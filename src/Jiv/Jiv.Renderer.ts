@@ -1,100 +1,64 @@
 import { ShaderCompiler, type ShaderProgram } from '../Core/Shader.Compiler';
 import { QuadGeometry } from '../Core/Geometry.Quad';
+import { JivInstanceBuffer } from './Jiv.InstanceBuffer';
 import type { Jiv } from './Jiv';
 import vertSrc from './Shaders/Jiv.Panel.vert?raw';
 import fragSrc from './Shaders/Jiv.Panel.frag?raw';
 
+const BYTES_PER_VEC4 = 16;
+const BYTES_PER_INSTANCE = 128; // 32 floats * 4 bytes
+const INSTANCE_ATTR_COUNT = 8;  // locations 1-8
+
 export class JivRenderer {
+  private _gl: WebGL2RenderingContext;
   private _shader: ShaderProgram;
   private _quad: QuadGeometry;
+  private _instanceBuffer: JivInstanceBuffer;
+  private _resolutionLoc: WebGLUniformLocation | null;
 
-  constructor(private _gl: WebGL2RenderingContext) {
-    this._shader = ShaderCompiler.Compile(_gl, vertSrc, fragSrc);
-    this._quad = new QuadGeometry(_gl);
+  constructor(gl: WebGL2RenderingContext) {
+    this._gl = gl;
+    this._shader = ShaderCompiler.Compile(gl, vertSrc, fragSrc);
+    this._quad = new QuadGeometry(gl);
+    this._instanceBuffer = new JivInstanceBuffer(gl);
+
+    // Look up the single remaining uniform
+    this._resolutionLoc = gl.getUniformLocation(this._shader.Program, 'u_Resolution');
+
+    // Extend the quad's VAO with per-instance attribute pointers
+    gl.bindVertexArray(this._quad.Vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._instanceBuffer.Buffer);
+
+    for (let loc = 1; loc <= INSTANCE_ATTR_COUNT; loc++) {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, BYTES_PER_INSTANCE, (loc - 1) * BYTES_PER_VEC4);
+      gl.vertexAttribDivisor(loc, 1);
+    }
+
+    gl.bindVertexArray(null);
   }
 
-  Render = (jiv: Jiv, canvasWidth: number, canvasHeight: number, dpr: number): void => {
+  BeginFrame = (): void => {
+    this._instanceBuffer.Begin();
+  };
+
+  AddInstance = (jiv: Jiv, dpr: number): void => {
+    this._instanceBuffer.Push(jiv, dpr);
+  };
+
+  DrawAll = (canvasWidth: number, canvasHeight: number): void => {
+    const count = this._instanceBuffer.Count;
+    if (count === 0) return;
+
     const gl = this._gl;
-    const s = this._shader;
-    const style = jiv.Style;
-    const d = dpr; // all CSS pixels → device pixels
 
-    gl.useProgram(s.Program);
+    this._instanceBuffer.Upload();
 
-    // Scale CSS pixel values to device pixels
-    const x = jiv.X * d;
-    const y = jiv.Y * d;
-    const w = jiv.Width * d;
-    const h = jiv.Height * d;
-    const borderWidth = style.BorderWidth * d;
-    const borderBlur = style.BorderBlur * d;
-    const shadowBlur = style.ShadowBlur * d;
-    const shadowOffX = style.ShadowOffsetX * d;
-    const shadowOffY = style.ShadowOffsetY * d;
-    const radii: [number, number, number, number] = [
-      style.BorderRadius[0] * d, style.BorderRadius[1] * d,
-      style.BorderRadius[2] * d, style.BorderRadius[3] * d,
-    ];
+    gl.useProgram(this._shader.Program);
+    gl.uniform2f(this._resolutionLoc, canvasWidth, canvasHeight);
 
-    // Expand the draw rect to include shadow bleed
-    const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
-    const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
-    const borderMargin = borderWidth + borderBlur;
-    const marginX = Math.max(shadowMarginX, borderMargin);
-    const marginY = Math.max(shadowMarginY, borderMargin);
-
-    const rectX = x - marginX;
-    const rectY = y - marginY;
-    const rectW = w + marginX * 2;
-    const rectH = h + marginY * 2;
-
-    const centerX = x + w / 2;
-    const centerY = y + h / 2;
-    const halfW = w / 2;
-    const halfH = h / 2;
-
-    // Uniforms (all in device pixels)
-    this._uniform2f(s, 'u_Resolution', canvasWidth, canvasHeight);
-    this._uniform4f(s, 'u_Rect', rectX, rectY, rectW, rectH);
-    this._uniform2f(s, 'u_PanelCenter', centerX, centerY);
-    this._uniform2f(s, 'u_PanelHalfSize', halfW, halfH);
-    this._uniform4f(s, 'u_Radii', radii[0], radii[1], radii[2], radii[3]);
-    this._uniform1f(s, 'u_Smoothness', style.Smoothness);
-    this._uniform4f(s, 'u_Background',
-      style.Background.R, style.Background.G,
-      style.Background.B, style.Background.A,
-    );
-    this._uniform4f(s, 'u_BorderColor',
-      style.BorderColor.R, style.BorderColor.G,
-      style.BorderColor.B, style.BorderColor.A,
-    );
-    this._uniform1f(s, 'u_BorderWidth', borderWidth);
-    this._uniform1f(s, 'u_BorderBlur', borderBlur);
-    this._uniform4f(s, 'u_ShadowColor',
-      style.ShadowColor.R, style.ShadowColor.G,
-      style.ShadowColor.B, style.ShadowColor.A,
-    );
-    this._uniform1f(s, 'u_ShadowBlur', shadowBlur);
-    this._uniform2f(s, 'u_ShadowOffset', shadowOffX, shadowOffY);
-    this._uniform1f(s, 'u_Opacity', style.Opacity);
-
-    // Draw
-    this._quad.Bind(gl);
-    this._quad.Draw(gl);
-  };
-
-  private _uniform1f = (s: ShaderProgram, name: string, v: number): void => {
-    const loc = s.Uniforms.get(name);
-    if (loc) this._gl.uniform1f(loc, v);
-  };
-
-  private _uniform2f = (s: ShaderProgram, name: string, x: number, y: number): void => {
-    const loc = s.Uniforms.get(name);
-    if (loc) this._gl.uniform2f(loc, x, y);
-  };
-
-  private _uniform4f = (s: ShaderProgram, name: string, x: number, y: number, z: number, w: number): void => {
-    const loc = s.Uniforms.get(name);
-    if (loc) this._gl.uniform4f(loc, x, y, z, w);
+    gl.bindVertexArray(this._quad.Vao);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, count);
+    gl.bindVertexArray(null);
   };
 }

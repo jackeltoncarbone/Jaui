@@ -3,31 +3,18 @@ precision highp float;
 
 in vec2 v_PixelPos;
 
-// Panel geometry
-uniform vec2 u_PanelCenter;    // center of the panel in pixels
-uniform vec2 u_PanelHalfSize;  // half-width, half-height
-uniform vec4 u_Radii;          // corner radii: (tl, tr, br, bl)
-uniform float u_Smoothness;    // superellipse smoothness (0-1)
-
-// Fill
-uniform vec4 u_Background;
-
-// Border
-uniform vec4 u_BorderColor;
-uniform float u_BorderWidth;
-uniform float u_BorderBlur;
-
-// Shadow
-uniform vec4 u_ShadowColor;
-uniform float u_ShadowBlur;
-uniform vec2 u_ShadowOffset;
-
-// Appearance
-uniform float u_Opacity;
+// Per-instance data from vertex shader (flat = no interpolation)
+flat in vec4 v_PanelGeom;     // centerX, centerY, halfW, halfH
+flat in vec4 v_Radii;         // tl, tr, br, bl
+flat in vec4 v_Background;    // RGBA
+flat in vec4 v_BorderColor;   // RGBA
+flat in vec4 v_ShadowColor;   // RGBA
+flat in vec4 v_ShadowParams;  // shadowOffX, shadowOffY, shadowBlur, borderWidth
+flat in vec4 v_StyleParams;   // borderBlur, smoothness, opacity, _pad
 
 out vec4 fragColor;
 
-// ─── SDF (inlined at compile time by vite-plugin-glsl) ───
+// ─── SDF ───
 
 float SuperellipseSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
     float r = p.x >= 0.0
@@ -49,44 +36,54 @@ float SuperellipseSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
 }
 
 void main() {
-    vec2 p = v_PixelPos - u_PanelCenter;
+    // Unpack instance data
+    vec2 panelCenter = v_PanelGeom.xy;
+    vec2 panelHalfSize = v_PanelGeom.zw;
+    vec2 shadowOffset = v_ShadowParams.xy;
+    float shadowBlur = v_ShadowParams.z;
+    float borderWidth = v_ShadowParams.w;
+    float borderBlur = v_StyleParams.x;
+    float smoothness = v_StyleParams.y;
+    float opacity = v_StyleParams.z;
+
+    vec2 p = v_PixelPos - panelCenter;
 
     // ─── Shadow ───
-    vec2 sp = p - u_ShadowOffset;
-    float shadowDist = SuperellipseSDF(sp, u_PanelHalfSize, u_Radii, u_Smoothness);
-    float shadowAlpha = (1.0 - smoothstep(-u_ShadowBlur, 0.0, shadowDist)) * u_ShadowColor.a;
-    vec4 shadow = vec4(u_ShadowColor.rgb, shadowAlpha);
+    vec2 sp = p - shadowOffset;
+    float shadowDist = SuperellipseSDF(sp, panelHalfSize, v_Radii, smoothness);
+    float shadowAlpha = (1.0 - smoothstep(-shadowBlur, 0.0, shadowDist)) * v_ShadowColor.a;
+    vec4 shadow = vec4(v_ShadowColor.rgb, shadowAlpha);
 
     // ─── Panel body ───
-    float dist = SuperellipseSDF(p, u_PanelHalfSize, u_Radii, u_Smoothness);
+    float dist = SuperellipseSDF(p, panelHalfSize, v_Radii, smoothness);
     float fillAlpha = 1.0 - smoothstep(-0.5, 0.5, dist);  // antialiased edge
 
     // ─── Border ───
     float borderOuter = smoothstep(-0.5, 0.5, dist);
-    float borderInner = smoothstep(-0.5, 0.5, dist + u_BorderWidth);
+    float borderInner = smoothstep(-0.5, 0.5, dist + borderWidth);
     float borderBase = (1.0 - borderOuter) * borderInner;
 
     // Apply border blur (soft glow effect)
     float borderGlow = 0.0;
-    if (u_BorderBlur > 0.0) {
-        borderGlow = (1.0 - smoothstep(-u_BorderBlur, 0.0, dist)) *
-                     smoothstep(-u_BorderBlur - u_BorderWidth, -u_BorderWidth, dist);
+    if (borderBlur > 0.0) {
+        borderGlow = (1.0 - smoothstep(-borderBlur, 0.0, dist)) *
+                     smoothstep(-borderBlur - borderWidth, -borderWidth, dist);
     }
-    float borderAlpha = max(borderBase, borderGlow) * u_BorderColor.a;
+    float borderAlpha = max(borderBase, borderGlow) * v_BorderColor.a;
 
     // ─── Composite ───
     // Shadow behind everything
     vec4 result = shadow;
 
-    // Fill over shadow (only where shadow is visible but fill is not)
-    vec4 fill = vec4(u_Background.rgb, u_Background.a * fillAlpha);
+    // Fill over shadow
+    vec4 fill = vec4(v_Background.rgb, v_Background.a * fillAlpha);
     result = mix(result, fill, fillAlpha);
 
     // Border on top
-    vec4 border = vec4(u_BorderColor.rgb, borderAlpha);
+    vec4 border = vec4(v_BorderColor.rgb, borderAlpha);
     result = result * (1.0 - borderAlpha) + border;
 
-    result.a *= u_Opacity;
+    result.a *= opacity;
 
     fragColor = result;
 }
