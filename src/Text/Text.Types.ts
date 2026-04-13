@@ -29,3 +29,14 @@ export const DefaultTextStyle: TextStyle = {
   TextOverflow: 'Clip',
   MaxLines: null,
 };
+
+export interface TextMeasurement {
+  Width: number;        // CSS px — widest line
+  Height: number;       // CSS px — total height = lines * FontSize * LineHeight
+  Lines: string[];      // text broken into lines
+}
+
+export interface TextConfig {
+  Content: string;
+  Style: TextStyle;
+}

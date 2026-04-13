@@ -2,6 +2,8 @@ import type { JivStyle } from './Jiv.Types';
 import { DefaultJivStyle } from './Jiv.Defaults';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
 import { DefaultLayoutConfig, DefaultChildLayout } from '../Layout/Layout.Types';
+import type { TextStyle, TextMeasurement } from '../Text/Text.Types';
+import { DefaultTextStyle } from '../Text/Text.Types';
 import { DirtyFlag, type DirtyFlags } from '../Core/Types';
 
 export class Jiv {
@@ -24,6 +26,15 @@ export class Jiv {
   // Layout — child config (how this node behaves as a child of its parent)
   ChildLayout: ChildLayout;
 
+  // Text content (optional)
+  Text: string | null = null;
+  TextStyle: TextStyle;
+  TextMeasurement: TextMeasurement | null = null;
+
+  // Intrinsic sizing (from text measurement or other content sources)
+  IntrinsicWidth: number | null = null;
+  IntrinsicHeight: number | null = null;
+
   // Dirty tracking
   Dirty: DirtyFlags = DirtyFlag.Layout;
 
@@ -35,6 +46,8 @@ export class Jiv {
     Style?: Partial<JivStyle>;
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
+    Text?: string;
+    TextStyle?: Partial<TextStyle>;
   }) {
     this.X = options?.X ?? 0;
     this.Y = options?.Y ?? 0;
@@ -64,6 +77,16 @@ export class Jiv {
     this.ChildLayout.Margin = options?.ChildLayout?.Margin
       ? [...options.ChildLayout.Margin]
       : [...DefaultChildLayout.Margin];
+
+    // Text
+    this.TextStyle = { ...DefaultTextStyle, ...options?.TextStyle };
+    this.TextStyle.Color = options?.TextStyle?.Color
+      ? { ...options.TextStyle.Color }
+      : { ...DefaultTextStyle.Color };
+    if (options?.Text !== undefined) {
+      this.Text = options.Text;
+      this.Dirty |= DirtyFlag.Text;
+    }
   }
 
   AddChild = (child: Jiv): void => {
@@ -84,6 +107,16 @@ export class Jiv {
 
   MarkLayoutDirty = (): void => {
     this.Dirty |= DirtyFlag.Layout;
+    if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
+  };
+
+  SetText = (text: string | null, style?: Partial<TextStyle>): void => {
+    this.Text = text;
+    if (style) {
+      Object.assign(this.TextStyle, style);
+      if (style.Color) this.TextStyle.Color = { ...style.Color };
+    }
+    this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
     if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
   };
 }

@@ -178,18 +178,6 @@ export const SolveFlex = (container: FlexContainer, children: FlexChild[]): Layo
   }
 
   if (container.Wrap === 'WrapReverse') {
-    const totalCross = lines.reduce((sum, l) => sum + l.CrossSize, 0)
-      + (lines.length - 1) * _crossGap(container);
-    for (const line of lines) {
-      line.CrossPos = crossAvailable - line.CrossPos - line.CrossSize;
-      for (const item of line.Items) {
-        // Recalculate cross position relative to flipped line
-        const lineStart = line.CrossPos;
-        const relativePos = item.CrossPos - (crossAvailable - line.CrossPos - line.CrossSize);
-        item.CrossPos = lineStart + (line.CrossSize - (item.CrossPos - (crossAvailable - totalCross) + line.CrossPos) - item.CrossSize);
-      }
-    }
-    // Simpler approach: just flip each item's cross position
     for (const line of lines) {
       for (const item of line.Items) {
         item.CrossPos = crossAvailable - item.CrossPos - item.CrossSize;
@@ -263,7 +251,7 @@ const _distributeMainSpace = (
   line: _FlexLine,
   mainAvailable: number,
   gap: number,
-  container: FlexContainer,
+  _container: FlexContainer,
   horiz: boolean,
 ): void => {
   const items = line.Items;
@@ -398,7 +386,7 @@ const _resolveAutoMargins = (
   line: _FlexLine,
   mainAvailable: number,
   gap: number,
-  container: FlexContainer,
+  _container: FlexContainer,
   horiz: boolean,
 ): void => {
   const items = line.Items;

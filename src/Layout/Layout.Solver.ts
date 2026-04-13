@@ -43,10 +43,37 @@ const _solveNode = (
   const flowIndices: number[] = [];
   const flexChildren: FlexChild[] = [];
 
+  const horiz = node.Layout.Direction === 'Row' || node.Layout.Direction === 'RowReverse';
+
   for (let i = 0; i < node.Children.length; i++) {
     const c = node.Children[i];
     const pos = c.ChildLayout.Position;
     if (pos === 'Flow' || pos === 'Offset') {
+      const resolvedW = _resolveSize(c.ChildLayout.Width, width);
+      const resolvedH = _resolveSize(c.ChildLayout.Height, height);
+
+      // Intrinsic applies to MAIN axis always; on CROSS axis only when child is NOT stretching.
+      const effectiveAlign = c.ChildLayout.AlignSelf === 'Auto'
+        ? node.Layout.Align
+        : c.ChildLayout.AlignSelf;
+      const crossStretches = effectiveAlign === 'Stretch';
+
+      let finalW: number | 'Auto';
+      let finalH: number | 'Auto';
+      if (horiz) {
+        // Row: main = Width, cross = Height
+        finalW = resolvedW === 'Auto' && c.IntrinsicWidth !== null ? c.IntrinsicWidth : resolvedW;
+        finalH = resolvedH === 'Auto' && c.IntrinsicHeight !== null && !crossStretches
+          ? c.IntrinsicHeight
+          : resolvedH;
+      } else {
+        // Column: main = Height, cross = Width
+        finalH = resolvedH === 'Auto' && c.IntrinsicHeight !== null ? c.IntrinsicHeight : resolvedH;
+        finalW = resolvedW === 'Auto' && c.IntrinsicWidth !== null && !crossStretches
+          ? c.IntrinsicWidth
+          : resolvedW;
+      }
+
       flexChildren.push({
         Index: flowIndices.length,
         Order: c.ChildLayout.Order,
@@ -55,8 +82,8 @@ const _solveNode = (
         FlexBasis: c.ChildLayout.FlexBasis,
         AlignSelf: c.ChildLayout.AlignSelf,
         Margin: c.ChildLayout.Margin,
-        Width: _resolveSize(c.ChildLayout.Width, width),
-        Height: _resolveSize(c.ChildLayout.Height, height),
+        Width: finalW,
+        Height: finalH,
         MinWidth: c.ChildLayout.MinWidth,
         MaxWidth: c.ChildLayout.MaxWidth,
         MinHeight: c.ChildLayout.MinHeight,
