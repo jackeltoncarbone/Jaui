@@ -1,0 +1,36 @@
+import { DefaultColor } from '../Core/Types';
+import { DefaultTransform } from '../Transform/Transform.Types';
+import type { JivStyle } from './Jiv.Types';
+
+export const DefaultJivStyle: JivStyle = {
+  BorderRadius: [0, 0, 0, 0],
+  CornerShape: ['Round', 'Round', 'Round', 'Round'],
+  Smoothness: 0.6,
+  Overflow: 'Visible',
+  Background: DefaultColor,
+  BlendMode: 'Normal',
+  Frost: 0,
+  FrostBlur: 0,
+  Thickness: 0,
+  Fillet: 0,
+  Refraction: 0,
+  Brightness: 1,
+  Saturation: 1,
+  Contrast: 1,
+  Transform: { ...DefaultTransform },
+  BorderColor: DefaultColor,
+  BorderWidth: 0,
+  BorderBlur: 0,
+  BorderOffset: 0,
+  ContainBorder: false,
+  ShadowColor: DefaultColor,
+  ShadowBlur: 0,
+  ShadowOffsetX: 0,
+  ShadowOffsetY: 0,
+  InnerShadow: false,
+  Opacity: 1,
+  Visible: true,
+  Cursor: 'Default',
+  Interactive: false,
+  PointerEvents: 'Auto',
+};

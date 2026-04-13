@@ -1,0 +1,29 @@
+{
+  "name": "jwift",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Canvas-based UI rendering engine for the web",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "dev": "vite playground",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "files": [
+    "dist"
+  ],
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vite": "^7.0.0",
+    "vite-plugin-glsl": "^1.4.0",
+    "vitest": "^4.0.0"
+  }
+}
