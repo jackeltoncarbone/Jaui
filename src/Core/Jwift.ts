@@ -59,6 +59,11 @@ export class Canvas {
   get Height(): number { return this._height; }
   get Dpr(): number { return this._dpr; }
 
+  /** Request an immediate re-render (called by animation manager). */
+  RequestFrame = (): void => {
+    if (this._running) this._render(0);
+  };
+
   private _tick = (time: number): void => {
     if (!this._running) return;
     this._frameId = requestAnimationFrame(this._tick);
