@@ -24,8 +24,14 @@ const _solveNode = (
 
   if (node.Children.length === 0) return;
 
-  // Placed / Fixed / Sticky children are positioned externally — recurse into
-  // them using their own X/Y/W/H so their internal subtree gets laid out.
+  // Placed / Sticky children are positioned RELATIVE TO PARENT (like CSS
+  // position: absolute inside a positioned ancestor). child.X / child.Y are
+  // offsets from parent's origin, so the child moves automatically when the
+  // parent moves — no external sync required.
+  //
+  // Fixed is positioned relative to the CANVAS VIEWPORT (CSS position:
+  // fixed), so it uses child.X / child.Y directly, ignoring the accumulated
+  // parent offset.
   for (const child of node.Children) {
     const pos = child.ChildLayout.Position;
     if (pos === 'Placed' || pos === 'Fixed' || pos === 'Sticky') {
@@ -34,7 +40,9 @@ const _solveNode = (
       const declH = _resolveSize(child.ChildLayout.Height, height);
       const w = declW === 'Auto' ? child.Width : declW;
       const h = declH === 'Auto' ? child.Height : declH;
-      _solveNode(child, w, h, child.X, child.Y, results);
+      const absX = pos === 'Fixed' ? child.X : offsetX + child.X;
+      const absY = pos === 'Fixed' ? child.Y : offsetY + child.Y;
+      _solveNode(child, w, h, absX, absY, results);
     }
   }
 

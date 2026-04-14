@@ -616,11 +616,16 @@ void main() {
         fillA = fillAlpha * v_Tint.a;
     }
 
-    // ── Composite: shadow → fill → edge-light (premultiplied-over) ──
-    vec4 shadow = vec4(v_ShadowColor.rgb, shadowAlpha);
-    vec4 fill = vec4(fillRgb, fillA);
-    vec4 result = shadow;
-    result = mix(result, fill, fillA);
+    // ── Composite: fill OVER shadow (straight-alpha "over" operator) ──
+    // Was `mix(shadow, fill, fillA)`, which applies fillA as BOTH a lerp factor
+    // AND a color scale — a white fill at 18% alpha became grey at 3% alpha
+    // (barely visible). Correct over compositing: out.a = A.a + B.a * (1−A.a);
+    // out.rgb = (A.rgb * A.a + B.rgb * B.a * (1−A.a)) / out.a.
+    float outA = fillA + shadowAlpha * (1.0 - fillA);
+    vec3 outRGB = outA > 1e-5
+        ? (fillRgb * fillA + v_ShadowColor.rgb * shadowAlpha * (1.0 - fillA)) / outA
+        : vec3(0.0);
+    vec4 result = vec4(outRGB, outA);
 
     // Composite order for glass:
     //   1) Wide rim glow (vibrant backdrop pickup, inward fade) — the optical

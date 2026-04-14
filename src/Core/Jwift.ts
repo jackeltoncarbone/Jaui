@@ -79,7 +79,12 @@ export class Canvas {
     this._observeResize();
     this._watchDpr();
     this._listenForScroll();
-    this._listenForSpecularTilt();
+    // NOTE: pointer-driven specular tilt is intentionally NOT wired. It felt
+    // like a "glow follows cursor" gimmick — the wrong abstraction for the
+    // Jiv material. Real gyro input (DeviceOrientation) will drive this on
+    // mobile; any "cursor highlight" effect belongs in a separate composited
+    // overlay layer, not baked into the core material.
+    //   this._listenForSpecularTilt();
   }
 
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
@@ -229,8 +234,8 @@ export class Canvas {
   private _scanFrostBlur = (node: Jiv): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible
         && node.Style.Material === 'LiquidGlass'
-        && node.Style.FrostBlur > this._maxFrostBlur) {
-      this._maxFrostBlur = node.Style.FrostBlur;
+        && node.Style.BackdropFrostBlur > this._maxFrostBlur) {
+      this._maxFrostBlur = node.Style.BackdropFrostBlur;
     }
     for (const child of node.Children) this._scanFrostBlur(child);
   };
@@ -459,6 +464,7 @@ export class Canvas {
    *  rim. `SpecularTilt` is only applied to specular math (Blinn-Phong catchlight
    *  + rim-spec highlight) — not to ambient, edge light, or border directionality,
    *  which stay anchored to the stylesheet-set `LightAngle`. */
+  // @ts-expect-error — retained for future mobile gyro wiring; see constructor note
   private _listenForSpecularTilt = (): void => {
     const updateFromEvent = (clientX: number, clientY: number): void => {
       const r = this.Element.getBoundingClientRect();

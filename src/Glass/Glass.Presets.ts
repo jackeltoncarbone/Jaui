@@ -30,19 +30,19 @@ export const LiquidGlass: Partial<JivStyle> = {
   ShadowOffsetY: 6,
 
   // Backdrop grading — gentle, content stays readable
-  FrostBlur: 6,
-  Brightness: 0.97,
-  Saturation: 1.12,
-  Contrast: 0.96,
+  BackdropFrostBlur: 3,
+  BackdropBrightness: 1,
+  BackdropSaturation: 1.25,
+  BackdropContrast: 0.75,
 
   // Refraction / bezel — match Apple's dossier. Bulge stays near-zero; the
   // Apple glass surface reads as FLAT, not fishbowl-domed. Thickness controls
   // perceived glass depth (and the rim-spec line width scales with it).
-  Thickness: 4,          // was 8 — too aggressive, bubble-sheet feel
+  Thickness: 1,          // was 8 — too aggressive, bubble-sheet feel
   Fillet: 0.25,          // was 2 — Apple is essentially flat-surfaced, not fishbowled
-  BezelWidth: 11,
-  BezelScale: 0.32,
-  Refraction: 1,
+  BezelWidth: 7,
+  BezelScale: 0.325,
+  Refraction: 7,
 
   // Lighting
   LightAngle: 135,                 // upper-left light (0=+x, 90=up)
@@ -78,9 +78,9 @@ export const SolidGlass: Partial<JivStyle> = {
   BorderWidth: 1,
   BorderBlur: 0.5,
   BorderRadius: [32, 32, 32, 32],
-  Brightness: 1,
-  Saturation: 1,
-  Contrast: 1,
+  BackdropBrightness: 1,
+  BackdropSaturation: 1,
+  BackdropContrast: 1,
 };
 
 /**
@@ -95,10 +95,10 @@ export const ClearGlass: Partial<JivStyle> = {
   BorderBlur: 0.5,
   BorderRadius: [32, 32, 32, 32],
 
-  FrostBlur: 1,
-  Brightness: 1,
-  Saturation: 1.1,
-  Contrast: 1,
+  BackdropFrostBlur: 1,
+  BackdropBrightness: 1,
+  BackdropSaturation: 1.1,
+  BackdropContrast: 1,
 
   Thickness: 1,
   Fillet: 0.5,

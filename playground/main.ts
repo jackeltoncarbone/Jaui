@@ -1,5 +1,4 @@
 import { Canvas, Jiv, LiquidGlass } from '../src/Core/Jwift';
-import { JivAnimator } from '../src/Jiv/Jiv.Animator';
 
 const el = document.getElementById('jwift') as HTMLCanvasElement;
 const canvas = new Canvas(el);
@@ -101,7 +100,9 @@ const tabBar = new Jiv({
   Height: NAV_H,
 });
 
-// Indicator pill — Placed child, manually positioned + animated
+// Indicator pill — Placed child, X/Y RELATIVE to tabBar (Placed = parent-relative,
+// like CSS position: absolute inside a positioned ancestor). No manual animator;
+// the canvas auto-animator picks up solver targets and springs between them.
 const IND_W = TAB_W - INDICATOR_INSET * 2;
 const IND_H = NAV_H - BAR_PAD * 2 - INDICATOR_INSET * 2;
 const indicator = new Jiv({
@@ -110,8 +111,8 @@ const indicator = new Jiv({
     BorderRadius: [IND_H / 2, IND_H / 2, IND_H / 2, IND_H / 2],
   },
   ChildLayout: { Position: 'Placed', Width: IND_W, Height: IND_H },
-  X: BAR_PAD + INDICATOR_INSET, // relative to tabBar — but since Placed = absolute,
-  Y: BAR_PAD + INDICATOR_INSET, // we'll compute absolute X/Y after first layout pass
+  X: BAR_PAD + INDICATOR_INSET,  // relative to tabBar.X
+  Y: BAR_PAD + INDICATOR_INSET,  // relative to tabBar.Y
   Width: IND_W, Height: IND_H,
 });
 
@@ -137,45 +138,44 @@ screen.AddChild(tabBar);
 canvas.Root.AddChild(screen);
 canvas.Start();
 
-// ─── Manual positioning for Placed children (tab bar + indicator) ───
-
-const indAnimator = new JivAnimator(indicator);
-canvas.Animations.Register(indAnimator);
+// ─── Placed positioning: tab bar (screen-relative) + indicator (tab-bar-relative) ───
+// Placed children's X/Y are RELATIVE to parent. Indicator just sets its offset
+// within tabBar; the solver cascades tabBar's position down automatically.
+// No manual animator needed — Canvas's auto-animator springs Placed children
+// to their solved targets on layout changes.
 
 let selected = 0;
 
 const BOTTOM_INSET = 32;
+const SIDE_INSET = 20;                  // keep nav at least this far from screen edges
+
+/** Reposition the tab bar. X/Y here are RELATIVE to `screen` (its parent),
+ *  which starts at (0,0) so this is effectively canvas-absolute. The width
+ *  adapts to the viewport so the nav never hangs off a narrow screen. */
 const positionTabBar = (): void => {
-  tabBar.X = (canvas.Width - NAV_W) / 2;
+  const maxW = canvas.Width - SIDE_INSET * 2;
+  const width = Math.min(NAV_W, maxW);
+  tabBar.Width = width;
+  tabBar.ChildLayout.Width = width;
+  tabBar.X = (canvas.Width - width) / 2;
   tabBar.Y = canvas.Height - NAV_H - BOTTOM_INSET;
+  tabBar.MarkLayoutDirty();
 };
 
-const updateIndicator = (snap: boolean): void => {
-  const targetX = tabBar.X + BAR_PAD + INDICATOR_INSET + selected * TAB_W;
-  const targetY = tabBar.Y + BAR_PAD + INDICATOR_INSET;
-  if (snap) {
-    indAnimator.Springs.X.Target = targetX;
-    indAnimator.Springs.Y.Target = targetY;
-    indAnimator.Springs.Width.Target = IND_W;
-    indAnimator.Springs.Height.Target = IND_H;
-    indAnimator.Springs.X.Snap();
-    indAnimator.Springs.Y.Snap();
-    indAnimator.Springs.Width.Snap();
-    indAnimator.Springs.Height.Snap();
-    indicator.X = targetX;
-    indicator.Y = targetY;
-    indicator.Width = IND_W;
-    indicator.Height = IND_H;
-  } else {
-    indAnimator.SetTargets({ X: targetX, Y: targetY, Width: IND_W, Height: IND_H });
-    canvas.Animations.Kick();
-  }
+/** Update indicator to the currently-selected tab. X is RELATIVE to tabBar. */
+const updateIndicator = (): void => {
+  const effectiveTabW = (tabBar.Width - BAR_PAD * 2) / TAB_COUNT;
+  indicator.X = BAR_PAD + INDICATOR_INSET + selected * effectiveTabW;
+  indicator.Y = BAR_PAD + INDICATOR_INSET;
+  indicator.Width = effectiveTabW - INDICATOR_INSET * 2;
+  indicator.ChildLayout.Width = indicator.Width;
+  indicator.MarkLayoutDirty();
 };
 
 const tryInit = (): void => {
   if (canvas.Width > 0) {
     positionTabBar();
-    updateIndicator(true);
+    updateIndicator();
     canvas.RequestFrame();
   } else {
     requestAnimationFrame(tryInit);
@@ -183,14 +183,19 @@ const tryInit = (): void => {
 };
 requestAnimationFrame(tryInit);
 
-// Reposition on window resize
-window.addEventListener('resize', () => {
+// Reposition on any viewport change — ResizeObserver catches window resize AND
+// canvas container size changes; visualViewport catches browser zoom reliably
+// on mobile + some desktops where resize alone doesn't fire.
+const onViewport = (): void => {
   requestAnimationFrame(() => {
     positionTabBar();
-    updateIndicator(true);
+    updateIndicator();
     canvas.RequestFrame();
   });
-});
+};
+window.addEventListener('resize', onViewport);
+window.visualViewport?.addEventListener('resize', onViewport);
+new ResizeObserver(onViewport).observe(el);
 
 // ─── Click to select ───
 
@@ -199,12 +204,13 @@ el.addEventListener('click', (ev) => {
   const clickX = ev.clientX - rect.left;
   const clickY = ev.clientY - rect.top;
 
-  // Hit-test against tab bar
+  // Hit-test against tab bar using its CURRENT width (responsive)
   if (clickX < tabBar.X || clickX > tabBar.X + tabBar.Width) return;
   if (clickY < tabBar.Y || clickY > tabBar.Y + tabBar.Height) return;
 
+  const effectiveTabW = (tabBar.Width - BAR_PAD * 2) / TAB_COUNT;
   const localX = clickX - tabBar.X - BAR_PAD;
-  const idx = Math.max(0, Math.min(TAB_COUNT - 1, Math.floor(localX / TAB_W)));
+  const idx = Math.max(0, Math.min(TAB_COUNT - 1, Math.floor(localX / effectiveTabW)));
   if (idx === selected) return;
 
   // Update text styles — old tab dims, new tab brightens
@@ -218,7 +224,7 @@ el.addEventListener('click', (ev) => {
   });
 
   selected = idx;
-  updateIndicator(false);
+  updateIndicator();
 });
 
 console.log('[Jwift] Click a tab in the nav bar');

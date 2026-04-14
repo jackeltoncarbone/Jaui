@@ -122,10 +122,10 @@ export class JivInstanceBuffer {
     data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : style.Material === 'SolidGlass' ? 2 : 0;
 
     // loc 9 — a_Grading (frostLod derived from FrostBlur)
-    data[offset + 32] = style.Brightness;
-    data[offset + 33] = style.Saturation;
-    data[offset + 34] = style.Contrast;
-    const blurPx = Math.max(0.5, style.FrostBlur * d);
+    data[offset + 32] = style.BackdropBrightness;
+    data[offset + 33] = style.BackdropSaturation;
+    data[offset + 34] = style.BackdropContrast;
+    const blurPx = Math.max(0.5, style.BackdropFrostBlur * d);
     data[offset + 35] = Math.max(0, Math.min(10, Math.log2(blurPx)));
 
     // loc 10 — a_Refraction (all px values scaled by dpr)

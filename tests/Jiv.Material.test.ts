@@ -16,7 +16,7 @@ describe('Jiv Material', () => {
   it('LiquidGlass preset has transparent background', () => {
     expect(LiquidGlass.Background).toEqual({ R: 1, G: 1, B: 1, A: 0 });
     expect(LiquidGlass.Material).toBe('LiquidGlass');
-    expect(LiquidGlass.FrostBlur).toBeGreaterThan(0);
+    expect(LiquidGlass.BackdropFrostBlur).toBeGreaterThan(0);
   });
 
   it('SolidGlass preset has subtle tint, no refraction', () => {
@@ -27,7 +27,7 @@ describe('Jiv Material', () => {
   it('ClearGlass preset has high specular, low blur', () => {
     expect(ClearGlass.Material).toBe('LiquidGlass');
     expect(ClearGlass.SpecularIntensity).toBeGreaterThan(0.7);
-    expect(ClearGlass.FrostBlur).toBeLessThanOrEqual(1);
+    expect(ClearGlass.BackdropFrostBlur).toBeLessThanOrEqual(1);
   });
 
   it('all new physical properties default to sensible values', () => {

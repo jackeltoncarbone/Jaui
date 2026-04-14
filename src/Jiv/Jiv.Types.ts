@@ -28,13 +28,13 @@ export interface JivStyle {
 
   // Physical material — the Jiv is a slab with measurable properties
   Frost: number;               // backdrop blur intensity (0 = clear, 1 = full frost)
-  FrostBlur: number;           // blur radius in px when Frost > 0
+  BackdropFrostBlur: number;           // blur radius in px when Frost > 0
   Thickness: number;           // bezel refraction magnitude in px (displacement at hump peak)
   Fillet: number;              // reserved — multiplies InnerBlur (softens interior)
   Refraction: number;          // overall refraction multiplier (0..1)
-  Brightness: number;          // backdrop brightness multiplier
-  Saturation: number;          // backdrop saturation
-  Contrast: number;            // backdrop contrast
+  BackdropBrightness: number;          // backdrop brightness multiplier
+  BackdropSaturation: number;          // backdrop saturation
+  BackdropContrast: number;            // backdrop contrast
 
   // Refraction band geometry
   BezelWidth: number;          // refraction band width in CSS px (how far inward the rim effect reaches)
