@@ -72,8 +72,16 @@ export class Jiv implements OnInit, OnDestroy {
   constructor() {
     this.Node = new JivCore(this._buildOptions());
     // Reactively re-apply on input changes — spring animator handles the
-    // smooth transition; we don't recreate the Jiv.
-    effect(() => this._apply());
+    // smooth transition; we don't recreate the Jiv. Tracking the registry
+    // version signal here is what makes live `.jss` hot-edits propagate:
+    // when a `<jyle>` re-parses, the registry version bumps, every Jiv
+    // that reads it via this effect re-resolves its class rules.
+    effect(() => {
+      // Subscribe to registry changes — even for class-less jivs, this is
+      // cheap and keeps behavior uniform.
+      this._registry?.Version();
+      this._apply();
+    });
   }
 
   ngOnInit(): void {

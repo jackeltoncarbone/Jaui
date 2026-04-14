@@ -17,6 +17,7 @@ Screen {
   Justify: Start
   Align: Stretch
   Background: rgba(12, 14, 20, 1)
+  FlexGrow: 1
 }
 
 ToolbarRow {
@@ -82,6 +83,20 @@ Section {
   Align: Stretch
   Gap: 14
   Padding: 0 24 0 24
+  FlexGrow: 0
+  FlexShrink: 0
+  Height: 400
+}
+
+SectionCompact {
+  Direction: Column
+  Justify: Start
+  Align: Stretch
+  Gap: 14
+  Padding: 0 24 0 24
+  FlexGrow: 0
+  FlexShrink: 0
+  Height: 280
 }
 
 SectionHeader {
@@ -122,9 +137,23 @@ SectionViewAllLabel {
 Row {
   Direction: Row
   Justify: Start
-  Align: Stretch
+  Align: Center
   Gap: 14
   Padding: 2 4 2 4
+  FlexGrow: 0
+  FlexShrink: 0
+  Height: 340
+}
+
+RowCompact {
+  Direction: Row
+  Justify: Start
+  Align: Center
+  Gap: 14
+  Padding: 2 4 2 4
+  FlexGrow: 0
+  FlexShrink: 0
+  Height: 220
 }
 
 Card {
@@ -178,21 +207,57 @@ CardTitleCompact {
   Color: rgba(255, 255, 255, 0.97)
 }
 
+/* Toolbar + TabBar use Jwift's LiquidGlass preset values inline — until
+ * JSS gets multi-class inheritance (`: Base1, Base2`), we duplicate the
+ * preset fields here. Matches Glass.Presets.ts. */
+
 Toolbar {
   Direction: Row
   Justify: End
   Align: Center
-  Gap: 10
+  Gap: 8
   Padding: 6
   Width: 220
   Height: 56
-  BorderRadius: 28
+
   Material: LiquidGlass
-  BorderWidth: 1
-  BorderColor: rgba(255, 255, 255, 0.2)
-  BackdropFrostBlur: 18
+  Background: rgba(255, 255, 255, 0)
+  BorderColor: rgba(255, 255, 255, 0.12)
+  BorderWidth: 1.4
+  BorderBlur: 0.5
+  BorderRadius: 28
+  BorderBrightness: 1.35
+  BorderSaturation: 1.25
+  BorderContrast: 1.0
+  BorderFrostLodOffset: -0.5
+
+  ShadowColor: rgba(0, 0, 0, 0.18)
+  ShadowBlur: 22
+  ShadowOffsetY: 6
+
+  BackdropFrostBlur: 0.15
+  BackdropBrightness: 1
   BackdropSaturation: 1.25
-  BackdropContrast: 0.9
+  BackdropContrast: 0.75
+
+  Thickness: 2
+  Fillet: 0.25
+  BezelWidth: 0
+  BezelScale: 0
+  Refraction: 10
+
+  LightAngle: 135
+  LightIntensity: 1
+  SpecularIntensity: 0.55
+  SpecularSharpness: 10
+  FresnelStrength: 0.55
+  ChromaticAberration: 0.3
+  EdgeLightTop: 0.16
+  EdgeLightBottom: 0.03
+  BorderVariance: 0.3
+  BorderAlphaVariance: 0.2
+  BorderFresnelBrightness: 0.25
+  InnerBlur: 0.25
 }
 
 ToolbarButton {
@@ -221,14 +286,45 @@ TabBar {
   Padding: 6
   Width: 440
   Height: 64
-  BorderRadius: 32
+
   Material: LiquidGlass
-  BorderWidth: 1
-  BorderColor: rgba(255, 255, 255, 0.22)
-  BackdropFrostBlur: 20
-  BackdropBrightness: 1.05
-  BackdropSaturation: 1.35
-  BackdropContrast: 0.85
+  Background: rgba(255, 255, 255, 0)
+  BorderColor: rgba(255, 255, 255, 0.12)
+  BorderWidth: 1.4
+  BorderBlur: 0.5
+  BorderRadius: 32
+  BorderBrightness: 1.35
+  BorderSaturation: 1.25
+  BorderContrast: 1.0
+  BorderFrostLodOffset: -0.5
+
+  ShadowColor: rgba(0, 0, 0, 0.18)
+  ShadowBlur: 22
+  ShadowOffsetY: 6
+
+  BackdropFrostBlur: 3
+  BackdropBrightness: 1
+  BackdropSaturation: 1.25
+  BackdropContrast: 0.75
+
+  Thickness: 2
+  Fillet: 0.25
+  BezelWidth: 7
+  BezelScale: 0.25
+  Refraction: 10
+
+  LightAngle: 135
+  LightIntensity: 1
+  SpecularIntensity: 0.55
+  SpecularSharpness: 10
+  FresnelStrength: 0.55
+  ChromaticAberration: 0.3
+  EdgeLightTop: 0.16
+  EdgeLightBottom: 0.03
+  BorderVariance: 0.3
+  BorderAlphaVariance: 0.2
+  BorderFresnelBrightness: 0.25
+  InnerBlur: 0.25
 }
 
 TabItem {

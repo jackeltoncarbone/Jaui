@@ -74,8 +74,20 @@ export class JwiftCanvas implements OnInit, OnDestroy {
   ngOnInit(): void {
     const sheet = this.stylesheet();
     if (sheet) this._registry.Merge(sheet);
-    this.Canvas.Start();
-    this.ready.emit(this.Canvas);
+
+    // Wait for web fonts to finish loading before we start rasterizing
+    // text into the canvas cache — otherwise the first render uses the
+    // browser fallback font and the cached glyph atlas is stale until
+    // something invalidates it.
+    const start = () => {
+      this.Canvas.Start();
+      this.ready.emit(this.Canvas);
+    };
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      document.fonts.ready.then(start);
+    } else {
+      start();
+    }
   }
 
   ngOnDestroy(): void {

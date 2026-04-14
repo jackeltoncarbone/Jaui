@@ -1,4 +1,4 @@
-import { Injectable, InjectionToken } from '@angular/core';
+import { Injectable, InjectionToken, signal } from '@angular/core';
 import { ParseJss, type Stylesheet, type Ruleset } from 'jwift';
 
 /**
@@ -12,17 +12,30 @@ import { ParseJss, type Stylesheet, type Ruleset } from 'jwift';
  * Registries are mutable bags — a `<jyle>` parses its text content once on
  * mount and merges into the local registry. Re-rendering a `<jyle>` with
  * new content replaces the rules under its own keys (last-wins).
+ *
+ * `Version()` is a signal bumped on every `Merge` / `MergeSource`. Consumers
+ * (Jiv component) read it inside an `effect(() => ...)` so Angular's
+ * reactivity re-runs class resolution when rules change — which is what
+ * makes live `.jss` hot-edits apply without a page reload.
  */
 @Injectable()
 export class JssRegistry {
   /** Class name → routed Ruleset. Lookup is O(1). */
   private _rules = new Map<string, Ruleset>();
 
+  private _version = signal(0);
+
+  /** Monotonic version — increments on every merge. Angular effects that
+   *  read this will re-run on changes; this is how live JSS edits flow
+   *  through to already-mounted `<jiv>` instances. */
+  readonly Version = this._version.asReadonly();
+
   /** Add (or replace) a parsed sheet's contents in this registry. */
   Merge = (sheet: Stylesheet): void => {
     for (const [name, ruleset] of Object.entries(sheet)) {
       this._rules.set(name, ruleset);
     }
+    this._version.update((v) => v + 1);
   };
 
   /** Add raw JSS source — convenience for `<jyle>` projections. */

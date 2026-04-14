@@ -86,14 +86,14 @@ type CardRef = { Kicker: string; Title: string; Color: string };
         </jiv>
 
         <!-- Continue Where You Left Off (compact) -->
-        <jiv class="Section">
+        <jiv class="SectionCompact">
           <jiv class="SectionHeader">
             <jext class="SectionTitle" text="Continue Where You Left Off" />
             <jiv class="SectionViewAll">
               <jext class="SectionViewAllLabel" text="View All" />
             </jiv>
           </jiv>
-          <jiv class="Row">
+          <jiv class="RowCompact">
             @for (c of Continue(); track c.Title) {
               <jiv class="CardCompact" [style]="{ Background: c.Color }">
                 <jext class="CardKicker" [text]="c.Kicker" />
@@ -104,14 +104,14 @@ type CardRef = { Kicker: string; Title: string; Color: string };
         </jiv>
 
         <!-- New in the Store (compact) -->
-        <jiv class="Section">
+        <jiv class="SectionCompact">
           <jiv class="SectionHeader">
             <jext class="SectionTitle" text="New in the Store" />
             <jiv class="SectionViewAll">
               <jext class="SectionViewAllLabel" text="View All" />
             </jiv>
           </jiv>
-          <jiv class="Row">
+          <jiv class="RowCompact">
             @for (c of Store(); track c.Title) {
               <jiv class="CardCompact" [style]="{ Background: c.Color }">
                 <jext class="CardKicker" [text]="c.Kicker" />
