@@ -3,7 +3,6 @@
  * Entry point. Creates a WebGL2 context and runs the render loop.
  */
 
-import { JivRenderer } from '../Jiv/Jiv.Renderer';
 import { JivAnimator } from '../Jiv/Jiv.Animator';
 import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
@@ -12,9 +11,12 @@ import { TextCache } from '../Text/Text.Cache';
 import { TextRenderer } from '../Text/Text.Renderer';
 import { MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
-import { GlassRenderer } from '../Glass/Glass.Renderer';
+// Single unified renderer. "Glass" is historical — it handles every Jiv regardless
+// of Material. Material controls whether the backdrop is sampled + graded.
+import { GlassRenderer as JivRenderer } from '../Glass/Glass.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { BlitRenderer } from './Blit';
+import { BlurPass } from './BlurPass';
 import { DirtyFlag } from './Types';
 import { Jiv } from '../Jiv/Jiv';
 
@@ -29,15 +31,17 @@ export class Canvas {
   private _running: boolean = false;
   private _frameId: number = 0;
   private _lastTime: number = 0;
-  private _jivRenderer!: JivRenderer;
+  private _panelRenderer!: JivRenderer;
   private _textRenderer!: TextRenderer;
   private _textCache!: TextCache;
-  private _glassRenderer!: GlassRenderer;
   private _sceneFbo!: Framebuffer;
   private _blit!: BlitRenderer;
+  private _blur!: BlurPass;
   private _animationManager = new AnimationManager();
   private _animators = new Map<Jiv, JivAnimator>();
   private _textAnimators = new Map<Jiv, TextAnimator>();
+  /** Largest FrostBlur of any glass collected this frame (CSS px). Drives the dual-filter pyramid. */
+  private _maxFrostBlur: number = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.Element = canvas;
@@ -54,12 +58,12 @@ export class Canvas {
     if (!gl) throw new Error('[Jwift] WebGL2 not supported');
     this.Gl = gl;
 
-    this._jivRenderer = new JivRenderer(gl);
+    this._panelRenderer = new JivRenderer(gl);
     this._textRenderer = new TextRenderer(gl);
     this._textCache = new TextCache(gl);
-    this._glassRenderer = new GlassRenderer(gl);
     this._sceneFbo = new Framebuffer(gl);
     this._blit = new BlitRenderer(gl);
+    this._blur = new BlurPass(gl);
 
     // Animation manager triggers re-render when springs step
     this._animationManager.OnFrame(() => this.RequestFrame());
@@ -123,10 +127,12 @@ export class Canvas {
     const w = gl.drawingBufferWidth;
     const h = gl.drawingBufferHeight;
 
-    // Ensure scene FBO matches canvas size
+    // The scene FBO captures the "background" that Liquid Glass panels refract
+    // through. One Jiv renderer handles ALL panels — Material='None' branches
+    // skip the backdrop sample in the shader.
     this._sceneFbo.Resize(w, h);
 
-    // ─── Pass 1: render non-glass panels + text to sceneFbo ───
+    // ─── Pass 1: non-glass panels + text into sceneFbo ───
     this._sceneFbo.Bind();
     gl.viewport(0, 0, w, h);
     gl.clearColor(0.04, 0.04, 0.04, 1.0);
@@ -134,37 +140,49 @@ export class Canvas {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    this._jivRenderer.BeginFrame();
+    this._panelRenderer.BeginFrame();
     this._collectNonGlass(this.Root);
-    this._jivRenderer.DrawAll(w, h);
+    // null backdrop — we're writing INTO sceneFbo; feedback loop if we also sample it.
+    this._panelRenderer.DrawAll(w, h, null);
 
     this._textCache.BeginFrame();
     this._textRenderer.BeginFrame();
     this._collectTextInstancesForNonGlass(this.Root);
     this._textRenderer.DrawAll(w, h);
 
-    // ─── Pass 2: generate mipmap chain on the scene texture (GPU blur levels) ───
+    // ─── Pass 2: blur sceneFbo with a Dual Filter pyramid ───
+    // Dual Filtering (Bjørge 2015) — downsample/upsample chain that gives
+    // Gaussian-equivalent blur in O(log N) sample count and never bands the way
+    // a single 5-tap pass does at large radii. Blur radius driven by the max
+    // FrostBlur (CSS px) of any glass on screen — one shared blurred FBO is
+    // sampled by all glass instances. Scan first, then blur.
+    this._maxFrostBlur = 0;
+    this._scanFrostBlur(this.Root);
+    const blurCssPx = Math.max(1, this._maxFrostBlur);
+    const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, blurCssPx * this._dpr);
+    // Also keep the unblurred scene mipmap'd for rim backdrop samples that want
+    // crisp-ish color pickup (edge lighting uses LOD 0.5 for a light touch of blur).
     this._sceneFbo.GenerateMipmap();
 
-    // ─── Pass 3: blit sceneFbo to screen ───
+    // ─── Pass 3: blit sceneFbo (UNBLURRED) to screen as base ───
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
     this._blit.Draw(this._sceneFbo.Texture);
 
-    // ─── Pass 4: render glass panels to screen, sampling sceneTexture for backdrop ───
+    // ─── Pass 4: glass panels — sample the BLURRED backdrop for soft refraction ───
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    this._glassRenderer.BeginFrame();
+    this._panelRenderer.BeginFrame();
     this._collectGlass(this.Root);
-    this._glassRenderer.DrawAll(w, h, this._sceneFbo.Texture);
+    this._panelRenderer.DrawAll(w, h, blurredScene);
 
-    // ─── Pass 5: non-glass descendants of glass nodes render on top of the glass ───
-    this._jivRenderer.BeginFrame();
+    // ─── Pass 5: non-glass descendants of glass nodes, on top of the glass ───
+    this._panelRenderer.BeginFrame();
     this._collectNonGlassUnderGlass(this.Root);
-    this._jivRenderer.DrawAll(w, h);
+    this._panelRenderer.DrawAll(w, h, blurredScene);
 
-    // ─── Pass 6: text belonging to glass subtree renders on top ───
+    // ─── Pass 6: text belonging to glass subtree, on top of everything ───
     this._textRenderer.BeginFrame();
     this._collectTextInstancesForGlass(this.Root);
     this._textRenderer.DrawAll(w, h);
@@ -173,16 +191,26 @@ export class Canvas {
   private _collectNonGlass = (node: Jiv): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible
         && node.Style.Material === 'None' && !this._hasGlassAncestor(node)) {
-      this._jivRenderer.AddInstance(node, this._dpr);
+      this._panelRenderer.AddInstance(node, this._dpr);
     }
     for (const child of node.Children) this._collectNonGlass(child);
   };
 
   private _collectGlass = (node: Jiv): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible && node.Style.Material !== 'None') {
-      this._glassRenderer.AddInstance(node, this._dpr);
+      this._panelRenderer.AddInstance(node, this._dpr);
     }
     for (const child of node.Children) this._collectGlass(child);
+  };
+
+  /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px). */
+  private _scanFrostBlur = (node: Jiv): void => {
+    if (node.Width > 0 && node.Height > 0 && node.Style.Visible
+        && node.Style.Material === 'LiquidGlass'
+        && node.Style.FrostBlur > this._maxFrostBlur) {
+      this._maxFrostBlur = node.Style.FrostBlur;
+    }
+    for (const child of node.Children) this._scanFrostBlur(child);
   };
 
   /** Non-glass panels that live inside a glass subtree — rendered on top of the glass pass. */
@@ -192,7 +220,7 @@ export class Canvas {
       // Only emit if this non-glass node is a DESCENDANT of a glass node (not the glass itself)
       // — _isUnderGlass includes self, so we need to check if an ANCESTOR is glass
       if (this._hasGlassAncestor(node)) {
-        this._jivRenderer.AddInstance(node, this._dpr);
+        this._panelRenderer.AddInstance(node, this._dpr);
       }
     }
     for (const child of node.Children) this._collectNonGlassUnderGlass(child);

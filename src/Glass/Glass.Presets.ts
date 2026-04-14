@@ -16,14 +16,14 @@ export const LiquidGlass: Partial<JivStyle> = {
   BorderRadius: [32, 32, 32, 32],
 
   // Backdrop grading — gentle, content stays readable
-  FrostBlur: 2,
+  FrostBlur: 4,
   Brightness: 0.95,
   Saturation: 1.15,
   Contrast: 0.95,
 
   // Refraction / bezel
   Thickness: 8,
-  Fillet: 1.2,              // surface bulge magnitude (Show Studio's --surface-bulge)
+  Fillet: 2,              // surface bulge magnitude (Show Studio's --surface-bulge)
   BezelWidth: 12,
   BezelScale: 0.35,
   Refraction: 1,

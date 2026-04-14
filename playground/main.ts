@@ -12,38 +12,44 @@ const screen = new Jiv({
   ChildLayout: { FlexGrow: 1 },
 });
 
-const circlesRow = new Jiv({
-  Layout: { Direction: 'Row', Justify: 'SpaceEvenly', Align: 'End', Padding: [40, 40, 0, 40] },
+// Content stack: a tall column of colorful cards that fills the screen and
+// extends UNDER the glass bar so refraction has something interesting to show.
+const contentColumn = new Jiv({
+  Layout: { Direction: 'Column', Justify: 'Start', Align: 'Stretch', Gap: 16, Padding: [40, 40, 120, 40] },
   ChildLayout: { FlexGrow: 1 },
 });
-const circleColors = [
-  { R: 0.9, G: 0.35, B: 0.55 },
-  { R: 0.35, G: 0.65, B: 1.0 },
-  { R: 1.0, G: 0.75, B: 0.25 },
-  { R: 0.45, G: 1.0, B: 0.65 },
+
+const cardPalette = [
+  { R: 0.9, G: 0.35, B: 0.55 },  // pink
+  { R: 0.35, G: 0.65, B: 1.0 },  // blue
+  { R: 1.0, G: 0.75, B: 0.25 },  // yellow
+  { R: 0.45, G: 1.0, B: 0.65 },  // green
+  { R: 0.75, G: 0.4, B: 1.0 },   // purple
+  { R: 1.0, G: 0.5, B: 0.3 },    // orange
 ];
-circleColors.forEach((c) => {
-  const circle = new Jiv({
+
+for (let i = 0; i < 4; i++) {
+  const c = cardPalette[i % cardPalette.length];
+  const card = new Jiv({
+    Text: `Card ${i + 1}`,
+    TextStyle: { FontSize: 22, FontWeight: 600, Color: { R: 1, G: 1, B: 1, A: 0.95 }, TextAlign: 'Center' },
     Style: {
       Background: { R: c.R, G: c.G, B: c.B, A: 1 },
-      BorderRadius: [260, 260, 260, 260],
-      Smoothness: 1,
-      ShadowColor: { R: 0, G: 0, B: 0, A: 0.4 },
-      ShadowBlur: 40,
-      ShadowOffsetY: 12,
+      BorderRadius: [24, 24, 24, 24],
+      ShadowColor: { R: 0, G: 0, B: 0, A: 0.35 },
+      ShadowBlur: 24,
+      ShadowOffsetY: 8,
     },
-    ChildLayout: { FlexGrow: 0, Width: 280, Height: 280 },
+    ChildLayout: { FlexGrow: 0, FlexShrink: 0, Height: 120 },
   });
-  circlesRow.AddChild(circle);
-});
-screen.AddChild(circlesRow);
+  contentColumn.AddChild(card);
+}
 
-// Bottom row: holds the tab bar, centered, with less margin so bar sits over the circles
-const bottomRow = new Jiv({
-  Layout: { Direction: 'Row', Justify: 'Center', Align: 'End', Padding: [0, 0, 24, 0] },
-  ChildLayout: { FlexGrow: 0, Height: 84 },
-});
-screen.AddChild(bottomRow);
+screen.AddChild(contentColumn);
+
+// The tab bar is Placed (absolute positioning) so it can overlap the circles.
+// Glass needs backdrop content to refract — if the bar sits alongside circles
+// it has nothing behind it.
 
 // ─── Nav Tab Bar ───
 
@@ -63,7 +69,9 @@ const tabBar = new Jiv({
     ShadowBlur: 24,
     ShadowOffsetY: 8,
   },
-  ChildLayout: { FlexGrow: 0, Width: NAV_W, Height: NAV_H },
+  ChildLayout: { Position: 'Placed', Width: NAV_W, Height: NAV_H },
+  Width: NAV_W,
+  Height: NAV_H,
 });
 
 // Indicator pill — Placed child, manually positioned + animated
@@ -96,17 +104,24 @@ const tabs: Jiv[] = tabLabels.map((label, i) => new Jiv({
 tabBar.AddChild(indicator);
 tabs.forEach((t) => tabBar.AddChild(t));
 
-bottomRow.AddChild(tabBar);
+// Tab bar is a Placed direct child of screen — we position it manually after
+// the first layout pass so it floats over the circles at the bottom-center.
+screen.AddChild(tabBar);
 canvas.Root.AddChild(screen);
 canvas.Start();
 
-// ─── Indicator animation (manual JivAnimator for a Placed node) ───
+// ─── Manual positioning for Placed children (tab bar + indicator) ───
 
-// Placed children aren't put through the Canvas's auto-animator loop. We create one manually.
 const indAnimator = new JivAnimator(indicator);
 canvas.Animations.Register(indAnimator);
 
 let selected = 0;
+
+const positionTabBar = (): void => {
+  // Center horizontally, 60% down so it's visible over cards even in small viewports.
+  tabBar.X = (canvas.Width - NAV_W) / 2;
+  tabBar.Y = Math.min(canvas.Height - NAV_H - 24, canvas.Height * 0.55);
+};
 
 const updateIndicator = (snap: boolean): void => {
   const targetX = tabBar.X + BAR_PAD + INDICATOR_INSET + selected * TAB_W;
@@ -120,7 +135,6 @@ const updateIndicator = (snap: boolean): void => {
     indAnimator.Springs.Y.Snap();
     indAnimator.Springs.Width.Snap();
     indAnimator.Springs.Height.Snap();
-    // Also sync Jiv properties directly so first render doesn't show 0,0
     indicator.X = targetX;
     indicator.Y = targetY;
     indicator.Width = IND_W;
@@ -131,9 +145,9 @@ const updateIndicator = (snap: boolean): void => {
   }
 };
 
-// Keep trying until tabBar has its resolved position, then snap
 const tryInit = (): void => {
-  if (tabBar.X > 0 && tabBar.Y > 0) {
+  if (canvas.Width > 0) {
+    positionTabBar();
     updateIndicator(true);
     canvas.RequestFrame();
   } else {
@@ -141,6 +155,15 @@ const tryInit = (): void => {
   }
 };
 requestAnimationFrame(tryInit);
+
+// Reposition on window resize
+window.addEventListener('resize', () => {
+  requestAnimationFrame(() => {
+    positionTabBar();
+    updateIndicator(true);
+    canvas.RequestFrame();
+  });
+});
 
 // ─── Click to select ───
 
@@ -172,3 +195,5 @@ el.addEventListener('click', (ev) => {
 });
 
 console.log('[Jwift] Click a tab in the nav bar');
+
+(window as unknown as { __jwift: unknown }).__jwift = { canvas, screen, contentColumn, tabBar };

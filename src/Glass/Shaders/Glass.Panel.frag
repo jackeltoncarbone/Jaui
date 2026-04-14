@@ -97,14 +97,70 @@ vec2 SuperellipseGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
     return L > 0.0001 ? g / L : vec2(0.0);
 }
 
+// ────────── Apple squircle-pill SDF (TRUE perpendicular distance) ──────────
+// `extent(u) = maxExt * (1 - u²)^0.284` where u = |py / halfH|, constants from SS's
+// `GeneratePillPath` Bezier control points.
+//
+// The cap's implicit equation is F(x, y) = x − (flatExtent + ext(|y/halfH|)) = 0.
+// The perpendicular distance from a point to F=0 is F / |∇F|. We compute ∇F
+// analytically via d(ext)/du, then take max with the vertical constraint
+// (y ≤ halfH) to get the SDF of the convex intersection. This is a TRUE SDF —
+// constant-distance offsets are real perpendicular offsets — so a
+// `dist − borderWidth` contour produces a concentric pill-shaped inner border.
+float ApplePillSDF(vec2 p, vec2 halfSize) {
+    bool horiz = halfSize.x >= halfSize.y;
+    vec2 hs = horiz ? halfSize : halfSize.yx;
+    vec2 q = horiz ? vec2(abs(p.x), abs(p.y)) : vec2(abs(p.y), abs(p.x));
+
+    // SS's pill: the curve never reaches its CP at 42.5 — it bulges to ~40.59
+    // (empirically the max of the Bezier mid-segment). flatExtent is where the
+    // straight side ends, so the cap tip at u=0 lands at flatExtent + maxExtent
+    // — and we want that == hs.x so the shape exactly fills its bbox (otherwise
+    // a thin shadow sliver shows through at the cap tips).
+    float endScale = hs.y / 25.0;
+    float maxExtent = 40.59 * endScale;
+    float flatExtent = hs.x - maxExtent;
+
+    float u = q.y / hs.y;
+    float oneMinusU2 = max(1.0 - u * u, 0.0001);
+    float ext = maxExtent * pow(oneMinusU2, 0.284);
+
+    // ∂ext/∂u = 0.284 · maxExtent · (1−u²)^(−0.716) · (−2u) = −0.568 · u · maxExtent · (1−u²)^(−0.716)
+    float dExtDu = -0.568 * u * maxExtent * pow(oneMinusU2, -0.716);
+    float dExtDy = dExtDu / hs.y;
+
+    // Perpendicular distance to cap curve: F / |∇F|  (∇F = (1, -dExt/dy))
+    float horiz_d = q.x - (flatExtent + ext);
+    float gradLen = sqrt(1.0 + dExtDy * dExtDy);
+    float horiz_perp = horiz_d / gradLen;
+
+    float vert_d = q.y - hs.y;   // already a true perpendicular distance
+
+    return max(horiz_perp, vert_d);
+}
+
+vec2 ApplePillGrad(vec2 p, vec2 halfSize) {
+    const float eps = 1.0;
+    float dX = ApplePillSDF(p + vec2(eps, 0.0), halfSize)
+             - ApplePillSDF(p - vec2(eps, 0.0), halfSize);
+    float dY = ApplePillSDF(p + vec2(0.0, eps), halfSize)
+             - ApplePillSDF(p - vec2(0.0, eps), halfSize);
+    vec2 g = vec2(dX, dY);
+    float L = length(g);
+    return L > 0.0001 ? g / L : vec2(0.0);
+}
+
 // ────────── Unified shape SDF / gradient ──────────
-// All three modes (rect/pill/circle) use superellipse. Smoothness picks the
-// curvature profile: ~0.6 squircle, 0.25 Apple pill, 0.01 near-perfect circle.
+//   mode 0: Rect    — superellipse with auto-smoothness
+//   mode 1: Pill    — Apple squircle-pill (Bezier-derived, true SDF)
+//   mode 2: Circle  — superellipse at smoothness ≈ 0.01
 float ShapeSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
+    if (mode == 1) return ApplePillSDF(p, halfSize);
     return SuperellipseSDF(p, halfSize, radii, smoothness);
 }
 
 vec2 ShapeGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
+    if (mode == 1) return ApplePillGrad(p, halfSize);
     return SuperellipseGrad(p, halfSize, radii, smoothness);
 }
 
@@ -212,13 +268,21 @@ void main() {
         float caPx = chromaticAberration * hump * 3.0;
         vec2 caStep = normal * caPx;
 
+        // FBO has top-of-scene at UV.y=1 (panel/text shaders flip Y in clip space).
+        // Flip Y here so each fragment samples the pixel directly behind it.
         vec2 baseUv = (v_PixelPos + refractOffset) / u_Resolution;
         vec2 uvR = (v_PixelPos + refractOffset + caStep) / u_Resolution;
         vec2 uvB = (v_PixelPos + refractOffset - caStep) / u_Resolution;
+        baseUv.y = 1.0 - baseUv.y;
+        uvR.y = 1.0 - uvR.y;
+        uvB.y = 1.0 - uvB.y;
 
-        vec3 sR = textureLod(u_Backdrop, uvR, bandLod).rgb;
-        vec3 sG = textureLod(u_Backdrop, baseUv, bandLod).rgb;
-        vec3 sB = textureLod(u_Backdrop, uvB, bandLod).rgb;
+        // Backdrop is a PRE-BLURRED 2-pass Gaussian FBO. Sample directly — no
+        // need for mipmap LOD or multi-tap (which would double-blur and muddy
+        // the image). The texture has LINEAR filtering for free.
+        vec3 sR = texture(u_Backdrop, uvR).rgb;
+        vec3 sG = texture(u_Backdrop, baseUv).rgb;
+        vec3 sB = texture(u_Backdrop, uvB).rgb;
         backdrop = vec3(sR.r, sG.g, sB.b);
 
         backdrop = applyGrading(backdrop, brightness, saturation, contrast);
@@ -232,80 +296,125 @@ void main() {
         backdrop *= absorb;
     }
 
-    // ── Fresnel rim (stronger at grazing angle = smaller edgeDist) ──
-    float cosTheta = smoothstep(0.0, bezelWidth, edgeDist);    // 0 at edge → 1 inside
-    float fresnel = 0.04 + 0.96 * pow(1.0 - cosTheta, 5.0);
-    fresnel *= fresnelStrength;
-
-    // ── Specular catchlight (Blinn-Phong on fake bevel 3D normal) ──
-    // Bevel normal: xy comes from SDF gradient scaled by (1 - hump) so it tilts,
-    // z comes from hump so the bevel curls "up" near the edge.
-    vec3 N3 = normalize(vec3(normal * (1.0 - hump * 0.8), max(hump * 1.3, 0.05)));
-    vec3 L3 = normalize(vec3(lightDir, 0.55));
-    vec3 V3 = vec3(0.0, 0.0, 1.0);
-    vec3 H3 = normalize(L3 + V3);
-    float NdotH = max(dot(N3, H3), 0.0);
-    float NdotL = max(dot(N3, L3), 0.0);
-    float specHard = pow(NdotH, specSharpness);
-    float specSoft = pow(NdotH, max(specSharpness * 0.15, 4.0)) * 0.35;
-    float catchlight = (specHard + specSoft) * hump * fresnel * specIntensity * lightIntensity;
-    vec3 specColor = vec3(1.0, 0.98, 0.92) * catchlight;
-
-    // ── Hemispherical rim ambient (top vs bottom, aligned to light dir) ──
-    // Dot with light direction: +1 on lit side, -1 on unlit.
-    float upness = 0.5 + 0.5 * dot(normal, lightDir);
-    float rimAmbient = mix(edgeLightBottom, edgeLightTop, upness);
-    float rimBand = 1.0 - smoothstep(0.0, bezelWidth * 1.5, edgeDist);
-    vec3 rimAmb = vec3(rimAmbient * rimBand * lightIntensity);
-
     // ── Variable border width along perimeter ──
-    float theta = atan(-normal.y, normal.x);            // screen angle
-    float phi = atan(-lightDir.y, lightDir.x);          // light angle
-    float widthScale = 1.0 + borderVariance * sin(theta - phi);
+    // Thicker where the rim's outward normal aligns with the light direction.
+    float alignment = dot(normal, lightDir);            // +1 lit, -1 unlit
+    float widthScale = 1.0 + borderVariance * alignment;
     float localBorderWidth = borderWidth * widthScale;
     float localBorderBlur = borderBlur * widthScale;
 
-    // ── Border composite (thin ink stroke + optional soft glow) ──
-    float borderOuter = smoothstep(-0.5, 0.5, dist);
-    float borderInner = smoothstep(-0.5, 0.5, dist + localBorderWidth);
-    float borderBase = (1.0 - borderOuter) * borderInner;
-    float borderGlow = 0.0;
-    if (localBorderBlur > 0.0) {
-        borderGlow = (1.0 - smoothstep(-localBorderBlur, 0.0, dist))
-                    * smoothstep(-localBorderBlur - localBorderWidth, -localBorderWidth, dist);
+    // ── Edge lighting (Apple Liquid Glass) ──────────────────────────────
+    // Two bands stacked:
+    //   1) WIDE inward rim glow — vibrant color sampled from behind the glass,
+    //      fading from the outline inward over `bezelWidth` px. This is the
+    //      visible "edge thickness" — the optical light gathered along the
+    //      bevel. NOT tied to BorderColor.a (that's the ink-line stroke).
+    //      Strength controlled by `fresnelStrength` (preset default 0.7).
+    //   2) THIN bright outline — a 1–2 px stroke drawn on top, color =
+    //      BorderColor. Defines the silhouette under the rim glow.
+    float edgeLightAlpha = 0.0;
+    vec3 edgeLightRgb = vec3(0.0);
+    if (materialType == 1.0 && fillAlpha > 0.0) {
+        // Wide rim band — at LEAST 6 px so the glow is actually visible,
+        // scaled up with bezelWidth (the optical "thickness" of the glass).
+        float rimBand = max(bezelWidth * 0.75, 6.0);
+
+        // Proximity: 1 at the outline (dist ≈ 0), 0 a full band inward, 0 outside.
+        // Must be zero where dist > 0 (the expanded-rect shadow region) or the
+        // edge light leaks into the shadow and looks like a dark blob.
+        float edgeProximity = dist > 0.0 ? 0.0 : clamp(1.0 + dist / rimBand, 0.0, 1.0);
+
+        // Single soft falloff — exp 1.6 keeps a strong peak near the rim and a
+        // gentle fade inward. Double-pow (4.7 effective) pinched the band to
+        // invisibility.
+        float falloff = pow(edgeProximity, 1.6);
+
+        // Directional: lit side full, unlit side dimmed (not dark)
+        float lightFacing = max(alignment, 0.0);
+        float directional = 0.6 + 0.4 * pow(lightFacing, 1.5);
+
+        // Rim backdrop sample — offset INWARD from the outline so the rim picks up
+        // the color from behind the glass, not the pixel directly beneath it.
+        vec2 rimUv = (v_PixelPos - normal * rimBand * 1.2) / u_Resolution;
+        rimUv.y = 1.0 - rimUv.y;
+        vec3 rimSample = texture(u_Backdrop, rimUv).rgb;
+
+        // Saturation + brightness boost — Apple's rim picks up surrounding hue
+        // and intensifies it (the "light gathering" feel).
+        float rimLuma = dot(rimSample, LUMA);
+        vec3 rimVibrant = clamp(mix(vec3(rimLuma), rimSample, 1.6) * 1.25, 0.0, 1.0);
+
+        // Brighter near the rim (specular cap), pure backdrop color deeper in
+        float specularCap = pow(edgeProximity, 3.5);
+        edgeLightRgb = mix(rimVibrant, mix(rimVibrant, vec3(1.0), 0.6), specularCap);
+
+        // Strength = Fresnel knob × directional × shape mask. NOT gated by
+        // BorderColor.a (that's the ink-line, separate concern).
+        edgeLightAlpha = falloff * directional * fresnelStrength * fillAlpha;
     }
-    float borderAlpha = max(borderBase, borderGlow) * v_BorderColor.a;
 
     // ── Shadow ──
     vec2 sp = p - shadowOffset;
     float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
     float shadowAlpha = (1.0 - smoothstep(-shadowBlur, 0.0, shadowDist)) * v_ShadowColor.a;
 
-    // ── Fill color mix (backdrop or tinted panel for SolidGlass) ──
+    // ── Fill: interior is PURELY the refracted backdrop (LG) or the tint (SG/None).
+    // No internal haze, no rim ambient, no specular overlay. All rim brightness
+    // comes from the border glow, per Apple Liquid Glass design intent.
     vec3 fillRgb;
     float fillA;
     if (materialType == 1.0) {
-        // LiquidGlass: backdrop is the base, Fresnel lightens the rim slightly
-        fillRgb = backdrop + fresnel * 0.08;
-        fillRgb += rimAmb + specColor;
+        fillRgb = backdrop;
         fillA = fillAlpha;
-    } else if (materialType == 2.0) {
-        // SolidGlass: tint over a clean background (no refraction)
-        fillRgb = v_Tint.rgb + rimAmb + specColor * 0.3;
-        fillA = fillAlpha * v_Tint.a;
     } else {
         fillRgb = v_Tint.rgb;
         fillA = fillAlpha * v_Tint.a;
     }
 
-    // ── Composite: shadow → fill → border (premultiplied-over) ──
+    // ── Composite: shadow → fill → edge-light (premultiplied-over) ──
     vec4 shadow = vec4(v_ShadowColor.rgb, shadowAlpha);
     vec4 fill = vec4(fillRgb, fillA);
     vec4 result = shadow;
     result = mix(result, fill, fillA);
-    result.rgb = result.rgb * (1.0 - borderAlpha) + v_BorderColor.rgb * borderAlpha;
-    result.a = result.a * (1.0 - borderAlpha) + borderAlpha;
-    result.a *= opacity;
 
+    // Composite order for glass:
+    //   1) Wide rim glow (vibrant backdrop pickup, inward fade) — the optical
+    //      "light gathering" along the bevel
+    //   2) Physical Fresnel rim stroke — a thin highlight at the very outline,
+    //      thicker + brighter on the lit side (BorderVariance × light angle),
+    //      tinted with backdrop vibrancy, fading on the unlit side. This is
+    //      what makes the outline read as a real bevel catching light, not a
+    //      flat CSS border. For non-glass it falls back to a uniform stroke.
+    if (materialType == 1.0) {
+        result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
+        result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;
+
+        // Fresnel rim stroke — variable width, color = backdrop-vibrant + white spec,
+        // alpha modulated by light facing.
+        float lightFacing = max(alignment, 0.0);
+        // Brighter on lit side (60..100%), dimmer on unlit (10..50%).
+        float strokeBrightness = mix(0.15, 1.0, pow(lightFacing, 1.0));
+        // Stroke color: backdrop vibrancy carrying the rim character, brightened
+        // toward white on the lit side (Fresnel specular peak).
+        vec3 strokeColor = mix(edgeLightRgb, vec3(1.0), pow(lightFacing, 2.0) * 0.7);
+        // Tint by user BorderColor.rgb so brand-coloured borders still read.
+        strokeColor = mix(strokeColor, v_BorderColor.rgb, 0.25);
+
+        float borderOuter = smoothstep(-0.5, 0.5, dist);
+        float borderInner = smoothstep(-0.5, 0.5, dist + localBorderWidth);
+        float borderBase = (1.0 - borderOuter) * borderInner;
+        float borderAlpha = borderBase * v_BorderColor.a * strokeBrightness;
+        result.rgb = result.rgb * (1.0 - borderAlpha) + strokeColor * borderAlpha;
+        result.a = result.a * (1.0 - borderAlpha) + borderAlpha;
+    } else {
+        float borderOuter = smoothstep(-0.5, 0.5, dist);
+        float borderInner = smoothstep(-0.5, 0.5, dist + localBorderWidth);
+        float borderBase = (1.0 - borderOuter) * borderInner;
+        float borderAlpha = borderBase * v_BorderColor.a;
+        result.rgb = result.rgb * (1.0 - borderAlpha) + v_BorderColor.rgb * borderAlpha;
+        result.a = result.a * (1.0 - borderAlpha) + borderAlpha;
+    }
+
+    result.a *= opacity;
     fragColor = result;
 }

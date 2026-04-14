@@ -6,7 +6,11 @@ precision highp float;
 layout(location = 0) in vec2 a_Position;
 out vec2 v_Uv;
 void main() {
-    v_Uv = vec2(a_Position.x, 1.0 - a_Position.y);
+    // The scene FBO was rendered with panel/text shaders that already flip Y
+    // (clip.y = -clip.y) to convert device-Y=top-of-screen into clip-Y=+1.
+    // That places top-of-scene at the texture's high-UV.y end. Pass UV through
+    // as-is so top-of-scene → top-of-display.
+    v_Uv = a_Position;
     vec2 clip = a_Position * 2.0 - 1.0;
     gl_Position = vec4(clip, 0.0, 1.0);
 }
