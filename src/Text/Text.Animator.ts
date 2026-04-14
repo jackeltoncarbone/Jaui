@@ -1,6 +1,6 @@
 import { Spring } from '../Animation/Spring';
 import type { Animatable } from '../Animation/Animation.Manager';
-import type { TextStyle } from './Text.Types';
+import type { ResolvedTextStyle } from './Text.Types';
 import { LayoutWords, Tokenize, type WordPosition } from './Text.WordLayout';
 
 /**
@@ -19,7 +19,7 @@ import { LayoutWords, Tokenize, type WordPosition } from './Text.WordLayout';
 
 export interface AnimatedWord {
   Content: string;
-  Style: TextStyle;
+  Style: ResolvedTextStyle;
   Width: number;           // CSS px (final measured width)
   Height: number;          // CSS px (line height)
   TargetX: number;
@@ -33,27 +33,27 @@ export interface AnimatedWord {
 export class TextAnimator implements Animatable {
   readonly Words: AnimatedWord[] = [];
   private _content: string = '';
-  private _style: TextStyle;
+  private _style: ResolvedTextStyle;
   private _maxWidth: number | null = null;
 
   /** Spring stiffness/damping for word position + opacity springs. */
   private _stiffness: number;
   private _damping: number;
 
-  constructor(style: TextStyle, stiffness: number = 260, damping: number = 30) {
+  constructor(style: ResolvedTextStyle, stiffness: number = 260, damping: number = 30) {
     this._style = _cloneStyle(style);
     this._stiffness = stiffness;
     this._damping = damping;
   }
 
   get Content(): string { return this._content; }
-  get Style(): TextStyle { return this._style; }
+  get Style(): ResolvedTextStyle { return this._style; }
 
   /**
    * Sync the animator to the current desired (content, style, maxWidth).
    * Returns true if any spring needs to animate (caller should Kick).
    */
-  Update = (content: string, style: TextStyle, maxWidth: number | null): boolean => {
+  Update = (content: string, style: ResolvedTextStyle, maxWidth: number | null): boolean => {
     const contentChanged = content !== this._content;
     const styleChanged = _stylesDiffer(style, this._style);
     const wrapChanged = maxWidth !== this._maxWidth;
@@ -116,7 +116,7 @@ export class TextAnimator implements Animatable {
 
   private _reconcileContent = (
     newContent: string,
-    newStyle: TextStyle,
+    newStyle: ResolvedTextStyle,
     maxWidth: number | null,
   ): boolean => {
     const newTokens = Tokenize(newContent);
@@ -192,7 +192,7 @@ export class TextAnimator implements Animatable {
 
 // ─── Helpers ───
 
-const _stylesDiffer = (a: TextStyle, b: TextStyle): boolean => {
+const _stylesDiffer = (a: ResolvedTextStyle, b: ResolvedTextStyle): boolean => {
   return a.FontFamily !== b.FontFamily
     || a.FontSize !== b.FontSize
     || a.FontWeight !== b.FontWeight
@@ -206,7 +206,7 @@ const _stylesDiffer = (a: TextStyle, b: TextStyle): boolean => {
     || a.Color.B !== b.Color.B || a.Color.A !== b.Color.A;
 };
 
-const _cloneStyle = (s: TextStyle): TextStyle => ({
+const _cloneStyle = (s: ResolvedTextStyle): ResolvedTextStyle => ({
   ...s,
   Color: { ...s.Color },
 });

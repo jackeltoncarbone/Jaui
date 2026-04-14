@@ -1,4 +1,6 @@
-import type { JivStyle } from './Jiv.Types';
+import type { JivStyle, JivRenderStyle } from './Jiv.Types';
+import type { ResolveContext } from '../Core/Length';
+import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { DefaultJivStyle } from './Jiv.Defaults';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
 import { DefaultLayoutConfig, DefaultChildLayout } from '../Layout/Layout.Types';
@@ -26,7 +28,7 @@ export class Jiv {
   // RenderStyle — what the renderer actually consumes. Spring-animated copy
   // of Style/EffectiveStyle. Starts equal to Style (no entry animation), then
   // JivStyleAnimator drives it toward EffectiveStyle on every tick.
-  RenderStyle: JivStyle;
+  RenderStyle: JivRenderStyle;
 
   // Layout — container config (how this node lays out its children)
   Layout: LayoutConfig;
@@ -72,6 +74,20 @@ export class Jiv {
    *  meaningful on text-bearing Jivs. */
   TextSelectionStyle: Partial<JivStyle> | null = null;
 
+  /** Resolved Length context, populated top-down during layout. Holds this
+   *  Jiv's resolved PointScale + the parent dims/viewport needed to turn
+   *  any Length field (%, pt, rpt, vw/vh, arithmetic) into pixels.
+   *  Null until the first layout pass has run for this Jiv. */
+  ResolveCtx: ResolveContext | null = null;
+
+  /** When true, the layout solver snaps this Jiv's X/Y/Width/Height to the
+   *  solver result instead of spring-chasing them. Used for Jivs whose
+   *  position is driven imperatively on every frame (e.g. text-selection
+   *  highlights following a drag) — spring lag looks like the highlight is
+   *  trailing the cursor. Default false: the framework's "everything
+   *  animates" posture wins unless a feature opts out. */
+  SnapLayout: boolean = false;
+
   // Dirty tracking
   Dirty: DirtyFlags = DirtyFlag.Layout;
 
@@ -86,6 +102,7 @@ export class Jiv {
     FocusStyle?: Partial<JivStyle>;
     DisabledStyle?: Partial<JivStyle>;
     TextSelectionStyle?: Partial<JivStyle>;
+    SnapLayout?: boolean;
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
     Text?: string;
@@ -95,52 +112,28 @@ export class Jiv {
     this.Y = options?.Y ?? 0;
     this.Width = options?.Width ?? 0;
     this.Height = options?.Height ?? 0;
+
+    // Every field on Style is a string (or enum/boolean) — no nested objects
+    // to deep-copy, shallow merge is enough.
     this.Style = { ...DefaultJivStyle, ...options?.Style };
 
-    // Deep copy nested objects
-    if (!options?.Style?.Transform) {
-      this.Style.Transform = { ...DefaultJivStyle.Transform };
-    }
-    this.Style.BorderRadius = options?.Style?.BorderRadius
-      ? [...options.Style.BorderRadius]
-      : [...DefaultJivStyle.BorderRadius];
-    this.Style.CornerShape = options?.Style?.CornerShape
-      ? [...options.Style.CornerShape]
-      : [...DefaultJivStyle.CornerShape];
-    // Deep-copy nested color objects so overrides don't bleed through
-    this.Style.Background = { ...this.Style.Background };
-    this.Style.BorderColor = { ...this.Style.BorderColor };
-    this.Style.ShadowColor = { ...this.Style.ShadowColor };
+    // RenderStyle starts as a fully-resolved numeric snapshot of Style under
+    // a seed context. The style animator overwrites on first layout with the
+    // real ResolveCtx; this initial pass just gives frame-0 reasonable values.
+    this.RenderStyle = ResolveStyle(this.Style, SEED_CONTEXT);
 
-    // RenderStyle starts as a full deep clone of Style — no entry animation
-    // (springs init at target). Subsequent EffectiveStyle changes drive
-    // springs to animate this toward the new target.
-    this.RenderStyle = _deepCloneStyle(this.Style);
-
-    // Layout config — deep copy Padding tuple
+    // Layout config — shallow merge, everything is string/enum/null.
     this.Layout = { ...DefaultLayoutConfig, ...options?.Layout };
-    this.Layout.Padding = options?.Layout?.Padding
-      ? [...options.Layout.Padding]
-      : [...DefaultLayoutConfig.Padding];
 
-    // Child layout — deep copy Margin tuple
+    // Child layout — shallow merge + deep-copy the one remaining nested
+    // objects (AttachTargetAnchor/SelfAnchor are { X, Y } and are shared-by-
+    // reference from the default otherwise).
     this.ChildLayout = { ...DefaultChildLayout, ...options?.ChildLayout };
-    this.ChildLayout.Margin = options?.ChildLayout?.Margin
-      ? [...options.ChildLayout.Margin]
-      : [...DefaultChildLayout.Margin];
-    // Deep-copy Attach objects/arrays so mutations don't bleed through the
-    // shared default.
     this.ChildLayout.AttachTargetAnchor = { ...(options?.ChildLayout?.AttachTargetAnchor ?? DefaultChildLayout.AttachTargetAnchor) };
     this.ChildLayout.AttachSelfAnchor = { ...(options?.ChildLayout?.AttachSelfAnchor ?? DefaultChildLayout.AttachSelfAnchor) };
-    this.ChildLayout.AttachInset = options?.ChildLayout?.AttachInset
-      ? [...options.ChildLayout.AttachInset]
-      : [...DefaultChildLayout.AttachInset];
 
     // Text
     this.TextStyle = { ...DefaultTextStyle, ...options?.TextStyle };
-    this.TextStyle.Color = options?.TextStyle?.Color
-      ? { ...options.TextStyle.Color }
-      : { ...DefaultTextStyle.Color };
     if (options?.Text !== undefined) {
       this.Text = options.Text;
       this.Dirty |= DirtyFlag.Text;
@@ -153,6 +146,7 @@ export class Jiv {
     this.FocusStyle = options?.FocusStyle ?? null;
     this.DisabledStyle = options?.DisabledStyle ?? null;
     this.TextSelectionStyle = options?.TextSelectionStyle ?? null;
+    this.SnapLayout = options?.SnapLayout ?? false;
   }
 
   /** Final render-time style: base + state overrides in priority order.
@@ -192,23 +186,9 @@ export class Jiv {
 
   SetText = (text: string | null, style?: Partial<TextStyle>): void => {
     this.Text = text;
-    if (style) {
-      Object.assign(this.TextStyle, style);
-      if (style.Color) this.TextStyle.Color = { ...style.Color };
-    }
+    if (style) Object.assign(this.TextStyle, style);
     this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
     if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
   };
 }
 
-/** Deep clone a JivStyle so a RenderStyle can diverge from its Style source
- *  under the animator. All nested objects/arrays get fresh copies. */
-const _deepCloneStyle = (s: JivStyle): JivStyle => ({
-  ...s,
-  Background: { ...s.Background },
-  BorderColor: { ...s.BorderColor },
-  ShadowColor: { ...s.ShadowColor },
-  BorderRadius: [...s.BorderRadius],
-  CornerShape: [...s.CornerShape],
-  Transform: { ...s.Transform },
-});

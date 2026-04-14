@@ -1,8 +1,13 @@
+/**
+ * Runtime (resolved) Transform — numeric form consumed by the renderer.
+ * The authorable form is a string on JivStyle.Transform, parsed via
+ * Transform.Parse.ts into this object at StyleResolver time.
+ */
 export interface Transform {
   TranslateX: number;
   TranslateY: number;
-  ScaleX: number;
-  ScaleY: number;
+  ScaleX: number;              // unitless multiplier
+  ScaleY: number;              // unitless multiplier
   Rotation: number;            // degrees
   SkewX: number;               // degrees
   SkewY: number;               // degrees

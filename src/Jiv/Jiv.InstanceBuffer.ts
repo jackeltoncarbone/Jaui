@@ -89,7 +89,7 @@ export class JivInstanceBuffer {
     data[offset + 6] = w / 2;
     data[offset + 7] = h / 2;
 
-    // loc 3 — a_Radii
+    // loc 3 — a_Radii (resolved to px by the style animator)
     data[offset + 8] = style.BorderRadius[0] * d;
     data[offset + 9] = style.BorderRadius[1] * d;
     data[offset + 10] = style.BorderRadius[2] * d;
@@ -121,7 +121,7 @@ export class JivInstanceBuffer {
 
     // loc 8 — a_StyleParams
     data[offset + 28] = borderBlur;
-    data[offset + 29] = style.Smoothness;
+    data[offset + 29] = style.BorderRadiusSmoothness;
     data[offset + 30] = style.Opacity;
     data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : style.Material === 'SolidGlass' ? 2 : 0;
 
@@ -142,7 +142,7 @@ export class JivInstanceBuffer {
     // Screen Y is down, so "up" maps to -Y. We store the screen-space light direction.
     const rad = style.LightAngle * (Math.PI / 180);
     const lightX = Math.cos(rad);
-    const lightY = -Math.sin(rad); // flip so positive angle = toward top-of-screen
+    const lightY = -Math.sin(rad);
     data[offset + 40] = lightX;
     data[offset + 41] = lightY;
     data[offset + 42] = style.LightIntensity;

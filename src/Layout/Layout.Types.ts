@@ -39,10 +39,12 @@ export interface LayoutConfig {
   Justify: JustifyContent;
   Align: AlignItems;
   AlignContent: AlignContent;
-  Gap: number;
-  RowGap: number;
-  ColumnGap: number;
-  Padding: [number, number, number, number]; // top, right, bottom, left
+  Gap: string;
+  RowGap: string;
+  ColumnGap: string;
+  /** CSS shorthand string: "0", "1 2", "1 2 3 4" (T R B L). Plain number =
+   *  uniform on all sides. */
+  Padding: string;
 }
 
 /** Type shape of a Jiv referenced as an attach target. Avoids a circular
@@ -55,33 +57,36 @@ export interface ChildLayout {
   Position: PositionMode;
   FlexGrow: number;
   FlexShrink: number;
-  FlexBasis: number | 'Auto';
+  FlexBasis: string | 'Auto';
   AlignSelf: AlignItems | 'Auto';
   Order: number;
-  Margin: [number | 'Auto', number | 'Auto', number | 'Auto', number | 'Auto'];
-  Width: number | 'Auto' | string;
-  Height: number | 'Auto' | string;
-  MinWidth: number;
-  MaxWidth: number;
-  MinHeight: number;
-  MaxHeight: number;
+  /** Space-separated shorthand or number (uniform). "Auto" permitted in any
+   *  component for flex auto-margin behavior (pass via explicit "auto" token). */
+  Margin: string;
+  Width: string | 'Auto';
+  Height: string | 'Auto';
+  MinWidth: string;
+  MaxWidth: string;
+  MinHeight: string;
+  MaxHeight: string;
   AspectRatio: number | null;
   ZIndex: number | 'Auto';
-  OffsetX: number;
-  OffsetY: number;
-  StickyTop: number | null;
-  StickyBottom: number | null;
-  StickyLeft: number | null;
-  StickyRight: number | null;
+  OffsetX: string;
+  OffsetY: string;
+  StickyTop: string | null;
+  StickyBottom: string | null;
+  StickyLeft: string | null;
+  StickyRight: string | null;
 
   // Attach — only meaningful when Position === 'Attach'
   AttachTo: AttachTarget | null;
   AttachMode: 'Anchor' | 'Fill';
   AttachTargetAnchor: AnchorPoint;   // 0..1 on target rect
   AttachSelfAnchor: AnchorPoint;     // 0..1 on self rect (Anchor mode only)
-  AttachOffsetX: number;
-  AttachOffsetY: number;
-  AttachInset: [number, number, number, number]; // top, right, bottom, left (Fill mode)
+  AttachOffsetX: string;
+  AttachOffsetY: string;
+  /** Space-separated shorthand, same as Padding. */
+  AttachInset: string;
 }
 
 export interface LayoutResult {
@@ -110,10 +115,10 @@ export const DefaultLayoutConfig: LayoutConfig = {
   Justify: 'Start',
   Align: 'Stretch',
   AlignContent: 'Stretch',
-  Gap: 0,
-  RowGap: 0,
-  ColumnGap: 0,
-  Padding: [0, 0, 0, 0],
+  Gap: '0',
+  RowGap: '0',
+  ColumnGap: '0',
+  Padding: '0',
 };
 
 export const DefaultChildLayout: ChildLayout = {
@@ -123,17 +128,17 @@ export const DefaultChildLayout: ChildLayout = {
   FlexBasis: 'Auto',
   AlignSelf: 'Auto',
   Order: 0,
-  Margin: [0, 0, 0, 0],
+  Margin: '0',
   Width: 'Auto',
   Height: 'Auto',
-  MinWidth: 0,
-  MaxWidth: Infinity,
-  MinHeight: 0,
-  MaxHeight: Infinity,
+  MinWidth: '0',
+  MaxWidth: 'none',
+  MinHeight: '0',
+  MaxHeight: 'none',
   AspectRatio: null,
   ZIndex: 'Auto',
-  OffsetX: 0,
-  OffsetY: 0,
+  OffsetX: '0',
+  OffsetY: '0',
   StickyTop: null,
   StickyBottom: null,
   StickyLeft: null,
@@ -142,7 +147,7 @@ export const DefaultChildLayout: ChildLayout = {
   AttachMode: 'Anchor',
   AttachTargetAnchor: { X: 0.5, Y: 0.5 },
   AttachSelfAnchor: { X: 0.5, Y: 0.5 },
-  AttachOffsetX: 0,
-  AttachOffsetY: 0,
-  AttachInset: [0, 0, 0, 0],
+  AttachOffsetX: '0',
+  AttachOffsetY: '0',
+  AttachInset: '0',
 };

@@ -11,92 +11,183 @@ export type BlendMode =
   | 'Darken' | 'Lighten' | 'ColorDodge' | 'ColorBurn'
   | 'SoftLight' | 'HardLight' | 'Difference' | 'Exclusion';
 
+/**
+ * Authorable style — every numeric / dimensional / color / transform field is
+ * a CSS-style string (or a bare number as a convenience fast-path for simple
+ * scalars). The StyleResolver service parses and resolves this into the
+ * fully-numeric `JivRenderStyle` that the renderer consumes.
+ *
+ * String grammar:
+ *   Scalars: `"0.5"`, `"1pt"`, `"50%"`, `"1pt + 4"`, `"(100vh - 64) / 3"`
+ *   Tuples (Padding, BorderRadius, CornerShape): `"0"` (all), `"1 2"` (v h),
+ *          `"1 2 3 4"` (T R B L)
+ *   Colors (Background, BorderColor, ShadowColor): `"#rgb"`, `"#rrggbbaa"`,
+ *          `"rgb(...)"`, `"rgba(...)"`, `"hsl(...)"`, `"hsla(...)"`,
+ *          `"transparent"`
+ *   Transform: `"translate(x, y) scale(s) rotate(deg)"` — function syntax,
+ *              any order, any subset
+ */
 export interface JivStyle {
   // Material — 'None' uses the default panel shader; 'LiquidGlass'/'SolidGlass'
   // route through the glass pipeline (backdrop sampling, grading)
   Material: MaterialType;
 
+  /** Cascading base unit. `1pt` anywhere in this Jiv's subtree resolves to
+   *  `N × PointScale`. When resolving PointScale itself, `pt` refers to
+   *  PARENT's PointScale. Default `"1pt"` — inherit parent. */
+  PointScale: string;
+
   // Shape
-  BorderRadius: [number, number, number, number]; // tl, tr, br, bl
-  CornerShape: [CornerShape, CornerShape, CornerShape, CornerShape];
-  Smoothness: number;
+  /** Space-separated, CSS shorthand: "0" (all), "1 2" (tl/br, tr/bl),
+   *  "1 2 3 4" (tl, tr, br, bl). Plain number shortcut: all corners same. */
+  BorderRadius: string;
+  /** Space-separated tokens; same 1/2/4 shorthand as BorderRadius. */
+  CornerShape: string;
+  /** Corner curvature smoothness — superellipse exponent interpolating
+   *  between round (0) and squircle (1). */
+  BorderRadiusSmoothness: string;
   Overflow: Overflow;
 
   // Fill
-  Background: Color;
+  Background: string;
   BlendMode: BlendMode;
 
   // Physical material — the Jiv is a slab with measurable properties
-  Frost: number;               // backdrop blur intensity (0 = clear, 1 = full frost)
-  BackdropFrostBlur: number;           // blur radius in px when Frost > 0
-  Thickness: number;           // bezel refraction magnitude in px (displacement at hump peak)
-  Fillet: number;              // reserved — multiplies InnerBlur (softens interior)
-  Refraction: number;          // overall refraction multiplier (0..1)
-  BackdropBrightness: number;          // backdrop brightness multiplier
-  BackdropSaturation: number;          // backdrop saturation
-  BackdropContrast: number;            // backdrop contrast
+  Frost: string;
+  BackdropFrostBlur: string;
+  Thickness: string;
+  Fillet: string;
+  Refraction: string;
+  BackdropBrightness: string;
+  BackdropSaturation: string;
+  BackdropContrast: string;
 
   // Refraction band geometry
-  BezelWidth: number;          // refraction band width in CSS px (how far inward the rim effect reaches)
-  BezelScale: number;          // where the displacement hump peaks within the bezel (0..1, default ~0.35)
+  BezelWidth: string;
+  BezelScale: string;
 
-  // Lighting (the slab has a virtual directional light)
-  LightAngle: number;          // degrees (0 = +x, 90 = up). Default -45 = upper-left
-  LightIntensity: number;      // overall lighting multiplier (0..∞, default 1)
+  // Lighting
+  LightAngle: string;        // degrees
+  LightIntensity: string;
 
-  // Specular catchlight (Blinn-Phong on the bevel)
-  SpecularIntensity: number;   // 0..1 — how bright the catchlight is
-  SpecularSharpness: number;   // Blinn exponent (20..300) — tighter = smaller crescent
+  // Specular catchlight
+  SpecularIntensity: string;
+  SpecularSharpness: string;
 
-  // Fresnel rim (grazing-angle reflection on the bevel)
-  FresnelStrength: number;     // 0..1 — multiplies Fresnel contribution
-
-  // Chromatic aberration at the rim
-  ChromaticAberration: number; // 0..1 — RGB channel split in the refraction
-
-  // Hemispherical rim ambient (top vs bottom rim brightness — directional environment)
-  EdgeLightTop: number;        // 0..1 — rim ambient on the lit side
-  EdgeLightBottom: number;     // 0..1 — rim ambient on the unlit side
+  // Fresnel + chromatic
+  FresnelStrength: string;
+  ChromaticAberration: string;
+  EdgeLightTop: string;
+  EdgeLightBottom: string;
 
   // Shape-driven variables
-  BorderVariance: number;      // 0..1 — how much border width varies around perimeter (thicker on lit side)
-  BorderAlphaVariance: number; // 0..1 — how much border alpha fades on the unlit side (0 = uniform hairline)
-  BorderFresnelBrightness: number; // 0..1 — strength of white Fresnel tint on the lit side of the stroke
-  InnerBlur: number;           // 0..1 — extra blur in the interior vs the rim (longer optical path)
+  BorderVariance: string;
+  BorderAlphaVariance: string;
+  BorderFresnelBrightness: string;
+  InnerBlur: string;
 
-  // Transform
-  Transform: Transform;
+  // Transform — function-syntax string composing translate/scale/rotate/skew/origin
+  Transform: string;
 
   // Border
-  BorderColor: Color;
-  BorderWidth: number;
-  BorderBlur: number;          // soft glow border
-  BorderOffset: number;        // inward/outward shift from edge
-  ContainBorder: boolean;      // clip border glow to shape interior
+  BorderColor: string;
+  BorderWidth: string;
+  BorderBlur: string;
+  BorderOffset: string;
+  ContainBorder: boolean;
 
-  // Border-zone backdrop filter — like Frost/Brightness/Saturation/Contrast for
-  // the panel interior, but applied ONLY in the border annulus. Apple's glass
-  // rim acts like a separate optical zone that can pick up brighter / more
-  // saturated light than the panel face. Multipliers ON TOP of the panel
-  // grading: 1.0 = inherit panel value, >1 = boost in border zone.
-  BorderBrightness: number;    // multiplier for backdrop brightness in border zone
-  BorderSaturation: number;    // multiplier for backdrop saturation in border zone
-  BorderContrast: number;      // multiplier for backdrop contrast in border zone
-  BorderFrostLodOffset: number; // additional LOD on backdrop sample in border zone (negative = sharper, positive = blurrier)
+  // Border-zone backdrop filter
+  BorderBrightness: string;
+  BorderSaturation: string;
+  BorderContrast: string;
+  BorderFrostLodOffset: string;
 
   // Shadow
+  ShadowColor: string;
+  ShadowBlur: string;
+  ShadowOffsetX: string;
+  ShadowOffsetY: string;
+  InnerShadow: boolean;
+
+  // Appearance
+  Opacity: string;
+  Visible: boolean;
+
+  // Interaction
+  Cursor: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
+  Interactive: boolean;
+  PointerEvents: 'Auto' | 'None';
+  UserSelect: 'Auto' | 'None';
+}
+
+/**
+ * Fully resolved version of JivStyle — every authored string is parsed and
+ * every Length resolved to pixels. This is what the renderer / InstanceBuffer
+ * reads and what the style animator writes each tick.
+ */
+export interface JivRenderStyle {
+  Material: MaterialType;
+  PointScale: number;
+
+  BorderRadius: [number, number, number, number];          // tl, tr, br, bl
+  CornerShape: [CornerShape, CornerShape, CornerShape, CornerShape];
+  BorderRadiusSmoothness: number;
+  Overflow: Overflow;
+
+  Background: Color;
+  BlendMode: BlendMode;
+
+  Frost: number;
+  BackdropFrostBlur: number;
+  Thickness: number;
+  Fillet: number;
+  Refraction: number;
+  BackdropBrightness: number;
+  BackdropSaturation: number;
+  BackdropContrast: number;
+
+  BezelWidth: number;
+  BezelScale: number;
+
+  LightAngle: number;
+  LightIntensity: number;
+
+  SpecularIntensity: number;
+  SpecularSharpness: number;
+
+  FresnelStrength: number;
+  ChromaticAberration: number;
+  EdgeLightTop: number;
+  EdgeLightBottom: number;
+  BorderVariance: number;
+  BorderAlphaVariance: number;
+  BorderFresnelBrightness: number;
+  InnerBlur: number;
+
+  Transform: Transform;
+
+  BorderColor: Color;
+  BorderWidth: number;
+  BorderBlur: number;
+  BorderOffset: number;
+  ContainBorder: boolean;
+
+  BorderBrightness: number;
+  BorderSaturation: number;
+  BorderContrast: number;
+  BorderFrostLodOffset: number;
+
   ShadowColor: Color;
   ShadowBlur: number;
   ShadowOffsetX: number;
   ShadowOffsetY: number;
   InnerShadow: boolean;
 
-  // Appearance
   Opacity: number;
-  Visible: boolean;            // false = hidden but still takes layout space
+  Visible: boolean;
 
-  // Interaction
   Cursor: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
   Interactive: boolean;
   PointerEvents: 'Auto' | 'None';
+  UserSelect: 'Auto' | 'None';
 }

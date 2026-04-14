@@ -46,7 +46,7 @@ describe('Attach positioning mode', () => {
         Position: 'Attach',
         AttachTo: target,
         AttachMode: 'Fill',
-        AttachInset: [10, 20, 10, 20],  // top, right, bottom, left
+        AttachInset: '10 20 10 20',  // top, right, bottom, left
       },
     });
     root.AddChild(attached);

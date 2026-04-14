@@ -1,4 +1,4 @@
-import type { TextStyle, TextMeasurement } from './Text.Types';
+import type { ResolvedTextStyle, TextMeasurement } from './Text.Types';
 
 // Module-level shared measurement canvas (created lazily)
 let _sharedCtx: CanvasRenderingContext2D | null = null;
@@ -15,7 +15,7 @@ const _getSharedContext = (): CanvasRenderingContext2D => {
 };
 
 /** Apply style to a 2D context (matches browser font string syntax). */
-export const ApplyTextStyle = (ctx: CanvasRenderingContext2D, style: TextStyle, dpr: number = 1): void => {
+export const ApplyTextStyle = (ctx: CanvasRenderingContext2D, style: ResolvedTextStyle, dpr: number = 1): void => {
   const italic = style.FontStyle === 'Italic' ? 'italic ' : '';
   const size = style.FontSize * dpr;
   ctx.font = `${italic}${style.FontWeight} ${size}px ${style.FontFamily}`;
@@ -34,7 +34,7 @@ export const ApplyTextStyle = (ctx: CanvasRenderingContext2D, style: TextStyle, 
  */
 export const MeasureText = (
   content: string,
-  style: TextStyle,
+  style: ResolvedTextStyle,
   maxWidth: number | null,
   ctx?: CanvasRenderingContext2D,
 ): TextMeasurement => {
@@ -108,7 +108,7 @@ const _wrapParagraph = (
 /** Apply MaxLines + TextOverflow (Ellipsis) to the line list. */
 const _applyMaxLines = (
   lines: string[],
-  style: TextStyle,
+  style: ResolvedTextStyle,
   ctx: CanvasRenderingContext2D,
   maxWidth: number | null = null,
 ): string[] => {

@@ -1,10 +1,13 @@
-import type { TextStyle } from './Text.Types';
+import type { ResolvedTextStyle } from './Text.Types';
 
 /**
  * Fast hash for text + style + dpr.
  * Uses FNV-1a (32-bit) — stable, fast, low collision for typical UI strings.
+ *
+ * Takes a ResolvedTextStyle (numeric FontSize/LetterSpacing) — cache keys
+ * need to be stable pixel values, not authored Length expressions.
  */
-export const HashTextKey = (content: string, style: TextStyle, dpr: number): string => {
+export const HashTextKey = (content: string, style: ResolvedTextStyle, dpr: number): string => {
   let h = 0x811c9dc5; // FNV-1a 32-bit offset basis
 
   // Hash content

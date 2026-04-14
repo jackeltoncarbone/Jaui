@@ -1,4 +1,4 @@
-import type { TextStyle, TextAlign } from './Text.Types';
+import type { ResolvedTextStyle, TextAlign } from './Text.Types';
 import { ApplyTextStyle } from './Text.Measure';
 
 export interface WordPosition {
@@ -45,7 +45,7 @@ export const Tokenize = (content: string): string[] => {
  */
 export const LayoutWords = (
   content: string,
-  style: TextStyle,
+  style: ResolvedTextStyle,
   maxWidth: number | null,
   ctx?: CanvasRenderingContext2D,
 ): WordPosition[] => {

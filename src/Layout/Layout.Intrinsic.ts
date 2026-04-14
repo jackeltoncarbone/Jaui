@@ -1,41 +1,96 @@
 import type { Jiv } from '../Jiv/Jiv';
+import { Resolve, type ResolveContext } from '../Core/Length';
+import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
+import type { Viewport } from './Layout.Solver';
 
 /**
  * Compute IntrinsicWidth / IntrinsicHeight for container Jivs based on their children.
  * Runs bottom-up so children's intrinsics are known before computing the parent.
  *
- * Rules:
- * - Text nodes have intrinsic from MeasureText (already set by Canvas._measureDirtyText).
- * - Container nodes (no text, with children) get intrinsic from summing their children
- *   along the container's main axis + max across cross axis, plus gap + padding.
- * - Leaf nodes without text have no intrinsic (remain null).
- * - Explicit Width/Height on a child is used instead of its intrinsic when computing parent.
+ * Length handling: intrinsic runs BEFORE SolveLayout, so parent dims aren't
+ * known yet — `%` units can't resolve here (they collapse to 0, which is the
+ * right intrinsic behavior: a percentage-sized child contributes no intrinsic
+ * width). `pt` / `rpt` / `px` / `vw` / `vh` all resolve normally because they
+ * depend only on the PointScale cascade + viewport, both of which we can
+ * establish before sizes are known. This function does a top-down PointScale
+ * cascade first, stashing a seed `ResolveCtx` on each Jiv, then runs the
+ * bottom-up intrinsic computation using those seed contexts.
  */
-export const ComputeIntrinsicSizes = (root: Jiv): void => {
+
+const DEFAULT_POINT_SCALE = 16;
+
+const DEFAULT_VIEWPORT: Viewport = { Width: 0, Height: 0 };
+
+export const ComputeIntrinsicSizes = (root: Jiv, viewport: Viewport = DEFAULT_VIEWPORT): void => {
+  CascadePointScale(root, viewport);
   _compute(root);
 };
 
+/** Top-down PointScale cascade. Each Jiv gets a seed ResolveCtx with
+ *  ParentWidth/Height = 0 (unknown pre-solve) but real PointScale +
+ *  viewport. Parent PointScale flows to child; child's PointScale expressed
+ *  in `pt` resolves against parent's PointScale (ptRefersToParent=true).
+ *  Idempotent — safe to call multiple times per frame. */
+export const CascadePointScale = (root: Jiv, viewport: Viewport = DEFAULT_VIEWPORT): void => {
+  _cascadePointScale(root, null, viewport);
+};
+
+const _cascadePointScale = (
+  node: Jiv,
+  parentPointScale: number | null,
+  viewport: Viewport,
+): void => {
+  const parent = parentPointScale ?? DEFAULT_POINT_SCALE;
+  const seed: ResolveContext = {
+    ParentWidth: 0,
+    ParentHeight: 0,
+    PointScale: parent,         // unused when ptRefersToParent=true
+    ParentPointScale: parent,
+    RootPointScale: 0,          // patched below once root's is known
+    ViewportWidth: viewport.Width,
+    ViewportHeight: viewport.Height,
+  };
+  const pointScale = Resolve(node.Style.PointScale, seed, 'W', true);
+
+  // RootPointScale: root uses its own; children inherit from parent ctx.
+  const rootPointScale = node.Parent?.ResolveCtx?.RootPointScale ?? pointScale;
+
+  node.ResolveCtx = {
+    ParentWidth: 0,
+    ParentHeight: 0,
+    PointScale: pointScale,
+    ParentPointScale: parent,
+    RootPointScale: rootPointScale,
+    ViewportWidth: viewport.Width,
+    ViewportHeight: viewport.Height,
+  };
+
+  for (const child of node.Children) _cascadePointScale(child, pointScale, viewport);
+};
+
 const _compute = (node: Jiv): void => {
-  // Bottom-up: children first
   for (const child of node.Children) _compute(child);
 
-  const [pt, pr, pb, pl] = node.Layout.Padding;
+  const ctx = node.ResolveCtx!;
+  const [pt, pr, pb, pl] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
 
-  // Text nodes — intrinsic = text measurement + this node's own padding
   if (node.Text !== null && node.TextMeasurement !== null) {
     node.IntrinsicWidth = node.TextMeasurement.Width + pl + pr;
     node.IntrinsicHeight = node.TextMeasurement.Height + pt + pb;
     return;
   }
 
-  // No children → no intrinsic to derive
   if (node.Children.length === 0) return;
 
   const dir = node.Layout.Direction;
   const horiz = dir === 'Row' || dir === 'RowReverse';
-  const gap = horiz
-    ? (node.Layout.ColumnGap || node.Layout.Gap)
-    : (node.Layout.RowGap || node.Layout.Gap);
+  // Gap fallback: prefer the axis-specific gap; if it resolves to 0 (default),
+  // fall back to the general Gap. Can't use JS `||` on raw fields because
+  // `'0'` (string zero) is truthy and would shadow an explicit general Gap.
+  const axis: 'W' | 'H' = horiz ? 'W' : 'H';
+  const specific = Resolve(horiz ? node.Layout.ColumnGap : node.Layout.RowGap, ctx, axis);
+  const general = Resolve(node.Layout.Gap, ctx, axis);
+  const gap = specific || general;
 
   let mainSum = 0;
   let crossMax = 0;
@@ -44,8 +99,14 @@ const _compute = (node: Jiv): void => {
   for (const c of node.Children) {
     if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed') continue;
 
-    const explicitW = typeof c.ChildLayout.Width === 'number' ? c.ChildLayout.Width : null;
-    const explicitH = typeof c.ChildLayout.Height === 'number' ? c.ChildLayout.Height : null;
+    // Explicit size participates in intrinsic sum only if it's purely
+    // numeric (px) or resolvable without parent dims. Length that's `%`
+    // can't be resolved pre-solve — skip to intrinsic in that case.
+    const childCtx = c.ResolveCtx!;
+    const w = c.ChildLayout.Width;
+    const h = c.ChildLayout.Height;
+    const explicitW = _intrinsicOf(w, childCtx, 'W');
+    const explicitH = _intrinsicOf(h, childCtx, 'H');
     const effectiveW = explicitW ?? c.IntrinsicWidth ?? 0;
     const effectiveH = explicitH ?? c.IntrinsicHeight ?? 0;
 
@@ -72,4 +133,20 @@ const _compute = (node: Jiv): void => {
     node.IntrinsicHeight = mainSum;
     node.IntrinsicWidth = crossMax;
   }
+};
+
+/** Return a pixel value if the dimension is "known" without parent dims.
+ *  Returns null for `Auto`, legacy ChildLayout "string" overrides, or any
+ *  Length whose string contains `%` (parent-dim-relative, can't resolve
+ *  pre-layout). Plain numbers, `pt`, `rpt`, `vw`, `vh`, and arithmetic
+ *  over those all resolve — they don't need parent dims. */
+const _intrinsicOf = (
+  size: string | 'Auto',
+  ctx: ResolveContext,
+  axis: 'W' | 'H',
+): number | null => {
+  if (size === 'Auto') return null;
+  if (typeof size === 'number') return size;
+  if (size.includes('%')) return null;   // parent-relative — skip
+  return Resolve(size, ctx, axis);
 };

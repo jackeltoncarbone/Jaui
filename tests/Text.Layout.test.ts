@@ -85,17 +85,17 @@ describe('Text / intrinsic size integration', () => {
   });
 
   it('SetText with style merges style fields', () => {
-    const j = new Jiv({ TextStyle: { FontSize: 16 } });
-    j.SetText('X', { FontSize: 24, Color: { R: 1, G: 0, B: 0, A: 1 } });
-    expect(j.TextStyle.FontSize).toBe(24);
-    expect(j.TextStyle.Color.R).toBe(1);
+    const j = new Jiv({ TextStyle: { FontSize: '16' } });
+    j.SetText('X', { FontSize: '24', Color: 'rgb(255, 0, 0)' });
+    expect(j.TextStyle.FontSize).toBe('24');
+    expect(j.TextStyle.Color).toBe('rgb(255, 0, 0)');
   });
 
   it('Jiv constructor TextStyle partial overrides defaults', () => {
-    const j = new Jiv({ TextStyle: { FontSize: 20, FontWeight: 700 } });
-    expect(j.TextStyle.FontSize).toBe(20);
+    const j = new Jiv({ TextStyle: { FontSize: '20', FontWeight: 700 } });
+    expect(j.TextStyle.FontSize).toBe('20');
     expect(j.TextStyle.FontWeight).toBe(700);
-    expect(j.TextStyle.FontFamily).toBe('system-ui'); // default
+    expect(j.TextStyle.FontFamily).toBe('system-ui');
   });
 
   // ─── Cross-axis Stretch should override intrinsic width ───
@@ -212,7 +212,7 @@ describe('Text / intrinsic size integration', () => {
   it('Container intrinsic includes padding', () => {
     const parent = new Jiv({ Width: 400, Height: 200 });
     const c = new Jiv({
-      Layout: { Direction: 'Row', Gap: 0, Padding: [10, 20, 10, 20] },
+      Layout: { Direction: 'Row', Gap: 0, Padding: '10 20 10 20' },
     });
     const child = new Jiv({ ChildLayout: { Width: 50, Height: 30 } });
     c.AddChild(child);
@@ -227,7 +227,7 @@ describe('Text / intrinsic size integration', () => {
   it('BUG: text node intrinsic size includes the node\'s own padding', () => {
     // A button: has Text + Padding. Its IntrinsicWidth should be text width + left/right padding.
     // Simulate MeasureText having run: set TextMeasurement manually.
-    const btn = new Jiv({ Layout: { Padding: [8, 14, 8, 14] } });
+    const btn = new Jiv({ Layout: { Padding: '8 14 8 14' } });
     btn.Text = 'Save';
     btn.TextMeasurement = { Width: 30, Height: 20, Lines: ['Save'] };
 
@@ -242,7 +242,7 @@ describe('Text / intrinsic size integration', () => {
     // Full integration: button Auto-width should resolve to text+padding via SolveLayout
     const header = new Jiv({ Width: 800, Height: 60, Layout: { Direction: 'Row' } });
     const btn = new Jiv({
-      Layout: { Padding: [8, 14, 8, 14] },
+      Layout: { Padding: '8 14 8 14' },
       ChildLayout: { FlexGrow: 0, Height: 36 },
     });
     btn.Text = 'Save';

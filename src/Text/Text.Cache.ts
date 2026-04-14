@@ -1,4 +1,4 @@
-import type { TextStyle, TextMeasurement } from './Text.Types';
+import type { ResolvedTextStyle, TextMeasurement } from './Text.Types';
 import { MeasureText, ApplyTextStyle } from './Text.Measure';
 import { HashTextKey } from './Text.Hash';
 
@@ -35,7 +35,7 @@ export class TextCache {
    * Get or create a text texture.
    * @param maxWidth — wrap boundary in CSS pixels (null = no wrap)
    */
-  Get = (content: string, style: TextStyle, maxWidth: number | null, dpr: number): TextCacheEntry => {
+  Get = (content: string, style: ResolvedTextStyle, maxWidth: number | null, dpr: number): TextCacheEntry => {
     const key = HashTextKey(content, style, dpr) + '|' + (maxWidth ?? 'null');
     const existing = this._cache.get(key);
     if (existing) {
@@ -60,7 +60,7 @@ export class TextCache {
 
   private _rasterize = (
     _content: string,
-    style: TextStyle,
+    style: ResolvedTextStyle,
     measurement: TextMeasurement,
     dpr: number,
   ): TextCacheEntry => {

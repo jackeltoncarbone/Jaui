@@ -7,11 +7,13 @@ import { JivAnimator } from '../Jiv/Jiv.Animator';
 import { JivStyleAnimator } from '../Jiv/Jiv.StyleAnimator';
 import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
-import { ComputeIntrinsicSizes } from '../Layout/Layout.Intrinsic';
+import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intrinsic';
 import { TextCache } from '../Text/Text.Cache';
 import { TextRenderer } from '../Text/Text.Renderer';
 import { MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
+import { ResolveTextStyle } from '../Text/Text.Types';
+import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 // Single unified Jiv renderer. Every Jiv flows through here regardless of Material.
 // Material controls whether the backdrop is sampled + graded; "Glass" is just a
 // styling preset (LiquidGlass, SolidGlass) — never a special code path.
@@ -80,7 +82,7 @@ export class Canvas {
     this._animationManager.Register(this._scrollManager);
 
     // Selection manager — rebuilds highlight Jivs under text on drag.
-    this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv));
+    this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv), this._animationManager);
 
     this._resize();
     this._observeResize();
@@ -88,6 +90,7 @@ export class Canvas {
     this._listenForScroll();
     this._listenForInteractionStates();
     this._listenForTextSelection();
+    this._listenForSelectionKeys();
     // NOTE: pointer-driven specular tilt is intentionally NOT wired. It felt
     // like a "glow follows cursor" gimmick — the wrong abstraction for the
     // Jiv material. Real gyro input (DeviceOrientation) will drive this on
@@ -116,6 +119,14 @@ export class Canvas {
 
   get Width(): number { return this._width; }
   get Height(): number { return this._height; }
+
+  /** Viewport passed to layout passes for Length resolution — `vw`/`vh`
+   *  resolve against these dims, and `%` on root-level placed children
+   *  falls back here when there's no parent rect. */
+  private _viewport = (): { Width: number; Height: number } => ({
+    Width: this._width,
+    Height: this._height,
+  });
   get Dpr(): number { return this._dpr; }
 
   /** Request an immediate re-render (called by animation manager). */
@@ -132,8 +143,11 @@ export class Canvas {
 
     // Check if layout needs re-solving
     if (this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root)) {
+      // Cascade PointScale first so _measureDirtyText can resolve FontSize
+      // against each Jiv's ResolveCtx before layout sizes are known.
+      CascadePointScale(this.Root, this._viewport());
       this._measureDirtyText(this.Root);
-      ComputeIntrinsicSizes(this.Root);
+      ComputeIntrinsicSizes(this.Root, this._viewport());
       this._solveAndAnimate();
       this._clearDirty(this.Root);
     }
@@ -239,12 +253,14 @@ export class Canvas {
     return [offsetX, offsetY];
   };
 
-  /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px). */
+  /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px).
+   *  Reads from RenderStyle (resolved px), not Style (authorable string) so the
+   *  blur pass picks the actually-rendered value. */
   private _scanFrostBlur = (node: Jiv): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible
         && node.Style.Material === 'LiquidGlass'
-        && node.Style.BackdropFrostBlur > this._maxFrostBlur) {
-      this._maxFrostBlur = node.Style.BackdropFrostBlur;
+        && node.RenderStyle.BackdropFrostBlur > this._maxFrostBlur) {
+      this._maxFrostBlur = node.RenderStyle.BackdropFrostBlur;
     }
     for (const child of node.Children) this._scanFrostBlur(child);
   };
@@ -298,10 +314,14 @@ export class Canvas {
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
 
-    const padding = node.Layout.Padding;
-    const contentX = node.X + offsetX + padding[3];
-    const contentY = node.Y + offsetY + padding[0];
-    const contentH = node.Height - padding[0] - padding[2];
+    // Padding is a Length — resolve against this Jiv's ctx (populated by
+    // the layout pass). ctx always exists post-layout; fall back to the
+    // root's ctx if something went sideways to avoid NaN in the render.
+    const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
+    const [padT, , padB, padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
+    const contentX = node.X + offsetX + padL;
+    const contentY = node.Y + offsetY + padT;
+    const contentH = node.Height - padT - padB;
 
     let totalTextHeight = 0;
     for (const w of anim.Words) {
@@ -328,24 +348,26 @@ export class Canvas {
   };
 
   private _processTextTransitions = (node: Jiv): void => {
-    const padding = node.Layout.Padding;
-    const contentW = node.Width - padding[3] - padding[1];
+    const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
+    const [, padR, , padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
+    const contentW = node.Width - padL - padR;
     const maxWidth = contentW > 0 ? contentW : null;
+    const resolvedStyle = ResolveTextStyle(node.TextStyle, ctx);
 
     if (node.Text !== null) {
       let anim = this._textAnimators.get(node);
       if (!anim) {
-        anim = new TextAnimator(node.TextStyle);
+        anim = new TextAnimator(resolvedStyle);
         this._textAnimators.set(node, anim);
         this._animationManager.Register(anim);
       }
-      if (anim.Update(node.Text, node.TextStyle, maxWidth)) {
+      if (anim.Update(node.Text, resolvedStyle, maxWidth)) {
         this._animationManager.Kick();
       }
     } else {
       const anim = this._textAnimators.get(node);
       if (anim && anim.Content !== '') {
-        if (anim.Update('', node.TextStyle, maxWidth)) {
+        if (anim.Update('', resolvedStyle, maxWidth)) {
           this._animationManager.Kick();
         }
       }
@@ -363,8 +385,11 @@ export class Canvas {
 
   private _measureDirtyText = (node: Jiv): void => {
     if (node.Text !== null && (node.Dirty & DirtyFlag.Text || node.TextMeasurement === null)) {
-      // Unbounded measurement — intrinsic sizing with padding is handled by ComputeIntrinsicSizes
-      node.TextMeasurement = MeasureText(node.Text, node.TextStyle, null);
+      // Unbounded measurement — intrinsic sizing with padding is handled by ComputeIntrinsicSizes.
+      // TextStyle holds Length fields (FontSize, LetterSpacing) — resolve against this Jiv's ctx.
+      const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
+      const resolved = ResolveTextStyle(node.TextStyle, ctx);
+      node.TextMeasurement = MeasureText(node.Text, resolved, null);
     } else if (node.Text === null) {
       node.TextMeasurement = null;
       node.IntrinsicWidth = null;
@@ -380,7 +405,7 @@ export class Canvas {
     this.Root.Width = this._width;
     this.Root.Height = this._height;
 
-    const results = SolveLayout(this.Root);
+    const results = SolveLayout(this.Root, this._viewport());
 
     for (const [node, result] of results) {
       // Skip the root — it doesn't animate to its own position
@@ -408,7 +433,14 @@ export class Canvas {
         const needsKick = animator.SetTargets({
           X: result.X, Y: result.Y, Width: result.Width, Height: result.Height,
         });
-        if (needsKick) this._animationManager.Kick();
+        if (node.SnapLayout) {
+          // Opt-out of position/size spring — this Jiv's layout is driven
+          // imperatively every frame (e.g. selection highlight following
+          // a drag) and spring-chasing would lag behind the cursor.
+          animator.SnapToTargets();
+        } else if (needsKick) {
+          this._animationManager.Kick();
+        }
       }
     }
 
@@ -463,8 +495,9 @@ export class Canvas {
     // Re-render immediately so the buffer isn't blank between frames
     if (this._running) {
       if (this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root)) {
+        CascadePointScale(this.Root, this._viewport());
         this._measureDirtyText(this.Root);
-        ComputeIntrinsicSizes(this.Root);
+        ComputeIntrinsicSizes(this.Root, this._viewport());
         this._solveAndAnimate();
         this._clearDirty(this.Root);
       }
@@ -607,8 +640,8 @@ export class Canvas {
       const hit = this._scrollManager.HitTopmost(cssX, cssY);
       const textJiv = selMgr.NearestTextJiv(this.Root, hit, cssX, cssY);
 
-      if (!textJiv) {
-        selMgr.Set(null);
+      if (!textJiv || !selMgr.IsSelectable(textJiv)) {
+        selMgr.Set(null, this.Root);
         this._animationManager.Kick();
         return;
       }
@@ -632,13 +665,16 @@ export class Canvas {
       if (clickCount >= 3) {
         granularity = 'line';
         const [s, eIdx] = selMgr.LineRangeFor(textJiv, wordIdx);
-        selMgr.Set({ TextJiv: textJiv, StartWord: s, EndWord: eIdx });
-      } else if (clickCount === 2) {
-        granularity = 'word';
-        selMgr.Set({ TextJiv: textJiv, StartWord: wordIdx, EndWord: wordIdx });
+        selMgr.Set({
+          AnchorJiv: textJiv, AnchorWord: s,
+          ExtentJiv: textJiv, ExtentWord: eIdx,
+        }, this.Root);
       } else {
-        granularity = 'char';
-        selMgr.Set({ TextJiv: textJiv, StartWord: wordIdx, EndWord: wordIdx });
+        granularity = clickCount === 2 ? 'word' : 'char';
+        selMgr.Set({
+          AnchorJiv: textJiv, AnchorWord: wordIdx,
+          ExtentJiv: textJiv, ExtentWord: wordIdx,
+        }, this.Root);
       }
 
       this._animationManager.Kick();
@@ -651,24 +687,42 @@ export class Canvas {
       const rect = this.Element.getBoundingClientRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
-      const idx = selMgr.WordIndexAt(anchorJiv, cssX, cssY);
-      if (idx === null) return;
 
-      let start = anchorWord;
-      let end = idx;
+      // Re-resolve which text Jiv the cursor is over on every tick — selection
+      // flows across Jiv boundaries like web selection. When the pointer is
+      // off-canvas or over an unselectable region, NearestTextJiv falls back
+      // to the closest text Jiv by rect distance.
+      const hit = this._scrollManager.HitTopmost(cssX, cssY);
+      const extentJiv = selMgr.NearestTextJiv(this.Root, hit, cssX, cssY) ?? anchorJiv;
+      const extentWord = selMgr.WordIndexAt(extentJiv, cssX, cssY);
+      if (extentWord === null) return;
+
+      let aJiv = anchorJiv, aWord = anchorWord;
+      let eJiv = extentJiv, eWord = extentWord;
+
       if (granularity === 'line') {
-        // Expand both ends to full-line boundaries
+        // Expand each endpoint to cover its whole line. Lines don't cross
+        // Jiv boundaries, so we line-expand anchor and extent independently
+        // inside their own Jivs. Pick each endpoint's OUTER edge (facing
+        // away from the other) so both full lines end up in the range.
         const [as, ae] = selMgr.LineRangeFor(anchorJiv, anchorWord);
-        const [es, ee] = selMgr.LineRangeFor(anchorJiv, idx);
-        start = Math.min(as, es);
-        end = Math.max(ae, ee);
-      } else if (granularity === 'word') {
-        // Selection always covers whole words on both endpoints
-        // (words are already word-level in our model, so just forward idx)
-        start = anchorWord;
-        end = idx;
+        const [es, ee] = selMgr.LineRangeFor(extentJiv, extentWord);
+        if (aJiv === eJiv) {
+          aWord = Math.min(as, es);
+          eWord = Math.max(ae, ee);
+        } else {
+          const cmp = selMgr.DocOrder(anchorJiv, extentJiv, this.Root);
+          if (cmp <= 0) { aWord = as; eWord = ee; }  // anchor is before extent
+          else { aWord = ae; eWord = es; }            // anchor is after extent
+        }
       }
-      selMgr.Set({ TextJiv: anchorJiv, StartWord: start, EndWord: end });
+      // 'word' and 'char' granularities just forward the raw endpoints —
+      // words are already our atom, so there's nothing to snap.
+
+      selMgr.Set({
+        AnchorJiv: aJiv, AnchorWord: aWord,
+        ExtentJiv: eJiv, ExtentWord: eWord,
+      }, this.Root);
       this._animationManager.Kick();
     });
 
@@ -682,6 +736,47 @@ export class Canvas {
     };
     this.Element.addEventListener('pointerup', end);
     this.Element.addEventListener('pointercancel', end);
+  };
+
+  /** Keyboard shortcuts on the active selection — Cmd/Ctrl+A select-all
+   *  within the current text Jiv, Escape clears.
+   *
+   *  Listens on `window` (canvas isn't focusable by default). We only act
+   *  when the active element is the body / canvas — so typing Cmd+A inside
+   *  a real <input> on the page still does the native thing. */
+  private _listenForSelectionKeys = (): void => {
+    const selMgr = this._selectionManager;
+    window.addEventListener('keydown', (e: KeyboardEvent) => {
+      const ae = document.activeElement;
+      const inEditable = ae && (
+        ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' ||
+        (ae as HTMLElement).isContentEditable
+      );
+      if (inEditable) return;
+
+      const meta = e.ctrlKey || e.metaKey;
+      if (meta && (e.key === 'a' || e.key === 'A')) {
+        // Select from the first text Jiv's first word to the last text Jiv's
+        // last word — selection is document-wide, not scoped to one Jiv.
+        const first = selMgr.FirstTextJiv(this.Root);
+        const last = selMgr.LastTextJiv(this.Root);
+        if (first && last) {
+          const [, lastWord] = selMgr.FullRange(last);
+          selMgr.Set({
+            AnchorJiv: first, AnchorWord: 0,
+            ExtentJiv: last, ExtentWord: lastWord,
+          }, this.Root);
+          this._animationManager.Kick();
+          e.preventDefault();
+        }
+      } else if (e.key === 'Escape') {
+        if (selMgr.Current) {
+          selMgr.Set(null, this.Root);
+          this._animationManager.Kick();
+          e.preventDefault();
+        }
+      }
+    }, { capture: true });
   };
 
   /** Wheel + touch/pointer drag — both route through ScrollManager which
@@ -780,9 +875,10 @@ export class Canvas {
         if (bottom > maxBottom) maxBottom = bottom;
       }
       // Add bottom padding so last item doesn't sit flush against the edge
-      const pad = node.Layout.Padding;
-      node.ContentWidth = maxRight + pad[1];
-      node.ContentHeight = maxBottom + pad[2];
+      const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
+      const [, padR, padB] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
+      node.ContentWidth = maxRight + padR;
+      node.ContentHeight = maxBottom + padB;
     }
     for (const c of node.Children) this._measureScrollContents(c);
   };
