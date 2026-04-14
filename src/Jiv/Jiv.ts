@@ -67,6 +67,11 @@ export class Jiv {
   FocusStyle: Partial<JivStyle> | null = null;
   DisabledStyle: Partial<JivStyle> | null = null;
 
+  /** Optional style override for text selection highlights. When null, the
+   *  selection manager uses its iOS-like translucent-blue default. Only
+   *  meaningful on text-bearing Jivs. */
+  TextSelectionStyle: Partial<JivStyle> | null = null;
+
   // Dirty tracking
   Dirty: DirtyFlags = DirtyFlag.Layout;
 
@@ -80,6 +85,7 @@ export class Jiv {
     ActiveStyle?: Partial<JivStyle>;
     FocusStyle?: Partial<JivStyle>;
     DisabledStyle?: Partial<JivStyle>;
+    TextSelectionStyle?: Partial<JivStyle>;
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
     Text?: string;
@@ -146,6 +152,7 @@ export class Jiv {
     this.ActiveStyle = options?.ActiveStyle ?? null;
     this.FocusStyle = options?.FocusStyle ?? null;
     this.DisabledStyle = options?.DisabledStyle ?? null;
+    this.TextSelectionStyle = options?.TextSelectionStyle ?? null;
   }
 
   /** Final render-time style: base + state overrides in priority order.

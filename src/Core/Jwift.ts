@@ -22,6 +22,7 @@ import { BlurPass } from './BlurPass';
 import { DirtyFlag } from './Types';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
+import { SelectionManager } from '../Selection/Selection.Manager';
 
 export class Canvas {
   readonly Gl: WebGL2RenderingContext;
@@ -45,6 +46,7 @@ export class Canvas {
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
   private _textAnimators = new Map<Jiv, TextAnimator>();
   private _scrollManager!: ScrollManager;
+  private _selectionManager!: SelectionManager;
   /** Largest FrostBlur of any glass collected this frame (CSS px). Drives the dual-filter pyramid. */
   private _maxFrostBlur: number = 0;
 
@@ -77,11 +79,15 @@ export class Canvas {
     this._scrollManager = new ScrollManager(this.Root);
     this._animationManager.Register(this._scrollManager);
 
+    // Selection manager — rebuilds highlight Jivs under text on drag.
+    this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv));
+
     this._resize();
     this._observeResize();
     this._watchDpr();
     this._listenForScroll();
     this._listenForInteractionStates();
+    this._listenForTextSelection();
     // NOTE: pointer-driven specular tilt is intentionally NOT wired. It felt
     // like a "glow follows cursor" gimmick — the wrong abstraction for the
     // Jiv material. Real gyro input (DeviceOrientation) will drive this on
@@ -563,12 +569,86 @@ export class Canvas {
     this.Element.addEventListener('pointercancel', clearActive);
   };
 
+  /** Mouse-drag on text → selection. Touch is reserved for scroll; mouse
+   *  specifically for selection (matches desktop expectation). The topmost
+   *  hit must be a text-bearing Jiv to start a selection. */
+  private _listenForTextSelection = (): void => {
+    let anchorJiv: Jiv | null = null;
+    let anchorWord: number = -1;
+    let dragging = false;
+
+    const walkUpToText = (j: Jiv | null): Jiv | null => {
+      let cur: Jiv | null = j;
+      while (cur) {
+        if (cur.Text !== null && this._textAnimators.get(cur)?.Words.length) return cur;
+        cur = cur.Parent;
+      }
+      return null;
+    };
+
+    this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.pointerType !== 'mouse') return;                     // touch → scroll, not select
+      if (e.button !== 0) return;                                // primary button only
+
+      const rect = this.Element.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      const hit = this._scrollManager.HitTopmost(cssX, cssY);
+      const textJiv = walkUpToText(hit);
+
+      if (!textJiv) {
+        this._selectionManager.Set(null);                        // click outside text clears
+        return;
+      }
+
+      const idx = this._selectionManager.WordIndexAt(textJiv, cssX, cssY);
+      if (idx === null) return;
+
+      anchorJiv = textJiv;
+      anchorWord = idx;
+      dragging = true;
+      this._selectionManager.Set({ TextJiv: textJiv, StartWord: idx, EndWord: idx });
+      this._animationManager.Kick();
+      this.Element.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+
+    this.Element.addEventListener('pointermove', (e: PointerEvent) => {
+      if (!dragging || !anchorJiv) return;
+
+      const rect = this.Element.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      const idx = this._selectionManager.WordIndexAt(anchorJiv, cssX, cssY);
+      if (idx === null) return;
+
+      this._selectionManager.Set({ TextJiv: anchorJiv, StartWord: anchorWord, EndWord: idx });
+      this._animationManager.Kick();
+    });
+
+    const end = (e: PointerEvent): void => {
+      if (e.pointerType !== 'mouse') return;
+      dragging = false;
+      anchorJiv = null;
+      if (this.Element.hasPointerCapture(e.pointerId)) {
+        this.Element.releasePointerCapture(e.pointerId);
+      }
+    };
+    this.Element.addEventListener('pointerup', end);
+    this.Element.addEventListener('pointercancel', end);
+  };
+
   /** Wheel + touch/pointer drag — both route through ScrollManager which
    *  handles physics (momentum, rubber-band for drag). Wheel clamps; drag
    *  rubber-bands past bounds. */
   private _listenForScroll = (): void => {
     // ─── Wheel ───
     this.Element.addEventListener('wheel', (e: WheelEvent) => {
+      // Browser zoom (Ctrl/Cmd + wheel, or pinch-zoom which Chrome delivers
+      // as wheel + ctrlKey) is a browser-owned gesture — we must NOT consume
+      // it as scroll. Let it bubble to the browser's zoom handler.
+      if (e.ctrlKey) return;
+
       this._measureScrollContents(this.Root);
 
       const rect = this.Element.getBoundingClientRect();
