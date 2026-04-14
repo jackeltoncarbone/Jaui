@@ -17,6 +17,6 @@ import { Home } from '../Home/Home';
       <home></home>
     </jwift-canvas>
   `,
-  styles: [':host { display: block; width: 100vw; height: 100vh; overflow: hidden; }'],
+  styles: [''],
 })
 export class App {}

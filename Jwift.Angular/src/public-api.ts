@@ -8,7 +8,6 @@
 
 export * from './Canvas/JwiftCanvas';
 export * from './Jiv/Jiv';
-export * from './Jiv/Parent.Jiv.Token';
 export * from './Jext/Jext';
 export * from './Jyle/Jyle';
 export * from './Jss/Jss.Registry';

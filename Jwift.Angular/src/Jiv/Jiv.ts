@@ -1,9 +1,10 @@
 import {
-  AfterViewInit,
   ChangeDetectionStrategy,
   Component,
   OnDestroy,
+  OnInit,
   effect,
+  forwardRef,
   inject,
   input,
 } from '@angular/core';
@@ -14,14 +15,18 @@ import {
   type ChildLayout,
   type TextStyle,
 } from 'jwift';
-import { PARENT_JIV } from './Parent.Jiv.Token';
-import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
+import { JwiftCanvas } from '../Canvas/JwiftCanvas';
+import { JSS_REGISTRY } from '../Jss/Jss.Registry';
 
 /**
- * `<jiv>` — generic Jwift node. Bridges Angular template authoring to a
- * Jiv instance: creates the Jiv on construction, attaches it to the parent
- * (resolved via PARENT_JIV), provides itself as PARENT_JIV for descendants,
- * and removes itself on destroy.
+ * `<jiv>` — generic Jwift node. Creates a Jiv on construction, attaches
+ * to the nearest ancestor `<jiv>` or `<jwift-canvas>` on init, removes
+ * itself on destroy.
+ *
+ * Parent resolution is pure Angular DI — `inject(ParentClass, { skipSelf,
+ * optional })`. The closer ancestor wins; if nested under another `<jiv>`
+ * that Jiv is the parent; otherwise we fall through to the enclosing
+ * `<jwift-canvas>`'s Root. No custom InjectionToken ceremony.
  *
  * Inputs (signal-based, all optional):
  *   class       — space-separated class names; resolved against the local
@@ -42,12 +47,8 @@ import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
   template: '<ng-content></ng-content>',
   styles: [':host { display: contents; }'],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  providers: [
-    { provide: PARENT_JIV, useFactory: (cmp: Jiv) => cmp.Node, deps: [Jiv] },
-  ],
 })
-export class Jiv implements AfterViewInit, OnDestroy {
-  // class is a reserved keyword in TS — alias it.
+export class Jiv implements OnInit, OnDestroy {
   readonly className = input<string | undefined>(undefined, { alias: 'class' });
   readonly style = input<Partial<JivStyle> | undefined>(undefined);
   readonly layout = input<Partial<LayoutConfig> | undefined>(undefined);
@@ -55,26 +56,41 @@ export class Jiv implements AfterViewInit, OnDestroy {
   readonly text = input<string | null | undefined>(undefined);
   readonly textStyle = input<Partial<TextStyle> | undefined>(undefined);
 
-  /** The underlying Jiv instance. Created in the constructor so the
-   *  PARENT_JIV provider has a value to hand to descendants. */
+  /** The underlying Jiv instance, created in the constructor. */
   readonly Node: JivCore;
 
-  private _parent = inject(PARENT_JIV);
+  // forwardRef because Jiv (this class) references itself via DI. The
+  // parent Jiv — if any — is the nearest ancestor. If there's no parent
+  // Jiv, we're a top-level child of <jwift-canvas> and attach to its Root.
+  private _parentJiv = inject<Jiv | null>(forwardRef(() => Jiv), {
+    skipSelf: true,
+    optional: true,
+  });
+  private _canvas = inject(JwiftCanvas, { optional: true });
   private _registry = inject(JSS_REGISTRY, { optional: true });
 
   constructor() {
     this.Node = new JivCore(this._buildOptions());
-    // Reactively re-apply on input changes — let the spring animator handle
-    // the smooth transition rather than recreating the Jiv.
+    // Reactively re-apply on input changes — spring animator handles the
+    // smooth transition; we don't recreate the Jiv.
     effect(() => this._apply());
   }
 
-  ngAfterViewInit(): void {
-    this._parent.AddChild(this.Node);
+  ngOnInit(): void {
+    this._parent().AddChild(this.Node);
   }
 
   ngOnDestroy(): void {
-    this._parent.RemoveChild(this.Node);
+    this._parent().RemoveChild(this.Node);
+  }
+
+  /** Nearest ancestor Jiv or the canvas root. Always defined if this
+   *  `<jiv>` is used inside a `<jwift-canvas>` (which it must be — a
+   *  floating `<jiv>` with no canvas ancestor throws a clear error). */
+  private _parent(): JivCore {
+    if (this._parentJiv) return this._parentJiv.Node;
+    if (this._canvas) return this._canvas.Root;
+    throw new Error('[Jwift.Angular] <jiv> must be inside a <jwift-canvas>');
   }
 
   private _buildOptions(): {
@@ -95,8 +111,8 @@ export class Jiv implements AfterViewInit, OnDestroy {
     };
   }
 
-  /** Re-apply the merged options to the live Node. Spring animator picks up
-   *  field deltas automatically — no manual transition logic. */
+  /** Re-apply merged options to the live Node on input change. Spring
+   *  animator picks up field deltas automatically — no manual transitions. */
   private _apply(): void {
     const opts = this._buildOptions();
     if (opts.Style) Object.assign(this.Node.Style, opts.Style);
@@ -107,3 +123,4 @@ export class Jiv implements AfterViewInit, OnDestroy {
     this.Node.MarkLayoutDirty();
   }
 }
+

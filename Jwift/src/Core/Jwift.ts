@@ -508,7 +508,14 @@ export class Canvas {
   };
 
   private _observeResize = (): void => {
-    const observer = new ResizeObserver(() => this._resize());
+    // Defer _resize() to the next animation frame so the ResizeObserver's
+    // callback returns synchronously. Running layout changes in-line
+    // causes the browser to emit "ResizeObserver loop completed with
+    // undelivered notifications" (benign but noisy, and Angular's global
+    // error listener amplifies each one into a console error).
+    const observer = new ResizeObserver(() => {
+      requestAnimationFrame(() => this._resize());
+    });
     observer.observe(this.Element);
   };
 
