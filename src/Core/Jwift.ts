@@ -569,45 +569,78 @@ export class Canvas {
     this.Element.addEventListener('pointercancel', clearActive);
   };
 
-  /** Mouse-drag on text → selection. Touch is reserved for scroll; mouse
-   *  specifically for selection (matches desktop expectation). The topmost
-   *  hit must be a text-bearing Jiv to start a selection. */
+  /** Mouse-driven text selection. Match web behavior:
+   *    • Mousedown ANYWHERE — maps to the nearest text Jiv + word. If the
+   *      tree has no text at all, clears selection.
+   *    • Drag — extends selection to the nearest word of the anchor Jiv at
+   *      the current pointer position (past-bounds points clamp to the
+   *      nearest line/word, same as browser selection).
+   *    • Double-click — selects the word at the click point.
+   *    • Triple-click — selects the whole line.
+   *  Mobile (touch): long-press to start selection with handle UI is a
+   *  deliberate follow-up — touch is currently reserved for scroll.
+   *
+   *  Click-count uses a 400 ms window with a < 5 px travel threshold,
+   *  matching Chromium's heuristics. The active text Jiv is remembered
+   *  across the burst so a triple-click always lands on the same Jiv. */
   private _listenForTextSelection = (): void => {
     let anchorJiv: Jiv | null = null;
     let anchorWord: number = -1;
+    /** Granularity of the current drag: 'char' (word-by-word), 'word'
+     *  (double-click — extend by whole words), 'line' (triple-click). */
+    let granularity: 'char' | 'word' | 'line' = 'char';
+    /** Active click-burst state for double/triple detection. */
+    let lastClickAt = 0;
+    let lastClickX = 0, lastClickY = 0;
+    let clickCount = 0;
     let dragging = false;
 
-    const walkUpToText = (j: Jiv | null): Jiv | null => {
-      let cur: Jiv | null = j;
-      while (cur) {
-        if (cur.Text !== null && this._textAnimators.get(cur)?.Words.length) return cur;
-        cur = cur.Parent;
-      }
-      return null;
-    };
+    const selMgr = this._selectionManager;
 
     this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
-      if (e.pointerType !== 'mouse') return;                     // touch → scroll, not select
-      if (e.button !== 0) return;                                // primary button only
+      if (e.pointerType !== 'mouse') return;
+      if (e.button !== 0) return;
 
       const rect = this.Element.getBoundingClientRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
       const hit = this._scrollManager.HitTopmost(cssX, cssY);
-      const textJiv = walkUpToText(hit);
+      const textJiv = selMgr.NearestTextJiv(this.Root, hit, cssX, cssY);
 
       if (!textJiv) {
-        this._selectionManager.Set(null);                        // click outside text clears
+        selMgr.Set(null);
+        this._animationManager.Kick();
         return;
       }
 
-      const idx = this._selectionManager.WordIndexAt(textJiv, cssX, cssY);
-      if (idx === null) return;
+      const wordIdx = selMgr.WordIndexAt(textJiv, cssX, cssY);
+      if (wordIdx === null) return;
+
+      // Click-count detection — must be same Jiv and within the burst window
+      const now = performance.now();
+      const burstAlive = (now - lastClickAt) < 400
+        && Math.hypot(cssX - lastClickX, cssY - lastClickY) < 5;
+      clickCount = burstAlive ? clickCount + 1 : 1;
+      lastClickAt = now;
+      lastClickX = cssX;
+      lastClickY = cssY;
 
       anchorJiv = textJiv;
-      anchorWord = idx;
+      anchorWord = wordIdx;
       dragging = true;
-      this._selectionManager.Set({ TextJiv: textJiv, StartWord: idx, EndWord: idx });
+
+      if (clickCount >= 3) {
+        granularity = 'line';
+        const [s, eIdx] = selMgr.LineRangeFor(textJiv, wordIdx);
+        selMgr.Set({ TextJiv: textJiv, StartWord: s, EndWord: eIdx });
+      } else if (clickCount === 2) {
+        granularity = 'word';
+        selMgr.Set({ TextJiv: textJiv, StartWord: wordIdx, EndWord: wordIdx });
+      } else {
+        granularity = 'char';
+        selMgr.Set({ TextJiv: textJiv, StartWord: wordIdx, EndWord: wordIdx });
+      }
+
       this._animationManager.Kick();
       this.Element.setPointerCapture(e.pointerId);
       e.preventDefault();
@@ -615,14 +648,27 @@ export class Canvas {
 
     this.Element.addEventListener('pointermove', (e: PointerEvent) => {
       if (!dragging || !anchorJiv) return;
-
       const rect = this.Element.getBoundingClientRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
-      const idx = this._selectionManager.WordIndexAt(anchorJiv, cssX, cssY);
+      const idx = selMgr.WordIndexAt(anchorJiv, cssX, cssY);
       if (idx === null) return;
 
-      this._selectionManager.Set({ TextJiv: anchorJiv, StartWord: anchorWord, EndWord: idx });
+      let start = anchorWord;
+      let end = idx;
+      if (granularity === 'line') {
+        // Expand both ends to full-line boundaries
+        const [as, ae] = selMgr.LineRangeFor(anchorJiv, anchorWord);
+        const [es, ee] = selMgr.LineRangeFor(anchorJiv, idx);
+        start = Math.min(as, es);
+        end = Math.max(ae, ee);
+      } else if (granularity === 'word') {
+        // Selection always covers whole words on both endpoints
+        // (words are already word-level in our model, so just forward idx)
+        start = anchorWord;
+        end = idx;
+      }
+      selMgr.Set({ TextJiv: anchorJiv, StartWord: start, EndWord: end });
       this._animationManager.Kick();
     });
 

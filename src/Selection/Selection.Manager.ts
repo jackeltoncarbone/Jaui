@@ -24,11 +24,13 @@ export interface SelectionRange {
   EndWord: number;   // inclusive; StartWord ≤ EndWord
 }
 
-/** iOS-like selection color — subtle, readable on any backdrop. */
+/** iOS-like selection color — subtle, readable on any backdrop. Chunky
+ *  border radius reads as "highlight pill," not "text underline." Override
+ *  any or all via Jiv.TextSelectionStyle — Material:'LiquidGlass' works for
+ *  a glassy selection, BorderColor for an outline, Thickness for bevel. */
 const DEFAULT_SELECTION_STYLE: Partial<JivStyle> = {
-  Background: { R: 0.33, G: 0.56, B: 0.98, A: 0.35 },
-  BorderRadius: [3, 3, 3, 3],
-  // No border, no shadow — pure fill.
+  Background: { R: 0.33, G: 0.56, B: 0.98, A: 0.38 },
+  BorderRadius: [6, 6, 6, 6],
 };
 
 export class SelectionManager {
@@ -58,9 +60,64 @@ export class SelectionManager {
     if (sel) this._rebuild(sel);
   };
 
-  /** Map a canvas-space point to a word index within a text Jiv. Returns null
-   *  if the point is not over text content. Call with the CURRENT solved rect
-   *  of the text Jiv — caller knows it. */
+  /** Find the text Jiv nearest to (cssX, cssY). First tries the hit path
+   *  (topmost Jiv's ancestor chain that has text); if nothing there has
+   *  text, scans the whole tree for the Jiv whose bounding rect is closest
+   *  (zero distance = inside). Matches web behavior: clicking in the margin
+   *  near a paragraph still starts selection on that paragraph. */
+  NearestTextJiv = (root: Jiv, hit: Jiv | null, cssX: number, cssY: number): Jiv | null => {
+    // Prefer the hit target's text ancestor (click INTO text is unambiguous)
+    let cur: Jiv | null = hit;
+    while (cur) {
+      if (this._hasText(cur)) return cur;
+      cur = cur.Parent;
+    }
+    // Fallback: nearest by Euclidean distance to rect edge
+    let best: Jiv | null = null;
+    let bestDist = Infinity;
+    this._walk(root, (j) => {
+      if (!this._hasText(j)) return;
+      const dx = cssX < j.X ? j.X - cssX : cssX > j.X + j.Width ? cssX - (j.X + j.Width) : 0;
+      const dy = cssY < j.Y ? j.Y - cssY : cssY > j.Y + j.Height ? cssY - (j.Y + j.Height) : 0;
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) { bestDist = d; best = j; }
+    });
+    return best;
+  };
+
+  private _hasText = (j: Jiv): boolean => {
+    const a = this._getAnimator(j);
+    return j.Text !== null && a !== undefined && a.Words.length > 0;
+  };
+
+  private _walk = (node: Jiv, fn: (j: Jiv) => void): void => {
+    fn(node);
+    for (const c of node.Children) this._walk(c, fn);
+  };
+
+  /** Word index of the line break after this word (used for line selection). */
+  LineRangeFor = (textJiv: Jiv, wordIdx: number): [number, number] => {
+    const anim = this._getAnimator(textJiv);
+    if (!anim || wordIdx < 0 || wordIdx >= anim.Words.length) return [0, 0];
+    const lineY = Math.round(anim.Words[wordIdx].TargetY);
+    let start = wordIdx;
+    while (start > 0 && Math.round(anim.Words[start - 1].TargetY) === lineY) start--;
+    let end = wordIdx;
+    while (end < anim.Words.length - 1 && Math.round(anim.Words[end + 1].TargetY) === lineY) end++;
+    return [start, end];
+  };
+
+  /** Full text range (for triple-click-and-drag or Select-All). */
+  FullRange = (textJiv: Jiv): [number, number] => {
+    const anim = this._getAnimator(textJiv);
+    if (!anim || anim.Words.length === 0) return [0, 0];
+    return [0, anim.Words.length - 1];
+  };
+
+  /** Map a canvas-space point to a word index within a text Jiv. Always
+   *  returns a valid index — the nearest word even if the point is far
+   *  outside the Jiv's bounds. Matches browser selection: drag past the
+   *  bottom edge and you keep selecting toward the end. */
   WordIndexAt = (textJiv: Jiv, cssX: number, cssY: number): number | null => {
     const anim = this._getAnimator(textJiv);
     if (!anim || anim.Words.length === 0) return null;
