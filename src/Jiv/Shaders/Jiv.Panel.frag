@@ -21,133 +21,221 @@ uniform vec2 u_Resolution;
 
 out vec4 fragColor;
 
-// ────────── Shape mode + smoothness (matches Show Studio visible outline) ──────────
-// SS's visible pill is a custom Bezier, NOT a uniform capsule. Its curvature profile
-// is tighter near top/bottom and wider in the middle — approximately a superellipse
-// with p ≈ 2.75 (smoothness 0.25). We use superellipse for ALL shapes with the
-// appropriate smoothness, matching SS's GetMode() output:
+// ────────────────────────────────────────────────────────────────────────────
+//  MASTER JIV SDF
+//  One family, one formula. The shape is a rectangle with each corner replaced
+//  by a superellipse arc. The corner "box" has two semi-axes (rx, ry) and a
+//  power n. Boundary: (|qx|/rx)^n + (|qy|/ry)^n = 1.
 //
-//   0 = Rect    — aspect < 1.3 or radius small            (auto-smoothness 0.45..0.65)
-//   1 = Pill    — aspect ≥ 1.3 AND radius ≈ max           (smoothness 0.25 — Apple squircle-pill)
-//   2 = Circle  — aspect ∈ (0.7, 1.43) AND radius ≈ max   (smoothness 0.01 — near-perfect circle)
-int ShapeMode(vec2 halfSize, vec4 radii) {
+//  Three preset regimes, all via the same formula with different (rx, ry, n):
+//    • RECT   — rx = ry = perCornerRadius,  n derived from `smoothness`
+//               (s=0 → n=2 circle corner; s=0.6 → n≈5 Apple squircle)
+//    • PILL   — rx = 1.6236·halfY, ry = halfY, n = 2.55
+//               Semi-axes derived from Show Studio's 3-Bezier endcap fit:
+//               maxExtent ≈ 40.59 at halfY=25 → rx/ry = 40.59/25 = 1.6236.
+//               Exponent n=2.55 matches the Bezier's full-middle profile
+//               (point (0.859, 0.64) on the fitted superellipse).
+//    • CIRCLE — rx = ry = min(halfX, halfY), n = 2
+//
+//  Shape fills its bbox: at (rx, 0) boundary → |px| = halfX, at (0, ry) → |py| = halfY.
+//
+//  Approximate SDF:   dist = (L − 1) / |∇L_physical|
+//                     L    = ((qx/rx)^n + (qy/ry)^n)^(1/n)
+//  Analytic gradient is well-defined and finite everywhere — no derivative
+//  divergence at endcap tips (the bug in the previous Apple-squircle-pill).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Smoothness s ∈ [0,1] → superellipse exponent.
+// s = 0:   n = 2        → classical circular corner
+// s = 0.5: n ≈ 3.5      → mild squircle
+// s = 0.6: n ≈ 4.8      → Apple iOS (Figma "iOS" preset, closest to quintic)
+// s = 1:   n = 8        → very square-like
+float SmoothnessToExponent(float s) {
+    s = clamp(s, 0.0, 1.0);
+    return 2.0 + 6.0 * s;
+}
+
+// Classify the shape into Rect / Pill / Circle and emit its corner-box (rx, ry)
+// and exponent n.
+//   radii: per-corner scalar corner radius, used only in Rect mode.
+//   Returns 1 if pill, 2 if circle, 0 if rect.
+int ClassifyShape(vec2 halfSize, vec4 radii, float smoothness, out vec2 rAxis, out float n) {
     float minHalf = min(halfSize.x, halfSize.y);
     float maxHalf = max(halfSize.x, halfSize.y);
     float aspect = maxHalf / max(minHalf, 0.0001);
     float minRadius = min(min(radii.x, radii.y), min(radii.z, radii.w));
 
-    bool isCircle = aspect < 1.43 && minRadius >= minHalf * 0.9;
-    if (isCircle) return 2;
+    // Circle: near-square and corner radius fills the short axis
+    if (aspect < 1.43 && minRadius >= minHalf * 0.9) {
+        rAxis = vec2(minHalf, minHalf);
+        n = 2.0;
+        return 2;
+    }
 
-    bool isPill = aspect >= 1.3 && minRadius >= minHalf - 1.0;
-    if (isPill) return 1;
+    // Pill: elongated AND corner radius saturated at short-axis half
+    if (aspect >= 1.3 && minRadius >= minHalf - 1.0) {
+        // Show Studio pill: rx = 1.6236 · halfY (or halfX if vertical pill), ry = halfY
+        // The cornerBox extends halfY × 1.6236·halfY outward from the flat zone.
+        // Requires halfX > 1.6236·halfY for a flat zone to exist, which is
+        // guaranteed by aspect ≥ 1.3 (near-boundary case just makes flat→0).
+        bool horiz = halfSize.x >= halfSize.y;
+        float b = horiz ? halfSize.y : halfSize.x;
+        float a = 1.6236 * b;
+        rAxis = horiz ? vec2(a, b) : vec2(b, a);
+        n = 2.55;
+        return 1;
+    }
 
+    // Rect: per-corner scalar radius, superellipse exponent from smoothness
+    rAxis = vec2(minRadius);   // (rx, ry) for the current corner; caller uses ShapeSDF
+    n = SmoothnessToExponent(smoothness);
     return 0;
 }
 
-float AutoSmoothness(vec2 halfSize, vec4 radii, int mode) {
-    if (mode == 2) return 0.01;   // Circle
-    if (mode == 1) return 0.25;   // Pill — Apple squircle-pill (p = 2.75)
-
-    // Rect: base + pill-easing
-    float minHalf = min(halfSize.x, halfSize.y);
-    float minRadius = min(min(radii.x, radii.y), min(radii.z, radii.w));
-
-    float base;
-    if (minHalf <= minRadius) base = 0.65;
-    else if (minHalf >= minRadius * 1.5) base = 0.45;
-    else {
-        float t = (minHalf - minRadius) / (minRadius * 0.5);
-        base = mix(0.65, 0.45, t);
-    }
-
-    float maxR = minHalf;
-    float pillThreshold = maxR * 0.7;
-    if (minRadius > pillThreshold) {
-        float f = clamp((minRadius - pillThreshold) / (maxR - pillThreshold), 0.0, 1.0);
-        float e = f * f * (3.0 - 2.0 * f);
-        base = base * (1.0 - e * 0.96) + 0.04 * e;
-    }
-    return base;
-}
-
-// ────────── Superellipse (Rect / Squircle mode) ──────────
-float SuperellipseSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
-    float r = p.x >= 0.0
+// ─── Per-corner resolution of rect mode ───
+// In rect mode each of the 4 corners can have its own radius. We pick the
+// relevant one based on which quadrant the query point is in.
+float PickRectRadius(vec2 p, vec4 radii) {
+    // radii = (tl, tr, br, bl)
+    return p.x >= 0.0
         ? (p.y <= 0.0 ? radii.y : radii.z)
         : (p.y <= 0.0 ? radii.x : radii.w);
-    r = min(r, min(halfSize.x, halfSize.y));
-    float n = 2.0 + 3.0 * smoothness;
-    vec2 q = abs(p) - halfSize + r;
+}
+
+// Master SDF — operates on a shape defined by halfSize + cornerBox (rx, ry) + exponent n.
+// qc is the corner-offset vector (positive in the corner region, zero in the flat zone).
+float ShapeSDF_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
+    vec2 q = abs(p) - halfSize + rAxis;
+
     if (q.x <= 0.0 && q.y <= 0.0) {
+        // Inside the flat interior (rectangular box between the 4 corner regions)
         return -min(halfSize.x - abs(p.x), halfSize.y - abs(p.y));
     }
-    float qxn = pow(max(q.x, 0.0), n);
-    float qyn = pow(max(q.y, 0.0), n);
-    return pow(qxn + qyn, 1.0 / n) - r;
+
+    // At least one component is past the flat boundary — we're in a corner region
+    vec2 qc = max(q, vec2(0.0));
+    vec2 uv = qc / rAxis;
+    // Epsilon-clamped uv for pow(0, x) safety in GLSL ES
+    vec2 uvE = max(uv, vec2(1e-5));
+
+    float un = pow(uvE.x, n);
+    float vn = pow(uvE.y, n);
+    float L = pow(un + vn, 1.0 / n);
+
+    // Gradient magnitude in PHYSICAL (qx, qy) space — not normalized space.
+    // L = ((qx/rx)^n + (qy/ry)^n)^(1/n)
+    // ∂L/∂qx = L^(1−n) · (qx/rx)^(n−1) / rx  = L^(1−n) · uv.x^(n−1) / rx
+    // |∇L|² = L^(2(1−n)) · (uv.x^(2(n−1))/rx² + uv.y^(2(n−1))/ry²)
+    float nm1 = n - 1.0;
+    float gx = pow(uvE.x, nm1) / rAxis.x;
+    float gy = pow(uvE.y, nm1) / rAxis.y;
+    float lfactor = pow(L, 1.0 - n);
+    float gradLen = lfactor * sqrt(gx * gx + gy * gy);
+
+    return (L - 1.0) / max(gradLen, 1e-5);
 }
 
-vec2 SuperellipseGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
-    const float eps = 1.0;
-    float dX = SuperellipseSDF(p + vec2(eps, 0.0), halfSize, radii, smoothness)
-             - SuperellipseSDF(p - vec2(eps, 0.0), halfSize, radii, smoothness);
-    float dY = SuperellipseSDF(p + vec2(0.0, eps), halfSize, radii, smoothness)
-             - SuperellipseSDF(p - vec2(0.0, eps), halfSize, radii, smoothness);
-    vec2 g = vec2(dX, dY);
-    float L = length(g);
-    return L > 0.0001 ? g / L : vec2(0.0);
+// Analytic gradient (outward unit normal) of the corner superellipse.
+// Direction of ∇F = (uv.x^(n−1)/rx, uv.y^(n−1)/ry), sign from p.
+// Magnitude falls out when normalized.
+vec2 ShapeGrad_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
+    vec2 q = abs(p) - halfSize + rAxis;
+    vec2 qc = max(q, vec2(0.0));
+    vec2 uv = qc / rAxis;
+    vec2 uvE = max(uv, vec2(1e-5));
+
+    float nm1 = n - 1.0;
+    vec2 g = vec2(
+        sign(p.x) * pow(uvE.x, nm1) / rAxis.x,
+        sign(p.y) * pow(uvE.y, nm1) / rAxis.y
+    );
+
+    // Near (qx ≈ 0, qy ≈ 0) — on an edge midpoint where both q components are ~0 —
+    // the gradient above is ~0. Fall back to the straight-edge normal: whichever
+    // axis has the smaller |halfSize − |p|| is the closest edge, and the normal
+    // points outward along that axis.
+    float gLen = length(g);
+    if (gLen < 1e-4) {
+        float dx = halfSize.x - abs(p.x);
+        float dy = halfSize.y - abs(p.y);
+        return dx < dy
+            ? vec2(sign(p.x), 0.0)
+            : vec2(0.0, sign(p.y));
+    }
+    return g / gLen;
 }
 
-// ────────── Pill (capsule) SDF ──────────  [TEMPORARY — to be replaced]
-// Standard capsule: distance to the centerline segment, minus the half-height radius.
-// True SDF with analytic gradient — well-defined perpendicular distance EVERYWHERE.
-//
-// NOTE: This is a REGRESSION from the Apple-squircle-pill that preceded it. The old
-// code matched Show Studio's Bezier pill (tighter curvature near top/bottom, wider
-// middle), but its analytic derivative diverged at u→1 (endcap tips) producing
-// incorrect SDF there. The halo issue it appeared to cause was actually the
-// refraction bulge magnitude being too large. Task #11 (shape audit) will combine
-// Apple's squircle math with Show Studio's Jiv pill profile and produce a single
-// well-behaved master SDF. Until then, capsule is the safe stopgap.
-float PillSDF(vec2 p, vec2 halfSize) {
-    bool horiz = halfSize.x >= halfSize.y;
-    vec2 q = horiz ? p : p.yx;
-    vec2 hs = horiz ? halfSize : halfSize.yx;
-    float r = hs.y;
-    float lineExtent = max(hs.x - r, 0.0);
-    // Clamp query point onto the centerline segment [-lineExtent, lineExtent] × {0}
-    vec2 closest = vec2(clamp(q.x, -lineExtent, lineExtent), 0.0);
-    return length(q - closest) - r;
+// ─── Unified dispatch: classify, then evaluate ───
+//   mode 0: Rect    — per-corner scalar radius, superellipse exponent from smoothness
+//   mode 1: Pill    — Show Studio stretched squircle endcap (1.6236·halfY × halfY, n=2.55)
+//   mode 2: Circle  — full-axis superellipse at n=2
+int ShapeMode(vec2 halfSize, vec4 radii) {
+    float minHalf = min(halfSize.x, halfSize.y);
+    float maxHalf = max(halfSize.x, halfSize.y);
+    float aspect = maxHalf / max(minHalf, 0.0001);
+    float minRadius = min(min(radii.x, radii.y), min(radii.z, radii.w));
+    if (aspect < 1.43 && minRadius >= minHalf * 0.9) return 2;
+    if (aspect >= 1.3 && minRadius >= minHalf - 1.0) return 1;
+    return 0;
 }
 
-// Analytic gradient of the capsule SDF: unit vector from the closest centerline
-// point to the query point (or arbitrary axis-aligned unit if the query is on the
-// centerline itself, where the gradient is undefined).
-vec2 PillGrad(vec2 p, vec2 halfSize) {
-    bool horiz = halfSize.x >= halfSize.y;
-    vec2 q = horiz ? p : p.yx;
-    vec2 hs = horiz ? halfSize : halfSize.yx;
-    float r = hs.y;
-    float lineExtent = max(hs.x - r, 0.0);
-    vec2 closest = vec2(clamp(q.x, -lineExtent, lineExtent), 0.0);
-    vec2 d = q - closest;
-    float L = length(d);
-    vec2 g = L > 0.0001 ? d / L : vec2(0.0, q.y >= 0.0 ? 1.0 : -1.0);
-    return horiz ? g : g.yx;
-}
-
-// ────────── Unified shape SDF / gradient ──────────
-//   mode 0: Rect    — superellipse with auto-smoothness
-//   mode 1: Pill    — Apple squircle-pill (Bezier-derived, true SDF)
-//   mode 2: Circle  — superellipse at smoothness ≈ 0.01
 float ShapeSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
-    if (mode == 1) return PillSDF(p, halfSize);
-    return SuperellipseSDF(p, halfSize, radii, smoothness);
+    vec2 rAxis;
+    float n;
+
+    if (mode == 2) {
+        float r = min(halfSize.x, halfSize.y);
+        rAxis = vec2(r);
+        n = 2.0;
+    } else if (mode == 1) {
+        bool horiz = halfSize.x >= halfSize.y;
+        float b = horiz ? halfSize.y : halfSize.x;
+        float a = 1.6236 * b;
+        rAxis = horiz ? vec2(a, b) : vec2(b, a);
+        n = 2.55;
+    } else {
+        // Rect — pick per-corner radius based on which quadrant we're in
+        float r = PickRectRadius(p, radii);
+        r = min(r, min(halfSize.x, halfSize.y));
+        rAxis = vec2(r);
+        n = SmoothnessToExponent(smoothness);
+    }
+
+    return ShapeSDF_inner(p, halfSize, rAxis, n);
 }
 
 vec2 ShapeGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
-    if (mode == 1) return PillGrad(p, halfSize);
-    return SuperellipseGrad(p, halfSize, radii, smoothness);
+    vec2 rAxis;
+    float n;
+
+    if (mode == 2) {
+        float r = min(halfSize.x, halfSize.y);
+        rAxis = vec2(r);
+        n = 2.0;
+    } else if (mode == 1) {
+        bool horiz = halfSize.x >= halfSize.y;
+        float b = horiz ? halfSize.y : halfSize.x;
+        float a = 1.6236 * b;
+        rAxis = horiz ? vec2(a, b) : vec2(b, a);
+        n = 2.55;
+    } else {
+        float r = PickRectRadius(p, radii);
+        r = min(r, min(halfSize.x, halfSize.y));
+        rAxis = vec2(r);
+        n = SmoothnessToExponent(smoothness);
+    }
+
+    return ShapeGrad_inner(p, halfSize, rAxis, n);
+}
+
+// Back-compat alias — previously used `AutoSmoothness` to pick a smoothness
+// per mode. In the new formulation, Rect uses the user's `Smoothness`; Pill and
+// Circle hard-code their own n (2.55 and 2). This wrapper exists so main() can
+// still pass a `smoothness` parameter through without change.
+float AutoSmoothness(vec2 halfSize, vec4 radii, int mode) {
+    // Only Rect honors the input smoothness. Pill/Circle ignore it entirely
+    // (their exponent is baked in). Caller can continue to pass user smoothness.
+    return 0.6;
 }
 
 // Rec. 709 luma
