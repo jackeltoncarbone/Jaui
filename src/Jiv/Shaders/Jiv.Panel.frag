@@ -14,7 +14,7 @@ flat in vec4 v_StyleParams;   // borderBlur, smoothness, opacity, _pad
 
 out vec4 fragColor;
 
-// ─── SDF ───
+// ─── SDF (rect / pill / circle via auto-mode) ───
 
 float SuperellipseSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
     float r = p.x >= 0.0
@@ -35,6 +35,39 @@ float SuperellipseSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
     return pow(qxn + qyn, 1.0 / n) - r;
 }
 
+// Auto-derived smoothness (matches Show Studio's GetMode):
+//   Circle: 0.01      — near-perfect circle
+//   Pill:   0.25      — Apple squircle-pill (p = 2.75)
+//   Rect:   0.45..0.65 with pill-easing toward 0.04 as radius approaches maxR
+float AutoSmoothness(vec2 halfSize, vec4 radii) {
+    float minHalf = min(halfSize.x, halfSize.y);
+    float maxHalf = max(halfSize.x, halfSize.y);
+    float aspect = maxHalf / max(minHalf, 0.0001);
+    float minRadius = min(min(radii.x, radii.y), min(radii.z, radii.w));
+
+    if (aspect < 1.43 && minRadius >= minHalf * 0.9) return 0.01;
+    if (aspect >= 1.3 && minRadius >= minHalf - 1.0) return 0.25;
+
+    float base;
+    if (minHalf <= minRadius) base = 0.65;
+    else if (minHalf >= minRadius * 1.5) base = 0.45;
+    else base = mix(0.65, 0.45, (minHalf - minRadius) / (minRadius * 0.5));
+
+    float maxR = minHalf;
+    float pillThreshold = maxR * 0.7;
+    if (minRadius > pillThreshold) {
+        float f = clamp((minRadius - pillThreshold) / (maxR - pillThreshold), 0.0, 1.0);
+        float e = f * f * (3.0 - 2.0 * f);
+        base = base * (1.0 - e * 0.96) + 0.04 * e;
+    }
+    return base;
+}
+
+// All shapes are superellipses with per-shape auto-smoothness (matches SS visuals).
+float ShapeSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
+    return SuperellipseSDF(p, halfSize, radii, smoothness);
+}
+
 void main() {
     // Unpack instance data
     vec2 panelCenter = v_PanelGeom.xy;
@@ -48,14 +81,17 @@ void main() {
 
     vec2 p = v_PixelPos - panelCenter;
 
+    // Use auto-derived smoothness so rect / pill / circle all get SS's profiles.
+    float effectiveSmooth = AutoSmoothness(panelHalfSize, v_Radii);
+
     // ─── Shadow ───
     vec2 sp = p - shadowOffset;
-    float shadowDist = SuperellipseSDF(sp, panelHalfSize, v_Radii, smoothness);
+    float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth);
     float shadowAlpha = (1.0 - smoothstep(-shadowBlur, 0.0, shadowDist)) * v_ShadowColor.a;
     vec4 shadow = vec4(v_ShadowColor.rgb, shadowAlpha);
 
     // ─── Panel body ───
-    float dist = SuperellipseSDF(p, panelHalfSize, v_Radii, smoothness);
+    float dist = ShapeSDF(p, panelHalfSize, v_Radii, effectiveSmooth);
     float fillAlpha = 1.0 - smoothstep(-0.5, 0.5, dist);  // antialiased edge
 
     // ─── Border ───
@@ -79,9 +115,9 @@ void main() {
     vec4 fill = vec4(v_Background.rgb, v_Background.a * fillAlpha);
     result = mix(result, fill, fillAlpha);
 
-    // Border on top
-    vec4 border = vec4(v_BorderColor.rgb, borderAlpha);
-    result = result * (1.0 - borderAlpha) + border;
+    // Border on top (premultiplied-over composite — rgb scaled by borderAlpha)
+    result.rgb = result.rgb * (1.0 - borderAlpha) + v_BorderColor.rgb * borderAlpha;
+    result.a = result.a * (1.0 - borderAlpha) + borderAlpha;
 
     result.a *= opacity;
 

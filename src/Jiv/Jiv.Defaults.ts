@@ -3,6 +3,7 @@ import { DefaultTransform } from '../Transform/Transform.Types';
 import type { JivStyle } from './Jiv.Types';
 
 export const DefaultJivStyle: JivStyle = {
+  Material: 'None',
   BorderRadius: [0, 0, 0, 0],
   CornerShape: ['Round', 'Round', 'Round', 'Round'],
   Smoothness: 0.6,
@@ -17,6 +18,18 @@ export const DefaultJivStyle: JivStyle = {
   Brightness: 1,
   Saturation: 1,
   Contrast: 1,
+  BezelWidth: 12,
+  BezelScale: 0.35,
+  LightAngle: -45,
+  LightIntensity: 1,
+  SpecularIntensity: 0,
+  SpecularSharpness: 100,
+  FresnelStrength: 0,
+  ChromaticAberration: 0,
+  EdgeLightTop: 0,
+  EdgeLightBottom: 0,
+  BorderVariance: 0,
+  InnerBlur: 0,
   Transform: { ...DefaultTransform },
   BorderColor: DefaultColor,
   BorderWidth: 0,

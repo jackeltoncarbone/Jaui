@@ -12,6 +12,9 @@ import { TextCache } from '../Text/Text.Cache';
 import { TextRenderer } from '../Text/Text.Renderer';
 import { MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
+import { GlassRenderer } from '../Glass/Glass.Renderer';
+import { Framebuffer } from './Framebuffer';
+import { BlitRenderer } from './Blit';
 import { DirtyFlag } from './Types';
 import { Jiv } from '../Jiv/Jiv';
 
@@ -29,6 +32,9 @@ export class Canvas {
   private _jivRenderer!: JivRenderer;
   private _textRenderer!: TextRenderer;
   private _textCache!: TextCache;
+  private _glassRenderer!: GlassRenderer;
+  private _sceneFbo!: Framebuffer;
+  private _blit!: BlitRenderer;
   private _animationManager = new AnimationManager();
   private _animators = new Map<Jiv, JivAnimator>();
   private _textAnimators = new Map<Jiv, TextAnimator>();
@@ -51,6 +57,9 @@ export class Canvas {
     this._jivRenderer = new JivRenderer(gl);
     this._textRenderer = new TextRenderer(gl);
     this._textCache = new TextCache(gl);
+    this._glassRenderer = new GlassRenderer(gl);
+    this._sceneFbo = new Framebuffer(gl);
+    this._blit = new BlitRenderer(gl);
 
     // Animation manager triggers re-render when springs step
     this._animationManager.OnFrame(() => this.RequestFrame());
@@ -114,72 +123,142 @@ export class Canvas {
     const w = gl.drawingBufferWidth;
     const h = gl.drawingBufferHeight;
 
+    // Ensure scene FBO matches canvas size
+    this._sceneFbo.Resize(w, h);
+
+    // ─── Pass 1: render non-glass panels + text to sceneFbo ───
+    this._sceneFbo.Bind();
     gl.viewport(0, 0, w, h);
     gl.clearColor(0.04, 0.04, 0.04, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
-
-    // Enable blending for alpha compositing
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
-    // Collect all visible Jivs into the instance buffer, then draw once
     this._jivRenderer.BeginFrame();
-    this._collectInstances(this.Root);
+    this._collectNonGlass(this.Root);
     this._jivRenderer.DrawAll(w, h);
 
-    // Text pass (on top of panels)
     this._textCache.BeginFrame();
     this._textRenderer.BeginFrame();
-    this._collectTextInstances(this.Root);
+    this._collectTextInstancesForNonGlass(this.Root);
+    this._textRenderer.DrawAll(w, h);
+
+    // ─── Pass 2: generate mipmap chain on the scene texture (GPU blur levels) ───
+    this._sceneFbo.GenerateMipmap();
+
+    // ─── Pass 3: blit sceneFbo to screen ───
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, w, h);
+    this._blit.Draw(this._sceneFbo.Texture);
+
+    // ─── Pass 4: render glass panels to screen, sampling sceneTexture for backdrop ───
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    this._glassRenderer.BeginFrame();
+    this._collectGlass(this.Root);
+    this._glassRenderer.DrawAll(w, h, this._sceneFbo.Texture);
+
+    // ─── Pass 5: non-glass descendants of glass nodes render on top of the glass ───
+    this._jivRenderer.BeginFrame();
+    this._collectNonGlassUnderGlass(this.Root);
+    this._jivRenderer.DrawAll(w, h);
+
+    // ─── Pass 6: text belonging to glass subtree renders on top ───
+    this._textRenderer.BeginFrame();
+    this._collectTextInstancesForGlass(this.Root);
     this._textRenderer.DrawAll(w, h);
   };
 
-  private _collectInstances = (node: Jiv): void => {
-    if (node.Width > 0 && node.Height > 0 && node.Style.Visible) {
+  private _collectNonGlass = (node: Jiv): void => {
+    if (node.Width > 0 && node.Height > 0 && node.Style.Visible
+        && node.Style.Material === 'None' && !this._hasGlassAncestor(node)) {
       this._jivRenderer.AddInstance(node, this._dpr);
     }
-    for (const child of node.Children) {
-      this._collectInstances(child);
-    }
+    for (const child of node.Children) this._collectNonGlass(child);
   };
 
-  private _collectTextInstances = (node: Jiv): void => {
-    if (node.Width > 0 && node.Height > 0 && node.Style.Visible) {
-      const anim = this._textAnimators.get(node);
-      if (anim && anim.Words.length > 0) {
-        const padding = node.Layout.Padding;
-        const contentX = node.X + padding[3];
-        const contentY = node.Y + padding[0];
-        const contentH = node.Height - padding[0] - padding[2];
+  private _collectGlass = (node: Jiv): void => {
+    if (node.Width > 0 && node.Height > 0 && node.Style.Visible && node.Style.Material !== 'None') {
+      this._glassRenderer.AddInstance(node, this._dpr);
+    }
+    for (const child of node.Children) this._collectGlass(child);
+  };
 
-        // Vertical centering within the content box (based on total text block height)
-        let totalTextHeight = 0;
-        for (const w of anim.Words) {
-          const bottom = w.TargetY + w.Height;
-          if (bottom > totalTextHeight) totalTextHeight = bottom;
-        }
-        const yOffset = (contentH - totalTextHeight) / 2;
-
-        for (const w of anim.Words) {
-          const opacity = node.Style.Opacity * w.Opacity.Value;
-          if (opacity <= 0.001) continue;
-
-          const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
-          const wx = contentX + w.SpringX.Value;
-          const wy = contentY + yOffset + w.SpringY.Value;
-          this._textRenderer.AddText({
-            Texture: entry.Texture,
-            X: wx * this._dpr,
-            Y: wy * this._dpr,
-            Width: entry.Width,
-            Height: entry.Height,
-            Opacity: opacity,
-          });
-        }
+  /** Non-glass panels that live inside a glass subtree — rendered on top of the glass pass. */
+  private _collectNonGlassUnderGlass = (node: Jiv): void => {
+    if (node.Width > 0 && node.Height > 0 && node.Style.Visible
+        && node.Style.Material === 'None' && this._isUnderGlass(node) && node !== this.Root) {
+      // Only emit if this non-glass node is a DESCENDANT of a glass node (not the glass itself)
+      // — _isUnderGlass includes self, so we need to check if an ANCESTOR is glass
+      if (this._hasGlassAncestor(node)) {
+        this._jivRenderer.AddInstance(node, this._dpr);
       }
     }
-    for (const child of node.Children) {
-      this._collectTextInstances(child);
+    for (const child of node.Children) this._collectNonGlassUnderGlass(child);
+  };
+
+  /** True if any STRICT ancestor of node has Material != 'None'. */
+  private _hasGlassAncestor = (node: Jiv): boolean => {
+    let p = node.Parent;
+    while (p) {
+      if (p.Style.Material !== 'None') return true;
+      p = p.Parent;
+    }
+    return false;
+  };
+
+  /** True if node itself or any ancestor is glass — text inside glass renders in pass 5. */
+  private _isUnderGlass = (node: Jiv): boolean => {
+    let cur: Jiv | null = node;
+    while (cur) {
+      if (cur.Style.Material !== 'None') return true;
+      cur = cur.Parent;
+    }
+    return false;
+  };
+
+  private _collectTextInstancesForNonGlass = (node: Jiv): void => {
+    if (!this._isUnderGlass(node)) this._emitTextFor(node);
+    for (const child of node.Children) this._collectTextInstancesForNonGlass(child);
+  };
+
+  private _collectTextInstancesForGlass = (node: Jiv): void => {
+    if (this._isUnderGlass(node)) this._emitTextFor(node);
+    for (const child of node.Children) this._collectTextInstancesForGlass(child);
+  };
+
+  private _emitTextFor = (node: Jiv): void => {
+    if (node.Width <= 0 || node.Height <= 0 || !node.Style.Visible) return;
+    const anim = this._textAnimators.get(node);
+    if (!anim || anim.Words.length === 0) return;
+
+    const padding = node.Layout.Padding;
+    const contentX = node.X + padding[3];
+    const contentY = node.Y + padding[0];
+    const contentH = node.Height - padding[0] - padding[2];
+
+    let totalTextHeight = 0;
+    for (const w of anim.Words) {
+      const bottom = w.TargetY + w.Height;
+      if (bottom > totalTextHeight) totalTextHeight = bottom;
+    }
+    const yOffset = (contentH - totalTextHeight) / 2;
+
+    for (const w of anim.Words) {
+      const opacity = node.Style.Opacity * w.Opacity.Value;
+      if (opacity <= 0.001) continue;
+      const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
+      const wx = contentX + w.SpringX.Value;
+      const wy = contentY + yOffset + w.SpringY.Value;
+      this._textRenderer.AddText({
+        Texture: entry.Texture,
+        X: wx * this._dpr,
+        Y: wy * this._dpr,
+        Width: entry.Width,
+        Height: entry.Height,
+        Opacity: opacity,
+      });
     }
   };
 
@@ -349,7 +428,10 @@ export type { Vec2, Vec4, Rect, Color, DeviceTier, DirtyFlags } from './Types';
 export { DirtyFlag } from './Types';
 
 // Jiv
-export type { JivStyle, CornerShape, BlendMode } from '../Jiv/Jiv.Types';
+export type { JivStyle, CornerShape, BlendMode, MaterialType } from '../Jiv/Jiv.Types';
+
+// Glass presets
+export { LiquidGlass, SolidGlass, ClearGlass } from '../Glass/Glass.Presets';
 
 // Layout
 export type {

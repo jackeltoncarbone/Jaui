@@ -1,298 +1,174 @@
-import { Canvas, Jiv } from '../src/Core/Jwift';
+import { Canvas, Jiv, LiquidGlass } from '../src/Core/Jwift';
+import { JivAnimator } from '../src/Jiv/Jiv.Animator';
 
 const el = document.getElementById('jwift') as HTMLCanvasElement;
 const canvas = new Canvas(el);
 
-// ─── Tree ───
-//
-// App (Column)
-// ├── Header (Row)
-// │   ├── Title (text)
-// │   └── Actions (Row) — Button × 3
-// └── Body (Row)
-//     ├── Sidebar (Column) — NavItem × 4
-//     └── Main (Column) — Card × 3 (each with header + body text)
+// ─── Background (colored circles + content behind the glass bar) ───
 
-const app = new Jiv({
-  Layout: { Mode: 'Flex', Direction: 'Column', Gap: 12, Padding: [16, 16, 16, 16] },
-  Style: {
-    Background: { R: 1, G: 1, B: 1, A: 0.02 },
-    BorderRadius: [20, 20, 20, 20],
-    Smoothness: 0.6,
-    BorderColor: { R: 1, G: 1, B: 1, A: 0.12 },
-    BorderWidth: 1,
-  },
+const screen = new Jiv({
+  Layout: { Direction: 'Column', Justify: 'Start', Align: 'Stretch' },
+  Style: { Background: { R: 0.06, G: 0.07, B: 0.12, A: 1 } },
   ChildLayout: { FlexGrow: 1 },
 });
 
-// ─── Header ───
-
-const header = new Jiv({
-  Layout: { Direction: 'Row', Align: 'Center', Justify: 'SpaceBetween', Padding: [12, 16, 12, 16], Gap: 12 },
-  Style: {
-    Background: { R: 1, G: 1, B: 1, A: 0.05 },
-    BorderRadius: [12, 12, 12, 12],
-  },
-  ChildLayout: { Height: 56, FlexShrink: 0 },
-});
-
-const title = new Jiv({
-  Text: 'Jwift Demo',
-  TextStyle: { FontSize: 22, FontWeight: 700, Color: { R: 1, G: 1, B: 1, A: 0.95 } },
-  ChildLayout: { FlexGrow: 0 },
-});
-
-const actions = new Jiv({
-  Layout: { Direction: 'Row', Gap: 8, Align: 'Center' },
-  ChildLayout: { FlexGrow: 0 },
-});
-
-const makeButton = (label: string, accent: { R: number; G: number; B: number }): Jiv => new Jiv({
-  Text: label,
-  TextStyle: { FontSize: 13, FontWeight: 600, Color: { R: 1, G: 1, B: 1, A: 0.9 }, TextAlign: 'Center' },
-  Layout: { Padding: [8, 14, 8, 14] },
-  Style: {
-    Background: { R: accent.R, G: accent.G, B: accent.B, A: 0.22 },
-    BorderRadius: [10, 10, 10, 10],
-    BorderColor: { R: 1, G: 1, B: 1, A: 0.25 },
-    BorderWidth: 1,
-  },
-  ChildLayout: { Height: 36, FlexGrow: 0 },
-});
-
-const btn1 = makeButton('Save', { R: 0.4, G: 0.7, B: 1.0 });
-const btn2 = makeButton('Share', { R: 0.5, G: 0.9, B: 0.6 });
-const btn3 = makeButton('Delete', { R: 1.0, G: 0.5, B: 0.5 });
-
-actions.AddChild(btn1);
-actions.AddChild(btn2);
-actions.AddChild(btn3);
-
-header.AddChild(title);
-header.AddChild(actions);
-
-// ─── Body ───
-
-const body = new Jiv({
-  Layout: { Direction: 'Row', Gap: 12 },
+const circlesRow = new Jiv({
+  Layout: { Direction: 'Row', Justify: 'SpaceEvenly', Align: 'End', Padding: [40, 40, 0, 40] },
   ChildLayout: { FlexGrow: 1 },
 });
+const circleColors = [
+  { R: 0.9, G: 0.35, B: 0.55 },
+  { R: 0.35, G: 0.65, B: 1.0 },
+  { R: 1.0, G: 0.75, B: 0.25 },
+  { R: 0.45, G: 1.0, B: 0.65 },
+];
+circleColors.forEach((c) => {
+  const circle = new Jiv({
+    Style: {
+      Background: { R: c.R, G: c.G, B: c.B, A: 1 },
+      BorderRadius: [260, 260, 260, 260],
+      Smoothness: 1,
+      ShadowColor: { R: 0, G: 0, B: 0, A: 0.4 },
+      ShadowBlur: 40,
+      ShadowOffsetY: 12,
+    },
+    ChildLayout: { FlexGrow: 0, Width: 280, Height: 280 },
+  });
+  circlesRow.AddChild(circle);
+});
+screen.AddChild(circlesRow);
 
-// Sidebar
+// Bottom row: holds the tab bar, centered, with less margin so bar sits over the circles
+const bottomRow = new Jiv({
+  Layout: { Direction: 'Row', Justify: 'Center', Align: 'End', Padding: [0, 0, 24, 0] },
+  ChildLayout: { FlexGrow: 0, Height: 84 },
+});
+screen.AddChild(bottomRow);
 
-const sidebar = new Jiv({
-  Layout: { Direction: 'Column', Gap: 6, Padding: [12, 12, 12, 12] },
+// ─── Nav Tab Bar ───
+
+const NAV_W = 440;
+const NAV_H = 60;
+const BAR_PAD = 6;
+const TAB_COUNT = 4;
+const TAB_W = (NAV_W - BAR_PAD * 2) / TAB_COUNT;
+const INDICATOR_INSET = 2;
+
+const tabBar = new Jiv({
+  Layout: { Direction: 'Row', Justify: 'Start', Align: 'Stretch', Padding: [BAR_PAD, BAR_PAD, BAR_PAD, BAR_PAD], Gap: 0 },
   Style: {
-    Background: { R: 1, G: 1, B: 1, A: 0.04 },
-    BorderRadius: [12, 12, 12, 12],
+    ...LiquidGlass,
+    BorderRadius: [NAV_H / 2, NAV_H / 2, NAV_H / 2, NAV_H / 2], // pill shape
+    ShadowColor: { R: 0, G: 0, B: 0, A: 0.35 },
+    ShadowBlur: 24,
+    ShadowOffsetY: 8,
   },
-  ChildLayout: { Width: 180, FlexShrink: 0 },
+  ChildLayout: { FlexGrow: 0, Width: NAV_W, Height: NAV_H },
 });
 
-const navLabels = ['Dashboard', 'Projects', 'Team', 'Settings'];
-const navItems: Jiv[] = navLabels.map((label) => new Jiv({
-  Text: label,
-  TextStyle: { FontSize: 14, FontWeight: 500, Color: { R: 1, G: 1, B: 1, A: 0.85 } },
-  Layout: { Padding: [10, 12, 10, 12] },
+// Indicator pill — Placed child, manually positioned + animated
+const IND_W = TAB_W - INDICATOR_INSET * 2;
+const IND_H = NAV_H - BAR_PAD * 2 - INDICATOR_INSET * 2;
+const indicator = new Jiv({
   Style: {
-    Background: { R: 1, G: 1, B: 1, A: 0.04 },
-    BorderRadius: [8, 8, 8, 8],
+    Background: { R: 1, G: 1, B: 1, A: 0.18 },
+    BorderRadius: [IND_H / 2, IND_H / 2, IND_H / 2, IND_H / 2],
   },
-  ChildLayout: { Height: 38, FlexGrow: 0 },
+  ChildLayout: { Position: 'Placed', Width: IND_W, Height: IND_H },
+  X: BAR_PAD + INDICATOR_INSET, // relative to tabBar — but since Placed = absolute,
+  Y: BAR_PAD + INDICATOR_INSET, // we'll compute absolute X/Y after first layout pass
+  Width: IND_W, Height: IND_H,
+});
+
+const tabLabels = ['Home', 'Discover', 'Activity', 'Profile'];
+const tabs: Jiv[] = tabLabels.map((label, i) => new Jiv({
+  Text: label,
+  TextStyle: {
+    FontSize: 14,
+    FontWeight: i === 0 ? 600 : 500,
+    Color: i === 0 ? { R: 1, G: 1, B: 1, A: 0.95 } : { R: 1, G: 1, B: 1, A: 0.6 },
+    TextAlign: 'Center',
+  },
+  ChildLayout: { FlexGrow: 1, FlexBasis: 0 },
 }));
-navItems.forEach((n) => sidebar.AddChild(n));
 
-// Main content
+// Indicator first (underneath), then tabs on top
+tabBar.AddChild(indicator);
+tabs.forEach((t) => tabBar.AddChild(t));
 
-const main = new Jiv({
-  Layout: { Direction: 'Column', Gap: 12, Padding: [0, 0, 0, 0] },
-  ChildLayout: { FlexGrow: 1 },
-});
-
-const cardColors = [
-  { R: 0.4, G: 0.65, B: 1.0 },
-  { R: 0.5, G: 1.0, B: 0.7 },
-  { R: 1.0, G: 0.7, B: 0.4 },
-];
-
-interface Card {
-  Root: Jiv;
-  Header: Jiv;
-  Body: Jiv;
-}
-
-const makeCard = (title: string, body: string, accent: { R: number; G: number; B: number }): Card => {
-  const cardBody = new Jiv({
-    Text: body,
-    TextStyle: { FontSize: 13, Color: { R: 1, G: 1, B: 1, A: 0.7 }, LineHeight: 1.4 },
-    Layout: { Padding: [12, 16, 12, 16] },
-    ChildLayout: { FlexGrow: 1 },
-  });
-
-  const cardHeader = new Jiv({
-    Text: title,
-    TextStyle: { FontSize: 16, FontWeight: 600, Color: { R: 1, G: 1, B: 1, A: 0.95 } },
-    Layout: { Padding: [10, 16, 10, 16] },
-    Style: {
-      Background: { R: accent.R, G: accent.G, B: accent.B, A: 0.18 },
-      BorderRadius: [10, 10, 0, 0],
-    },
-    ChildLayout: { Height: 44, FlexShrink: 0 },
-  });
-
-  const root = new Jiv({
-    Layout: { Direction: 'Column' },
-    Style: {
-      Background: { R: 1, G: 1, B: 1, A: 0.05 },
-      BorderRadius: [10, 10, 10, 10],
-      BorderColor: { R: 1, G: 1, B: 1, A: 0.15 },
-      BorderWidth: 1,
-      ShadowColor: { R: 0, G: 0, B: 0, A: 0.3 },
-      ShadowBlur: 12,
-      ShadowOffsetY: 4,
-    },
-    ChildLayout: { FlexGrow: 1 },
-  });
-  root.AddChild(cardHeader);
-  root.AddChild(cardBody);
-
-  return { Root: root, Header: cardHeader, Body: cardBody };
-};
-
-const cards: Card[] = [
-  makeCard('Overview', 'Canvas-based UI rendering engine. Every pixel goes through WebGL2 shaders.', cardColors[0]),
-  makeCard('Layout', 'Flex solver computes positions instantly. Springs animate to new targets smoothly.', cardColors[1]),
-  makeCard('Text', 'Text rasterized to offscreen canvas, cached by content + style hash, rendered as textured quads.', cardColors[2]),
-];
-
-cards.forEach((c) => main.AddChild(c.Root));
-
-body.AddChild(sidebar);
-body.AddChild(main);
-
-app.AddChild(header);
-app.AddChild(body);
-canvas.Root.AddChild(app);
+bottomRow.AddChild(tabBar);
+canvas.Root.AddChild(screen);
 canvas.Start();
 
-// ─── Presets (cycle on click) ───
+// ─── Indicator animation (manual JivAnimator for a Placed node) ───
 
-interface Preset {
-  Name: string;
-  Apply: () => void;
-}
+// Placed children aren't put through the Canvas's auto-animator loop. We create one manually.
+const indAnimator = new JivAnimator(indicator);
+canvas.Animations.Register(indAnimator);
 
-const presets: Preset[] = [
-  {
-    Name: '1. Default (sidebar left, 3 cards column)',
-    Apply: () => {
-      body.Layout.Direction = 'Row';
-      main.Layout.Direction = 'Column';
-      sidebar.ChildLayout.Width = 180;
-      cards.forEach((c) => { c.Root.ChildLayout.FlexGrow = 1; });
-      navItems.forEach((n) => n.SetText(n.Text ?? '', { TextAlign: 'Left' }));
-    },
-  },
-  {
-    Name: '2. Sidebar right (RowReverse)',
-    Apply: () => {
-      body.Layout.Direction = 'RowReverse';
-      main.Layout.Direction = 'Column';
-    },
-  },
-  {
-    Name: '3. Compact sidebar (60px, centered text)',
-    Apply: () => {
-      body.Layout.Direction = 'Row';
-      sidebar.ChildLayout.Width = 60;
-      navItems.forEach((n, i) => n.SetText(['D', 'P', 'T', 'S'][i], { TextAlign: 'Center', FontSize: 18, FontWeight: 700 }));
-    },
-  },
-  {
-    Name: '4. Center alignment, all text centered',
-    Apply: () => {
-      body.Layout.Direction = 'Row';
-      sidebar.ChildLayout.Width = 180;
-      navItems.forEach((n, i) => n.SetText(navLabels[i], { TextAlign: 'Center' }));
-      cards.forEach((c) => {
-        c.Header.SetText(c.Header.Text ?? '', { TextAlign: 'Center' });
-        c.Body.SetText(c.Body.Text ?? '', { TextAlign: 'Center' });
-      });
-    },
-  },
-  {
-    Name: '5. Mobile stacked (everything column)',
-    Apply: () => {
-      body.Layout.Direction = 'Column';
-      main.Layout.Direction = 'Column';
-      sidebar.ChildLayout.Width = 'Auto' as number | 'Auto';
-      sidebar.Layout.Direction = 'Row';
-      sidebar.Layout.Justify = 'SpaceEvenly';
-      navItems.forEach((n, i) => n.SetText(navLabels[i], { TextAlign: 'Center', FontSize: 13 }));
-    },
-  },
-  {
-    Name: '6. Dense grid (3 cards in row)',
-    Apply: () => {
-      body.Layout.Direction = 'Row';
-      sidebar.Layout.Direction = 'Column';
-      sidebar.ChildLayout.Width = 180;
-      main.Layout.Direction = 'Row';
-      main.Layout.Wrap = 'NoWrap';
-      navItems.forEach((n, i) => n.SetText(navLabels[i], { TextAlign: 'Left', FontSize: 14, FontWeight: 500 }));
-      cards.forEach((c) => {
-        c.Header.SetText(c.Header.Text ?? '', { TextAlign: 'Left' });
-        c.Body.SetText(c.Body.Text ?? '', { TextAlign: 'Left' });
-      });
-    },
-  },
-  {
-    Name: '7. Buttons SpaceBetween',
-    Apply: () => {
-      header.Layout.Justify = 'SpaceBetween';
-      actions.Layout.Justify = 'SpaceBetween';
-      actions.ChildLayout.FlexGrow = 1;
-    },
-  },
-  {
-    Name: '8. Reset',
-    Apply: () => {
-      body.Layout.Direction = 'Row';
-      main.Layout.Direction = 'Column';
-      main.Layout.Wrap = 'NoWrap';
-      sidebar.Layout.Direction = 'Column';
-      sidebar.Layout.Justify = 'Start';
-      sidebar.ChildLayout.Width = 180;
-      header.Layout.Justify = 'SpaceBetween';
-      actions.Layout.Justify = 'Start';
-      actions.ChildLayout.FlexGrow = 0;
-      navItems.forEach((n, i) => n.SetText(navLabels[i], { TextAlign: 'Left', FontSize: 14, FontWeight: 500 }));
-      cards.forEach((c) => {
-        c.Header.SetText(c.Header.Text ?? '', { TextAlign: 'Left' });
-        c.Body.SetText(c.Body.Text ?? '', { TextAlign: 'Left' });
-      });
-    },
-  },
-];
+let selected = 0;
 
-const apply = (index: number): void => {
-  presets[index].Apply();
-  canvas.Root.Dirty |= 1; // mark layout dirty
-  // Propagate dirty through the tree
-  const walk = (n: Jiv): void => {
-    n.MarkLayoutDirty();
-    n.Children.forEach(walk);
-  };
-  walk(canvas.Root);
-  console.log(`[Jwift] ${presets[index].Name}`);
+const updateIndicator = (snap: boolean): void => {
+  const targetX = tabBar.X + BAR_PAD + INDICATOR_INSET + selected * TAB_W;
+  const targetY = tabBar.Y + BAR_PAD + INDICATOR_INSET;
+  if (snap) {
+    indAnimator.Springs.X.Target = targetX;
+    indAnimator.Springs.Y.Target = targetY;
+    indAnimator.Springs.Width.Target = IND_W;
+    indAnimator.Springs.Height.Target = IND_H;
+    indAnimator.Springs.X.Snap();
+    indAnimator.Springs.Y.Snap();
+    indAnimator.Springs.Width.Snap();
+    indAnimator.Springs.Height.Snap();
+    // Also sync Jiv properties directly so first render doesn't show 0,0
+    indicator.X = targetX;
+    indicator.Y = targetY;
+    indicator.Width = IND_W;
+    indicator.Height = IND_H;
+  } else {
+    indAnimator.SetTargets({ X: targetX, Y: targetY, Width: IND_W, Height: IND_H });
+    canvas.Animations.Kick();
+  }
 };
 
-apply(0);
+// Keep trying until tabBar has its resolved position, then snap
+const tryInit = (): void => {
+  if (tabBar.X > 0 && tabBar.Y > 0) {
+    updateIndicator(true);
+    canvas.RequestFrame();
+  } else {
+    requestAnimationFrame(tryInit);
+  }
+};
+requestAnimationFrame(tryInit);
 
-let current = 0;
-el.addEventListener('click', () => {
-  current = (current + 1) % presets.length;
-  apply(current);
+// ─── Click to select ───
+
+el.addEventListener('click', (ev) => {
+  const rect = el.getBoundingClientRect();
+  const clickX = ev.clientX - rect.left;
+  const clickY = ev.clientY - rect.top;
+
+  // Hit-test against tab bar
+  if (clickX < tabBar.X || clickX > tabBar.X + tabBar.Width) return;
+  if (clickY < tabBar.Y || clickY > tabBar.Y + tabBar.Height) return;
+
+  const localX = clickX - tabBar.X - BAR_PAD;
+  const idx = Math.max(0, Math.min(TAB_COUNT - 1, Math.floor(localX / TAB_W)));
+  if (idx === selected) return;
+
+  // Update text styles — old tab dims, new tab brightens
+  tabs[selected].SetText(tabLabels[selected], {
+    Color: { R: 1, G: 1, B: 1, A: 0.6 },
+    FontWeight: 500,
+  });
+  tabs[idx].SetText(tabLabels[idx], {
+    Color: { R: 1, G: 1, B: 1, A: 0.95 },
+    FontWeight: 600,
+  });
+
+  selected = idx;
+  updateIndicator(false);
 });
 
-console.log(`[Jwift] Click to cycle through ${presets.length} layout presets`);
+console.log('[Jwift] Click a tab in the nav bar');
