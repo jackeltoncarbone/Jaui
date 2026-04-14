@@ -530,14 +530,17 @@ export class Canvas {
       if (this._hoveredJiv) this._hoveredJiv.Hover = false;
       this._hoveredJiv = hit;
       if (hit) hit.Hover = true;
-      this.RequestFrame();
+      // Kick the animation loop so style springs wake up and chase the new
+      // EffectiveStyle target. Without this, springs that had settled at the
+      // old state stay frozen — Jiv appears to "still be hovered."
+      this._animationManager.Kick();
     });
 
     this.Element.addEventListener('pointerleave', () => {
       if (this._hoveredJiv) {
         this._hoveredJiv.Hover = false;
         this._hoveredJiv = null;
-        this.RequestFrame();
+        this._animationManager.Kick();
       }
     });
 
@@ -546,14 +549,14 @@ export class Canvas {
       if (!hit) return;
       this._activeJiv = hit;
       hit.Active = true;
-      this.RequestFrame();
+      this._animationManager.Kick();
     });
 
     const clearActive = (): void => {
       if (this._activeJiv) {
         this._activeJiv.Active = false;
         this._activeJiv = null;
-        this.RequestFrame();
+        this._animationManager.Kick();
       }
     };
     this.Element.addEventListener('pointerup', clearActive);
