@@ -1,8 +1,10 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
+import { JssPlugin } from './src/Jss/Jss.VitePlugin';
 
 export default defineConfig({
   root: resolve(__dirname, 'playground'),
+  plugins: [JssPlugin()],
   resolve: {
     alias: {
       '@jwift': resolve(__dirname, 'src'),
