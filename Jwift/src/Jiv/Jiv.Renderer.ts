@@ -2,8 +2,8 @@ import { ShaderCompiler, type ShaderProgram } from '../Core/Shader.Compiler';
 import { QuadGeometry } from '../Core/Geometry.Quad';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from './Jiv.InstanceBuffer';
 import type { Jiv } from './Jiv';
-import vertSrc from './Shaders/Jiv.Panel.vert?raw';
-import fragSrc from './Shaders/Jiv.Panel.frag?raw';
+import vertSrc from './Shaders/Jiv.Panel.vert.gen';
+import fragSrc from './Shaders/Jiv.Panel.frag.gen';
 
 const BYTES_PER_VEC4 = 16;
 const BYTES_PER_INSTANCE = JIV_FLOATS_PER_INSTANCE * 4;

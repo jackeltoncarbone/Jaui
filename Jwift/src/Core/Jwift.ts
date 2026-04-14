@@ -97,6 +97,7 @@ export class Canvas {
     // mobile; any "cursor highlight" effect belongs in a separate composited
     // overlay layer, not baked into the core material.
     //   this._listenForSpecularTilt();
+    void this._listenForSpecularTilt;   // keep symbol live for future wiring
   }
 
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
@@ -516,7 +517,9 @@ export class Canvas {
    *  rim. `SpecularTilt` is only applied to specular math (Blinn-Phong catchlight
    *  + rim-spec highlight) — not to ambient, edge light, or border directionality,
    *  which stay anchored to the stylesheet-set `LightAngle`. */
-  // @ts-expect-error — retained for future mobile gyro wiring; see constructor note
+  // Retained for future mobile gyro wiring; see constructor note. The
+  // `void` reference at the end of the constructor keeps TS happy without
+  // a suppression comment until we actually wire it up.
   private _listenForSpecularTilt = (): void => {
     const updateFromEvent = (clientX: number, clientY: number): void => {
       const r = this.Element.getBoundingClientRect();
@@ -946,3 +949,8 @@ export { JivAnimator } from '../Jiv/Jiv.Animator';
 
 // Accessibility
 export type { AccessibilityConfig } from '../Accessibility/Accessibility.Types';
+
+// JSS
+export { ParseJss } from '../Jss/Jss.Parser';
+export type { Stylesheet, Ruleset } from '../Jss/Jss.Parser';
+export { SlotFor, type Slot } from '../Jss/Jss.Routes';

@@ -3,15 +3,17 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Canvas-based UI rendering engine for the web",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/Core/Jwift.js",
+  "types": "./dist/Core/Jwift.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/Core/Jwift.d.ts",
+      "default": "./dist/Core/Jwift.js"
     }
   },
   "scripts": {
+    "build:shaders": "node scripts/build-shaders.mjs",
+    "prebuild": "npm run build:shaders",
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest"

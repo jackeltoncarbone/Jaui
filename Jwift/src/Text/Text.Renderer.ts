@@ -1,8 +1,8 @@
 import { ShaderCompiler, type ShaderProgram } from '../Core/Shader.Compiler';
 import { QuadGeometry } from '../Core/Geometry.Quad';
 import { TextInstanceBuffer, type TextDrawCommand } from './Text.InstanceBuffer';
-import vertSrc from './Shaders/Text.Quad.vert?raw';
-import fragSrc from './Shaders/Text.Quad.frag?raw';
+import vertSrc from './Shaders/Text.Quad.vert.gen';
+import fragSrc from './Shaders/Text.Quad.frag.gen';
 
 export class TextRenderer {
   private _gl: WebGL2RenderingContext;
