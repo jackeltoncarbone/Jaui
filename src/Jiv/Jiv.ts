@@ -47,6 +47,18 @@ export class Jiv {
   ContentWidth: number = 0;
   ContentHeight: number = 0;
 
+  // Interaction states — set by Canvas input system based on pointer + focus.
+  // Each state has an optional style override; EffectiveStyle() merges them
+  // in priority order so the renderer always sees the correct final style.
+  Hover: boolean = false;
+  Active: boolean = false;
+  Focus: boolean = false;
+  Disabled: boolean = false;
+  HoverStyle: Partial<JivStyle> | null = null;
+  ActiveStyle: Partial<JivStyle> | null = null;
+  FocusStyle: Partial<JivStyle> | null = null;
+  DisabledStyle: Partial<JivStyle> | null = null;
+
   // Dirty tracking
   Dirty: DirtyFlags = DirtyFlag.Layout;
 
@@ -56,6 +68,10 @@ export class Jiv {
     Width?: number;
     Height?: number;
     Style?: Partial<JivStyle>;
+    HoverStyle?: Partial<JivStyle>;
+    ActiveStyle?: Partial<JivStyle>;
+    FocusStyle?: Partial<JivStyle>;
+    DisabledStyle?: Partial<JivStyle>;
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
     Text?: string;
@@ -106,7 +122,28 @@ export class Jiv {
       this.Text = options.Text;
       this.Dirty |= DirtyFlag.Text;
     }
+
+    // Interaction state overrides (stored as-is; caller's responsibility to
+    // deep-copy if they want isolation — these are typically stylesheet objects)
+    this.HoverStyle = options?.HoverStyle ?? null;
+    this.ActiveStyle = options?.ActiveStyle ?? null;
+    this.FocusStyle = options?.FocusStyle ?? null;
+    this.DisabledStyle = options?.DisabledStyle ?? null;
   }
+
+  /** Final render-time style: base + state overrides in priority order.
+   *  Disabled beats Focus beats Active beats Hover — a disabled focused
+   *  active hover all stacked yields the disabled look. Cheap shortcut
+   *  when no state is active (returns base reference directly). */
+  EffectiveStyle = (): JivStyle => {
+    if (!this.Hover && !this.Active && !this.Focus && !this.Disabled) return this.Style;
+    const merged: JivStyle = { ...this.Style };
+    if (this.Hover && this.HoverStyle) Object.assign(merged, this.HoverStyle);
+    if (this.Active && this.ActiveStyle) Object.assign(merged, this.ActiveStyle);
+    if (this.Focus && this.FocusStyle) Object.assign(merged, this.FocusStyle);
+    if (this.Disabled && this.DisabledStyle) Object.assign(merged, this.DisabledStyle);
+    return merged;
+  };
 
   AddChild = (child: Jiv): void => {
     if (child.Parent) child.Parent.RemoveChild(child);

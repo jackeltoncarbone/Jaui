@@ -79,6 +79,7 @@ export class Canvas {
     this._observeResize();
     this._watchDpr();
     this._listenForScroll();
+    this._listenForInteractionStates();
     // NOTE: pointer-driven specular tilt is intentionally NOT wired. It felt
     // like a "glow follows cursor" gimmick — the wrong abstraction for the
     // Jiv material. Real gyro input (DeviceOrientation) will drive this on
@@ -497,6 +498,60 @@ export class Canvas {
       this._panelRenderer.SpecularTiltY = 0;
       this.RequestFrame();
     }, { passive: true });
+  };
+
+  /** Pointer → interaction states (Hover / Active). The topmost hit Jiv
+   *  becomes Hover:true; everyone else clears. Pointer down/up toggles
+   *  Active on the hit target. Focus is keyboard-driven and sits on a
+   *  separate system (added with the input focus chain). Disabled is set
+   *  declaratively by the caller — we never touch it here.
+   *
+   *  State changes trigger a re-render via RequestFrame. State mutations
+   *  are O(1) per frame per pointer (two pointers = two state flips max). */
+  private _hoveredJiv: Jiv | null = null;
+  private _activeJiv: Jiv | null = null;
+
+  private _listenForInteractionStates = (): void => {
+    const topmostAt = (clientX: number, clientY: number): Jiv | null => {
+      const rect = this.Element.getBoundingClientRect();
+      return this._scrollManager.HitTopmost(clientX - rect.left, clientY - rect.top);
+    };
+
+    this.Element.addEventListener('pointermove', (e: PointerEvent) => {
+      const hit = topmostAt(e.clientX, e.clientY);
+      if (hit === this._hoveredJiv) return;
+
+      if (this._hoveredJiv) this._hoveredJiv.Hover = false;
+      this._hoveredJiv = hit;
+      if (hit) hit.Hover = true;
+      this.RequestFrame();
+    });
+
+    this.Element.addEventListener('pointerleave', () => {
+      if (this._hoveredJiv) {
+        this._hoveredJiv.Hover = false;
+        this._hoveredJiv = null;
+        this.RequestFrame();
+      }
+    });
+
+    this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
+      const hit = topmostAt(e.clientX, e.clientY);
+      if (!hit) return;
+      this._activeJiv = hit;
+      hit.Active = true;
+      this.RequestFrame();
+    });
+
+    const clearActive = (): void => {
+      if (this._activeJiv) {
+        this._activeJiv.Active = false;
+        this._activeJiv = null;
+        this.RequestFrame();
+      }
+    };
+    this.Element.addEventListener('pointerup', clearActive);
+    this.Element.addEventListener('pointercancel', clearActive);
   };
 
   /** Wheel + touch/pointer drag — both route through ScrollManager which

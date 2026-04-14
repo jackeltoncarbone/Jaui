@@ -122,7 +122,7 @@ export class ScrollManager implements Animatable {
 
   /** DOM-style scroll target: topmost hit, walk UP for scrollable ancestor. */
   ResolveScrollTarget = (cssX: number, cssY: number): Jiv | null => {
-    const hit = this._hitTopmost(this._root, cssX, cssY, 0, 0);
+    const hit = this.HitTopmost(cssX, cssY);
     if (!hit) return null;
     let cur: Jiv | null = hit;
     while (cur) {
@@ -130,6 +130,12 @@ export class ScrollManager implements Animatable {
       cur = cur.Parent;
     }
     return null;
+  };
+
+  /** Topmost Jiv at (cssX, cssY) — respects Visible + PointerEvents. Shared
+   *  by scroll, interaction-state tracking, and (soon) focus/click. */
+  HitTopmost = (cssX: number, cssY: number): Jiv | null => {
+    return this._hitTopmost(this._root, cssX, cssY, 0, 0);
   };
 
   Tick = (dt: number): boolean => {

@@ -59,6 +59,20 @@ for (const c of cards) {
       ShadowBlur: 32,
       ShadowOffsetY: 14,
     },
+    // Hover: brighter shadow lift. Active: press-in (dimmed shadow).
+    // No animation yet for color/shadow (MVP) — the change is instant.
+    // Scale/Opacity can animate via the existing JivAnimator once we wire
+    // state-driven target updates.
+    HoverStyle: {
+      ShadowColor: { R: 0, G: 0, B: 0, A: 0.55 },
+      ShadowBlur: 40,
+      ShadowOffsetY: 18,
+    },
+    ActiveStyle: {
+      ShadowColor: { R: 0, G: 0, B: 0, A: 0.25 },
+      ShadowBlur: 20,
+      ShadowOffsetY: 6,
+    },
     ChildLayout: { FlexGrow: 0, FlexShrink: 0, Height: c.Height },
   });
   card.AddChild(new Jiv({
