@@ -19,6 +19,12 @@ flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lod
 
 uniform sampler2D u_Backdrop;
 uniform vec2 u_Resolution;
+// Specular tilt — added to lightDir ONLY for specular computations (bevel
+// catchlight and rim-spec highlight), not for ambient/edge-light/border
+// directionality. Canvas-wide, set by pointer or gyro each frame. This
+// reproduces Apple's gyro-driven catchlight without sliding the virtual
+// "sun" for the rest of the material.
+uniform vec2 u_SpecularTilt;
 
 out vec4 fragColor;
 
@@ -653,12 +659,14 @@ void main() {
         // ── Blinn-Phong specular catchlight on the bevel ──
         // The bevel has a 3D normal: 2D outward normal (when on the bevel)
         // tilted toward +Z (out of screen) at the flat center. We model this
-        // as `(normal * hump, 1 - hump)`: pure +Z at the center where the
-        // surface is flat (hump=0), and tilted outward at the rim (hump=1).
+        // as `(normal * hump, 1 - hump*0.7)`: mostly +Z at the center where
+        // the surface is flat (hump=0), tilted outward at the rim (hump=1).
         // View direction is +Z (orthographic). Light direction in 3D adds an
-        // elevation component so the catchlight has a specific landing point.
+        // elevation + the SpecularTilt offset — this reproduces Apple's
+        // gyro-driven catchlight (tilt device → specular slides across rim).
         vec3 N3 = normalize(vec3(normal * hump, 1.0 - hump * 0.7));
-        vec3 L3 = normalize(vec3(lightDir, 0.6));   // virtual light, slightly elevated
+        vec2 specLightDir = normalize(lightDir + u_SpecularTilt);
+        vec3 L3 = normalize(vec3(specLightDir, 0.6));
         vec3 V3 = vec3(0.0, 0.0, 1.0);
         vec3 H3 = normalize(L3 + V3);
         float specBase = pow(max(dot(N3, H3), 0.0), specSharpness);
@@ -695,7 +703,13 @@ void main() {
         float rimSpecW = max(thickness * 0.18, 0.75);
         float rimSpecBand = smoothstep(0.5, -0.5, dist)
                           - smoothstep(-0.5 - rimSpecW, 0.5 - rimSpecW, dist);
-        float rimSpecDir = pow(max(alignment, 0.0), 3.0);   // sharp on lit side only
+        // Directional alignment uses the TILTED light direction so the
+        // rim-spec line slides around the perimeter as pointer/gyro moves.
+        // The ambient, edge-light, and border directionality stay fixed to
+        // the stylesheet-set LightAngle (via `alignment` above).
+        vec2 specLightDirRim = normalize(lightDir + u_SpecularTilt);
+        float rimSpecAlign = dot(normal, specLightDirRim);
+        float rimSpecDir = pow(max(rimSpecAlign, 0.0), 3.0);
         float rimSpecAlpha = rimSpecBand * rimSpecDir * specIntensity * fillAlpha;
         // Color: vibrant-boosted backdrop (sampled at the rim) mixed toward white.
         // LOD offset slightly sharper than the panel so the rim highlight reads

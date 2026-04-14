@@ -79,6 +79,7 @@ export class Canvas {
     this._observeResize();
     this._watchDpr();
     this._listenForScroll();
+    this._listenForSpecularTilt();
   }
 
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
@@ -451,6 +452,39 @@ export class Canvas {
   private _observeResize = (): void => {
     const observer = new ResizeObserver(() => this._resize());
     observer.observe(this.Element);
+  };
+
+  /** Pointer tracking → specular tilt. Simulates Apple's gyro-driven catchlight:
+   *  as the user moves the cursor, the specular highlight slides across the
+   *  rim. `SpecularTilt` is only applied to specular math (Blinn-Phong catchlight
+   *  + rim-spec highlight) — not to ambient, edge light, or border directionality,
+   *  which stay anchored to the stylesheet-set `LightAngle`. */
+  private _listenForSpecularTilt = (): void => {
+    const updateFromEvent = (clientX: number, clientY: number): void => {
+      const r = this.Element.getBoundingClientRect();
+      // Map pointer to [-1, +1] relative to canvas center, then scale to a
+      // modest tilt magnitude (Apple's gyro tilt rarely exceeds ~30°, which
+      // in light-direction space is about 0.5 unit). Clamp to ±0.5.
+      const tx = ((clientX - r.left) / Math.max(r.width, 1) - 0.5) * 2;
+      const ty = ((clientY - r.top) / Math.max(r.height, 1) - 0.5) * 2;
+      this._panelRenderer.SpecularTiltX = Math.max(-0.5, Math.min(0.5, tx * 0.5));
+      // Y note: screen Y grows downward, but LightAngle's y convention has
+      // "up" as negative in screen space (matches the instance buffer's
+      // `lightY = -sin(rad)`). So mouse moving DOWN should shift the
+      // specular origin DOWN in the light source, i.e. tilt.y positive.
+      this._panelRenderer.SpecularTiltY = Math.max(-0.5, Math.min(0.5, ty * 0.5));
+      this.RequestFrame();
+    };
+
+    this.Element.addEventListener('pointermove', (e: PointerEvent) => {
+      updateFromEvent(e.clientX, e.clientY);
+    }, { passive: true });
+
+    this.Element.addEventListener('pointerleave', () => {
+      this._panelRenderer.SpecularTiltX = 0;
+      this._panelRenderer.SpecularTiltY = 0;
+      this.RequestFrame();
+    }, { passive: true });
   };
 
   /** Wheel events → find the deepest scroll container under the cursor and apply the delta. */

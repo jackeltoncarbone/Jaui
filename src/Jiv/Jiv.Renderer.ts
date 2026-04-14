@@ -25,6 +25,13 @@ export class JivRenderer {
   private _dummyTex: WebGLTexture;
   private _resolutionLoc: WebGLUniformLocation | null;
   private _backdropLoc: WebGLUniformLocation | null;
+  private _specTiltLoc: WebGLUniformLocation | null;
+  /** Specular tilt offset — added to lightDir ONLY for the specular/rim-spec
+   *  computations, not for ambient/edge-light/border directionality. Canvas
+   *  sets this per-frame from pointer or gyroscope (simulates Apple's
+   *  device-rotation-driven catchlight without moving the "sun" itself). */
+  SpecularTiltX: number = 0;
+  SpecularTiltY: number = 0;
 
   constructor(gl: WebGL2RenderingContext) {
     this._gl = gl;
@@ -48,6 +55,7 @@ export class JivRenderer {
 
     this._resolutionLoc = gl.getUniformLocation(this._shader.Program, 'u_Resolution');
     this._backdropLoc = gl.getUniformLocation(this._shader.Program, 'u_Backdrop');
+    this._specTiltLoc = gl.getUniformLocation(this._shader.Program, 'u_SpecularTilt');
 
     // Wire instance attributes onto the quad's VAO
     gl.bindVertexArray(this._quad.Vao);
@@ -83,6 +91,7 @@ export class JivRenderer {
     gl.useProgram(this._shader.Program);
     gl.uniform2f(this._resolutionLoc, canvasWidth, canvasHeight);
     gl.uniform1i(this._backdropLoc, 0);
+    gl.uniform2f(this._specTiltLoc, this.SpecularTiltX, this.SpecularTiltY);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, backdropTexture ?? this._dummyTex);
