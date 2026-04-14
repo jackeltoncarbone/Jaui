@@ -640,11 +640,14 @@ void main() {
             : pow(clamp(1.0 + dist / max(bezelWidth, 0.5), 0.0, 1.0), 2.0);
         vec3 rimAmbientRgb = vec3(hemiAmbient) * rimMask;
 
-        // ── Inner darkening (1 px inset dark ring) ──
-        // Apple's glass has a faint ~1 px inset dark line — the perceptual
-        // boundary between the bright rim and the flat interior. Triangular
-        // band centered at dist = -1, ~1 px wide, very low alpha.
-        float innerDarkBand = max(0.0, 1.0 - abs(dist + 1.0));
+        // ── Inner darkening (inset dark ring) ──
+        // Apple's glass has a faint inset dark line — the perceptual boundary
+        // between the bright rim and the flat interior. Position scales with
+        // bezel width (where the refraction band transitions to flat), width
+        // with thickness (a thicker slab shows a wider inner line edge-on).
+        float innerPos = bezelWidth * 0.35;                  // how far inside to place it
+        float innerW   = max(thickness * 0.12, 0.5);         // band half-width
+        float innerDarkBand = max(0.0, 1.0 - abs(dist + innerPos) / max(innerW, 0.5));
         float innerDarkAlpha = innerDarkBand * 0.04;
 
         // ── Blinn-Phong specular catchlight on the bevel ──
@@ -674,6 +677,35 @@ void main() {
         result.rgb *= 1.0 - innerDarkAlpha;
         result.rgb = result.rgb * (1.0 - specAlpha) + specRgb * specAlpha;
         result.a = result.a * (1.0 - specAlpha) + specAlpha;
+
+        // ── Rim specular highlight (Apple's chrome-edge catchlight) ─────
+        // A SECOND very thin bright line right at the silhouette, on the LIT
+        // side only — sharper directional falloff than the main border, and
+        // picks up vibrant color from the backdrop. Distinct from:
+        //   - Blinn-Phong catchlight (on the bevel SURFACE, not the silhouette)
+        //   - Main border stroke (uniform around the perimeter)
+        //   - Wide rim glow (soft inward fade, not pinned at the edge)
+        // This is the "variable vibrant rim line" that reads as chrome-like
+        // specular reflection off the glass rim, brightest where the rim's
+        // outward normal points toward the light.
+        //
+        // Width is PHYSICAL — proportional to perceived glass thickness. A
+        // thicker slab shows a wider rim edge-on. Floor at 0.75 px so the
+        // highlight never disappears on thin glass.
+        float rimSpecW = max(thickness * 0.18, 0.75);
+        float rimSpecBand = smoothstep(0.5, -0.5, dist)
+                          - smoothstep(-0.5 - rimSpecW, 0.5 - rimSpecW, dist);
+        float rimSpecDir = pow(max(alignment, 0.0), 3.0);   // sharp on lit side only
+        float rimSpecAlpha = rimSpecBand * rimSpecDir * specIntensity * fillAlpha;
+        // Color: vibrant-boosted backdrop (sampled at the rim) mixed toward white.
+        // LOD offset slightly sharper than the panel so the rim highlight reads
+        // as "specular reflection of crisper nearby content."
+        vec3 rimSpecBackdrop = textureLod(u_Backdrop, baseUv, max(0.0, lodBoost - 0.5)).rgb;
+        float rimSpecLuma = dot(rimSpecBackdrop, LUMA);
+        vec3 rimSpecVibrant = clamp(mix(vec3(rimSpecLuma), rimSpecBackdrop, 1.8) * 1.4, 0.0, 1.0);
+        vec3 rimSpecRgb = mix(rimSpecVibrant, vec3(1.0), 0.45);
+        result.rgb = result.rgb * (1.0 - rimSpecAlpha) + rimSpecRgb * rimSpecAlpha;
+        result.a = result.a * (1.0 - rimSpecAlpha) + rimSpecAlpha;
 
         // ── Border zone backdrop refilter ───────────────────────────────
         // Apple's glass rim isn't a flat color — it's an optical zone where

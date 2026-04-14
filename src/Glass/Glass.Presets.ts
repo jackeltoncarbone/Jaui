@@ -24,48 +24,50 @@ export const LiquidGlass: Partial<JivStyle> = {
   BorderContrast: 1.0,
   BorderFrostLodOffset: -0.5,
 
-  // Ambient drop shadow — floats the panel off the backdrop
-  ShadowColor: { R: 0, G: 0, B: 0, A: 0.22 },
-  ShadowBlur: 28,
-  ShadowOffsetY: 10,
+  // Ambient drop shadow — Apple shadows are SUBTLE; ~15% alpha, soft blur
+  ShadowColor: { R: 0, G: 0, B: 0, A: 0.18 },
+  ShadowBlur: 22,
+  ShadowOffsetY: 6,
 
   // Backdrop grading — gentle, content stays readable
-  FrostBlur: 5,
-  Brightness: 0.95,
-  Saturation: 1.15,
-  Contrast: 0.95,
+  FrostBlur: 6,
+  Brightness: 0.97,
+  Saturation: 1.12,
+  Contrast: 0.96,
 
-  // Refraction / bezel
-  Thickness: 8,
-  Fillet: 2,              // surface bulge magnitude (Show Studio's --surface-bulge)
-  BezelWidth: 12,
-  BezelScale: 0.35,
+  // Refraction / bezel — match Apple's dossier. Bulge stays near-zero; the
+  // Apple glass surface reads as FLAT, not fishbowl-domed. Thickness controls
+  // perceived glass depth (and the rim-spec line width scales with it).
+  Thickness: 4,          // was 8 — too aggressive, bubble-sheet feel
+  Fillet: 0.25,          // was 2 — Apple is essentially flat-surfaced, not fishbowled
+  BezelWidth: 11,
+  BezelScale: 0.32,
   Refraction: 1,
 
   // Lighting
   LightAngle: 135,                 // upper-left light (0=+x, 90=up)
   LightIntensity: 1,
 
-  // Specular catchlight — the #1 glass tell
+  // Specular: SpecularIntensity drives BOTH the Blinn-Phong bevel catchlight
+  // AND the thin rim-specular highlight. Sharpness is for the bevel catchlight.
   SpecularIntensity: 0.55,
-  SpecularSharpness: 120,
-  FresnelStrength: 0.7,
+  SpecularSharpness: 140,
+  FresnelStrength: 0.55,           // was 0.7 — softer, less heavy rim glow
 
-  // Chromatic aberration at rim
-  ChromaticAberration: 0.35,
+  // Chromatic aberration at rim — subtle (~0.5 px per Apple dossier)
+  ChromaticAberration: 0.3,
 
   // Rim ambient (top brighter, bottom dim)
-  EdgeLightTop: 0.18,
-  EdgeLightBottom: 0.04,
+  EdgeLightTop: 0.16,
+  EdgeLightBottom: 0.03,
 
   // Variable border width (thicker on lit side)
-  BorderVariance: 0.35,
-  // Border stays mostly uniform (crisp hairline), slight Fresnel sparkle on lit side
-  BorderAlphaVariance: 0.08,
-  BorderFresnelBrightness: 0.35,
+  BorderVariance: 0.3,
+  BorderAlphaVariance: 0.2,
+  BorderFresnelBrightness: 0.25,
 
   // Center slightly more blurred than rim (longer optical path)
-  InnerBlur: 0.35,
+  InnerBlur: 0.25,
 };
 
 /** Opaque-tinted panel — no refraction, no specular. */
