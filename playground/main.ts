@@ -4,44 +4,71 @@ import { JivAnimator } from '../src/Jiv/Jiv.Animator';
 const el = document.getElementById('jwift') as HTMLCanvasElement;
 const canvas = new Canvas(el);
 
-// ─── Background (colored circles + content behind the glass bar) ───
+// ─── Background screen ───
 
 const screen = new Jiv({
   Layout: { Direction: 'Column', Justify: 'Start', Align: 'Stretch' },
-  Style: { Background: { R: 0.06, G: 0.07, B: 0.12, A: 1 } },
+  Style: { Background: { R: 0.04, G: 0.045, B: 0.08, A: 1 } },
   ChildLayout: { FlexGrow: 1 },
 });
 
-// Content stack: a tall column of colorful cards that fills the screen and
-// extends UNDER the glass bar so refraction has something interesting to show.
+// ─── Header ───
+
+const header = new Jiv({
+  Layout: { Direction: 'Column', Justify: 'End', Align: 'Start', Gap: 4, Padding: [56, 32, 20, 32] },
+  ChildLayout: { FlexGrow: 0, FlexShrink: 0, Height: 140 },
+});
+header.AddChild(new Jiv({
+  Text: 'Today',
+  TextStyle: { FontSize: 14, FontWeight: 600, Color: { R: 1, G: 0.45, B: 0.55, A: 1 }, TextAlign: 'Left' },
+  ChildLayout: { FlexGrow: 0, Height: 18 },
+}));
+header.AddChild(new Jiv({
+  Text: 'Discover',
+  TextStyle: { FontSize: 40, FontWeight: 700, Color: { R: 1, G: 1, B: 1, A: 0.98 }, TextAlign: 'Left' },
+  ChildLayout: { FlexGrow: 0, Height: 52 },
+}));
+
+screen.AddChild(header);
+
+// Content stack — colourful cards behind the glass bar so refraction has material to work on.
 const contentColumn = new Jiv({
-  Layout: { Direction: 'Column', Justify: 'Start', Align: 'Stretch', Gap: 16, Padding: [40, 40, 120, 40] },
+  Layout: { Direction: 'Column', Justify: 'Start', Align: 'Stretch', Gap: 18, Padding: [0, 24, 140, 24] },
   ChildLayout: { FlexGrow: 1 },
 });
 
-const cardPalette = [
-  { R: 0.9, G: 0.35, B: 0.55 },  // pink
-  { R: 0.35, G: 0.65, B: 1.0 },  // blue
-  { R: 1.0, G: 0.75, B: 0.25 },  // yellow
-  { R: 0.45, G: 1.0, B: 0.65 },  // green
-  { R: 0.75, G: 0.4, B: 1.0 },   // purple
-  { R: 1.0, G: 0.5, B: 0.3 },    // orange
+type Card = { Title: string; Kicker: string; Color: { R: number; G: number; B: number }; Height: number };
+const cards: Card[] = [
+  { Title: 'Northern Lights',   Kicker: 'Featured',    Color: { R: 0.35, G: 0.55, B: 1.0 },  Height: 220 },
+  { Title: 'Sunset Run',        Kicker: 'Workout',     Color: { R: 1.0,  G: 0.48, B: 0.28 }, Height: 140 },
+  { Title: 'Deep Focus',        Kicker: 'Playlist',    Color: { R: 0.72, G: 0.38, B: 1.0 },  Height: 140 },
+  { Title: 'Coastline',         Kicker: 'Photo Story', Color: { R: 0.25, G: 0.78, B: 0.72 }, Height: 180 },
+  { Title: 'Golden Hour',       Kicker: 'Collection',  Color: { R: 1.0,  G: 0.78, B: 0.28 }, Height: 160 },
+  { Title: 'Evergreen',         Kicker: 'Nature',      Color: { R: 0.35, G: 0.72, B: 0.45 }, Height: 140 },
 ];
 
-for (let i = 0; i < 4; i++) {
-  const c = cardPalette[i % cardPalette.length];
+for (const c of cards) {
   const card = new Jiv({
-    Text: `Card ${i + 1}`,
-    TextStyle: { FontSize: 22, FontWeight: 600, Color: { R: 1, G: 1, B: 1, A: 0.95 }, TextAlign: 'Center' },
+    Layout: { Direction: 'Column', Justify: 'End', Align: 'Start', Gap: 2, Padding: [20, 22, 22, 22] },
     Style: {
-      Background: { R: c.R, G: c.G, B: c.B, A: 1 },
-      BorderRadius: [24, 24, 24, 24],
-      ShadowColor: { R: 0, G: 0, B: 0, A: 0.35 },
-      ShadowBlur: 24,
-      ShadowOffsetY: 8,
+      Background: { R: c.Color.R, G: c.Color.G, B: c.Color.B, A: 1 },
+      BorderRadius: [28, 28, 28, 28],
+      ShadowColor: { R: 0, G: 0, B: 0, A: 0.4 },
+      ShadowBlur: 32,
+      ShadowOffsetY: 14,
     },
-    ChildLayout: { FlexGrow: 0, FlexShrink: 0, Height: 120 },
+    ChildLayout: { FlexGrow: 0, FlexShrink: 0, Height: c.Height },
   });
+  card.AddChild(new Jiv({
+    Text: c.Kicker.toUpperCase(),
+    TextStyle: { FontSize: 11, FontWeight: 700, Color: { R: 1, G: 1, B: 1, A: 0.78 }, TextAlign: 'Left' },
+    ChildLayout: { FlexGrow: 0, Height: 14 },
+  }));
+  card.AddChild(new Jiv({
+    Text: c.Title,
+    TextStyle: { FontSize: 26, FontWeight: 700, Color: { R: 1, G: 1, B: 1, A: 0.98 }, TextAlign: 'Left' },
+    ChildLayout: { FlexGrow: 0, Height: 34 },
+  }));
   contentColumn.AddChild(card);
 }
 
@@ -65,9 +92,6 @@ const tabBar = new Jiv({
   Style: {
     ...LiquidGlass,
     BorderRadius: [NAV_H / 2, NAV_H / 2, NAV_H / 2, NAV_H / 2], // pill shape
-    ShadowColor: { R: 0, G: 0, B: 0, A: 0.35 },
-    ShadowBlur: 24,
-    ShadowOffsetY: 8,
   },
   ChildLayout: { Position: 'Placed', Width: NAV_W, Height: NAV_H },
   Width: NAV_W,
@@ -117,10 +141,10 @@ canvas.Animations.Register(indAnimator);
 
 let selected = 0;
 
+const BOTTOM_INSET = 32;
 const positionTabBar = (): void => {
-  // Center horizontally, 60% down so it's visible over cards even in small viewports.
   tabBar.X = (canvas.Width - NAV_W) / 2;
-  tabBar.Y = Math.min(canvas.Height - NAV_H - 24, canvas.Height * 0.55);
+  tabBar.Y = canvas.Height - NAV_H - BOTTOM_INSET;
 };
 
 const updateIndicator = (snap: boolean): void => {

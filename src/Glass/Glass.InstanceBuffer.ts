@@ -1,6 +1,6 @@
 import type { Jiv } from '../Jiv/Jiv';
 
-// Per-instance floats (13 vec4 slots = 52 floats = 208 bytes):
+// Per-instance floats (14 vec4 slots = 56 floats = 224 bytes):
 //   loc  1: a_Rect         (x, y, w, h)
 //   loc  2: a_PanelGeom    (cx, cy, halfW, halfH)
 //   loc  3: a_Radii        (tl, tr, br, bl)
@@ -16,8 +16,9 @@ import type { Jiv } from '../Jiv/Jiv';
 //   loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur)
 //   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, bulge)
 //                          bulge = Fillet (surface-bulge magnitude, Show Studio analog)
+//   loc 14: a_Outline      (borderAlphaVariance, borderFresnelBrightness, _pad, _pad)
 
-export const GLASS_FLOATS_PER_INSTANCE = 52;
+export const GLASS_FLOATS_PER_INSTANCE = 56;
 const BYTES_PER_INSTANCE = GLASS_FLOATS_PER_INSTANCE * 4;
 
 export class GlassInstanceBuffer {
@@ -151,6 +152,12 @@ export class GlassInstanceBuffer {
     data[offset + 49] = style.EdgeLightBottom;
     data[offset + 50] = style.BorderVariance;
     data[offset + 51] = style.Fillet;
+
+    // loc 14 — a_Outline
+    data[offset + 52] = style.BorderAlphaVariance;
+    data[offset + 53] = style.BorderFresnelBrightness;
+    data[offset + 54] = 0;
+    data[offset + 55] = 0;
 
     this._count++;
   };

@@ -60,6 +60,8 @@ export interface JivStyle {
 
   // Shape-driven variables
   BorderVariance: number;      // 0..1 — how much border width varies around perimeter (thicker on lit side)
+  BorderAlphaVariance: number; // 0..1 — how much border alpha fades on the unlit side (0 = uniform hairline)
+  BorderFresnelBrightness: number; // 0..1 — strength of white Fresnel tint on the lit side of the stroke
   InnerBlur: number;           // 0..1 — extra blur in the interior vs the rim (longer optical path)
 
   // Transform

@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import { resolve } from 'path';
 
 export default defineConfig({
+  root: resolve(__dirname, 'playground'),
   resolve: {
     alias: {
       '@jwift': resolve(__dirname, 'src'),

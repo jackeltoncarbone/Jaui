@@ -29,6 +29,8 @@ export const DefaultJivStyle: JivStyle = {
   EdgeLightTop: 0,
   EdgeLightBottom: 0,
   BorderVariance: 0,
+  BorderAlphaVariance: 0,
+  BorderFresnelBrightness: 0,
   InnerBlur: 0,
   Transform: { ...DefaultTransform },
   BorderColor: DefaultColor,

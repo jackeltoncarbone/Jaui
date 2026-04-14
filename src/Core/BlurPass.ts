@@ -127,7 +127,9 @@ export class BlurPass {
     let depth = Math.max(1, Math.min(MAX_LEVELS - 1, Math.ceil(Math.log2(target / 3 + 1))));
     // Use the per-tap offset to fine-tune within the chosen depth.
     const baseSigma = 3 * Math.pow(2, depth);
-    const tapOffset = Math.max(0.5, Math.min(2.0, target / baseSigma * 1.5));
+    // Keep tap-offset near 1.0 — wider offsets create the visible "oil pastel"
+    // striations (tap centers drift apart faster than the overlap can cover).
+    const tapOffset = Math.max(0.7, Math.min(1.3, target / baseSigma));
 
     // Allocate level FBOs at progressively halved sizes.
     // levels[0] is the destination at full size (where the upsample chain ends).

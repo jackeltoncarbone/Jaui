@@ -10,13 +10,18 @@ export const LiquidGlass: Partial<JivStyle> = {
 
   // Shape / alpha — fully transparent so only refracted backdrop + effects show
   Background: { R: 1, G: 1, B: 1, A: 0 },
-  BorderColor: { R: 1, G: 1, B: 1, A: 0.35 },
+  BorderColor: { R: 1, G: 1, B: 1, A: 0.55 },
   BorderWidth: 1,
   BorderBlur: 0.5,
   BorderRadius: [32, 32, 32, 32],
 
+  // Ambient drop shadow — floats the panel off the backdrop
+  ShadowColor: { R: 0, G: 0, B: 0, A: 0.22 },
+  ShadowBlur: 28,
+  ShadowOffsetY: 10,
+
   // Backdrop grading — gentle, content stays readable
-  FrostBlur: 4,
+  FrostBlur: 22,
   Brightness: 0.95,
   Saturation: 1.15,
   Contrast: 0.95,
@@ -46,6 +51,9 @@ export const LiquidGlass: Partial<JivStyle> = {
 
   // Variable border width (thicker on lit side)
   BorderVariance: 0.35,
+  // Border stays mostly uniform (crisp hairline), slight Fresnel sparkle on lit side
+  BorderAlphaVariance: 0.08,
+  BorderFresnelBrightness: 0.35,
 
   // Center slightly more blurred than rim (longer optical path)
   InnerBlur: 0.35,
@@ -96,5 +104,7 @@ export const ClearGlass: Partial<JivStyle> = {
   EdgeLightTop: 0.22,
   EdgeLightBottom: 0.05,
   BorderVariance: 0.4,
+  BorderAlphaVariance: 0.05,
+  BorderFresnelBrightness: 0.45,
   InnerBlur: 0.1,
 };

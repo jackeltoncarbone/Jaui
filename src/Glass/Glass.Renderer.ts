@@ -7,7 +7,7 @@ import fragSrc from './Shaders/Glass.Panel.frag?raw';
 
 const BYTES_PER_VEC4 = 16;
 const BYTES_PER_INSTANCE = GLASS_FLOATS_PER_INSTANCE * 4;
-const INSTANCE_ATTR_COUNT = 13; // locations 1..13
+const INSTANCE_ATTR_COUNT = 14; // locations 1..14
 
 export class GlassRenderer {
   private _gl: WebGL2RenderingContext;

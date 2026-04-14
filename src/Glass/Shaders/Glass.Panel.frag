@@ -13,7 +13,8 @@ flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
 flat in vec4 v_Refraction;     // thickness, bezelWidth, refractionStrength, bezelScale
 flat in vec4 v_Lighting;       // lightDirX, lightDirY, lightIntensity, fresnelStrength
 flat in vec4 v_Specular;       // specIntensity, specSharpness, chromaticAberration, innerBlur
-flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance, _pad
+flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance, bulge
+flat in vec4 v_Outline;        // borderAlphaVariance, borderFresnelBrightness, _pad, _pad
 
 uniform sampler2D u_Backdrop;
 uniform vec2 u_Resolution;
@@ -389,16 +390,13 @@ void main() {
         result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
         result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;
 
-        // Fresnel rim stroke — variable width, color = backdrop-vibrant + white spec,
-        // alpha modulated by light facing.
+        // Hairline silhouette — the unlit-side dim is `BorderAlphaVariance`,
+        // the lit-side white-mix is `BorderFresnelBrightness`. Zero for a
+        // flat uniform stroke, nonzero to reintroduce directional character.
         float lightFacing = max(alignment, 0.0);
-        // Brighter on lit side (60..100%), dimmer on unlit (10..50%).
-        float strokeBrightness = mix(0.15, 1.0, pow(lightFacing, 1.0));
-        // Stroke color: backdrop vibrancy carrying the rim character, brightened
-        // toward white on the lit side (Fresnel specular peak).
-        vec3 strokeColor = mix(edgeLightRgb, vec3(1.0), pow(lightFacing, 2.0) * 0.7);
-        // Tint by user BorderColor.rgb so brand-coloured borders still read.
-        strokeColor = mix(strokeColor, v_BorderColor.rgb, 0.25);
+        float alphaFloor = 1.0 - v_Outline.x;
+        float strokeBrightness = mix(alphaFloor, 1.0, pow(lightFacing, 2.0));
+        vec3 strokeColor = mix(v_BorderColor.rgb, vec3(1.0), pow(lightFacing, 3.0) * v_Outline.y);
 
         float borderOuter = smoothstep(-0.5, 0.5, dist);
         float borderInner = smoothstep(-0.5, 0.5, dist + localBorderWidth);
