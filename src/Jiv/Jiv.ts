@@ -17,8 +17,16 @@ export class Jiv {
   Parent: Jiv | null = null;
   Children: Jiv[] = [];
 
-  // Style — deep copy so mutations are local
+  // Style — user's declarative base. The renderer does NOT read this directly;
+  // it reads `RenderStyle`, which the style animator springs toward the
+  // EffectiveStyle (base + active state overrides) every frame. Mutating
+  // Style triggers the springs naturally.
   Style: JivStyle;
+
+  // RenderStyle — what the renderer actually consumes. Spring-animated copy
+  // of Style/EffectiveStyle. Starts equal to Style (no entry animation), then
+  // JivStyleAnimator drives it toward EffectiveStyle on every tick.
+  RenderStyle: JivStyle;
 
   // Layout — container config (how this node lays out its children)
   Layout: LayoutConfig;
@@ -93,6 +101,15 @@ export class Jiv {
     this.Style.CornerShape = options?.Style?.CornerShape
       ? [...options.Style.CornerShape]
       : [...DefaultJivStyle.CornerShape];
+    // Deep-copy nested color objects so overrides don't bleed through
+    this.Style.Background = { ...this.Style.Background };
+    this.Style.BorderColor = { ...this.Style.BorderColor };
+    this.Style.ShadowColor = { ...this.Style.ShadowColor };
+
+    // RenderStyle starts as a full deep clone of Style — no entry animation
+    // (springs init at target). Subsequent EffectiveStyle changes drive
+    // springs to animate this toward the new target.
+    this.RenderStyle = _deepCloneStyle(this.Style);
 
     // Layout config — deep copy Padding tuple
     this.Layout = { ...DefaultLayoutConfig, ...options?.Layout };
@@ -176,3 +193,15 @@ export class Jiv {
     if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
   };
 }
+
+/** Deep clone a JivStyle so a RenderStyle can diverge from its Style source
+ *  under the animator. All nested objects/arrays get fresh copies. */
+const _deepCloneStyle = (s: JivStyle): JivStyle => ({
+  ...s,
+  Background: { ...s.Background },
+  BorderColor: { ...s.BorderColor },
+  ShadowColor: { ...s.ShadowColor },
+  BorderRadius: [...s.BorderRadius],
+  CornerShape: [...s.CornerShape],
+  Transform: { ...s.Transform },
+});

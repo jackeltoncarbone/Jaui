@@ -4,6 +4,7 @@
  */
 
 import { JivAnimator } from '../Jiv/Jiv.Animator';
+import { JivStyleAnimator } from '../Jiv/Jiv.StyleAnimator';
 import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
 import { ComputeIntrinsicSizes } from '../Layout/Layout.Intrinsic';
@@ -41,6 +42,7 @@ export class Canvas {
   private _blur!: BlurPass;
   private _animationManager = new AnimationManager();
   private _animators = new Map<Jiv, JivAnimator>();
+  private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
   private _textAnimators = new Map<Jiv, TextAnimator>();
   private _scrollManager!: ScrollManager;
   /** Largest FrostBlur of any glass collected this frame (CSS px). Drives the dual-filter pyramid. */
@@ -303,7 +305,7 @@ export class Canvas {
     const yOffset = (contentH - totalTextHeight) / 2;
 
     for (const w of anim.Words) {
-      const opacity = node.Style.Opacity * w.Opacity.Value;
+      const opacity = node.RenderStyle.Opacity * w.Opacity.Value;
       if (opacity <= 0.001) continue;
       const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
       const wx = contentX + w.SpringX.Value;
@@ -380,27 +382,25 @@ export class Canvas {
 
       let animator = this._animators.get(node);
       if (!animator) {
-        // First layout for this Jiv — synthesize animator, snap to the solved
-        // target immediately (no spring-in from 0,0). Subsequent layouts will
-        // spring normally via SetTargets. An explicit entry animation (enter
-        // opacity/scale), when we add it, plugs in here with a different
-        // initial spring state + separate entry targets.
+        // First layout — create BOTH animators, snap both to targets (no
+        // entry animation). Style animator springs every animatable JivStyle
+        // field toward node.EffectiveStyle() thereafter; hover/active/focus
+        // state changes animate smoothly by default.
         animator = new JivAnimator(node);
         animator.SetTargets({
-          X: result.X,
-          Y: result.Y,
-          Width: result.Width,
-          Height: result.Height,
+          X: result.X, Y: result.Y, Width: result.Width, Height: result.Height,
         });
         animator.SnapToTargets();
         this._animators.set(node, animator);
         this._animationManager.Register(animator);
+
+        const styleAnim = new JivStyleAnimator(node);
+        styleAnim.SnapToTargets();
+        this._styleAnimators.set(node, styleAnim);
+        this._animationManager.Register(styleAnim);
       } else {
         const needsKick = animator.SetTargets({
-          X: result.X,
-          Y: result.Y,
-          Width: result.Width,
-          Height: result.Height,
+          X: result.X, Y: result.Y, Width: result.Width, Height: result.Height,
         });
         if (needsKick) this._animationManager.Kick();
       }
@@ -411,6 +411,12 @@ export class Canvas {
       if (!results.has(node)) {
         this._animationManager.Unregister(animator);
         this._animators.delete(node);
+      }
+    }
+    for (const [node, sAnim] of this._styleAnimators) {
+      if (!results.has(node)) {
+        this._animationManager.Unregister(sAnim);
+        this._styleAnimators.delete(node);
       }
     }
     for (const [node, tAnim] of this._textAnimators) {

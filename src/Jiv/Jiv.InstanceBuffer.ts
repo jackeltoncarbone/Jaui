@@ -50,10 +50,11 @@ export class JivInstanceBuffer {
   Push = (jiv: Jiv, dpr: number, offsetX: number = 0, offsetY: number = 0): void => {
     if (this._count >= this._capacity) this._grow();
 
-    // Read the EFFECTIVE style — merges Hover/Active/Focus/Disabled overrides
-    // over the base style. Fast-path when no state is active (returns the
-    // base style reference directly, no allocation).
-    const style = jiv.EffectiveStyle();
+    // Read the spring-animated RenderStyle (JivStyleAnimator writes here each
+    // frame, chasing jiv.EffectiveStyle() — the base-plus-state target).
+    // State transitions animate automatically: hover changes styles flow
+    // through the springs before reaching the renderer.
+    const style = jiv.RenderStyle;
     const d = dpr;
     const offset = this._count * JIV_FLOATS_PER_INSTANCE;
 

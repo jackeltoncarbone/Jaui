@@ -59,19 +59,22 @@ for (const c of cards) {
       ShadowBlur: 32,
       ShadowOffsetY: 14,
     },
-    // Hover: brighter shadow lift. Active: press-in (dimmed shadow).
-    // No animation yet for color/shadow (MVP) — the change is instant.
-    // Scale/Opacity can animate via the existing JivAnimator once we wire
-    // state-driven target updates.
+    // Hover: add a bright white rim + soft glow so it reads on dark backdrops.
+    // Active: darken the card (press-in feedback).
+    // State changes are instant in the MVP — animated transitions (color
+    // springs, scale tween) are a follow-up.
     HoverStyle: {
-      ShadowColor: { R: 0, G: 0, B: 0, A: 0.55 },
+      BorderColor: { R: 1, G: 1, B: 1, A: 0.95 },
+      BorderWidth: 2,
+      BorderBlur: 6,
+      ShadowColor: { R: 1, G: 1, B: 1, A: 0.28 },
       ShadowBlur: 40,
-      ShadowOffsetY: 18,
+      ShadowOffsetY: 0,
     },
     ActiveStyle: {
-      ShadowColor: { R: 0, G: 0, B: 0, A: 0.25 },
-      ShadowBlur: 20,
-      ShadowOffsetY: 6,
+      Background: { R: c.Color.R * 0.75, G: c.Color.G * 0.75, B: c.Color.B * 0.75, A: 1 },
+      BorderColor: { R: 1, G: 1, B: 1, A: 0.35 },
+      BorderWidth: 1,
     },
     ChildLayout: { FlexGrow: 0, FlexShrink: 0, Height: c.Height },
   });
