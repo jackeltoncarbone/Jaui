@@ -41,10 +41,23 @@ export class ScrollManager implements Animatable {
     }
   };
 
-  /** Find the deepest Overflow:Scroll Jiv at (cssX, cssY). Walks tree. */
-  HitScrollContainer = (cssX: number, cssY: number): Jiv | null => {
-    return this._hit(this._root, cssX, cssY, 0, 0);
+  /** DOM-style scroll target: find the topmost Jiv at (cssX, cssY) that accepts
+   *  pointer events, then walk UP the tree to the nearest scrollable ancestor.
+   *  Returns null if no ancestor is scrollable (e.g. pointer is over a floating
+   *  tab bar whose ancestors are not scroll containers — the wheel should NOT
+   *  fall through to a sibling scroll container behind it). */
+  ResolveScrollTarget = (cssX: number, cssY: number): Jiv | null => {
+    const hit = this._hitTopmost(this._root, cssX, cssY, 0, 0);
+    if (!hit) return null;
+    // Walk up (including the hit itself) for the nearest scrollable
+    let cur: Jiv | null = hit;
+    while (cur) {
+      if (cur.Style.Overflow === 'Scroll') return cur;
+      cur = cur.Parent;
+    }
+    return null;
   };
+
 
   Tick = (dt: number): boolean => {
     let active = false;
@@ -77,26 +90,30 @@ export class ScrollManager implements Animatable {
     for (const c of node.Children) this._stepWalk(c, fn);
   };
 
-  /** Recursive front-to-back-ish hit test: visits children last so the
-   *  deepest match wins (stack-style). Coordinates are CSS px in canvas space. */
-  private _hit = (node: Jiv, x: number, y: number, offX: number, offY: number): Jiv | null => {
-    let result: Jiv | null = null;
+  /** Front-to-back topmost hit test. Mirrors render order: children drawn
+   *  later (higher in Children array) are ON TOP, so reverse iterate and
+   *  return the first hit. Respects PointerEvents: 'None' (skips the node
+   *  AND its subtree, like CSS pointer-events: none). */
+  private _hitTopmost = (node: Jiv, x: number, y: number, offX: number, offY: number): Jiv | null => {
+    if (!node.Style.Visible || node.Style.PointerEvents === 'None') return null;
+
     const ox = node.X + offX;
     const oy = node.Y + offY;
-    const inside = x >= ox && x < ox + node.Width && y >= oy && y < oy + node.Height;
+    const inside = node === this._root
+      ? true   // root always covers everything
+      : x >= ox && x < ox + node.Width && y >= oy && y < oy + node.Height;
 
-    if (inside && node.Style.Overflow === 'Scroll') {
-      result = node; // tentative — a deeper scroll container beats this
+    if (!inside) return null;
+
+    // Descend (reverse = topmost first). A matching child wins over self.
+    const dx = node.Style.Overflow === 'Scroll' ? offX - node.ScrollX : offX;
+    const dy = node.Style.Overflow === 'Scroll' ? offY - node.ScrollY : offY;
+    for (let i = node.Children.length - 1; i >= 0; i--) {
+      const hit = this._hitTopmost(node.Children[i], x, y, dx, dy);
+      if (hit) return hit;
     }
 
-    if (inside) {
-      const dx = node.Style.Overflow === 'Scroll' ? offX - node.ScrollX : offX;
-      const dy = node.Style.Overflow === 'Scroll' ? offY - node.ScrollY : offY;
-      for (const c of node.Children) {
-        const deeper = this._hit(c, x, y, dx, dy);
-        if (deeper) result = deeper;
-      }
-    }
-    return result;
+    // No child hit — this node is the topmost at this point
+    return node;
   };
 }

@@ -85,8 +85,6 @@ screen.AddChild(contentColumn);
 const NAV_W = 440;
 const NAV_H = 60;
 const BAR_PAD = 6;
-const TAB_COUNT = 4;
-const TAB_W = (NAV_W - BAR_PAD * 2) / TAB_COUNT;
 const INDICATOR_INSET = 2;
 
 const tabBar = new Jiv({
@@ -100,22 +98,8 @@ const tabBar = new Jiv({
   Height: NAV_H,
 });
 
-// Indicator pill — Placed child, X/Y RELATIVE to tabBar (Placed = parent-relative,
-// like CSS position: absolute inside a positioned ancestor). No manual animator;
-// the canvas auto-animator picks up solver targets and springs between them.
-const IND_W = TAB_W - INDICATOR_INSET * 2;
-const IND_H = NAV_H - BAR_PAD * 2 - INDICATOR_INSET * 2;
-const indicator = new Jiv({
-  Style: {
-    Background: { R: 1, G: 1, B: 1, A: 0.18 },
-    BorderRadius: [IND_H / 2, IND_H / 2, IND_H / 2, IND_H / 2],
-  },
-  ChildLayout: { Position: 'Placed', Width: IND_W, Height: IND_H },
-  X: BAR_PAD + INDICATOR_INSET,  // relative to tabBar.X
-  Y: BAR_PAD + INDICATOR_INSET,  // relative to tabBar.Y
-  Width: IND_W, Height: IND_H,
-});
-
+// Tab labels — FlexGrow:1, they auto-distribute. The solver tells us each
+// tab's rect after the main pass; the indicator ATTACHES to the selected tab.
 const tabLabels = ['Home', 'Discover', 'Activity', 'Profile'];
 const tabs: Jiv[] = tabLabels.map((label, i) => new Jiv({
   Text: label,
@@ -127,6 +111,24 @@ const tabs: Jiv[] = tabLabels.map((label, i) => new Jiv({
   },
   ChildLayout: { FlexGrow: 1, FlexBasis: 0 },
 }));
+
+// Indicator pill — attaches to the selected tab's rect (Fill mode with small
+// inset). As the selection changes, we swap AttachTo and the solver recomputes;
+// the canvas auto-animator springs the indicator to the new rect. No manual
+// position math anywhere — declarative through and through.
+const IND_H = NAV_H - BAR_PAD * 2 - INDICATOR_INSET * 2;
+const indicator = new Jiv({
+  Style: {
+    Background: { R: 1, G: 1, B: 1, A: 0.18 },
+    BorderRadius: [IND_H / 2, IND_H / 2, IND_H / 2, IND_H / 2],
+  },
+  ChildLayout: {
+    Position: 'Attach',
+    AttachTo: tabs[0],
+    AttachMode: 'Fill',
+    AttachInset: [INDICATOR_INSET, INDICATOR_INSET, INDICATOR_INSET, INDICATOR_INSET],
+  },
+});
 
 // Indicator first (underneath), then tabs on top
 tabBar.AddChild(indicator);
@@ -162,13 +164,10 @@ const positionTabBar = (): void => {
   tabBar.MarkLayoutDirty();
 };
 
-/** Update indicator to the currently-selected tab. X is RELATIVE to tabBar. */
+/** Point the indicator at the currently-selected tab. Attach solver does the
+ *  rest — indicator rect follows the tab's solved layout, even on resize. */
 const updateIndicator = (): void => {
-  const effectiveTabW = (tabBar.Width - BAR_PAD * 2) / TAB_COUNT;
-  indicator.X = BAR_PAD + INDICATOR_INSET + selected * effectiveTabW;
-  indicator.Y = BAR_PAD + INDICATOR_INSET;
-  indicator.Width = effectiveTabW - INDICATOR_INSET * 2;
-  indicator.ChildLayout.Width = indicator.Width;
+  indicator.ChildLayout.AttachTo = tabs[selected];
   indicator.MarkLayoutDirty();
 };
 
@@ -204,14 +203,10 @@ el.addEventListener('click', (ev) => {
   const clickX = ev.clientX - rect.left;
   const clickY = ev.clientY - rect.top;
 
-  // Hit-test against tab bar using its CURRENT width (responsive)
-  if (clickX < tabBar.X || clickX > tabBar.X + tabBar.Width) return;
-  if (clickY < tabBar.Y || clickY > tabBar.Y + tabBar.Height) return;
-
-  const effectiveTabW = (tabBar.Width - BAR_PAD * 2) / TAB_COUNT;
-  const localX = clickX - tabBar.X - BAR_PAD;
-  const idx = Math.max(0, Math.min(TAB_COUNT - 1, Math.floor(localX / effectiveTabW)));
-  if (idx === selected) return;
+  // Hit-test each tab's current solved rect — no math, just geometry.
+  const idx = tabs.findIndex(t =>
+    clickX >= t.X && clickX < t.X + t.Width && clickY >= t.Y && clickY < t.Y + t.Height);
+  if (idx < 0 || idx === selected) return;
 
   // Update text styles — old tab dims, new tab brightens
   tabs[selected].SetText(tabLabels[selected], {

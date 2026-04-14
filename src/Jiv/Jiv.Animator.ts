@@ -53,6 +53,29 @@ export class JivAnimator implements Animatable {
     return needsKick;
   };
 
+  /** Force current spring values to their targets (zero velocity). Used on
+   *  first layout so a newly-appeared Jiv renders at its final position
+   *  immediately — no "swoop in from 0,0" even if the animator was created
+   *  before node.X/Y/W/H were set. Prefer this over relying on the constructor
+   *  reading a particular ordering. */
+  SnapToTargets = (): void => {
+    this.Springs.X.Snap();
+    this.Springs.Y.Snap();
+    this.Springs.Width.Snap();
+    this.Springs.Height.Snap();
+    this.Springs.Opacity.Snap();
+    this.Springs.ScaleX.Snap();
+    this.Springs.ScaleY.Snap();
+    // Mirror the snapped values back to the Jiv immediately
+    this._jiv.X = this.Springs.X.Value;
+    this._jiv.Y = this.Springs.Y.Value;
+    this._jiv.Width = this.Springs.Width.Value;
+    this._jiv.Height = this.Springs.Height.Value;
+    this._jiv.Style.Opacity = this.Springs.Opacity.Value;
+    this._jiv.Style.Transform.ScaleX = this.Springs.ScaleX.Value;
+    this._jiv.Style.Transform.ScaleY = this.Springs.ScaleY.Value;
+  };
+
   Tick = (dt: number): boolean => {
     let active = false;
     const s = this.Springs;

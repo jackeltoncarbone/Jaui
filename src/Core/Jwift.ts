@@ -379,13 +379,19 @@ export class Canvas {
 
       let animator = this._animators.get(node);
       if (!animator) {
-        // First layout: set position THEN create animator so springs init at correct values
-        node.X = result.X;
-        node.Y = result.Y;
-        node.Width = result.Width;
-        node.Height = result.Height;
-
+        // First layout for this Jiv — synthesize animator, snap to the solved
+        // target immediately (no spring-in from 0,0). Subsequent layouts will
+        // spring normally via SetTargets. An explicit entry animation (enter
+        // opacity/scale), when we add it, plugs in here with a different
+        // initial spring state + separate entry targets.
         animator = new JivAnimator(node);
+        animator.SetTargets({
+          X: result.X,
+          Y: result.Y,
+          Width: result.Width,
+          Height: result.Height,
+        });
+        animator.SnapToTargets();
         this._animators.set(node, animator);
         this._animationManager.Register(animator);
       } else {
@@ -502,7 +508,7 @@ export class Canvas {
       const rect = this.Element.getBoundingClientRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
-      const target = this._scrollManager.HitScrollContainer(cssX, cssY);
+      const target = this._scrollManager.ResolveScrollTarget(cssX, cssY);
       if (!target) return;
 
       // Convert delta — wheel deltas are CSS px when deltaMode === 0 (DOM_DELTA_PIXEL).

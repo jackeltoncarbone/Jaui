@@ -89,6 +89,13 @@ export class Jiv {
     this.ChildLayout.Margin = options?.ChildLayout?.Margin
       ? [...options.ChildLayout.Margin]
       : [...DefaultChildLayout.Margin];
+    // Deep-copy Attach objects/arrays so mutations don't bleed through the
+    // shared default.
+    this.ChildLayout.AttachTargetAnchor = { ...(options?.ChildLayout?.AttachTargetAnchor ?? DefaultChildLayout.AttachTargetAnchor) };
+    this.ChildLayout.AttachSelfAnchor = { ...(options?.ChildLayout?.AttachSelfAnchor ?? DefaultChildLayout.AttachSelfAnchor) };
+    this.ChildLayout.AttachInset = options?.ChildLayout?.AttachInset
+      ? [...options.ChildLayout.AttachInset]
+      : [...DefaultChildLayout.AttachInset];
 
     // Text
     this.TextStyle = { ...DefaultTextStyle, ...options?.TextStyle };

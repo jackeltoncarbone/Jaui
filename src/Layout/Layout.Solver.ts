@@ -5,11 +5,102 @@ import { SolveFlex, type FlexContainer, type FlexChild } from './Layout.Flex';
 /**
  * Solve layout for the entire tree rooted at `root`.
  * Top-down: parent solves first, children use parent's computed size.
+ * Two-phase: (1) resolve Flow/Offset/Placed/Fixed/Sticky; (2) resolve Attach
+ * against already-computed target rects, iterating until stable.
  */
 export const SolveLayout = (root: Jiv): Map<Jiv, LayoutResult> => {
   const results = new Map<Jiv, LayoutResult>();
   _solveNode(root, root.Width, root.Height, 0, 0, results);
+  _resolveAttachPass(root, results);
   return results;
+};
+
+/** Post-pass: for every Jiv with Position:'Attach', derive its rect from its
+ *  target's current result. Iterate until nothing changes (handles attach
+ *  chains where target is itself attached). Capped at ATTACH_MAX_ITER to
+ *  prevent infinite loops on cycles. */
+const ATTACH_MAX_ITER = 8;
+const _resolveAttachPass = (root: Jiv, results: Map<Jiv, LayoutResult>): void => {
+  const attached: Jiv[] = [];
+  _collectAttached(root, attached);
+  if (attached.length === 0) return;
+
+  for (let iter = 0; iter < ATTACH_MAX_ITER; iter++) {
+    let changed = false;
+    for (const node of attached) {
+      const target = node.ChildLayout.AttachTo as Jiv | null;
+      if (!target) continue;
+      const targetRect = results.get(target);
+      if (!targetRect) continue;
+
+      const rect = _computeAttachRect(node, targetRect);
+      const prior = results.get(node);
+      if (!prior
+          || prior.X !== rect.X || prior.Y !== rect.Y
+          || prior.Width !== rect.Width || prior.Height !== rect.Height) {
+        results.set(node, rect);
+        _solveSubtree(node, rect.Width, rect.Height, rect.X, rect.Y, results);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+  }
+};
+
+const _collectAttached = (node: Jiv, out: Jiv[]): void => {
+  if (node.ChildLayout.Position === 'Attach') out.push(node);
+  for (const c of node.Children) _collectAttached(c, out);
+};
+
+const _computeAttachRect = (node: Jiv, target: LayoutResult): LayoutResult => {
+  const cl = node.ChildLayout;
+
+  if (cl.AttachMode === 'Fill') {
+    // Target rect minus inset (top, right, bottom, left)
+    const [it, ir, ib, il] = cl.AttachInset;
+    return {
+      X: target.X + il,
+      Y: target.Y + it,
+      Width: Math.max(0, target.Width - il - ir),
+      Height: Math.max(0, target.Height - it - ib),
+    };
+  }
+
+  // Anchor mode: self's declared size positioned so selfAnchor maps to targetAnchor
+  const w = _resolveAttachSize(cl.Width, target.Width, node.Width);
+  const h = _resolveAttachSize(cl.Height, target.Height, node.Height);
+
+  const targetAX = target.X + target.Width * cl.AttachTargetAnchor.X;
+  const targetAY = target.Y + target.Height * cl.AttachTargetAnchor.Y;
+  const selfAX = w * cl.AttachSelfAnchor.X;
+  const selfAY = h * cl.AttachSelfAnchor.Y;
+
+  return {
+    X: targetAX - selfAX + cl.AttachOffsetX,
+    Y: targetAY - selfAY + cl.AttachOffsetY,
+    Width: w,
+    Height: h,
+  };
+};
+
+const _resolveAttachSize = (size: number | 'Auto' | string, containerSize: number, fallback: number): number => {
+  if (size === 'Auto') return fallback;
+  if (typeof size === 'number') return size;
+  if (typeof size === 'string' && size.endsWith('%')) {
+    return (parseFloat(size) / 100) * containerSize;
+  }
+  return fallback;
+};
+
+/** Like _solveNode but only recurses without re-emitting its own result (already set). */
+const _solveSubtree = (
+  node: Jiv, width: number, height: number, x: number, y: number,
+  results: Map<Jiv, LayoutResult>,
+): void => {
+  // Save and re-invoke the main solver on this node's subtree.
+  // _solveNode overwrites results.set(node, ...) with fresh X/Y/W/H; that's
+  // fine because we just computed them. Re-running gives us the children.
+  _solveNode(node, width, height, x, y, results);
 };
 
 const _solveNode = (

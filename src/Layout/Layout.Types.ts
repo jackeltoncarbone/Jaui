@@ -4,8 +4,33 @@ export type FlexWrap = 'NoWrap' | 'Wrap' | 'WrapReverse';
 export type JustifyContent = 'Start' | 'End' | 'Center' | 'SpaceBetween' | 'SpaceAround' | 'SpaceEvenly';
 export type AlignItems = 'Start' | 'End' | 'Center' | 'Stretch';
 export type AlignContent = 'Start' | 'End' | 'Center' | 'Stretch' | 'SpaceBetween' | 'SpaceAround' | 'SpaceEvenly';
-export type PositionMode = 'Flow' | 'Offset' | 'Placed' | 'Fixed' | 'Sticky';
+export type PositionMode = 'Flow' | 'Offset' | 'Placed' | 'Fixed' | 'Sticky' | 'Attach';
+
+export interface AnchorPoint {
+  /** 0..1 — horizontal position within the rect (0 = left, 0.5 = center, 1 = right) */
+  X: number;
+  /** 0..1 — vertical position within the rect */
+  Y: number;
+}
+
 export type Overflow = 'Visible' | 'Hidden' | 'Scroll';
+
+/** Jwift's equivalent of CSS anchor-positioning / SwiftUI `.alignmentGuide`.
+ *  Set Position:'Attach' on a Jiv, then its rect is derived from another Jiv's
+ *  current layout on every solve pass — so the attached node tracks its target
+ *  automatically as the target moves, resizes, reflows. Instant-target
+ *  cascade; springs animate to the derived rect like any other change.
+ *
+ *  Two placement modes:
+ *    Anchor — map a point on target to a point on self, plus optional offset.
+ *             Self size still comes from ChildLayout (fixed / Auto / intrinsic).
+ *    Fill   — self fills the target's rect minus AttachInset. Self size derived.
+ *
+ *  Target can be ANY Jiv in the tree (not just an ancestor or sibling). The
+ *  solver resolves Attach in a post-pass after the main top-down solve. If
+ *  the target is itself Attach, subsequent iterations catch it — deep chains
+ *  resolve in ≤N passes. Cycles don't infinite loop; they just fail to
+ *  converge past the iteration cap (logged for debugging). */
 
 export interface LayoutConfig {
   Mode: LayoutMode;
@@ -18,6 +43,12 @@ export interface LayoutConfig {
   RowGap: number;
   ColumnGap: number;
   Padding: [number, number, number, number]; // top, right, bottom, left
+}
+
+/** Type shape of a Jiv referenced as an attach target. Avoids a circular
+ *  import between Layout.Types and Jiv — only the bits the solver reads. */
+export interface AttachTarget {
+  Parent: AttachTarget | null;
 }
 
 export interface ChildLayout {
@@ -42,6 +73,15 @@ export interface ChildLayout {
   StickyBottom: number | null;
   StickyLeft: number | null;
   StickyRight: number | null;
+
+  // Attach — only meaningful when Position === 'Attach'
+  AttachTo: AttachTarget | null;
+  AttachMode: 'Anchor' | 'Fill';
+  AttachTargetAnchor: AnchorPoint;   // 0..1 on target rect
+  AttachSelfAnchor: AnchorPoint;     // 0..1 on self rect (Anchor mode only)
+  AttachOffsetX: number;
+  AttachOffsetY: number;
+  AttachInset: [number, number, number, number]; // top, right, bottom, left (Fill mode)
 }
 
 export interface LayoutResult {
@@ -98,4 +138,11 @@ export const DefaultChildLayout: ChildLayout = {
   StickyBottom: null,
   StickyLeft: null,
   StickyRight: null,
+  AttachTo: null,
+  AttachMode: 'Anchor',
+  AttachTargetAnchor: { X: 0.5, Y: 0.5 },
+  AttachSelfAnchor: { X: 0.5, Y: 0.5 },
+  AttachOffsetX: 0,
+  AttachOffsetY: 0,
+  AttachInset: [0, 0, 0, 0],
 };
