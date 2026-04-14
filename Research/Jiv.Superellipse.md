@@ -32,7 +32,7 @@ The corner's boundary, in corner-local coordinates `(qx, qy)` where `(0, 0)` is 
 | Preset | `rx` | `ry` | `n` | Notes |
 |---|---|---|---|---|
 | **Rect**   | `cornerRadius` | `cornerRadius` | `2 + 6·s` | Standard rounded rect. `s ∈ [0,1]` is the Apple-style smoothing knob. `s=0` → circular corner (`n=2`). `s=0.6` → Apple iOS squircle (`n≈5.6`). |
-| **Pill**   | `1.6236 · b` | `b` (= short halfSize) | `2.55` | Show Studio's Bezier pill reproduced as a stretched squircle. `b` is whichever half-extent is smaller (the pill's "radius" axis). |
+| **Pill**   | (polyline)   | (polyline) | (polyline) | Show Studio's actual 3-Bezier pill reproduced via 33-point polyline SDF. Pixel-accurate (99.99% match). See `SS_PillSDF` in the shader. |
 | **Circle** | `min(halfX, halfY)` | `min(halfX, halfY)` | `2` | Degenerates to a pure ellipse/circle when `halfX = halfY`. |
 
 The mode is auto-detected from aspect ratio + corner radius (see *Classification* below). Apps can also specify a mode explicitly.
@@ -62,25 +62,56 @@ The curve's maximum leftward extent is **40.59**, not 42.5. The `42.5` is the *c
 
 This is the SS pill's "personality": each endcap extends 62% further horizontally than a semicircle would, while still tapering to zero horizontal extent at the flat edges. That stretch is why the pill doesn't look like a gym-ball capsule — it has the iOS-esque *fullness* at the middle.
 
-## Where `n = 2.55` comes from
+## Pill: polyline SDF instead of closed-form
 
-Fit the SS Bezier endcap to a superellipse with `a = 40.59, b = 25`:
+After exhaustive sweeps (see `tests/Pill.SDF.Match.test.ts`) we found the closed-form
+superellipse fit floors out at ~99.66% pixel match with SS's actual Bezier path
+regardless of `(rx, n)`. The tightest single-parameter fit is `n = 2.7` at 0.34%
+mismatch — but the user requirement is exact match. So the pill mode now uses a
+**polyline SDF**:
+
+1. Sample SS's upper-right endcap quarter at 33 normalized `(u, v)` points
+   (one-time generation in `tests/Pill.PolylineGen.test.ts`).
+2. In the shader, fold query to first quadrant via `abs()`. Flat-zone case is a
+   trivial straight-edge SDF in y. Endcap case computes min distance to the
+   32 polyline segments, in physical px.
+3. Inside test: linear scan of the polyline (sorted by decreasing v) finds the
+   bracketing segment, lerps to find boundary `u_b`, compares `qL.x ≤ u_b * maxExtent`.
+4. Gradient: vector from closest polyline point to query, normalized, sign-
+   flipped if inside.
+
+Result: **99.99%** pixel match across all tested sizes (440×60, 600×80, 120×30, 800×100).
+
+The closed-form analysis below is retained for reference (it still applies to
+Rect mode).
+
+## Where `n = 3.0` comes from
+
+Fit the SS Bezier endcap to a superellipse with `a = 40.59, b = 25`. Sampling the Bezier at 7 points and finding the single `n` that minimizes mean squared error across ALL points (not just the single `(0.859, 0.64)` endpoint of Bezier 1):
 
 ```
-superellipse:  (x/a)^n + (y/b)^n = 1
-at y=0:  x = a = 40.59   (matches SS maxExtent) ✓
-at y=25: x = 0           (matches SS tangent point) ✓
-at y=16: SS x = 34.85  →  (34.85/40.59)^n + (16/25)^n = 1
-                           0.859^n + 0.64^n = 1
+SS Bezier sampled at t = 0.2, 0.4, 0.6, 0.8, 1.0 on Bezier 1, then 0.2, 0.5 on Bezier 2:
+  (u, v) = (0.216, 0.997)  (0.411, 0.977)  (0.583, 0.922)
+           (0.733, 0.816)  (0.859, 0.640)  (0.949, 0.403)  (1.000, 0.000)
+
+Max deviation from superellipse u^n + v^n = 1 at each n:
+  n = 2.0:  0.14 (pure ellipse) — shape visibly undersized in the middle
+  n = 2.55: 0.04 — best fit at the single (0.859, 0.64) point, but lacks
+                  fullness elsewhere; the visible silhouette has a subtle
+                  "hex" feel because the middle of the curve is too tight
+  n = 3.0:  0.02 — best overall closed-form fit (within ~0.6 px on a
+                  60-tall pill), smooth curvature profile throughout
+
+At `n = 3.0` the superellipse reproduces SS's Bezier to sub-pixel accuracy across
+the entire curve. The "hex" artifact of `n = 2.55` is a sign that the middle
+of the curve was being under-filled — too high `n` would flatten the sides
+further, too low `n` loses the SS pill's characteristic fullness.
 ```
 
-Solving numerically:
-- `n = 2.0`: 0.738 + 0.410 = 1.148 (too round)
-- `n = 2.5`: 0.684 + 0.327 = 1.011 (very close)
-- `n = 2.55`: 0.679 + 0.319 = 0.998 (~perfect)
-- `n = 3.0`: 0.634 + 0.262 = 0.896 (too square)
-
-`n = 2.55` reproduces the SS Bezier endcap to pixel accuracy (maximum deviation ~0.5 px on a 60-tall pill).
+An even closer fit would use a true numerical distance-to-Bezier evaluator
+(polyline tessellation or iq's Newton iteration), but at 0.6 px error on
+a display-pixel-accurate fit, the closed form is functionally equivalent
+and an order of magnitude cheaper per fragment.
 
 ## Why the anisotropic parameterization
 
