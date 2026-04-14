@@ -499,10 +499,12 @@ export class Canvas {
     }, { passive: true });
   };
 
-  /** Wheel events → find the deepest scroll container under the cursor and apply the delta. */
+  /** Wheel + touch/pointer drag — both route through ScrollManager which
+   *  handles physics (momentum, rubber-band for drag). Wheel clamps; drag
+   *  rubber-bands past bounds. */
   private _listenForScroll = (): void => {
+    // ─── Wheel ───
     this.Element.addEventListener('wheel', (e: WheelEvent) => {
-      // Always recompute content bounds before hit-testing — children may have moved
       this._measureScrollContents(this.Root);
 
       const rect = this.Element.getBoundingClientRect();
@@ -511,19 +513,65 @@ export class Canvas {
       const target = this._scrollManager.ResolveScrollTarget(cssX, cssY);
       if (!target) return;
 
-      // Convert delta — wheel deltas are CSS px when deltaMode === 0 (DOM_DELTA_PIXEL).
-      // Lines (mode 1) and pages (mode 2) get reasonable approximations.
-      let dx = e.deltaX;
-      let dy = e.deltaY;
-      if (e.deltaMode === 1) { dx *= 16; dy *= 16; }       // line ≈ one text line
+      let dx = e.deltaX, dy = e.deltaY;
+      if (e.deltaMode === 1) { dx *= 16; dy *= 16; }
       else if (e.deltaMode === 2) { dx *= target.Width; dy *= target.Height; }
 
       this._scrollManager.ApplyDelta(target, dx, dy);
       this._animationManager.Kick();
-
-      // Prevent the page from scrolling (canvas owns the scroll)
       e.preventDefault();
     }, { passive: false });
+
+    // ─── Pointer drag (touch + trackpad + mouse) ───
+    // Only consume drag for touch/pen; mouse drag stays available for selection
+    // once we have selection. Track per pointer id so multi-touch doesn't collide.
+    interface DragCtx { target: Jiv; lastX: number; lastY: number; lastT: number; }
+    const drags = new Map<number, DragCtx>();
+
+    this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
+      if (e.pointerType === 'mouse') return; // reserve mouse-drag for future selection
+
+      this._measureScrollContents(this.Root);
+      const rect = this.Element.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      const target = this._scrollManager.ResolveScrollTarget(cssX, cssY);
+      if (!target) return;
+
+      this.Element.setPointerCapture(e.pointerId);
+      this._scrollManager.DragStart(target);
+      drags.set(e.pointerId, { target, lastX: e.clientX, lastY: e.clientY, lastT: performance.now() });
+    });
+
+    this.Element.addEventListener('pointermove', (e: PointerEvent) => {
+      const ctx = drags.get(e.pointerId);
+      if (!ctx) return;
+      const now = performance.now();
+      const dt = Math.max(1e-3, (now - ctx.lastT) / 1000);
+      // Dragging pulls content the opposite direction of finger motion (finger
+      // moves up → content scrolls down, same as native).
+      const dx = -(e.clientX - ctx.lastX);
+      const dy = -(e.clientY - ctx.lastY);
+      this._scrollManager.DragMove(ctx.target, dx, dy, dt);
+      this._animationManager.Kick();
+      ctx.lastX = e.clientX;
+      ctx.lastY = e.clientY;
+      ctx.lastT = now;
+      e.preventDefault();
+    }, { passive: false });
+
+    const finish = (e: PointerEvent): void => {
+      const ctx = drags.get(e.pointerId);
+      if (!ctx) return;
+      this._scrollManager.DragEnd(ctx.target);
+      this._animationManager.Kick();
+      drags.delete(e.pointerId);
+      if (this.Element.hasPointerCapture(e.pointerId)) {
+        this.Element.releasePointerCapture(e.pointerId);
+      }
+    };
+    this.Element.addEventListener('pointerup', finish);
+    this.Element.addEventListener('pointercancel', finish);
   };
 
   /** Walk the tree, compute ContentWidth/Height for each Overflow:Scroll Jiv from
