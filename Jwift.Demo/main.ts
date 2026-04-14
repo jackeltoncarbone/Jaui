@@ -1,4 +1,4 @@
-import { Canvas, Jiv, LiquidGlass } from '../src/Core/Jwift';
+import { Canvas, Jiv, LiquidGlass } from 'jwift';
 
 const el = document.getElementById('jwift') as HTMLCanvasElement;
 const canvas = new Canvas(el);

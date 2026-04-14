@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "jwift": ["../Jwift/src/Core/Jwift.ts"],
+      "@jwift/*": ["../Jwift/src/*"]
+    }
+  },
+  "include": [
+    "./**/*.ts",
+    "../Jwift/src/Jss/Jss.d.ts",
+    "../Jwift/src/glsl.d.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}
