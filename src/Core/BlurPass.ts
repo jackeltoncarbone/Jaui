@@ -191,4 +191,11 @@ export class BlurPass {
 
     return this._levels[0].Texture;
   };
+
+  /** Generate mipmaps on the most-recent output. Caller invokes after Blur()
+   *  if it wants to use textureLod() to add additional spatially-varying blur
+   *  on top of the base Gaussian (Apple-style "more blur at the rim"). */
+  GenerateOutputMipmap = (): void => {
+    this._levels[0].GenerateMipmap();
+  };
 }

@@ -18,6 +18,7 @@ layout(location = 11) in vec4 a_Lighting;     // lightDirX, lightDirY, lightInte
 layout(location = 12) in vec4 a_Specular;     // specIntensity, specSharpness, chromaticAberration, innerBlur
 layout(location = 13) in vec4 a_RimEdge;      // edgeLightTop, edgeLightBottom, borderVariance, bulge
 layout(location = 14) in vec4 a_Outline;      // borderAlphaVariance, borderFresnelBrightness, _pad, _pad
+layout(location = 15) in vec4 a_BorderFilter; // brightnessMul, saturationMul, contrastMul, lodOffset
 
 uniform vec2 u_Resolution;
 
@@ -35,6 +36,7 @@ flat out vec4 v_Lighting;
 flat out vec4 v_Specular;
 flat out vec4 v_RimEdge;
 flat out vec4 v_Outline;
+flat out vec4 v_BorderFilter;
 
 void main() {
     vec2 pos = a_Rect.xy + a_Position * a_Rect.zw;
@@ -57,4 +59,5 @@ void main() {
     v_Specular = a_Specular;
     v_RimEdge = a_RimEdge;
     v_Outline = a_Outline;
+    v_BorderFilter = a_BorderFilter;
 }

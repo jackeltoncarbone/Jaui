@@ -18,12 +18,12 @@ beforeEach(() => {
 });
 
 describe('JivInstanceBuffer (single unified renderer for every Jiv)', () => {
-  it('allocates 56 floats per instance', () => {
-    expect(JIV_FLOATS_PER_INSTANCE).toBe(56);
+  it('allocates 60 floats per instance', () => {
+    expect(JIV_FLOATS_PER_INSTANCE).toBe(60);
   });
 
-  it('stride is 224 bytes', () => {
-    expect(JivInstanceBuffer.BytesPerInstance).toBe(224);
+  it('stride is 240 bytes', () => {
+    expect(JivInstanceBuffer.BytesPerInstance).toBe(240);
   });
 
   it('packs expected fields for a LiquidGlass Jiv', () => {

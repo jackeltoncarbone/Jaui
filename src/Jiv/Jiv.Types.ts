@@ -74,6 +74,16 @@ export interface JivStyle {
   BorderOffset: number;        // inward/outward shift from edge
   ContainBorder: boolean;      // clip border glow to shape interior
 
+  // Border-zone backdrop filter — like Frost/Brightness/Saturation/Contrast for
+  // the panel interior, but applied ONLY in the border annulus. Apple's glass
+  // rim acts like a separate optical zone that can pick up brighter / more
+  // saturated light than the panel face. Multipliers ON TOP of the panel
+  // grading: 1.0 = inherit panel value, >1 = boost in border zone.
+  BorderBrightness: number;    // multiplier for backdrop brightness in border zone
+  BorderSaturation: number;    // multiplier for backdrop saturation in border zone
+  BorderContrast: number;      // multiplier for backdrop contrast in border zone
+  BorderFrostLodOffset: number; // additional LOD on backdrop sample in border zone (negative = sharper, positive = blurrier)
+
   // Shadow
   ShadowColor: Color;
   ShadowBlur: number;

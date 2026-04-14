@@ -10,10 +10,19 @@ export const LiquidGlass: Partial<JivStyle> = {
 
   // Shape / alpha — fully transparent so only refracted backdrop + effects show
   Background: { R: 1, G: 1, B: 1, A: 0 },
-  BorderColor: { R: 1, G: 1, B: 1, A: 0.55 },
-  BorderWidth: 1,
+  // BorderColor is a TINT applied over the border-zone backdrop, not an opaque
+  // stroke. Low alpha = subtle white wash. Set to 0 for pure backdrop-tinted rim.
+  BorderColor: { R: 1, G: 1, B: 1, A: 0.12 },
+  BorderWidth: 1.4,
   BorderBlur: 0.5,
   BorderRadius: [32, 32, 32, 32],
+  // Border-zone backdrop refilter — brighter + more saturated + sharper than
+  // the panel face, so the rim catches color like a real glass bevel. These
+  // multiply the panel's grading.
+  BorderBrightness: 1.25,
+  BorderSaturation: 1.4,
+  BorderContrast: 1.0,
+  BorderFrostLodOffset: -0.5,
 
   // Ambient drop shadow — floats the panel off the backdrop
   ShadowColor: { R: 0, G: 0, B: 0, A: 0.22 },
@@ -21,7 +30,7 @@ export const LiquidGlass: Partial<JivStyle> = {
   ShadowOffsetY: 10,
 
   // Backdrop grading — gentle, content stays readable
-  FrostBlur: 22,
+  FrostBlur: 5,
   Brightness: 0.95,
   Saturation: 1.15,
   Contrast: 0.95,
@@ -89,10 +98,10 @@ export const ClearGlass: Partial<JivStyle> = {
   Saturation: 1.1,
   Contrast: 1,
 
-  Thickness: 10,
-  Fillet: 1.5,
-  BezelWidth: 14,
-  BezelScale: 0.35,
+  Thickness: 1,
+  Fillet: 0.5,
+  BezelWidth: 1,
+  BezelScale: 0.15,
   Refraction: 1,
 
   LightAngle: 135,

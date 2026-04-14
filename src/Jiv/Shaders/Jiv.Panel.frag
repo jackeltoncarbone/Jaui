@@ -15,6 +15,7 @@ flat in vec4 v_Lighting;       // lightDirX, lightDirY, lightIntensity, fresnelS
 flat in vec4 v_Specular;       // specIntensity, specSharpness, chromaticAberration, innerBlur
 flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance, bulge
 flat in vec4 v_Outline;        // borderAlphaVariance, borderFresnelBrightness, _pad, _pad
+flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lodOffset
 
 uniform sampler2D u_Backdrop;
 uniform vec2 u_Resolution;
@@ -453,6 +454,11 @@ void main() {
     //
     // The sum is applied as a UV offset when sampling the backdrop.
     vec3 backdrop = vec3(0.0);
+    // Hoisted so the border-zone refilter can reuse them
+    float lodBoost = 0.0;
+    vec2 baseUv = v_PixelPos / u_Resolution;
+    baseUv.y = 1.0 - baseUv.y;
+
     if (materialType == 1.0) {
         // Edge refraction: rotate the outward normal ~10° along the tangent,
         // then negate to sample INWARD (Show Studio's `-refract * edgeIntensity`).
@@ -489,19 +495,27 @@ void main() {
 
         // FBO has top-of-scene at UV.y=1 (panel/text shaders flip Y in clip space).
         // Flip Y here so each fragment samples the pixel directly behind it.
-        vec2 baseUv = (v_PixelPos + refractOffset) / u_Resolution;
+        // `baseUv` was hoisted to the outer scope — assign instead of redeclare
+        // so the border-zone refilter can reuse the same refracted UV.
+        baseUv = (v_PixelPos + refractOffset) / u_Resolution;
         vec2 uvR = (v_PixelPos + refractOffset + caStep) / u_Resolution;
         vec2 uvB = (v_PixelPos + refractOffset - caStep) / u_Resolution;
         baseUv.y = 1.0 - baseUv.y;
         uvR.y = 1.0 - uvR.y;
         uvB.y = 1.0 - uvB.y;
 
-        // Backdrop is a PRE-BLURRED 2-pass Gaussian FBO. Sample directly — no
-        // need for mipmap LOD or multi-tap (which would double-blur and muddy
-        // the image). The texture has LINEAR filtering for free.
-        vec3 sR = texture(u_Backdrop, uvR).rgb;
-        vec3 sG = texture(u_Backdrop, baseUv).rgb;
-        vec3 sB = texture(u_Backdrop, uvB).rgb;
+        // Backdrop is the Dual-Filter PRE-BLURRED FBO with mipmaps generated.
+        // Apple's blur is NON-UNIFORM — stronger at the rim, weaker at the
+        // center (longer optical path through the glass = more diffusion at
+        // the bevel where light enters/exits at a steep angle). We sample
+        // with `textureLod` and ramp the LOD up near the rim. LOD 0 = base
+        // Gaussian; +1 LOD ≈ 2× box blur; +2 LOD ≈ 4× box blur. The boost
+        // peaks at the silhouette edge and dies inward over `bezelWidth`.
+        float rimBoost = 1.0 - smoothstep(0.0, bezelWidth * 1.5, edgeDist);
+        lodBoost = rimBoost * 1.5 + innerBlur * 1.0;
+        vec3 sR = textureLod(u_Backdrop, uvR, lodBoost).rgb;
+        vec3 sG = textureLod(u_Backdrop, baseUv, lodBoost).rgb;
+        vec3 sB = textureLod(u_Backdrop, uvB, lodBoost).rgb;
         backdrop = vec3(sR.r, sG.g, sB.b);
 
         backdrop = applyGrading(backdrop, brightness, saturation, contrast);
@@ -573,9 +587,15 @@ void main() {
     }
 
     // ── Shadow ──
+    // SOFT drop shadow — fades symmetrically across the silhouette edge so the
+    // shadow extends OUTSIDE the silhouette (like CSS box-shadow). Old
+    // formulation was `1 - smoothstep(-blur, 0, dist)` which clipped at
+    // dist=0, producing a hard "shape mask in shadow color" with no outward
+    // bleed. Now: full opacity at -blur (deep inside silhouette), 0.5 at the
+    // edge, 0 at +blur outside.
     vec2 sp = p - shadowOffset;
     float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
-    float shadowAlpha = (1.0 - smoothstep(-shadowBlur, 0.0, shadowDist)) * v_ShadowColor.a;
+    float shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
 
     // ── Fill: interior is PURELY the refracted backdrop (LG) or the tint (SG/None).
     // No internal haze, no rim ambient, no specular overlay. All rim brightness
@@ -605,23 +625,95 @@ void main() {
     //      what makes the outline read as a real bevel catching light, not a
     //      flat CSS border. For non-glass it falls back to a uniform stroke.
     if (materialType == 1.0) {
+        // ── Hemispherical edge light (rim ambient — top vs bottom bias) ──
+        // Apple uses a virtual "sky above, ground below" environment so the
+        // top of the rim picks up brighter ambient than the bottom. In screen
+        // coords (y-down), the TOP edge has normal.y < 0; the BOTTOM has
+        // normal.y > 0. Mix between EdgeLightTop and EdgeLightBottom by the
+        // vertical normal component. Modulated by edge proximity so it only
+        // shows in the rim band, not the flat interior.
+        float hemiTop = max(-normal.y, 0.0);
+        float hemiBottom = max(normal.y, 0.0);
+        float hemiAmbient = (edgeLightTop * hemiTop + edgeLightBottom * hemiBottom);
+        float rimMask = (dist > 0.0)
+            ? 0.0
+            : pow(clamp(1.0 + dist / max(bezelWidth, 0.5), 0.0, 1.0), 2.0);
+        vec3 rimAmbientRgb = vec3(hemiAmbient) * rimMask;
+
+        // ── Inner darkening (1 px inset dark ring) ──
+        // Apple's glass has a faint ~1 px inset dark line — the perceptual
+        // boundary between the bright rim and the flat interior. Triangular
+        // band centered at dist = -1, ~1 px wide, very low alpha.
+        float innerDarkBand = max(0.0, 1.0 - abs(dist + 1.0));
+        float innerDarkAlpha = innerDarkBand * 0.04;
+
+        // ── Blinn-Phong specular catchlight on the bevel ──
+        // The bevel has a 3D normal: 2D outward normal (when on the bevel)
+        // tilted toward +Z (out of screen) at the flat center. We model this
+        // as `(normal * hump, 1 - hump)`: pure +Z at the center where the
+        // surface is flat (hump=0), and tilted outward at the rim (hump=1).
+        // View direction is +Z (orthographic). Light direction in 3D adds an
+        // elevation component so the catchlight has a specific landing point.
+        vec3 N3 = normalize(vec3(normal * hump, 1.0 - hump * 0.7));
+        vec3 L3 = normalize(vec3(lightDir, 0.6));   // virtual light, slightly elevated
+        vec3 V3 = vec3(0.0, 0.0, 1.0);
+        vec3 H3 = normalize(L3 + V3);
+        float specBase = pow(max(dot(N3, H3), 0.0), specSharpness);
+        float specAlpha = specBase * specIntensity * hump * fillAlpha * lightIntensity;
+        vec3 specRgb = vec3(1.0);  // bright white catchlight
+
+        // Composite order:
+        //   1) hemispherical rim ambient (additive, sub-rim)
+        //   2) wide rim glow (vibrant backdrop pickup)
+        //   3) inner darkening (multiplicative subtle dim)
+        //   4) Blinn-Phong specular catchlight (additive bright)
+        //   5) hairline silhouette stroke
+        result.rgb += rimAmbientRgb * fillAlpha;
         result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
         result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;
+        result.rgb *= 1.0 - innerDarkAlpha;
+        result.rgb = result.rgb * (1.0 - specAlpha) + specRgb * specAlpha;
+        result.a = result.a * (1.0 - specAlpha) + specAlpha;
 
-        // Hairline silhouette — the unlit-side dim is `BorderAlphaVariance`,
-        // the lit-side white-mix is `BorderFresnelBrightness`. Zero for a
-        // flat uniform stroke, nonzero to reintroduce directional character.
-        float lightFacing = max(alignment, 0.0);
-        float alphaFloor = 1.0 - v_Outline.x;
-        float strokeBrightness = mix(alphaFloor, 1.0, pow(lightFacing, 2.0));
-        vec3 strokeColor = mix(v_BorderColor.rgb, vec3(1.0), pow(lightFacing, 3.0) * v_Outline.y);
-
+        // ── Border zone backdrop refilter ───────────────────────────────
+        // Apple's glass rim isn't a flat color — it's an optical zone where
+        // the backdrop is sampled with its OWN grading (typically brighter,
+        // more saturated than the panel face). Then the BorderColor is
+        // overlaid on top with its alpha as a tint, NOT a solid stroke.
+        // This is what gives Apple's rim its "light-gathering" quality
+        // without the static UI-border feel.
         float borderOuter = smoothstep(-0.5, 0.5, dist);
         float borderInner = smoothstep(-0.5, 0.5, dist + localBorderWidth);
         float borderBase = (1.0 - borderOuter) * borderInner;
-        float borderAlpha = borderBase * v_BorderColor.a * strokeBrightness;
-        result.rgb = result.rgb * (1.0 - borderAlpha) + strokeColor * borderAlpha;
-        result.a = result.a * (1.0 - borderAlpha) + borderAlpha;
+
+        if (borderBase > 0.001) {
+            // Re-sample backdrop with border-zone grading. Same UV (no extra
+            // refraction offset — the border is the rim, refraction already
+            // applied via `refractOffset`). Apply LOD offset for sharper or
+            // blurrier border vs the panel.
+            float bLod = max(0.0, lodBoost + v_BorderFilter.w);
+            vec3 bSample = textureLod(u_Backdrop, baseUv, bLod).rgb;
+            vec3 borderBackdrop = applyGrading(
+                bSample,
+                brightness * v_BorderFilter.x,
+                saturation * v_BorderFilter.y,
+                contrast * v_BorderFilter.z
+            );
+
+            // Optional tint stroke from BorderColor — alpha controls strength
+            // of the colored overlay on top of the refiltered backdrop.
+            // Directional brightness from BorderAlphaVariance / FresnelBrightness.
+            float lightFacing = max(alignment, 0.0);
+            float alphaFloor = 1.0 - v_Outline.x;
+            float strokeBrightness = mix(alphaFloor, 1.0, pow(lightFacing, 2.0));
+            vec3 strokeTint = mix(v_BorderColor.rgb, vec3(1.0), pow(lightFacing, 3.0) * v_Outline.y);
+            vec3 borderRgb = mix(borderBackdrop, strokeTint, v_BorderColor.a * strokeBrightness);
+
+            // Replace the panel result in the border zone (alpha-blended by mask).
+            // borderBase is the antialiased annulus; result alpha follows panel.
+            result.rgb = mix(result.rgb, borderRgb, borderBase);
+            result.a = max(result.a, borderBase * fillAlpha);
+        }
     } else {
         float borderOuter = smoothstep(-0.5, 0.5, dist);
         float borderInner = smoothstep(-0.5, 0.5, dist + localBorderWidth);

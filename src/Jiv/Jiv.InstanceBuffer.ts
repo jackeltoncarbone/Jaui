@@ -1,6 +1,6 @@
 import type { Jiv } from './Jiv';
 
-// Per-instance floats (14 vec4 slots = 56 floats = 224 bytes):
+// Per-instance floats (15 vec4 slots = 60 floats = 240 bytes):
 //   loc  1: a_Rect         (x, y, w, h)
 //   loc  2: a_PanelGeom    (cx, cy, halfW, halfH)
 //   loc  3: a_Radii        (tl, tr, br, bl)
@@ -17,8 +17,11 @@ import type { Jiv } from './Jiv';
 //   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, bulge)
 //                          bulge = Fillet (surface-bulge magnitude, Show Studio analog)
 //   loc 14: a_Outline      (borderAlphaVariance, borderFresnelBrightness, _pad, _pad)
+//   loc 15: a_BorderFilter (brightnessMul, saturationMul, contrastMul, lodOffset)
+//                          Backdrop filter applied IN the border zone — multipliers
+//                          on top of the panel grading. lodOffset shifts mipmap LOD.
 
-export const JIV_FLOATS_PER_INSTANCE = 56;
+export const JIV_FLOATS_PER_INSTANCE = 60;
 const BYTES_PER_INSTANCE = JIV_FLOATS_PER_INSTANCE * 4;
 
 export class JivInstanceBuffer {
@@ -158,6 +161,12 @@ export class JivInstanceBuffer {
     data[offset + 53] = style.BorderFresnelBrightness;
     data[offset + 54] = 0;
     data[offset + 55] = 0;
+
+    // loc 15 — a_BorderFilter (border-zone backdrop grading multipliers)
+    data[offset + 56] = style.BorderBrightness;
+    data[offset + 57] = style.BorderSaturation;
+    data[offset + 58] = style.BorderContrast;
+    data[offset + 59] = style.BorderFrostLodOffset;
 
     this._count++;
   };

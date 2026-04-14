@@ -7,7 +7,7 @@ import fragSrc from './Shaders/Jiv.Panel.frag?raw';
 
 const BYTES_PER_VEC4 = 16;
 const BYTES_PER_INSTANCE = JIV_FLOATS_PER_INSTANCE * 4;
-const INSTANCE_ATTR_COUNT = 14; // locations 1..14
+const INSTANCE_ATTR_COUNT = 15; // locations 1..15
 
 /**
  * Single unified Jiv panel renderer. Every Jiv flows through here regardless

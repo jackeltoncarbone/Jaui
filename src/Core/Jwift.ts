@@ -168,6 +168,9 @@ export class Canvas {
     this._scanFrostBlur(this.Root);
     const blurCssPx = Math.max(1, this._maxFrostBlur);
     const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, blurCssPx * this._dpr);
+    // Mipmap the BLURRED FBO so the glass shader can sample at higher LODs near
+    // the rim — gives Apple's signature "blur stronger at the edge" behavior.
+    this._blur.GenerateOutputMipmap();
     // Also keep the unblurred scene mipmap'd for rim backdrop samples that want
     // crisp-ish color pickup (edge lighting uses LOD 0.5 for a light touch of blur).
     this._sceneFbo.GenerateMipmap();
