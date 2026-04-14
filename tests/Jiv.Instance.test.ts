@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { GlassInstanceBuffer, GLASS_FLOATS_PER_INSTANCE } from '../src/Glass/Glass.InstanceBuffer';
+import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../src/Jiv/Jiv.InstanceBuffer';
 import { Jiv } from '../src/Jiv/Jiv';
 import { LiquidGlass } from '../src/Glass/Glass.Presets';
 
@@ -17,18 +17,18 @@ beforeEach(() => {
   } as unknown as Document;
 });
 
-describe('GlassInstanceBuffer', () => {
-  it('allocates 52 floats per instance', () => {
-    expect(GLASS_FLOATS_PER_INSTANCE).toBe(52);
+describe('JivInstanceBuffer (single unified renderer for every Jiv)', () => {
+  it('allocates 56 floats per instance', () => {
+    expect(JIV_FLOATS_PER_INSTANCE).toBe(56);
   });
 
-  it('stride is 208 bytes', () => {
-    expect(GlassInstanceBuffer.BytesPerInstance).toBe(208);
+  it('stride is 224 bytes', () => {
+    expect(JivInstanceBuffer.BytesPerInstance).toBe(224);
   });
 
   it('packs expected fields for a LiquidGlass Jiv', () => {
     const gl = mockGl();
-    const buf = new GlassInstanceBuffer(gl);
+    const buf = new JivInstanceBuffer(gl);
     const jiv = new Jiv({
       X: 100, Y: 200, Width: 300, Height: 60,
       Style: { ...LiquidGlass, BorderRadius: [30, 30, 30, 30] },
@@ -77,7 +77,7 @@ describe('GlassInstanceBuffer', () => {
 
   it('Begin resets count to 0', () => {
     const gl = mockGl();
-    const buf = new GlassInstanceBuffer(gl);
+    const buf = new JivInstanceBuffer(gl);
     buf.Push(new Jiv({ Style: { ...LiquidGlass } }), 1);
     expect(buf.Count).toBe(1);
     buf.Begin();
@@ -86,7 +86,7 @@ describe('GlassInstanceBuffer', () => {
 
   it('grows capacity when exceeded', () => {
     const gl = mockGl();
-    const buf = new GlassInstanceBuffer(gl, 2);
+    const buf = new JivInstanceBuffer(gl, 2);
     buf.Begin();
     for (let i = 0; i < 5; i++) {
       buf.Push(new Jiv({ Style: { ...LiquidGlass } }), 1);

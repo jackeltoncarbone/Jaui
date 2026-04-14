@@ -1,4 +1,4 @@
-import type { Jiv } from '../Jiv/Jiv';
+import type { Jiv } from './Jiv';
 
 // Per-instance floats (14 vec4 slots = 56 floats = 224 bytes):
 //   loc  1: a_Rect         (x, y, w, h)
@@ -18,10 +18,10 @@ import type { Jiv } from '../Jiv/Jiv';
 //                          bulge = Fillet (surface-bulge magnitude, Show Studio analog)
 //   loc 14: a_Outline      (borderAlphaVariance, borderFresnelBrightness, _pad, _pad)
 
-export const GLASS_FLOATS_PER_INSTANCE = 56;
-const BYTES_PER_INSTANCE = GLASS_FLOATS_PER_INSTANCE * 4;
+export const JIV_FLOATS_PER_INSTANCE = 56;
+const BYTES_PER_INSTANCE = JIV_FLOATS_PER_INSTANCE * 4;
 
-export class GlassInstanceBuffer {
+export class JivInstanceBuffer {
   private _gl: WebGL2RenderingContext;
   private _buffer: WebGLBuffer;
   private _data: Float32Array;
@@ -31,7 +31,7 @@ export class GlassInstanceBuffer {
   constructor(gl: WebGL2RenderingContext, initialCapacity: number = 64) {
     this._gl = gl;
     this._capacity = initialCapacity;
-    this._data = new Float32Array(initialCapacity * GLASS_FLOATS_PER_INSTANCE);
+    this._data = new Float32Array(initialCapacity * JIV_FLOATS_PER_INSTANCE);
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jwift] Failed to create glass instance buffer');
@@ -44,15 +44,15 @@ export class GlassInstanceBuffer {
 
   Begin = (): void => { this._count = 0; };
 
-  Push = (jiv: Jiv, dpr: number): void => {
+  Push = (jiv: Jiv, dpr: number, offsetX: number = 0, offsetY: number = 0): void => {
     if (this._count >= this._capacity) this._grow();
 
     const style = jiv.Style;
     const d = dpr;
-    const offset = this._count * GLASS_FLOATS_PER_INSTANCE;
+    const offset = this._count * JIV_FLOATS_PER_INSTANCE;
 
-    const x = jiv.X * d;
-    const y = jiv.Y * d;
+    const x = (jiv.X + offsetX) * d;
+    const y = (jiv.Y + offsetY) * d;
     const w = jiv.Width * d;
     const h = jiv.Height * d;
     const borderWidth = style.BorderWidth * d;
@@ -168,7 +168,7 @@ export class GlassInstanceBuffer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this._buffer);
     gl.bufferData(
       gl.ARRAY_BUFFER,
-      this._data.subarray(0, this._count * GLASS_FLOATS_PER_INSTANCE),
+      this._data.subarray(0, this._count * JIV_FLOATS_PER_INSTANCE),
       gl.DYNAMIC_DRAW,
     );
   };
@@ -177,7 +177,7 @@ export class GlassInstanceBuffer {
 
   private _grow = (): void => {
     this._capacity *= 2;
-    const newData = new Float32Array(this._capacity * GLASS_FLOATS_PER_INSTANCE);
+    const newData = new Float32Array(this._capacity * JIV_FLOATS_PER_INSTANCE);
     newData.set(this._data);
     this._data = newData;
   };

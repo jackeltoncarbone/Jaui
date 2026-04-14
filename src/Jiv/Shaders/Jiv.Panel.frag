@@ -98,57 +98,42 @@ vec2 SuperellipseGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
     return L > 0.0001 ? g / L : vec2(0.0);
 }
 
-// ────────── Apple squircle-pill SDF (TRUE perpendicular distance) ──────────
-// `extent(u) = maxExt * (1 - u²)^0.284` where u = |py / halfH|, constants from SS's
-// `GeneratePillPath` Bezier control points.
+// ────────── Pill (capsule) SDF ──────────  [TEMPORARY — to be replaced]
+// Standard capsule: distance to the centerline segment, minus the half-height radius.
+// True SDF with analytic gradient — well-defined perpendicular distance EVERYWHERE.
 //
-// The cap's implicit equation is F(x, y) = x − (flatExtent + ext(|y/halfH|)) = 0.
-// The perpendicular distance from a point to F=0 is F / |∇F|. We compute ∇F
-// analytically via d(ext)/du, then take max with the vertical constraint
-// (y ≤ halfH) to get the SDF of the convex intersection. This is a TRUE SDF —
-// constant-distance offsets are real perpendicular offsets — so a
-// `dist − borderWidth` contour produces a concentric pill-shaped inner border.
-float ApplePillSDF(vec2 p, vec2 halfSize) {
+// NOTE: This is a REGRESSION from the Apple-squircle-pill that preceded it. The old
+// code matched Show Studio's Bezier pill (tighter curvature near top/bottom, wider
+// middle), but its analytic derivative diverged at u→1 (endcap tips) producing
+// incorrect SDF there. The halo issue it appeared to cause was actually the
+// refraction bulge magnitude being too large. Task #11 (shape audit) will combine
+// Apple's squircle math with Show Studio's Jiv pill profile and produce a single
+// well-behaved master SDF. Until then, capsule is the safe stopgap.
+float PillSDF(vec2 p, vec2 halfSize) {
     bool horiz = halfSize.x >= halfSize.y;
+    vec2 q = horiz ? p : p.yx;
     vec2 hs = horiz ? halfSize : halfSize.yx;
-    vec2 q = horiz ? vec2(abs(p.x), abs(p.y)) : vec2(abs(p.y), abs(p.x));
-
-    // SS's pill: the curve never reaches its CP at 42.5 — it bulges to ~40.59
-    // (empirically the max of the Bezier mid-segment). flatExtent is where the
-    // straight side ends, so the cap tip at u=0 lands at flatExtent + maxExtent
-    // — and we want that == hs.x so the shape exactly fills its bbox (otherwise
-    // a thin shadow sliver shows through at the cap tips).
-    float endScale = hs.y / 25.0;
-    float maxExtent = 40.59 * endScale;
-    float flatExtent = hs.x - maxExtent;
-
-    float u = q.y / hs.y;
-    float oneMinusU2 = max(1.0 - u * u, 0.0001);
-    float ext = maxExtent * pow(oneMinusU2, 0.284);
-
-    // ∂ext/∂u = 0.284 · maxExtent · (1−u²)^(−0.716) · (−2u) = −0.568 · u · maxExtent · (1−u²)^(−0.716)
-    float dExtDu = -0.568 * u * maxExtent * pow(oneMinusU2, -0.716);
-    float dExtDy = dExtDu / hs.y;
-
-    // Perpendicular distance to cap curve: F / |∇F|  (∇F = (1, -dExt/dy))
-    float horiz_d = q.x - (flatExtent + ext);
-    float gradLen = sqrt(1.0 + dExtDy * dExtDy);
-    float horiz_perp = horiz_d / gradLen;
-
-    float vert_d = q.y - hs.y;   // already a true perpendicular distance
-
-    return max(horiz_perp, vert_d);
+    float r = hs.y;
+    float lineExtent = max(hs.x - r, 0.0);
+    // Clamp query point onto the centerline segment [-lineExtent, lineExtent] × {0}
+    vec2 closest = vec2(clamp(q.x, -lineExtent, lineExtent), 0.0);
+    return length(q - closest) - r;
 }
 
-vec2 ApplePillGrad(vec2 p, vec2 halfSize) {
-    const float eps = 1.0;
-    float dX = ApplePillSDF(p + vec2(eps, 0.0), halfSize)
-             - ApplePillSDF(p - vec2(eps, 0.0), halfSize);
-    float dY = ApplePillSDF(p + vec2(0.0, eps), halfSize)
-             - ApplePillSDF(p - vec2(0.0, eps), halfSize);
-    vec2 g = vec2(dX, dY);
-    float L = length(g);
-    return L > 0.0001 ? g / L : vec2(0.0);
+// Analytic gradient of the capsule SDF: unit vector from the closest centerline
+// point to the query point (or arbitrary axis-aligned unit if the query is on the
+// centerline itself, where the gradient is undefined).
+vec2 PillGrad(vec2 p, vec2 halfSize) {
+    bool horiz = halfSize.x >= halfSize.y;
+    vec2 q = horiz ? p : p.yx;
+    vec2 hs = horiz ? halfSize : halfSize.yx;
+    float r = hs.y;
+    float lineExtent = max(hs.x - r, 0.0);
+    vec2 closest = vec2(clamp(q.x, -lineExtent, lineExtent), 0.0);
+    vec2 d = q - closest;
+    float L = length(d);
+    vec2 g = L > 0.0001 ? d / L : vec2(0.0, q.y >= 0.0 ? 1.0 : -1.0);
+    return horiz ? g : g.yx;
 }
 
 // ────────── Unified shape SDF / gradient ──────────
@@ -156,12 +141,12 @@ vec2 ApplePillGrad(vec2 p, vec2 halfSize) {
 //   mode 1: Pill    — Apple squircle-pill (Bezier-derived, true SDF)
 //   mode 2: Circle  — superellipse at smoothness ≈ 0.01
 float ShapeSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
-    if (mode == 1) return ApplePillSDF(p, halfSize);
+    if (mode == 1) return PillSDF(p, halfSize);
     return SuperellipseSDF(p, halfSize, radii, smoothness);
 }
 
 vec2 ShapeGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
-    if (mode == 1) return ApplePillGrad(p, halfSize);
+    if (mode == 1) return PillGrad(p, halfSize);
     return SuperellipseGrad(p, halfSize, radii, smoothness);
 }
 
@@ -250,13 +235,20 @@ void main() {
         vec2 edgeDisp = -rotatedNormal * hump * thickness;
 
         // Surface bulge: radial direction from panel center, scaled by dome profile.
+        // Magnitude is proportional to the panel's MINOR axis (its thickness),
+        // not a constant — otherwise long pills (halfY << halfX) produce a
+        // displacement larger than the pill is tall, pulling samples off-screen
+        // where CLAMP_TO_EDGE returns the FBO's cleared border (dark halos at
+        // pill endcaps).
         vec2 bulgeDisp = vec2(0.0);
         if (bulge != 0.0) {
+            float minHalf = min(panelHalfSize.x, panelHalfSize.y);
             float maxRadius = max(panelHalfSize.x, panelHalfSize.y);
             float normDist = clamp(length(p) / max(maxRadius, 1.0), 0.0, 1.0);
             float domeProfile = normDist * (1.0 - 0.3 * normDist);
             vec2 radialDir = length(p) > 0.001 ? p / length(p) : vec2(0.0);
-            bulgeDisp = radialDir * domeProfile * bulge * 40.0;
+            float bulgeMag = bulge * minHalf * 0.25;
+            bulgeDisp = radialDir * domeProfile * bulgeMag;
         }
 
         vec2 refractOffset = (edgeDisp + bulgeDisp) * refractionStrength;

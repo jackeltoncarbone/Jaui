@@ -32,8 +32,11 @@ header.AddChild(new Jiv({
 screen.AddChild(header);
 
 // Content stack — colourful cards behind the glass bar so refraction has material to work on.
+// Overflow: 'Scroll' → the wheel handler hit-tests this, and the cards below scroll
+// through its bounds. Cards total height > contentColumn height → visible overflow.
 const contentColumn = new Jiv({
   Layout: { Direction: 'Column', Justify: 'Start', Align: 'Stretch', Gap: 18, Padding: [0, 24, 140, 24] },
+  Style: { Overflow: 'Scroll' },
   ChildLayout: { FlexGrow: 1 },
 });
 

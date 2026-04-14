@@ -35,6 +35,18 @@ export class Jiv {
   IntrinsicWidth: number | null = null;
   IntrinsicHeight: number | null = null;
 
+  // Scroll state — only meaningful when Style.Overflow === 'Scroll'.
+  // ScrollX/Y are the *current* scroll offset (CSS px) applied to descendants.
+  // ScrollTargetX/Y are what the scroll spring is animating toward.
+  // ContentWidth/Height are the bounds of the children, computed during render
+  // collection so we can clamp scroll to [0, content - viewport].
+  ScrollX: number = 0;
+  ScrollY: number = 0;
+  ScrollTargetX: number = 0;
+  ScrollTargetY: number = 0;
+  ContentWidth: number = 0;
+  ContentHeight: number = 0;
+
   // Dirty tracking
   Dirty: DirtyFlags = DirtyFlag.Layout;
 

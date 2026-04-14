@@ -23,6 +23,21 @@ const _solveNode = (
   results.set(node, { X: offsetX, Y: offsetY, Width: width, Height: height });
 
   if (node.Children.length === 0) return;
+
+  // Placed / Fixed / Sticky children are positioned externally — recurse into
+  // them using their own X/Y/W/H so their internal subtree gets laid out.
+  for (const child of node.Children) {
+    const pos = child.ChildLayout.Position;
+    if (pos === 'Placed' || pos === 'Fixed' || pos === 'Sticky') {
+      // Resolve child's declared size; fall back to its manually-set Width/Height
+      const declW = _resolveSize(child.ChildLayout.Width, width);
+      const declH = _resolveSize(child.ChildLayout.Height, height);
+      const w = declW === 'Auto' ? child.Width : declW;
+      const h = declH === 'Auto' ? child.Height : declH;
+      _solveNode(child, w, h, child.X, child.Y, results);
+    }
+  }
+
   if (node.Layout.Mode !== 'Flex') return;
 
   const container: FlexContainer = {

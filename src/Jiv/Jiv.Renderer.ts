@@ -1,19 +1,27 @@
 import { ShaderCompiler, type ShaderProgram } from '../Core/Shader.Compiler';
 import { QuadGeometry } from '../Core/Geometry.Quad';
-import { GlassInstanceBuffer, GLASS_FLOATS_PER_INSTANCE } from './Glass.InstanceBuffer';
-import type { Jiv } from '../Jiv/Jiv';
-import vertSrc from './Shaders/Glass.Panel.vert?raw';
-import fragSrc from './Shaders/Glass.Panel.frag?raw';
+import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from './Jiv.InstanceBuffer';
+import type { Jiv } from './Jiv';
+import vertSrc from './Shaders/Jiv.Panel.vert?raw';
+import fragSrc from './Shaders/Jiv.Panel.frag?raw';
 
 const BYTES_PER_VEC4 = 16;
-const BYTES_PER_INSTANCE = GLASS_FLOATS_PER_INSTANCE * 4;
+const BYTES_PER_INSTANCE = JIV_FLOATS_PER_INSTANCE * 4;
 const INSTANCE_ATTR_COUNT = 14; // locations 1..14
 
-export class GlassRenderer {
+/**
+ * Single unified Jiv panel renderer. Every Jiv flows through here regardless
+ * of its Material — the shader branches on `materialType` to decide whether
+ * to sample the backdrop, apply refraction/specular/etc., or draw a flat fill.
+ *
+ * Glass is just a styling preset (LiquidGlass, SolidGlass) that turns the
+ * material parameters up. The renderer doesn't know about "Glass" as a thing.
+ */
+export class JivRenderer {
   private _gl: WebGL2RenderingContext;
   private _shader: ShaderProgram;
   private _quad: QuadGeometry;
-  private _instanceBuffer: GlassInstanceBuffer;
+  private _instanceBuffer: JivInstanceBuffer;
   private _dummyTex: WebGLTexture;
   private _resolutionLoc: WebGLUniformLocation | null;
   private _backdropLoc: WebGLUniformLocation | null;
@@ -22,7 +30,7 @@ export class GlassRenderer {
     this._gl = gl;
     this._shader = ShaderCompiler.Compile(gl, vertSrc, fragSrc);
     this._quad = new QuadGeometry(gl);
-    this._instanceBuffer = new GlassInstanceBuffer(gl);
+    this._instanceBuffer = new JivInstanceBuffer(gl);
 
     // 1x1 black texture as placeholder — bound when no real backdrop is supplied
     // (e.g. during Pass 1, when we're rendering INTO the scene FBO and can't
@@ -56,8 +64,8 @@ export class GlassRenderer {
     this._instanceBuffer.Begin();
   };
 
-  AddInstance = (jiv: Jiv, dpr: number): void => {
-    this._instanceBuffer.Push(jiv, dpr);
+  AddInstance = (jiv: Jiv, dpr: number, offsetX: number = 0, offsetY: number = 0): void => {
+    this._instanceBuffer.Push(jiv, dpr, offsetX, offsetY);
   };
 
   get Count(): number { return this._instanceBuffer.Count; }

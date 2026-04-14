@@ -11,14 +11,16 @@ import { TextCache } from '../Text/Text.Cache';
 import { TextRenderer } from '../Text/Text.Renderer';
 import { MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
-// Single unified renderer. "Glass" is historical — it handles every Jiv regardless
-// of Material. Material controls whether the backdrop is sampled + graded.
-import { GlassRenderer as JivRenderer } from '../Glass/Glass.Renderer';
+// Single unified Jiv renderer. Every Jiv flows through here regardless of Material.
+// Material controls whether the backdrop is sampled + graded; "Glass" is just a
+// styling preset (LiquidGlass, SolidGlass) — never a special code path.
+import { JivRenderer } from '../Jiv/Jiv.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { BlitRenderer } from './Blit';
 import { BlurPass } from './BlurPass';
 import { DirtyFlag } from './Types';
 import { Jiv } from '../Jiv/Jiv';
+import { ScrollManager } from '../Scroll/Scroll.Manager';
 
 export class Canvas {
   readonly Gl: WebGL2RenderingContext;
@@ -40,6 +42,7 @@ export class Canvas {
   private _animationManager = new AnimationManager();
   private _animators = new Map<Jiv, JivAnimator>();
   private _textAnimators = new Map<Jiv, TextAnimator>();
+  private _scrollManager!: ScrollManager;
   /** Largest FrostBlur of any glass collected this frame (CSS px). Drives the dual-filter pyramid. */
   private _maxFrostBlur: number = 0;
 
@@ -68,9 +71,14 @@ export class Canvas {
     // Animation manager triggers re-render when springs step
     this._animationManager.OnFrame(() => this.RequestFrame());
 
+    // Scroll manager is itself an Animatable — registers with the animation manager
+    this._scrollManager = new ScrollManager(this.Root);
+    this._animationManager.Register(this._scrollManager);
+
     this._resize();
     this._observeResize();
     this._watchDpr();
+    this._listenForScroll();
   }
 
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
@@ -188,19 +196,29 @@ export class Canvas {
     this._textRenderer.DrawAll(w, h);
   };
 
-  private _collectNonGlass = (node: Jiv): void => {
+  private _collectNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible
         && node.Style.Material === 'None' && !this._hasGlassAncestor(node)) {
-      this._panelRenderer.AddInstance(node, this._dpr);
+      this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
     }
-    for (const child of node.Children) this._collectNonGlass(child);
+    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+    for (const child of node.Children) this._collectNonGlass(child, dx, dy);
   };
 
-  private _collectGlass = (node: Jiv): void => {
+  private _collectGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible && node.Style.Material !== 'None') {
-      this._panelRenderer.AddInstance(node, this._dpr);
+      this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
     }
-    for (const child of node.Children) this._collectGlass(child);
+    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+    for (const child of node.Children) this._collectGlass(child, dx, dy);
+  };
+
+  /** Compute the offset descendants see when descending past a scroll container. */
+  private _descendOffset = (node: Jiv, offsetX: number, offsetY: number): [number, number] => {
+    if (node.Style.Overflow === 'Scroll') {
+      return [offsetX - node.ScrollX, offsetY - node.ScrollY];
+    }
+    return [offsetX, offsetY];
   };
 
   /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px). */
@@ -214,16 +232,15 @@ export class Canvas {
   };
 
   /** Non-glass panels that live inside a glass subtree — rendered on top of the glass pass. */
-  private _collectNonGlassUnderGlass = (node: Jiv): void => {
+  private _collectNonGlassUnderGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible
         && node.Style.Material === 'None' && this._isUnderGlass(node) && node !== this.Root) {
-      // Only emit if this non-glass node is a DESCENDANT of a glass node (not the glass itself)
-      // — _isUnderGlass includes self, so we need to check if an ANCESTOR is glass
       if (this._hasGlassAncestor(node)) {
-        this._panelRenderer.AddInstance(node, this._dpr);
+        this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
       }
     }
-    for (const child of node.Children) this._collectNonGlassUnderGlass(child);
+    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+    for (const child of node.Children) this._collectNonGlassUnderGlass(child, dx, dy);
   };
 
   /** True if any STRICT ancestor of node has Material != 'None'. */
@@ -246,24 +263,26 @@ export class Canvas {
     return false;
   };
 
-  private _collectTextInstancesForNonGlass = (node: Jiv): void => {
-    if (!this._isUnderGlass(node)) this._emitTextFor(node);
-    for (const child of node.Children) this._collectTextInstancesForNonGlass(child);
+  private _collectTextInstancesForNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
+    if (!this._isUnderGlass(node)) this._emitTextFor(node, offsetX, offsetY);
+    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+    for (const child of node.Children) this._collectTextInstancesForNonGlass(child, dx, dy);
   };
 
-  private _collectTextInstancesForGlass = (node: Jiv): void => {
-    if (this._isUnderGlass(node)) this._emitTextFor(node);
-    for (const child of node.Children) this._collectTextInstancesForGlass(child);
+  private _collectTextInstancesForGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
+    if (this._isUnderGlass(node)) this._emitTextFor(node, offsetX, offsetY);
+    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+    for (const child of node.Children) this._collectTextInstancesForGlass(child, dx, dy);
   };
 
-  private _emitTextFor = (node: Jiv): void => {
+  private _emitTextFor = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Style.Visible) return;
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
 
     const padding = node.Layout.Padding;
-    const contentX = node.X + padding[3];
-    const contentY = node.Y + padding[0];
+    const contentX = node.X + offsetX + padding[3];
+    const contentY = node.Y + offsetY + padding[0];
     const contentH = node.Height - padding[0] - padding[2];
 
     let totalTextHeight = 0;
@@ -429,6 +448,56 @@ export class Canvas {
   private _observeResize = (): void => {
     const observer = new ResizeObserver(() => this._resize());
     observer.observe(this.Element);
+  };
+
+  /** Wheel events → find the deepest scroll container under the cursor and apply the delta. */
+  private _listenForScroll = (): void => {
+    this.Element.addEventListener('wheel', (e: WheelEvent) => {
+      // Always recompute content bounds before hit-testing — children may have moved
+      this._measureScrollContents(this.Root);
+
+      const rect = this.Element.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      const target = this._scrollManager.HitScrollContainer(cssX, cssY);
+      if (!target) return;
+
+      // Convert delta — wheel deltas are CSS px when deltaMode === 0 (DOM_DELTA_PIXEL).
+      // Lines (mode 1) and pages (mode 2) get reasonable approximations.
+      let dx = e.deltaX;
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) { dx *= 16; dy *= 16; }       // line ≈ one text line
+      else if (e.deltaMode === 2) { dx *= target.Width; dy *= target.Height; }
+
+      this._scrollManager.ApplyDelta(target, dx, dy);
+      this._animationManager.Kick();
+
+      // Prevent the page from scrolling (canvas owns the scroll)
+      e.preventDefault();
+    }, { passive: false });
+  };
+
+  /** Walk the tree, compute ContentWidth/Height for each Overflow:Scroll Jiv from
+   *  the bounding box of its children. Cheap; needed for clamping scroll target. */
+  private _measureScrollContents = (node: Jiv): void => {
+    if (node.Style.Overflow === 'Scroll') {
+      let maxRight = 0;
+      let maxBottom = 0;
+      for (const c of node.Children) {
+        // Only Flow children contribute to scroll content size.
+        // Placed/Fixed/Sticky are out-of-flow and don't extend the scroll bounds.
+        if (c.ChildLayout.Position !== 'Flow' && c.ChildLayout.Position !== 'Offset') continue;
+        const right = (c.X - node.X) + c.Width;
+        const bottom = (c.Y - node.Y) + c.Height;
+        if (right > maxRight) maxRight = right;
+        if (bottom > maxBottom) maxBottom = bottom;
+      }
+      // Add bottom padding so last item doesn't sit flush against the edge
+      const pad = node.Layout.Padding;
+      node.ContentWidth = maxRight + pad[1];
+      node.ContentHeight = maxBottom + pad[2];
+    }
+    for (const c of node.Children) this._measureScrollContents(c);
   };
 
   private _watchDpr = (): void => {
