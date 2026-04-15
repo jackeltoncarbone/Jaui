@@ -9,7 +9,7 @@ export const DefaultJivStyle: JivStyle = {
   PointScale: '1pt',
   BorderRadius: '0',
   CornerShape: 'Round',
-  BorderRadiusSmoothness: '0.6',
+  BorderRadiusSmoothness: '0.3',
   Overflow: 'Visible',
   Background: 'rgba(0, 0, 0, 0)',
   BlendMode: 'Normal',

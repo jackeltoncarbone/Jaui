@@ -163,7 +163,7 @@ Card {
   Padding: 16 18 18 18
   Width: 260
   Height: 320
-  BorderRadius: 28
+  BorderRadius: 48
   ShadowColor: rgba(0, 0, 0, 0.45)
   ShadowBlur: 24
   ShadowOffsetY: 10
@@ -176,7 +176,7 @@ CardCompact {
   Padding: 14 16 16 16
   Width: 200
   Height: 200
-  BorderRadius: 24
+  BorderRadius: 48
   ShadowColor: rgba(0, 0, 0, 0.4)
   ShadowBlur: 20
   ShadowOffsetY: 8
@@ -225,7 +225,7 @@ Toolbar {
   BorderColor: rgba(255, 255, 255, 0.12)
   BorderWidth: 1.4
   BorderBlur: 0.5
-  BorderRadius: 28
+  BorderRadius: 32
   BorderBrightness: 1.35
   BorderSaturation: 1.25
   BorderContrast: 1.0
@@ -235,16 +235,16 @@ Toolbar {
   ShadowBlur: 22
   ShadowOffsetY: 6
 
-  BackdropFrostBlur: 0.15
+  BackdropFrostBlur: 4
   BackdropBrightness: 1
   BackdropSaturation: 1.25
   BackdropContrast: 0.75
 
-  Thickness: 2
-  Fillet: 0.25
-  BezelWidth: 0
-  BezelScale: 0
-  Refraction: 10
+  Thickness: 1
+  Fillet: 0.125
+  BezelWidth: 11
+  BezelScale: 0.5
+  Refraction: 11
 
   LightAngle: 135
   LightIntensity: 1
@@ -302,16 +302,16 @@ TabBar {
   ShadowBlur: 22
   ShadowOffsetY: 6
 
-  BackdropFrostBlur: 3
+  BackdropFrostBlur: 4
   BackdropBrightness: 1
   BackdropSaturation: 1.25
   BackdropContrast: 0.75
 
-  Thickness: 2
-  Fillet: 0.25
-  BezelWidth: 7
-  BezelScale: 0.25
-  Refraction: 10
+  Thickness: 1
+  Fillet: 0.125
+  BezelWidth: 11
+  BezelScale: 0.5
+  Refraction: 11
 
   LightAngle: 135
   LightIntensity: 1

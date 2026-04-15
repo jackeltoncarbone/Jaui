@@ -25,6 +25,7 @@ export class JivRenderer {
   private _dummyTex: WebGLTexture;
   private _resolutionLoc: WebGLUniformLocation | null;
   private _backdropLoc: WebGLUniformLocation | null;
+  private _baseFrostLodLoc: WebGLUniformLocation | null;
   private _specTiltLoc: WebGLUniformLocation | null;
   /** Specular tilt offset — added to lightDir ONLY for the specular/rim-spec
    *  computations, not for ambient/edge-light/border directionality. Canvas
@@ -55,6 +56,7 @@ export class JivRenderer {
 
     this._resolutionLoc = gl.getUniformLocation(this._shader.Program, 'u_Resolution');
     this._backdropLoc = gl.getUniformLocation(this._shader.Program, 'u_Backdrop');
+    this._baseFrostLodLoc = gl.getUniformLocation(this._shader.Program, 'u_BaseFrostLod');
     this._specTiltLoc = gl.getUniformLocation(this._shader.Program, 'u_SpecularTilt');
 
     // Wire instance attributes onto the quad's VAO
@@ -78,10 +80,19 @@ export class JivRenderer {
 
   get Count(): number { return this._instanceBuffer.Count; }
 
-  /** Pass `null` for `backdropTexture` when rendering INTO the scene FBO (Pass 1) —
-   *  the renderer will bind a safe 1x1 placeholder instead, avoiding a GL feedback
-   *  loop. Shader branches on Material so non-glass Jivs never read the sample anyway. */
-  DrawAll = (canvasWidth: number, canvasHeight: number, backdropTexture: WebGLTexture | null): void => {
+  /** Pass `null` for `backdrop` when rendering INTO the scene FBO (Pass 1) —
+   *  the renderer binds a safe 1x1 placeholder instead, avoiding a GL feedback
+   *  loop. Shader branches on Material so non-glass Jivs never read the sample.
+   *
+   *  `backdrop` is the dual-filter pyramid output (with mipmaps). `baseFrostLod`
+   *  is log2 of the pyramid's base sigma (device px). Per-Jiv mipmap LOD =
+   *  `frostLod - baseFrostLod`, giving one clean Gaussian sample per fragment. */
+  DrawAll = (
+    canvasWidth: number,
+    canvasHeight: number,
+    backdrop: WebGLTexture | null,
+    baseFrostLod: number,
+  ): void => {
     const count = this._instanceBuffer.Count;
     if (count === 0) return;
 
@@ -91,10 +102,11 @@ export class JivRenderer {
     gl.useProgram(this._shader.Program);
     gl.uniform2f(this._resolutionLoc, canvasWidth, canvasHeight);
     gl.uniform1i(this._backdropLoc, 0);
+    gl.uniform1f(this._baseFrostLodLoc, baseFrostLod);
     gl.uniform2f(this._specTiltLoc, this.SpecularTiltX, this.SpecularTiltY);
 
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, backdropTexture ?? this._dummyTex);
+    gl.bindTexture(gl.TEXTURE_2D, backdrop ?? this._dummyTex);
 
     gl.bindVertexArray(this._quad.Vao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, count);

@@ -42,6 +42,10 @@ export class Canvas {
   private _textCache!: TextCache;
   private _sceneFbo!: Framebuffer;
   private _blit!: BlitRenderer;
+  // One blur pyramid per frame, built at a small baseline sigma. The output is
+  // mipmapped, and each Jiv picks a mipmap LOD matching its own BackdropFrostBlur
+  // (LOD n ≈ 2ⁿ × base sigma). Single Gaussian sample per fragment — no raw↔blur
+  // or disparate-tier mixing, so no ghosting/haze at intermediate values.
   private _blur!: BlurPass;
   private _animationManager = new AnimationManager();
   private _animators = new Map<Jiv, JivAnimator>();
@@ -181,7 +185,7 @@ export class Canvas {
     this._panelRenderer.BeginFrame();
     this._collectNonGlass(this.Root);
     // null backdrop — we're writing INTO sceneFbo; feedback loop if we also sample it.
-    this._panelRenderer.DrawAll(w, h, null);
+    this._panelRenderer.DrawAll(w, h, null, 0);
 
     this._textCache.BeginFrame();
     this._textRenderer.BeginFrame();
@@ -196,14 +200,20 @@ export class Canvas {
     // sampled by all glass instances. Scan first, then blur.
     this._maxFrostBlur = 0;
     this._scanFrostBlur(this.Root);
-    const blurCssPx = Math.max(1, this._maxFrostBlur);
-    const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, blurCssPx * this._dpr);
-    // Mipmap the BLURRED FBO so the glass shader can sample at higher LODs near
-    // the rim — gives Apple's signature "blur stronger at the edge" behavior.
+    // Baseline pyramid sigma (CSS px). Per-Jiv FrostBlur above this samples a
+    // higher mipmap LOD (each LOD ≈ doubles the effective sigma); per-Jiv values
+    // at or below it clamp to mip 0. Set just high enough to drive the dual-filter
+    // pyramid cleanly (BlurPass's depth-1 minimum floors effective σ ≈ 2 px anyway,
+    // so going below 1 CSS px gains nothing).
+    const baseBlurCssPx = 1;
+    const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, baseBlurCssPx * this._dpr);
+    // log2 of base sigma in DEVICE pixels — matches the instance-buffer frostLod
+    // scale (`Math.log2(blurPx * dpr)`). Shader uses `frostLod - u_BaseFrostLod`
+    // as the per-Jiv mipmap LOD offset.
+    const baseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
+    // Mipmap the pyramid so the glass shader can sample wider blurs (per-Jiv
+    // FrostBlur above base, plus rim-boost) via textureLod.
     this._blur.GenerateOutputMipmap();
-    // Also keep the unblurred scene mipmap'd for rim backdrop samples that want
-    // crisp-ish color pickup (edge lighting uses LOD 0.5 for a light touch of blur).
-    this._sceneFbo.GenerateMipmap();
 
     // ─── Pass 3: blit sceneFbo (UNBLURRED) to screen as base ───
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -216,12 +226,12 @@ export class Canvas {
 
     this._panelRenderer.BeginFrame();
     this._collectGlass(this.Root);
-    this._panelRenderer.DrawAll(w, h, blurredScene);
+    this._panelRenderer.DrawAll(w, h, blurredScene, baseFrostLod);
 
     // ─── Pass 5: non-glass descendants of glass nodes, on top of the glass ───
     this._panelRenderer.BeginFrame();
     this._collectNonGlassUnderGlass(this.Root);
-    this._panelRenderer.DrawAll(w, h, blurredScene);
+    this._panelRenderer.DrawAll(w, h, blurredScene, baseFrostLod);
 
     // ─── Pass 6: text belonging to glass subtree, on top of everything ───
     this._textRenderer.BeginFrame();

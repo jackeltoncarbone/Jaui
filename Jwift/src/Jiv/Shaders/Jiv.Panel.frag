@@ -17,7 +17,13 @@ flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance,
 flat in vec4 v_Outline;        // borderAlphaVariance, borderFresnelBrightness, _pad, _pad
 flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lodOffset
 
+// Dual-filter blurred backdrop pyramid (base sigma = u_BaseFrostLod equivalent).
+// Mipmapped — each integer LOD above the base ≈ doubles the effective sigma.
+// Per-Jiv FrostBlur is mapped to a mipmap LOD offset (`frostLod - u_BaseFrostLod`)
+// plus rim-boost LODs. Single textureLod sample per fragment = one real Gaussian,
+// no disparate-tier mixing and no ghosting at intermediate values.
 uniform sampler2D u_Backdrop;
+uniform float u_BaseFrostLod;
 uniform vec2 u_Resolution;
 // Specular tilt — added to lightDir ONLY for specular computations (bevel
 // catchlight and rim-spec highlight), not for ambient/edge-light/border
@@ -373,16 +379,6 @@ vec2 ShapeGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
     return ShapeGrad_inner(p, halfSize, rAxis, n);
 }
 
-// Back-compat alias — previously used `AutoSmoothness` to pick a smoothness
-// per mode. In the new formulation, Rect uses the user's `Smoothness`; Pill and
-// Circle hard-code their own n (2.55 and 2). This wrapper exists so main() can
-// still pass a `smoothness` parameter through without change.
-float AutoSmoothness(vec2 halfSize, vec4 radii, int mode) {
-    // Only Rect honors the input smoothness. Pill/Circle ignore it entirely
-    // (their exponent is baked in). Caller can continue to pass user smoothness.
-    return 0.6;
-}
-
 // Rec. 709 luma
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
@@ -392,6 +388,15 @@ vec3 applyGrading(vec3 color, float brightness, float saturation, float contrast
     color = mix(vec3(luma), color, saturation);
     color = (color - 0.5) * contrast + 0.5;
     return color;
+}
+
+// Sample the backdrop pyramid at per-Jiv blur strength. `frostLod` is this Jiv's
+// log2(BackdropFrostBlur * DPR); `extraLod` adds mipmap LOD on top (rim-boost /
+// inner-blur). Clamped to 0 — Jivs asking for less than the pyramid base still
+// sample mip 0 (cheapest blur available). One textureLod call = one Gaussian.
+vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
+    float lod = max(0.0, frostLod - u_BaseFrostLod) + extraLod;
+    return textureLod(u_Backdrop, uv, lod).rgb;
 }
 
 void main() {
@@ -431,9 +436,10 @@ void main() {
 
     vec2 p = v_PixelPos - panelCenter;
 
-    // ── Shape mode + auto-derived smoothness (matches Show Studio) ──
+    // Shape mode — Rect uses the user's Smoothness as the superellipse exponent;
+    // Pill/Circle bake their own exponent in ShapeSDF/ShapeGrad and ignore this.
     int mode = ShapeMode(panelHalfSize, v_Radii);
-    float effectiveSmooth = AutoSmoothness(panelHalfSize, v_Radii, mode);
+    float effectiveSmooth = smoothness;
 
     // ── SDF + normal ──
     float dist = ShapeSDF(p, panelHalfSize, v_Radii, effectiveSmooth, mode);
@@ -441,11 +447,15 @@ void main() {
     vec2 normal = ShapeGrad(p, panelHalfSize, v_Radii, effectiveSmooth, mode);
 
     // ── Bezel hump (pincushion profile) ──
+    // Pincushion y = (x/s) * e^(1 - x/s) peaks at x=s and decays exponentially
+    // toward 0 as x grows (by x=3 it's already < 2e-4 of peak). The old code
+    // multiplied by `smoothstep(1.2, 0.8, x)` to force-kill the tail, which
+    // created a visible seam where refraction abruptly stops. Remove that cap
+    // and let the exponential decay handle the interior — matches Apple's
+    // "continuous bevel → flat interior" profile with no boundary ring.
     float x = edgeDist / bezelWidth;
     float s = bezelScale;
-    float hump = (x / s) * exp(1.0 - x / s);          // peak = 1 at x = s
-    hump *= smoothstep(1.2, 0.8, x);                  // die past the band
-    hump = clamp(hump, 0.0, 1.0);
+    float hump = clamp((x / s) * exp(1.0 - x / s), 0.0, 1.0);
 
     // ── Fill alpha (shape mask) ──
     float fillAlpha = 1.0 - smoothstep(-0.5, 0.5, dist);
@@ -491,10 +501,6 @@ void main() {
 
         vec2 refractOffset = (edgeDisp + bulgeDisp) * refractionStrength;
 
-        // Variable LOD — center more blurred than rim
-        float bandLod = frostLod + innerBlur * 3.0
-                       * smoothstep(bezelWidth * 0.5, bezelWidth * 4.0, edgeDist);
-
         // CA spread along normal, scaled by hump and ca
         float caPx = chromaticAberration * hump * 3.0;
         vec2 caStep = normal * caPx;
@@ -517,11 +523,16 @@ void main() {
         // with `textureLod` and ramp the LOD up near the rim. LOD 0 = base
         // Gaussian; +1 LOD ≈ 2× box blur; +2 LOD ≈ 4× box blur. The boost
         // peaks at the silhouette edge and dies inward over `bezelWidth`.
-        float rimBoost = 1.0 - smoothstep(0.0, bezelWidth * 1.5, edgeDist);
+        // Wider transition (2.5 × bezelWidth) than the old 1.5× — stretches
+        // the blur ramp over more of the interior so the rim↔center blur
+        // difference doesn't read as a sharp ring. Gaussian-shaped falloff
+        // (x * (2 - x)) gives a gentler inward dropoff than pure smoothstep.
+        float rimT = clamp(edgeDist / (bezelWidth * 2.5), 0.0, 1.0);
+        float rimBoost = (1.0 - rimT) * (1.0 - rimT);
         lodBoost = rimBoost * 1.5 + innerBlur * 1.0;
-        vec3 sR = textureLod(u_Backdrop, uvR, lodBoost).rgb;
-        vec3 sG = textureLod(u_Backdrop, baseUv, lodBoost).rgb;
-        vec3 sB = textureLod(u_Backdrop, uvB, lodBoost).rgb;
+        vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
+        vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
+        vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
         backdrop = vec3(sR.r, sG.g, sB.b);
 
         backdrop = applyGrading(backdrop, brightness, saturation, contrast);
@@ -576,7 +587,7 @@ void main() {
         // the color from behind the glass, not the pixel directly beneath it.
         vec2 rimUv = (v_PixelPos - normal * rimBand * 1.2) / u_Resolution;
         rimUv.y = 1.0 - rimUv.y;
-        vec3 rimSample = texture(u_Backdrop, rimUv).rgb;
+        vec3 rimSample = sampleBackdrop(rimUv, 0.0, frostLod);
 
         // Saturation + brightness boost — Apple's rim picks up surrounding hue
         // and intensifies it (the "light gathering" feel).
@@ -657,8 +668,12 @@ void main() {
         // bezel width (where the refraction band transitions to flat), width
         // with thickness (a thicker slab shows a wider inner line edge-on).
         float innerPos = bezelWidth * 0.35;                  // how far inside to place it
-        float innerW   = max(thickness * 0.12, 0.5);         // band half-width
-        float innerDarkBand = max(0.0, 1.0 - abs(dist + innerPos) / max(innerW, 0.5));
+        float innerW   = max(thickness * 0.25, 1.2);         // Gaussian σ (CSS px)
+        // Gaussian falloff instead of triangular |x|/w — the linear shape reads
+        // as a hard 1-px dark line at small widths. Gaussian has no sharp edge
+        // and matches Apple's "soft 1 CSS px, 3–6% α, subtle" spec.
+        float innerD = (dist + innerPos) / innerW;
+        float innerDarkBand = exp(-innerD * innerD);
         float innerDarkAlpha = innerDarkBand * 0.04;
 
         // ── Blinn-Phong specular catchlight on the bevel ──
@@ -706,8 +721,14 @@ void main() {
         // thicker slab shows a wider rim edge-on. Floor at 0.75 px so the
         // highlight never disappears on thin glass.
         float rimSpecW = max(thickness * 0.18, 0.75);
-        float rimSpecBand = smoothstep(0.5, -0.5, dist)
-                          - smoothstep(-0.5 - rimSpecW, 0.5 - rimSpecW, dist);
+        // Thin band between the outline (dist=0) and rimSpecW inside (dist=-rimSpecW).
+        // Previous subtraction formulation left the second term at 0 deep inside
+        // while the first stayed at 1, so the "thin line" was actually a 55%
+        // wash over the entire lit-side interior. Now: inside-outline mask
+        // multiplied by a reverse ramp that goes to 0 past rimSpecW inward.
+        float insideOutline = 1.0 - smoothstep(-0.5, 0.5, dist);
+        float withinBand = smoothstep(-rimSpecW - 0.5, -rimSpecW + 0.5, dist);
+        float rimSpecBand = insideOutline * withinBand;
         // Directional alignment uses the TILTED light direction so the
         // rim-spec line slides around the perimeter as pointer/gyro moves.
         // The ambient, edge-light, and border directionality stay fixed to
@@ -719,7 +740,7 @@ void main() {
         // Color: vibrant-boosted backdrop (sampled at the rim) mixed toward white.
         // LOD offset slightly sharper than the panel so the rim highlight reads
         // as "specular reflection of crisper nearby content."
-        vec3 rimSpecBackdrop = textureLod(u_Backdrop, baseUv, max(0.0, lodBoost - 0.5)).rgb;
+        vec3 rimSpecBackdrop = sampleBackdrop(baseUv, max(0.0, lodBoost - 0.5), frostLod);
         float rimSpecLuma = dot(rimSpecBackdrop, LUMA);
         vec3 rimSpecVibrant = clamp(mix(vec3(rimSpecLuma), rimSpecBackdrop, 1.8) * 1.4, 0.0, 1.0);
         vec3 rimSpecRgb = mix(rimSpecVibrant, vec3(1.0), 0.45);
@@ -743,7 +764,7 @@ void main() {
             // applied via `refractOffset`). Apply LOD offset for sharper or
             // blurrier border vs the panel.
             float bLod = max(0.0, lodBoost + v_BorderFilter.w);
-            vec3 bSample = textureLod(u_Backdrop, baseUv, bLod).rgb;
+            vec3 bSample = sampleBackdrop(baseUv, bLod, frostLod);
             vec3 borderBackdrop = applyGrading(
                 bSample,
                 brightness * v_BorderFilter.x,
