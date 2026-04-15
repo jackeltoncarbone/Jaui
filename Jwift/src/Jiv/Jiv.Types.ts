@@ -10,12 +10,6 @@ export type MaterialType = 'None' | 'LiquidGlass' | 'SolidGlass' | 'ProgressiveB
  *  opposite edge is fully clear (unblurred scene shows through). */
 export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRight';
 
-/** Sidecar config for Material: 'ProgressiveBlur' Jivs. Kept off JivStyle so
- *  the core style/animator pipeline isn't dragged along for one material. */
-export interface ProgressiveBlurConfig {
-  Direction: ProgressiveBlurDirection;
-}
-
 export type BlendMode =
   | 'Normal' | 'Multiply' | 'Screen' | 'Overlay'
   | 'Darken' | 'Lighten' | 'ColorDodge' | 'ColorBurn'
@@ -41,6 +35,10 @@ export interface JivStyle {
   // Material — 'None' uses the default panel shader; 'LiquidGlass'/'SolidGlass'
   // route through the glass pipeline (backdrop sampling, grading)
   Material: MaterialType;
+
+  /** Only meaningful when Material === 'ProgressiveBlur'. Names the edge that
+   *  ramps to fully blurred; the opposite edge is clear. */
+  ProgressiveBlurDirection: ProgressiveBlurDirection;
 
   /** Cascading base unit. `1pt` anywhere in this Jiv's subtree resolves to
    *  `N × PointScale`. When resolving PointScale itself, `pt` refers to
@@ -137,6 +135,7 @@ export interface JivStyle {
  */
 export interface JivRenderStyle {
   Material: MaterialType;
+  ProgressiveBlurDirection: ProgressiveBlurDirection;
   PointScale: number;
 
   BorderRadius: [number, number, number, number];          // tl, tr, br, bl

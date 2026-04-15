@@ -115,6 +115,7 @@ const DEFAULT_MASS = 1;
  *  a spring: booleans, enums, and identity-shared nested structures. */
 const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void => {
   render.Material = target.Material;
+  render.ProgressiveBlurDirection = target.ProgressiveBlurDirection;
   render.CornerShape = target.CornerShape;
   render.Overflow = target.Overflow;
   render.BlendMode = target.BlendMode;

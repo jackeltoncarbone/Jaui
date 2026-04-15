@@ -49,6 +49,7 @@ export class Canvas {
   private _textRenderer!: TextRenderer;
   private _textCache!: TextCache;
   private _sceneFbo!: Framebuffer;
+  private _featheredSceneFbo!: Framebuffer;
   private _blit!: BlitRenderer;
   // One blur pyramid per frame, built at a small baseline sigma. The output is
   // mipmapped, and each Jiv picks a mipmap LOD matching its own BackdropFrostBlur
@@ -93,6 +94,7 @@ export class Canvas {
     this._textRenderer = new TextRenderer(gl);
     this._textCache = new TextCache(gl);
     this._sceneFbo = new Framebuffer(gl);
+    this._featheredSceneFbo = new Framebuffer(gl);
     this._blit = new BlitRenderer(gl);
     this._blur = new BlurPass(gl);
     this._progressiveBlurPass = new BlurPass(gl);
@@ -213,7 +215,32 @@ export class Canvas {
     this._collectTextInstancesForNonGlass(this.Root);
     this._textRenderer.DrawAll(w, h);
 
-    // ─── Pass 2: blur sceneFbo with a Dual Filter pyramid ───
+    // ─── Pass 1.5: composite ProgressiveBlur overlays INTO a secondary
+    // FBO so the glass pyramid (Pass 2) and the screen blit (Pass 3) both
+    // see the feather. We can't write into _sceneFbo directly because the
+    // progressive-blur shader samples it as u_Scene — that would be a
+    // feedback loop. Ordering: build the Gaussian chain from the pre-
+    // feather scene first (so the feather reads clean content), then copy
+    // sceneFbo → featheredFbo, then draw each feather on top. ───
+    let sceneTex: WebGLTexture = this._sceneFbo.Texture;
+    if (this._anyProgressiveBlur(this.Root)) {
+      this._progressiveBlurChain.Rebuild(this._sceneFbo.Texture, w, h, this._dpr, this._progressiveBlurPass, this._blit);
+
+      this._featheredSceneFbo.Resize(w, h);
+      this._featheredSceneFbo.Bind();
+      gl.viewport(0, 0, w, h);
+
+      gl.disable(gl.BLEND);
+      this._blit.Draw(this._sceneFbo.Texture);
+
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      this._drawProgressiveBlur(this.Root, 0, 0);
+
+      sceneTex = this._featheredSceneFbo.Texture;
+    }
+
+    // ─── Pass 2: blur scene with a Dual Filter pyramid ───
     // Dual Filtering (Bjørge 2015) — downsample/upsample chain that gives
     // Gaussian-equivalent blur in O(log N) sample count and never bands the way
     // a single 5-tap pass does at large radii. Blur radius driven by the max
@@ -227,7 +254,7 @@ export class Canvas {
     // pyramid cleanly (BlurPass's depth-1 minimum floors effective σ ≈ 2 px anyway,
     // so going below 1 CSS px gains nothing).
     const baseBlurCssPx = 1;
-    const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, baseBlurCssPx * this._dpr);
+    const blurredScene = this._blur.Blur(sceneTex, w, h, baseBlurCssPx * this._dpr);
     // log2 of base sigma in DEVICE pixels — matches the instance-buffer frostLod
     // scale (`Math.log2(blurPx * dpr)`). Shader uses `frostLod - u_BaseFrostLod`
     // as the per-Jiv mipmap LOD offset.
@@ -236,31 +263,11 @@ export class Canvas {
     // FrostBlur above base, plus rim-boost) via textureLod.
     this._blur.GenerateOutputMipmap();
 
-    // ─── Pass 3: blit sceneFbo (UNBLURRED) to screen as base ───
+    // ─── Pass 3: blit scene (UNBLURRED, with feather composited) to screen ───
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, w, h);
-    this._blit.Draw(this._sceneFbo.Texture);
-
-    // ─── Pass 3.5: progressive-blur overlays — each fragment reads the
-    // unblurred scene and four full-resolution Gaussian-blur levels from
-    // a ProgressiveBlurChain, lerping smoothly between them based on
-    // position along the gradient direction. True per-pixel variable
-    // Gaussian — no mipmap downsample hints, no box-filter pixelation.
-    // Sits below glass so a floating nav still refracts cleanly. ───
-    if (this._anyProgressiveBlur(this.Root)) {
-      // Rebuild the Gaussian stack from the sceneFbo. This is separate
-      // from the glass pyramid because the two use-cases have different
-      // quality/perf tradeoffs — glass wants per-Jiv mipmap LOD on a
-      // single pyramid; progressive wants crisp full-resolution Gaussians
-      // at the discrete stops it interpolates between.
-      this._progressiveBlurChain.Rebuild(this._sceneFbo.Texture, w, h, this._dpr, this._progressiveBlurPass, this._blit);
-
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, w, h);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      this._drawProgressiveBlur(this.Root, 0, 0);
-    }
+    gl.disable(gl.BLEND);
+    this._blit.Draw(sceneTex);
 
     // ─── Pass 4: glass panels — sample the BLURRED backdrop for soft refraction ───
     gl.enable(gl.BLEND);
@@ -1003,7 +1010,7 @@ export type { Vec2, Vec4, Rect, Color, DeviceTier, DirtyFlags } from './Types';
 export { DirtyFlag } from './Types';
 
 // Jiv
-export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection, ProgressiveBlurConfig } from '../Jiv/Jiv.Types';
+export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
 
 // Glass presets
 export { LiquidGlass, SolidGlass, ClearGlass } from '../Glass/Glass.Presets';

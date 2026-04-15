@@ -58,6 +58,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
   return {
     Material: s.Material,
+    ProgressiveBlurDirection: s.ProgressiveBlurDirection,
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 
     BorderRadius: borderRadius,

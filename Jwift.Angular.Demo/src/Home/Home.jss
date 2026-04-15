@@ -53,11 +53,12 @@ TabBarRow {
 /* Progressive blur feather — renders between the unblurred scene blit and
  * the glass chrome, so scroll content visually fades into the TabBar above
  * it. Width/X/Y get set imperatively on resize (the layout engine doesn't
- * yet have a "viewport-fixed, bottom-anchored" primitive). Direction is
- * set via the (progressiveBlur) input. BackdropFrostBlur is reused as the
- * max blur radius at the fully-blurred end of the gradient. */
+ * yet have a "viewport-fixed, bottom-anchored" primitive).
+ * BackdropFrostBlur is reused as the max blur radius at the fully-blurred
+ * end of the gradient. */
 ContentBlur {
   Material: ProgressiveBlur
+  ProgressiveBlurDirection: ToBottom
   Position: Fixed
   BackdropFrostBlur: 60
 }
@@ -126,18 +127,18 @@ SectionTitle {
   LetterSpacing: -0.2
 }
 
-/* Shared LiquidGlass base — mirrors Glass.Presets.ts LiquidGlass. Any class
+/* Shared LiquidGlass base for every glass surface in this screen. Any class
  * that wants to look like glass extends this and only expresses its own
- * overrides (shape, layout, chrome-specific tweaks). */
+ * overrides (layout, shape). */
 LiquidGlass {
   Material: LiquidGlass
   Background: rgba(255, 255, 255, 0)
   BorderColor: rgba(255, 255, 255, 0.12)
-  BorderWidth: 1.4
-  BorderBlur: 0.5
+  BorderWidth: 1
+  BorderBlur: 0.25
   BorderRadius: 32
-  BorderBrightness: 1.35
-  BorderSaturation: 1.25
+  BorderBrightness: 1.5
+  BorderSaturation: 1.5
   BorderContrast: 1.0
   BorderFrostLodOffset: -0.5
 
@@ -145,16 +146,16 @@ LiquidGlass {
   ShadowBlur: 22
   ShadowOffsetY: 6
 
-  BackdropFrostBlur: 3
+  BackdropFrostBlur: 4
   BackdropBrightness: 1
   BackdropSaturation: 1.25
   BackdropContrast: 0.75
 
-  Thickness: 2
-  Fillet: 0.25
-  BezelWidth: 7
-  BezelScale: 0.25
-  Refraction: 10
+  Thickness: 1
+  Fillet: 0.125
+  BezelWidth: 11
+  BezelScale: 0.5
+  Refraction: 11
 
   LightAngle: 135
   LightIntensity: 1
@@ -262,9 +263,8 @@ CardTitleCompact {
   Color: rgba(255, 255, 255, 0.97)
 }
 
-/* Toolbar + TabBar: floating chrome pills. Extend the LiquidGlass base and
- * override only the chrome-specific knobs (thinner slab, slightly stronger
- * backdrop blur, wider refraction band). */
+/* Toolbar + TabBar: floating chrome pills. Inherit the full glass tuning
+ * from LiquidGlass; override only layout. */
 
 Toolbar : LiquidGlass {
   Direction: Row
@@ -274,14 +274,6 @@ Toolbar : LiquidGlass {
   Padding: 6
   Width: 220
   Height: 56
-
-  BackdropFrostBlur: 4
-
-  Thickness: 1
-  Fillet: 0.125
-  BezelWidth: 11
-  BezelScale: 0.5
-  Refraction: 11
 }
 
 ToolbarButton {
@@ -310,14 +302,6 @@ TabBar : LiquidGlass {
   Padding: 6
   Width: 440
   Height: 64
-
-  BackdropFrostBlur: 4
-
-  Thickness: 1
-  Fillet: 0.125
-  BezelWidth: 11
-  BezelScale: 0.5
-  Refraction: 11
 }
 
 TabItem {

@@ -82,8 +82,7 @@ export class ProgressiveBlurRenderer {
     const rw = jiv.Width * dpr;
     const rh = jiv.Height * dpr;
 
-    const directionName = jiv.ProgressiveBlur?.Direction ?? 'ToTop';
-    const direction = DIRECTION_INDEX[directionName] ?? 0;
+    const direction = DIRECTION_INDEX[jiv.RenderStyle.ProgressiveBlurDirection] ?? 0;
 
     gl.useProgram(this._shader.Program);
     gl.uniform2f(this._resolutionLoc, canvasWidth, canvasHeight);

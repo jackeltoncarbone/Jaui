@@ -48,7 +48,7 @@ type CardRef = { Kicker: string; Title: string; Color: string };
            scroll area and under the TabBar. Dimensions set imperatively
            from canvas size; the jiv layout engine doesn't yet have a
            viewport-anchored bottom primitive. -->
-      <jiv class="ContentBlur" #contentBlur [progressiveBlur]="{ Direction: 'ToBottom' }" />
+      <jiv class="ContentBlur" #contentBlur />
 
       <jiv class="Scroll">
 
@@ -195,9 +195,17 @@ export class Home implements AfterViewInit, OnDestroy {
     // observe it so the overlay follows browser resizes. Written via
     // the Jiv's X/Y/Width/Height fields (Position: Fixed on the Jiv
     // means these are treated as viewport-absolute by the solver).
-    this._resizeObserver = new ResizeObserver(() => this._layoutContentBlur());
-    this._resizeObserver.observe(this._canvas.Canvas.Element);
-    this._layoutContentBlur();
+    //
+    // Read size from the ResizeObserver entry's contentRect, not from
+    // Canvas.Width — Jwift caches its own width/height and updates them
+    // on the next rAF, so the cached getter is stale inside this callback.
+    const el = this._canvas.Canvas.Element;
+    this._resizeObserver = new ResizeObserver((entries) => {
+      const rect = entries[0]?.contentRect;
+      if (rect) this._layoutContentBlur(rect.width, rect.height);
+    });
+    this._resizeObserver.observe(el);
+    this._layoutContentBlur(el.clientWidth, el.clientHeight);
   }
 
   ngOnDestroy(): void {
@@ -205,11 +213,9 @@ export class Home implements AfterViewInit, OnDestroy {
     this._resizeObserver = null;
   }
 
-  private _layoutContentBlur(): void {
+  private _layoutContentBlur(w: number, h: number): void {
     const node = this._contentBlurRef()?.Node;
     if (!node) return;
-    const w = this._canvas.Canvas.Width;
-    const h = this._canvas.Canvas.Height;
     if (w <= 0 || h <= 0) return;
     // Pin flush to viewport bottom. The TabBar (glass, Pass 4) paints
     // over the blur — so the blur extending behind the TabBar is fine
