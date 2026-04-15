@@ -14,11 +14,19 @@ import type { TextStyle } from '../Text/Text.Types';
  * springs / @when come in v2):
  *
  *   Stylesheet  = Ruleset*
- *   Ruleset     = Ident '{' Declaration* '}'
+ *   Ruleset     = Ident Extends? '{' Declaration* '}'
+ *   Extends     = ':' Ident (',' Ident)*
  *   Declaration = Ident ':' Value Terminator
  *   Value       = chars until Terminator, with braces balanced
  *   Terminator  = Newline | ';' | EOF | '}'
  *   Comments    = '//' … newline, or '/* … *​/'
+ *
+ * Extends flattens at parse time: `Toolbar : LiquidGlass { … }` inlines all
+ * fields from `LiquidGlass` first, then overlays Toolbar's own declarations.
+ * Multiple bases merge left-to-right (later wins). Extends is NOT runtime
+ * stacking — it's a build-time flatten, so the consumer sees one ruleset.
+ * Bases must be declared earlier in the same sheet (forward references are
+ * a future nicety; error out for now).
  *
  * Output per class: `{ Style?, Layout?, ChildLayout?, TextStyle? }` where
  * each property lands in its correct slot according to Jss.Routes. The
@@ -107,9 +115,23 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
   // combinators. JSS uses class-only selectors by design.
   const className = _readIdent(s);
   _skipWs(s);
+
+  // Optional `: Base1, Base2` extends list.
+  const bases: string[] = [];
+  if (s.src[s.pos] === ':') {
+    s.pos++;
+    while (true) {
+      _skipWs(s);
+      bases.push(_readIdent(s));
+      _skipWs(s);
+      if (s.src[s.pos] !== ',') break;
+      s.pos++;
+    }
+  }
+
   _expect(s, '{');
 
-  const ruleset: Ruleset = {};
+  const own: Ruleset = {};
 
   while (true) {
     _skipWs(s);
@@ -117,7 +139,24 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
     if (s.pos >= s.src.length) {
       throw new Error(`[Jwift] Unterminated ruleset "${className}" — missing "}"`);
     }
-    _parseDeclaration(s, ruleset);
+    _parseDeclaration(s, own);
+  }
+
+  // Flatten extends: start from empty, merge each base in declared order,
+  // then overlay own declarations. Later always wins. When there are no
+  // bases, skip the merge entirely so the emitted ruleset only carries the
+  // slots that were actually declared (same shape as before extends existed).
+  let ruleset: Ruleset = own;
+  if (bases.length > 0) {
+    ruleset = {};
+    for (const base of bases) {
+      const baseRuleset = out[base];
+      if (!baseRuleset) {
+        throw new Error(`[Jwift] "${className}" extends unknown class "${base}" — bases must be declared earlier in the same sheet`);
+      }
+      ruleset = _mergeRulesets(ruleset, baseRuleset);
+    }
+    ruleset = _mergeRulesets(ruleset, own);
   }
 
   // If this class appears multiple times in one sheet, merge (later

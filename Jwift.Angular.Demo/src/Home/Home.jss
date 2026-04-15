@@ -50,6 +50,18 @@ TabBarRow {
   Height: 100
 }
 
+/* Progressive blur feather — renders between the unblurred scene blit and
+ * the glass chrome, so scroll content visually fades into the TabBar above
+ * it. Width/X/Y get set imperatively on resize (the layout engine doesn't
+ * yet have a "viewport-fixed, bottom-anchored" primitive). Direction is
+ * set via the (progressiveBlur) input. BackdropFrostBlur is reused as the
+ * max blur radius at the fully-blurred end of the gradient. */
+ContentBlur {
+  Material: ProgressiveBlur
+  Position: Fixed
+  BackdropFrostBlur: 60
+}
+
 HeroStub {
   Direction: Column
   Justify: End
@@ -114,13 +126,56 @@ SectionTitle {
   LetterSpacing: -0.2
 }
 
-SectionViewAll {
+/* Shared LiquidGlass base — mirrors Glass.Presets.ts LiquidGlass. Any class
+ * that wants to look like glass extends this and only expresses its own
+ * overrides (shape, layout, chrome-specific tweaks). */
+LiquidGlass {
+  Material: LiquidGlass
+  Background: rgba(255, 255, 255, 0)
+  BorderColor: rgba(255, 255, 255, 0.12)
+  BorderWidth: 1.4
+  BorderBlur: 0.5
+  BorderRadius: 32
+  BorderBrightness: 1.35
+  BorderSaturation: 1.25
+  BorderContrast: 1.0
+  BorderFrostLodOffset: -0.5
+
+  ShadowColor: rgba(0, 0, 0, 0.18)
+  ShadowBlur: 22
+  ShadowOffsetY: 6
+
+  BackdropFrostBlur: 3
+  BackdropBrightness: 1
+  BackdropSaturation: 1.25
+  BackdropContrast: 0.75
+
+  Thickness: 2
+  Fillet: 0.25
+  BezelWidth: 7
+  BezelScale: 0.25
+  Refraction: 10
+
+  LightAngle: 135
+  LightIntensity: 1
+  SpecularIntensity: 0.55
+  SpecularSharpness: 10
+  FresnelStrength: 0.55
+  ChromaticAberration: 0.3
+  EdgeLightTop: 0.16
+  EdgeLightBottom: 0.03
+  BorderVariance: 0.3
+  BorderAlphaVariance: 0.2
+  BorderFresnelBrightness: 0.25
+  InnerBlur: 0.25
+}
+
+SectionViewAll : LiquidGlass {
   Direction: Row
   Justify: End
   Align: Center
   Padding: 6 12
   BorderRadius: 999
-  Material: LiquidGlass
   BorderWidth: 1
   BorderColor: rgba(255, 255, 255, 0.18)
   BackdropFrostBlur: 14
@@ -207,11 +262,11 @@ CardTitleCompact {
   Color: rgba(255, 255, 255, 0.97)
 }
 
-/* Toolbar + TabBar use Jwift's LiquidGlass preset values inline — until
- * JSS gets multi-class inheritance (`: Base1, Base2`), we duplicate the
- * preset fields here. Matches Glass.Presets.ts. */
+/* Toolbar + TabBar: floating chrome pills. Extend the LiquidGlass base and
+ * override only the chrome-specific knobs (thinner slab, slightly stronger
+ * backdrop blur, wider refraction band). */
 
-Toolbar {
+Toolbar : LiquidGlass {
   Direction: Row
   Justify: End
   Align: Center
@@ -220,44 +275,13 @@ Toolbar {
   Width: 220
   Height: 56
 
-  Material: LiquidGlass
-  Background: rgba(255, 255, 255, 0)
-  BorderColor: rgba(255, 255, 255, 0.12)
-  BorderWidth: 1.4
-  BorderBlur: 0.5
-  BorderRadius: 32
-  BorderBrightness: 1.35
-  BorderSaturation: 1.25
-  BorderContrast: 1.0
-  BorderFrostLodOffset: -0.5
-
-  ShadowColor: rgba(0, 0, 0, 0.18)
-  ShadowBlur: 22
-  ShadowOffsetY: 6
-
   BackdropFrostBlur: 4
-  BackdropBrightness: 1
-  BackdropSaturation: 1.25
-  BackdropContrast: 0.75
 
   Thickness: 1
   Fillet: 0.125
   BezelWidth: 11
   BezelScale: 0.5
   Refraction: 11
-
-  LightAngle: 135
-  LightIntensity: 1
-  SpecularIntensity: 0.55
-  SpecularSharpness: 10
-  FresnelStrength: 0.55
-  ChromaticAberration: 0.3
-  EdgeLightTop: 0.16
-  EdgeLightBottom: 0.03
-  BorderVariance: 0.3
-  BorderAlphaVariance: 0.2
-  BorderFresnelBrightness: 0.25
-  InnerBlur: 0.25
 }
 
 ToolbarButton {
@@ -278,7 +302,7 @@ ToolbarButtonGlyph {
   TextAlign: Center
 }
 
-TabBar {
+TabBar : LiquidGlass {
   Direction: Row
   Justify: SpaceBetween
   Align: Stretch
@@ -287,44 +311,13 @@ TabBar {
   Width: 440
   Height: 64
 
-  Material: LiquidGlass
-  Background: rgba(255, 255, 255, 0)
-  BorderColor: rgba(255, 255, 255, 0.12)
-  BorderWidth: 1.4
-  BorderBlur: 0.5
-  BorderRadius: 32
-  BorderBrightness: 1.35
-  BorderSaturation: 1.25
-  BorderContrast: 1.0
-  BorderFrostLodOffset: -0.5
-
-  ShadowColor: rgba(0, 0, 0, 0.18)
-  ShadowBlur: 22
-  ShadowOffsetY: 6
-
   BackdropFrostBlur: 4
-  BackdropBrightness: 1
-  BackdropSaturation: 1.25
-  BackdropContrast: 0.75
 
   Thickness: 1
   Fillet: 0.125
   BezelWidth: 11
   BezelScale: 0.5
   Refraction: 11
-
-  LightAngle: 135
-  LightIntensity: 1
-  SpecularIntensity: 0.55
-  SpecularSharpness: 10
-  FresnelStrength: 0.55
-  ChromaticAberration: 0.3
-  EdgeLightTop: 0.16
-  EdgeLightBottom: 0.03
-  BorderVariance: 0.3
-  BorderAlphaVariance: 0.2
-  BorderFresnelBrightness: 0.25
-  InnerBlur: 0.25
 }
 
 TabItem {

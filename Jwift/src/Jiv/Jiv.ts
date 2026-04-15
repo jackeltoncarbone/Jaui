@@ -1,4 +1,4 @@
-import type { JivStyle, JivRenderStyle } from './Jiv.Types';
+import type { JivStyle, JivRenderStyle, ProgressiveBlurConfig } from './Jiv.Types';
 import type { ResolveContext } from '../Core/Length';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { DefaultJivStyle } from './Jiv.Defaults';
@@ -74,6 +74,11 @@ export class Jiv {
    *  meaningful on text-bearing Jivs. */
   TextSelectionStyle: Partial<JivStyle> | null = null;
 
+  /** Sidecar config for Material: 'ProgressiveBlur'. Null otherwise. Lives
+   *  off JivStyle because it's meaningful to exactly one material and would
+   *  otherwise force the core resolver/animator to carry dead fields. */
+  ProgressiveBlur: ProgressiveBlurConfig | null = null;
+
   /** Resolved Length context, populated top-down during layout. Holds this
    *  Jiv's resolved PointScale + the parent dims/viewport needed to turn
    *  any Length field (%, pt, rpt, vw/vh, arithmetic) into pixels.
@@ -102,6 +107,7 @@ export class Jiv {
     FocusStyle?: Partial<JivStyle>;
     DisabledStyle?: Partial<JivStyle>;
     TextSelectionStyle?: Partial<JivStyle>;
+    ProgressiveBlur?: ProgressiveBlurConfig;
     SnapLayout?: boolean;
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
@@ -146,6 +152,7 @@ export class Jiv {
     this.FocusStyle = options?.FocusStyle ?? null;
     this.DisabledStyle = options?.DisabledStyle ?? null;
     this.TextSelectionStyle = options?.TextSelectionStyle ?? null;
+    this.ProgressiveBlur = options?.ProgressiveBlur ?? null;
     this.SnapLayout = options?.SnapLayout ?? false;
   }
 

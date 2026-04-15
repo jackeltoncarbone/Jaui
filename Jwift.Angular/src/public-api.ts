@@ -19,6 +19,7 @@ export * from './Jss/Jss.Registry';
 export type {
   JivStyle, LayoutConfig, ChildLayout, TextStyle,
   CornerShape, BlendMode, MaterialType, Color,
+  ProgressiveBlurDirection, ProgressiveBlurConfig,
   Stylesheet, Ruleset,
 } from 'jwift';
 export { LiquidGlass, SolidGlass, ClearGlass, ParseJss, Canvas } from 'jwift';

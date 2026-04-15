@@ -4,7 +4,17 @@ import type { Overflow } from '../Layout/Layout.Types';
 
 export type CornerShape = 'Round' | 'Squircle' | 'Bevel' | 'Scoop' | 'Notch' | number;
 
-export type MaterialType = 'None' | 'LiquidGlass' | 'SolidGlass';
+export type MaterialType = 'None' | 'LiquidGlass' | 'SolidGlass' | 'ProgressiveBlur';
+
+/** Direction the blur ramps TO — i.e. the edge that's fully blurred. The
+ *  opposite edge is fully clear (unblurred scene shows through). */
+export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRight';
+
+/** Sidecar config for Material: 'ProgressiveBlur' Jivs. Kept off JivStyle so
+ *  the core style/animator pipeline isn't dragged along for one material. */
+export interface ProgressiveBlurConfig {
+  Direction: ProgressiveBlurDirection;
+}
 
 export type BlendMode =
   | 'Normal' | 'Multiply' | 'Screen' | 'Overlay'

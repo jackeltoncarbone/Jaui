@@ -53,21 +53,28 @@ export class ScrollManager implements Animatable {
 
   constructor(private _root: Jiv) {}
 
-  /** Wheel/keyboard delta entry point. Adds delta to a clamped target;
-   *  position eases toward target in Tick. NO velocity injection — wheel
-   *  events are discrete and shouldn't produce inertial coasting (Apple/
-   *  Edge convention: smooth-scroll, not flick-momentum, for wheel input).
-   *  Rubber-band is a TOUCH gesture only; wheel always clamps at bounds. */
+  /** Wheel/keyboard delta entry point. Updates position instantly — no ease,
+   *  no spring. Wheel input is discrete and 1:1 "instant" is what the rest
+   *  of the web feels like (browsers' own smooth-scroll is a pref, not a
+   *  default on modern macOS/Windows). Spring-eased wheel felt laggy.
+   *
+   *  Rubber-band and momentum are TOUCH-only; wheel always clamps at bounds
+   *  and produces zero velocity. */
   ApplyDelta = (jiv: Jiv, dx: number, dy: number): void => {
     const s = this._ensureState(jiv);
     const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
     const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
-    s.targetX = Math.max(0, Math.min(maxX, s.targetX + dx));
-    s.targetY = Math.max(0, Math.min(maxY, s.targetY + dy));
+    const nextX = Math.max(0, Math.min(maxX, s.posX + dx));
+    const nextY = Math.max(0, Math.min(maxY, s.posY + dy));
+    s.posX = nextX;
+    s.posY = nextY;
+    s.targetX = nextX;
+    s.targetY = nextY;
     // Wheel cancels any leftover drag-flick momentum so the two inputs don't
     // fight each other (e.g. user flicks then immediately wheels — wheel wins).
     s.velX = 0;
     s.velY = 0;
+    this._syncJiv(jiv, s);
   };
 
   /** Start a drag (touch/pointer). Disables physics; caller will push

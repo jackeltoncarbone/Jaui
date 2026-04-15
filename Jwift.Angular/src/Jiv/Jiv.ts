@@ -14,6 +14,7 @@ import {
   type LayoutConfig,
   type ChildLayout,
   type TextStyle,
+  type ProgressiveBlurConfig,
 } from 'jwift';
 import { JwiftCanvas } from '../Canvas/JwiftCanvas';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
@@ -55,6 +56,8 @@ export class Jiv implements OnInit, OnDestroy {
   readonly childLayout = input<Partial<ChildLayout> | undefined>(undefined);
   readonly text = input<string | null | undefined>(undefined);
   readonly textStyle = input<Partial<TextStyle> | undefined>(undefined);
+  /** Sidecar config for Material: 'ProgressiveBlur' Jivs. */
+  readonly progressiveBlur = input<ProgressiveBlurConfig | undefined>(undefined);
 
   /** The underlying Jiv instance, created in the constructor. */
   readonly Node: JivCore;
@@ -107,15 +110,18 @@ export class Jiv implements OnInit, OnDestroy {
     ChildLayout?: Partial<ChildLayout>;
     TextStyle?: Partial<TextStyle>;
     Text?: string;
+    ProgressiveBlur?: ProgressiveBlurConfig;
   } {
     const fromClass = this._registry?.Resolve(this.className()) ?? null;
     const text = this.text();
+    const pb = this.progressiveBlur();
     return {
       Style:       { ...fromClass?.Style,       ...this.style() },
       Layout:      { ...fromClass?.Layout,      ...this.layout() },
       ChildLayout: { ...fromClass?.ChildLayout, ...this.childLayout() },
       TextStyle:   { ...fromClass?.TextStyle,   ...this.textStyle() },
       ...(text != null ? { Text: text } : {}),
+      ...(pb != null ? { ProgressiveBlur: pb } : {}),
     };
   }
 
@@ -128,6 +134,7 @@ export class Jiv implements OnInit, OnDestroy {
     if (opts.ChildLayout) Object.assign(this.Node.ChildLayout, opts.ChildLayout);
     if (opts.TextStyle) Object.assign(this.Node.TextStyle, opts.TextStyle);
     if ('Text' in opts) this.Node.Text = opts.Text ?? null;
+    if ('ProgressiveBlur' in opts) this.Node.ProgressiveBlur = opts.ProgressiveBlur ?? null;
     this.Node.MarkLayoutDirty();
   }
 }

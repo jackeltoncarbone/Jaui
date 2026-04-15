@@ -21,6 +21,14 @@ import { JivRenderer } from '../Jiv/Jiv.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { BlitRenderer } from './Blit';
 import { BlurPass } from './BlurPass';
+import { ProgressiveBlurRenderer } from '../ProgressiveBlur/ProgressiveBlur.Renderer';
+import { ProgressiveBlurChain } from '../ProgressiveBlur/ProgressiveBlur.Chain';
+import type { MaterialType } from '../Jiv/Jiv.Types';
+
+/** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
+ *  materials like ProgressiveBlur are compositing overlays — they don't have
+ *  a backdrop sample, border, or specular, and they render in their own pass. */
+const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass' || m === 'SolidGlass';
 import { DirtyFlag } from './Types';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
@@ -47,6 +55,16 @@ export class Canvas {
   // (LOD n ≈ 2ⁿ × base sigma). Single Gaussian sample per fragment — no raw↔blur
   // or disparate-tier mixing, so no ghosting/haze at intermediate values.
   private _blur!: BlurPass;
+  /** Separate BlurPass instance dedicated to the progressive-blur chain.
+   *  BlurPass reuses its internal FBOs across calls, so sharing the same
+   *  instance would have the chain rebuild clobber the glass pyramid that
+   *  Pass 4 still samples. Two instances cost a handful of extra FBOs. */
+  private _progressiveBlurPass!: BlurPass;
+  private _progressiveBlur!: ProgressiveBlurRenderer;
+  /** Gaussian blur stack for progressive-blur Jivs. Lazily rebuilt per
+   *  frame, and only when at least one such Jiv is visible — so the extra
+   *  BlurPass calls don't cost us anything on screens that don't use it. */
+  private _progressiveBlurChain!: ProgressiveBlurChain;
   private _animationManager = new AnimationManager();
   private _animators = new Map<Jiv, JivAnimator>();
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
@@ -77,6 +95,9 @@ export class Canvas {
     this._sceneFbo = new Framebuffer(gl);
     this._blit = new BlitRenderer(gl);
     this._blur = new BlurPass(gl);
+    this._progressiveBlurPass = new BlurPass(gl);
+    this._progressiveBlur = new ProgressiveBlurRenderer(gl);
+    this._progressiveBlurChain = new ProgressiveBlurChain(gl);
 
     // Animation manager triggers re-render when springs step
     this._animationManager.OnFrame(() => this.RequestFrame());
@@ -220,6 +241,27 @@ export class Canvas {
     gl.viewport(0, 0, w, h);
     this._blit.Draw(this._sceneFbo.Texture);
 
+    // ─── Pass 3.5: progressive-blur overlays — each fragment reads the
+    // unblurred scene and four full-resolution Gaussian-blur levels from
+    // a ProgressiveBlurChain, lerping smoothly between them based on
+    // position along the gradient direction. True per-pixel variable
+    // Gaussian — no mipmap downsample hints, no box-filter pixelation.
+    // Sits below glass so a floating nav still refracts cleanly. ───
+    if (this._anyProgressiveBlur(this.Root)) {
+      // Rebuild the Gaussian stack from the sceneFbo. This is separate
+      // from the glass pyramid because the two use-cases have different
+      // quality/perf tradeoffs — glass wants per-Jiv mipmap LOD on a
+      // single pyramid; progressive wants crisp full-resolution Gaussians
+      // at the discrete stops it interpolates between.
+      this._progressiveBlurChain.Rebuild(this._sceneFbo.Texture, w, h, this._dpr, this._progressiveBlurPass, this._blit);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, w, h);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      this._drawProgressiveBlur(this.Root, 0, 0);
+    }
+
     // ─── Pass 4: glass panels — sample the BLURRED backdrop for soft refraction ───
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -249,11 +291,42 @@ export class Canvas {
   };
 
   private _collectGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
-    if (node.Width > 0 && node.Height > 0 && node.Style.Visible && node.Style.Material !== 'None') {
+    if (node.Width > 0 && node.Height > 0 && node.Style.Visible && _isGlass(node.Style.Material)) {
       this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
     for (const child of node.Children) this._collectGlass(child, dx, dy);
+  };
+
+  /** Fast "is there any ProgressiveBlur Jiv visible?" probe — drives the
+   *  skip decision for the Pass 3.5 rebuild so screens that don't use
+   *  progressive blur pay zero cost for the feature. */
+  private _anyProgressiveBlur = (node: Jiv): boolean => {
+    if (node.Style.Material === 'ProgressiveBlur' && node.Style.Visible
+        && node.Width > 0 && node.Height > 0) return true;
+    for (const child of node.Children) {
+      if (this._anyProgressiveBlur(child)) return true;
+    }
+    return false;
+  };
+
+  /** Recursive draw for progressive-blur overlays. Unlike glass/text, these
+   *  aren't batched — each Jiv does one draw. We descend past scroll
+   *  containers the same way the other collect passes do. */
+  private _drawProgressiveBlur = (
+    node: Jiv,
+    offsetX: number,
+    offsetY: number,
+  ): void => {
+    if (node.Style.Material === 'ProgressiveBlur' && node.Style.Visible) {
+      this._progressiveBlur.Draw(
+        node, offsetX, offsetY,
+        this.Gl.drawingBufferWidth, this.Gl.drawingBufferHeight,
+        this._dpr, this._sceneFbo.Texture, this._progressiveBlurChain,
+      );
+    }
+    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+    for (const child of node.Children) this._drawProgressiveBlur(child, dx, dy);
   };
 
   /** Compute the offset descendants see when descending past a scroll container. */
@@ -288,11 +361,13 @@ export class Canvas {
     for (const child of node.Children) this._collectNonGlassUnderGlass(child, dx, dy);
   };
 
-  /** True if any STRICT ancestor of node has Material != 'None'. */
+  /** True if any STRICT ancestor of node is a glass panel. ProgressiveBlur
+   *  Jivs are NOT glass — they're a compositing overlay — so descendants of
+   *  a progressive-blur Jiv shouldn't be re-routed to the over-glass pass. */
   private _hasGlassAncestor = (node: Jiv): boolean => {
     let p = node.Parent;
     while (p) {
-      if (p.Style.Material !== 'None') return true;
+      if (_isGlass(p.Style.Material)) return true;
       p = p.Parent;
     }
     return false;
@@ -302,7 +377,7 @@ export class Canvas {
   private _isUnderGlass = (node: Jiv): boolean => {
     let cur: Jiv | null = node;
     while (cur) {
-      if (cur.Style.Material !== 'None') return true;
+      if (_isGlass(cur.Style.Material)) return true;
       cur = cur.Parent;
     }
     return false;
@@ -928,7 +1003,7 @@ export type { Vec2, Vec4, Rect, Color, DeviceTier, DirtyFlags } from './Types';
 export { DirtyFlag } from './Types';
 
 // Jiv
-export type { JivStyle, CornerShape, BlendMode, MaterialType } from '../Jiv/Jiv.Types';
+export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection, ProgressiveBlurConfig } from '../Jiv/Jiv.Types';
 
 // Glass presets
 export { LiquidGlass, SolidGlass, ClearGlass } from '../Glass/Glass.Presets';
