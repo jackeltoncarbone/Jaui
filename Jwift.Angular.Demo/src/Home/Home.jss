@@ -58,8 +58,8 @@ TabBarRow {
   Left: 0
   Direction: Row
   Justify: Center
-  Align: Center
-  Padding: 8 20 24 20
+  Align: Stretch
+  Padding: 8 24 24 24
   Width: 100vw
   Height: 100
 }
@@ -323,12 +323,12 @@ ToolbarAvatarGlyph {
 
 TabBar : LiquidGlass {
   Direction: Row
-  Justify: SpaceBetween
+  Justify: SpaceEvenly
   Align: Stretch
-  Gap: 4
+  Gap: 0
   Padding: 6
-  Width: 440
   Height: 64
+  FlexGrow: 1
 }
 
 TabItem {
