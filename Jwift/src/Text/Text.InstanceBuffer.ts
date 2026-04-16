@@ -8,7 +8,6 @@ import type { AtlasUv } from './Text.Cache';
  *  Padded to 12 floats (3 × vec4) for alignment.
  */
 export const TEXT_FLOATS_PER_INSTANCE = 12;
-const BYTES_PER_INSTANCE = TEXT_FLOATS_PER_INSTANCE * 4;
 
 export interface TextDrawCommand {
   X: number;         // device pixels
@@ -19,25 +18,21 @@ export interface TextDrawCommand {
   Opacity: number;
 }
 
+/**
+ * CPU-side instance data packer for text quads. Backend-agnostic —
+ * the Renderer consumes the raw data via TextAddInstance().
+ */
 export class TextInstanceBuffer {
-  private _gl: WebGL2RenderingContext;
-  private _buffer: WebGLBuffer;
   private _data: Float32Array;
   private _capacity: number;
   private _count: number = 0;
 
-  constructor(gl: WebGL2RenderingContext, initialCapacity: number = 128) {
-    this._gl = gl;
+  constructor(initialCapacity: number = 128) {
     this._capacity = initialCapacity;
     this._data = new Float32Array(initialCapacity * TEXT_FLOATS_PER_INSTANCE);
-
-    const buf = gl.createBuffer();
-    if (!buf) throw new Error('[Jwift] Failed to create text instance buffer');
-    this._buffer = buf;
   }
 
   get Count(): number { return this._count; }
-  get Buffer(): WebGLBuffer { return this._buffer; }
   get Data(): Float32Array { return this._data; }
 
   Begin = (): void => { this._count = 0; };
@@ -48,19 +43,16 @@ export class TextInstanceBuffer {
     const offset = this._count * TEXT_FLOATS_PER_INSTANCE;
     const data = this._data;
 
-    // loc 1 — a_Rect (screen position + size in device px)
     data[offset + 0] = cmd.X;
     data[offset + 1] = cmd.Y;
     data[offset + 2] = cmd.Width;
     data[offset + 3] = cmd.Height;
 
-    // loc 2 — a_UvRect (atlas UV)
     data[offset + 4] = cmd.Uv.U;
     data[offset + 5] = cmd.Uv.V;
     data[offset + 6] = cmd.Uv.UWidth;
     data[offset + 7] = cmd.Uv.UHeight;
 
-    // loc 3 — a_Opacity + 3 padding floats
     data[offset + 8] = cmd.Opacity;
     data[offset + 9] = 0;
     data[offset + 10] = 0;
@@ -68,19 +60,6 @@ export class TextInstanceBuffer {
 
     this._count++;
   };
-
-  Upload = (): void => {
-    if (this._count === 0) return;
-    const gl = this._gl;
-    gl.bindBuffer(gl.ARRAY_BUFFER, this._buffer);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      this._data.subarray(0, this._count * TEXT_FLOATS_PER_INSTANCE),
-      gl.DYNAMIC_DRAW,
-    );
-  };
-
-  static get BytesPerInstance(): number { return BYTES_PER_INSTANCE; }
 
   private _grow = (): void => {
     this._capacity *= 2;

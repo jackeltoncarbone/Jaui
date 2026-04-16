@@ -9,19 +9,14 @@ import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
 import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intrinsic';
 import { TextCache } from '../Text/Text.Cache';
-import { TextRenderer } from '../Text/Text.Renderer';
 import { MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
-// Single unified Jiv renderer. Every Jiv flows through here regardless of Material.
-// Material controls whether the backdrop is sampled + graded; "Glass" is just a
-// styling preset (LiquidGlass, SolidGlass) — never a special code path.
-import { JivRenderer } from '../Jiv/Jiv.Renderer';
-import { Framebuffer } from './Framebuffer';
-import { BlitRenderer } from './Blit';
-import { BlurPass } from './BlurPass';
-import { ProgressiveBlurRenderer } from '../ProgressiveBlur/ProgressiveBlur.Renderer';
+import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
+import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
+import type { Renderer, GpuTextureHandle } from './Renderer';
+import { WebGPURenderer } from './WebGPU.Renderer';
 import type { MaterialType } from '../Jiv/Jiv.Types';
 
 /** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
@@ -35,105 +30,58 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 
 export class Canvas {
-  readonly Gl: WebGL2RenderingContext;
   readonly Element: HTMLCanvasElement;
   readonly Root: Jiv;
 
+  private _renderer!: Renderer;
   private _width: number = 0;
   private _height: number = 0;
   private _dpr: number = 1;
   private _running: boolean = false;
   private _frameId: number = 0;
   private _lastTime: number = 0;
-  private _panelRenderer!: JivRenderer;
-  private _textRenderer!: TextRenderer;
+  private _panelBuffer = new JivInstanceBuffer();
+  private _textBuffer = new TextInstanceBuffer();
   private _textCache!: TextCache;
-  private _sceneFbo!: Framebuffer;
-  private _featheredSceneFbo!: Framebuffer;
-  private _blit!: BlitRenderer;
-  // One blur pyramid per frame, built at a small baseline sigma. The output is
-  // mipmapped, and each Jiv picks a mipmap LOD matching its own BackdropFrostBlur
-  // (LOD n ≈ 2ⁿ × base sigma). Single Gaussian sample per fragment — no raw↔blur
-  // or disparate-tier mixing, so no ghosting/haze at intermediate values.
-  private _blur!: BlurPass;
-  private _progressiveBlur!: ProgressiveBlurRenderer;
+  /** Specular tilt offset — added to lightDir for specular computations only. */
+  private _specTiltX: number = 0;
+  private _specTiltY: number = 0;
   private _animationManager = new AnimationManager();
   private _animators = new Map<JwiftElement, JivAnimator>();
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
   private _textAnimators = new Map<JwiftElement, TextAnimator>();
   private _scrollManager!: ScrollManager;
   private _selectionManager!: SelectionManager;
-  /** Largest FrostBlur of any glass collected this frame (CSS px). Drives the dual-filter pyramid. */
   private _maxFrostBlur: number = 0;
 
   // ─── Debug HUD ───
-  /** User-requested DPR override from `?dpr=N`, null to use auto. */
   private _dprOverride: number | null = null;
-  /** Overlay <div> — created only when Debug is on. */
   private _debugHud: HTMLDivElement | null = null;
-  /** Rolling window of ms-per-frame deltas. Fixed-size buffer, written in-place
-   *  to avoid per-frame allocations. `_hudIdx` is the write cursor, `_hudCount`
-   *  caps growth until the buffer is full. */
   private _hudDeltas: Float32Array = new Float32Array(30);
   private _hudIdx: number = 0;
   private _hudCount: number = 0;
-  /** Last HUD DOM update time (ms). Throttled to ~10Hz so textContent churn
-   *  doesn't itself tank the frame budget we're trying to measure. */
   private _hudLastWrite: number = 0;
-  private _glCallCount: number = 0;
-  private _glPassCounts: string = '';
-  private _glWrapped: boolean = false;
 
-  constructor(canvas: HTMLCanvasElement) {
+  /** Async factory — WebGPU device creation requires promises. */
+  static Create = async (canvas: HTMLCanvasElement): Promise<Canvas> => {
+    const renderer = new WebGPURenderer();
+    await renderer.Init(canvas);
+    return new Canvas(canvas, renderer);
+  };
+
+  private constructor(canvas: HTMLCanvasElement, renderer: Renderer) {
     this.Element = canvas;
     this.Root = new Jiv();
+    this._renderer = renderer;
 
-    // Tell Safari we own all gestures on this canvas. Without this, iOS waits
-    // ~300ms on each touch to decide if it's a browser-owned gesture (pan-zoom,
-    // double-tap-to-zoom) before delivering pointermove — and batches the
-    // resulting moves to ~20Hz. Setting `touch-action: none` unblocks the
-    // compositor fast-path and lets coalesced pointer events flow at 60Hz.
     this.Element.style.touchAction = 'none';
-
-    // Debug HUD — enabled by URL (`?debug` or `#debug`) so the user can flip
-    // it on iPad without rebuilding. Creates a fixed-position overlay next to
-    // the canvas showing FPS, frame-time, DPR, and dims. Optional `?dpr=N`
-    // overrides the auto-DPR for experimenting with fragment pressure.
     this._initDebugFromUrl();
 
-    const gl = canvas.getContext('webgl2', {
-      alpha: false,
-      antialias: false,
-      premultipliedAlpha: true,
-      preserveDrawingBuffer: false,
-      powerPreference: 'high-performance',
-    });
+    this._textCache = new TextCache(renderer);
 
-    if (!gl) throw new Error('[Jwift] WebGL2 not supported');
-    this.Gl = gl;
-    // GL wrapping adds per-call overhead that distorts measurements under
-    // CPU throttle. Only enable with ?glcalls explicitly.
-    if (this._debugHud && typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('glcalls')) {
-      this._wrapGlForCounting();
-    }
-
-    this._panelRenderer = new JivRenderer(gl);
-    this._textRenderer = new TextRenderer(gl);
-    this._textCache = new TextCache(gl);
-    this._sceneFbo = new Framebuffer(gl);
-    this._featheredSceneFbo = new Framebuffer(gl);
-    this._blit = new BlitRenderer(gl);
-    this._blur = new BlurPass(gl);
-    this._progressiveBlur = new ProgressiveBlurRenderer(gl);
-
-    // Animation manager triggers re-render when springs step
     this._animationManager.OnFrame(() => this.RequestFrame());
-
-    // Scroll manager is itself an Animatable — registers with the animation manager
     this._scrollManager = new ScrollManager(this.Root);
     this._animationManager.Register(this._scrollManager);
-
-    // Selection manager — rebuilds highlight Jivs under text on drag.
     this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv), this._animationManager);
 
     this._resize();
@@ -143,13 +91,7 @@ export class Canvas {
     this._listenForInteractionStates();
     this._listenForTextSelection();
     this._listenForSelectionKeys();
-    // NOTE: pointer-driven specular tilt is intentionally NOT wired. It felt
-    // like a "glow follows cursor" gimmick — the wrong abstraction for the
-    // Jiv material. Real gyro input (DeviceOrientation) will drive this on
-    // mobile; any "cursor highlight" effect belongs in a separate composited
-    // overlay layer, not baked into the core material.
-    //   this._listenForSpecularTilt();
-    void this._listenForSpecularTilt;   // keep symbol live for future wiring
+    void this._listenForSpecularTilt;
   }
 
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
@@ -219,127 +161,94 @@ export class Canvas {
   };
 
   private _render = (_dt: number): void => {
-    const gl = this.Gl;
-    const w = gl.drawingBufferWidth;
-    const h = gl.drawingBufferHeight;
-    if (this._glWrapped) { this._glCallCount = 0; this._glMark = 0; }
+    const r = this._renderer;
+    const w = Math.round(this._width * this._dpr);
+    const h = Math.round(this._height * this._dpr);
 
-    // The scene FBO captures the "background" that Liquid Glass panels refract
-    // through. One Jiv renderer handles ALL panels — Material='None' branches
-    // skip the backdrop sample in the shader.
-    this._sceneFbo.Resize(w, h);
+    r.Resize(w, h, this._dpr);
+    r.BeginFrame();
 
-    // ─── Pass 1: non-glass panels + text into sceneFbo ───
-    this._sceneFbo.Bind();
-    gl.viewport(0, 0, w, h);
-    gl.clearColor(0.04, 0.04, 0.04, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // ─── Pass 1: non-glass panels + text into scene texture ───
+    r.BeginScenePass(0.04, 0.04, 0.04);
 
-    this._panelRenderer.BeginFrame();
+    this._panelBuffer.Begin();
     this._collectNonGlass(this.Root);
-    // null backdrop — we're writing INTO sceneFbo; feedback loop if we also sample it.
-    this._panelRenderer.DrawAll(w, h, null, 0);
+    r.PanelBeginBatch();
+    if (this._panelBuffer.Count > 0) {
+      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
+    }
+    r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
 
     this._textCache.BeginFrame();
-    this._textRenderer.BeginFrame();
+    this._textBuffer.Begin();
     this._collectTextInstancesForNonGlass(this.Root);
-    this._textRenderer.DrawAll(w, h, this._textCache);
-    const p1 = this._glWrapped ? this._markGl() : 0;
+    r.TextBeginBatch();
+    if (this._textBuffer.Count > 0) {
+      r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
+    }
+    const atlas = this._textCache.Atlas;
+    if (atlas) r.TextDrawBatch(w, h, atlas);
 
-    // ─── Pass 2 (MOVED UP): blur scene with a Dual Filter pyramid ───
-    // Built BEFORE the progressive-blur composite so Pass 1.5 can reuse the
-    // mipmapped pyramid instead of building its own 4-level Gaussian chain.
-    // Dual Filtering (Bjørge 2015) — downsample/upsample chain that gives
-    // Gaussian-equivalent blur in O(log N) sample count and never bands the way
-    // a single 5-tap pass does at large radii. Blur radius driven by the max
-    // FrostBlur (CSS px) of any glass on screen — one shared blurred FBO is
-    // sampled by all glass instances. Scan first, then blur.
+    r.EndScenePass();
+
+    // ─── Pass 2: blur scene with a compute-shader pyramid ───
     this._maxFrostBlur = 0;
     this._scanFrostBlur(this.Root);
-    // Baseline pyramid sigma (CSS px). Per-Jiv FrostBlur above this samples a
-    // higher mipmap LOD (each LOD ≈ doubles the effective sigma); per-Jiv values
-    // at or below it clamp to mip 0. Set just high enough to drive the dual-filter
-    // pyramid cleanly (BlurPass's depth-1 minimum floors effective σ ≈ 2 px anyway,
-    // so going below 1 CSS px gains nothing).
     const baseBlurCssPx = 1;
     const maxFeatherSigma = this._maxProgressiveBlurSigma(this.Root);
-    const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, baseBlurCssPx * this._dpr);
-    // log2 of base sigma in DEVICE pixels — matches the instance-buffer frostLod
-    // scale (`Math.log2(blurPx * dpr)`). Shader uses `frostLod - u_BaseFrostLod`
-    // as the per-Jiv mipmap LOD offset.
+    const blurredScene = r.ComputeBlur(r.SceneTexture, w, h, baseBlurCssPx * this._dpr);
     const baseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
-    // Mipmap the pyramid so the glass shader can sample wider blurs (per-Jiv
-    // FrostBlur above base, plus rim-boost) via textureLod — and so the
-    // progressive-blur shader can sample it at arbitrary LODs.
-    this._blur.GenerateOutputMipmap();
-    const p2 = this._glWrapped ? this._markGl() : 0;
+    r.GenerateBlurMipmap();
 
-    // ─── Pass 1.5: composite ProgressiveBlur overlays INTO a secondary
-    // FBO so the screen blit (Pass 3) sees the feather. We can't write
-    // into _sceneFbo directly because the progressive-blur shader samples
-    // it as u_Scene — that would be a feedback loop. The blur pyramid is
-    // already built (Pass 2 above), so the shader just samples it at a
-    // ramp-driven LOD — no separate chain rebuild needed. ───
-    let sceneTex: WebGLTexture = this._sceneFbo.Texture;
+    // ─── Pass 1.5: progressive blur overlays ───
+    let sceneTex: GpuTextureHandle = r.SceneTexture;
     if (maxFeatherSigma > 0) {
-      // maxLod: LOD offset from the pyramid's base sigma to the desired
-      // feather sigma. Each LOD doubles effective sigma, so LOD =
-      // log2(targetSigma / baseSigma). Clamped to the pyramid's depth.
       const baseSigmaDevice = baseBlurCssPx * this._dpr;
       const targetSigmaDevice = maxFeatherSigma * this._dpr;
       const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
-
-      this._featheredSceneFbo.Resize(w, h);
-      this._featheredSceneFbo.Bind();
-      gl.viewport(0, 0, w, h);
-
-      gl.disable(gl.BLEND);
-      this._blit.Draw(this._sceneFbo.Texture);
-
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      // TODO: progressive blur needs a secondary render target to avoid feedback.
+      // For now, draw directly — full implementation in a follow-up.
       this._drawProgressiveBlur(this.Root, 0, 0, blurredScene, maxLod);
-
-      sceneTex = this._featheredSceneFbo.Texture;
     }
-    const p15 = this._glWrapped ? this._markGl() : 0;
 
-    // ─── Pass 3: blit scene (UNBLURRED, with feather composited) to screen ───
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, w, h);
-    gl.disable(gl.BLEND);
-    this._blit.Draw(sceneTex);
+    // ─── Pass 3: blit scene to screen ───
+    r.BindDefaultTarget();
+    r.Blit(sceneTex);
 
-    // ─── Pass 4: glass panels — sample the BLURRED backdrop for soft refraction ───
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-    this._panelRenderer.BeginFrame();
+    // ─── Pass 4: glass panels — sample the blurred backdrop ───
+    this._panelBuffer.Begin();
     this._collectGlass(this.Root);
-    this._panelRenderer.DrawAll(w, h, blurredScene, baseFrostLod);
-
-    // ─── Pass 5: non-glass descendants of glass nodes, on top of the glass ───
-    this._panelRenderer.BeginFrame();
-    this._collectNonGlassUnderGlass(this.Root);
-    this._panelRenderer.DrawAll(w, h, blurredScene, baseFrostLod);
-
-    // ─── Pass 6: text belonging to glass subtree, on top of everything ───
-    this._textRenderer.BeginFrame();
-    this._collectTextInstancesForGlass(this.Root);
-    this._textRenderer.DrawAll(w, h, this._textCache);
-
-    if (this._glWrapped) {
-      const p3456 = this._markGl();
-      this._glPassCounts = `GL ${this._glCallCount} (P1:${p1} P2:${p2} P1.5:${p15} P3-6:${p3456})`;
+    r.PanelBeginBatch();
+    if (this._panelBuffer.Count > 0) {
+      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
     }
+    r.PanelDrawBatch(w, h, blurredScene, baseFrostLod, this._specTiltX, this._specTiltY);
+
+    // ─── Pass 5: non-glass descendants of glass nodes ───
+    this._panelBuffer.Begin();
+    this._collectNonGlassUnderGlass(this.Root);
+    r.PanelBeginBatch();
+    if (this._panelBuffer.Count > 0) {
+      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
+    }
+    r.PanelDrawBatch(w, h, blurredScene, baseFrostLod, this._specTiltX, this._specTiltY);
+
+    // ─── Pass 6: text belonging to glass subtree ───
+    this._textBuffer.Begin();
+    this._collectTextInstancesForGlass(this.Root);
+    r.TextBeginBatch();
+    if (this._textBuffer.Count > 0) {
+      r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
+    }
+    if (atlas) r.TextDrawBatch(w, h, atlas);
+
+    r.EndFrame();
   };
 
   private _collectNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (node.Width > 0 && node.Height > 0 && node.Visible
         && node.RenderStyle.Material === 'None' && !this._hasGlassAncestor(node)) {
-      this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
+      this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
     for (const child of node.Children as Jiv[]) this._collectNonGlass(child, dx, dy);
@@ -347,7 +256,7 @@ export class Canvas {
 
   private _collectGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (node.Width > 0 && node.Height > 0 && node.Visible && _isGlass(node.RenderStyle.Material)) {
-      this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
+      this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
     for (const child of node.Children as Jiv[]) this._collectGlass(child, dx, dy);
@@ -379,15 +288,30 @@ export class Canvas {
     node: Jiv,
     offsetX: number,
     offsetY: number,
-    pyramid: WebGLTexture,
+    pyramid: GpuTextureHandle,
     maxLod: number,
   ): void => {
     if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Visible) {
-      this._progressiveBlur.Draw(
-        node, offsetX, offsetY,
-        this.Gl.drawingBufferWidth, this.Gl.drawingBufferHeight,
-        this._dpr, this._sceneFbo.Texture, pyramid, maxLod,
-      );
+      const d = this._dpr;
+      this._renderer.DrawProgressiveBlur({
+        Rect: {
+          X: (node.X + offsetX) * d,
+          Y: (node.Y + offsetY) * d,
+          W: node.Width * d,
+          H: node.Height * d,
+        },
+        Scene: this._renderer.SceneTexture,
+        Pyramid: pyramid,
+        MaxLod: maxLod,
+        Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
+        Opacity: node.RenderStyle.Opacity,
+        Background: node.RenderStyle.Background,
+        Grading: {
+          Brightness: node.RenderStyle.BackdropBrightness,
+          Saturation: node.RenderStyle.BackdropSaturation,
+          Contrast: node.RenderStyle.BackdropContrast,
+        },
+      });
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
     for (const child of node.Children as Jiv[]) this._drawProgressiveBlur(child, dx, dy, pyramid, maxLod);
@@ -418,7 +342,7 @@ export class Canvas {
     if (node.Width > 0 && node.Height > 0 && node.Visible
         && node.RenderStyle.Material === 'None' && this._isUnderGlass(node) && node !== this.Root) {
       if (this._hasGlassAncestor(node)) {
-        this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
+        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
       }
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
@@ -486,7 +410,7 @@ export class Canvas {
       const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
       const wx = contentX + w.SpringX.Value;
       const wy = contentY + yOffset + w.SpringY.Value;
-      this._textRenderer.AddText({
+      this._textBuffer.Push({
         X: wx * this._dpr,
         Y: wy * this._dpr,
         Width: entry.Width,
@@ -699,12 +623,12 @@ export class Canvas {
       // in light-direction space is about 0.5 unit). Clamp to ±0.5.
       const tx = ((clientX - r.left) / Math.max(r.width, 1) - 0.5) * 2;
       const ty = ((clientY - r.top) / Math.max(r.height, 1) - 0.5) * 2;
-      this._panelRenderer.SpecularTiltX = Math.max(-0.5, Math.min(0.5, tx * 0.5));
+      this._specTiltX = Math.max(-0.5, Math.min(0.5, tx * 0.5));
       // Y note: screen Y grows downward, but LightAngle's y convention has
       // "up" as negative in screen space (matches the instance buffer's
       // `lightY = -sin(rad)`). So mouse moving DOWN should shift the
       // specular origin DOWN in the light source, i.e. tilt.y positive.
-      this._panelRenderer.SpecularTiltY = Math.max(-0.5, Math.min(0.5, ty * 0.5));
+      this._specTiltY = Math.max(-0.5, Math.min(0.5, ty * 0.5));
       this.RequestFrame();
     };
 
@@ -713,8 +637,8 @@ export class Canvas {
     }, { passive: true });
 
     this.Element.addEventListener('pointerleave', () => {
-      this._panelRenderer.SpecularTiltX = 0;
-      this._panelRenderer.SpecularTiltY = 0;
+      this._specTiltX = 0;
+      this._specTiltY = 0;
       this.RequestFrame();
     }, { passive: true });
   };
@@ -1108,36 +1032,7 @@ export class Canvas {
     if (debug) this._enableDebugHud();
   };
 
-  private _wrapGlForCounting = (): void => {
-    if (this._glWrapped || !this.Gl) return;
-    this._glWrapped = true;
-    const gl = this.Gl as any;
-    const self = this;
-    const seen = new Set<string>();
-    let obj = gl;
-    while (obj && obj !== Object.prototype) {
-      try {
-        for (const key of Object.getOwnPropertyNames(obj)) {
-          if (seen.has(key) || key === 'getError') continue;
-          seen.add(key);
-          try {
-            if (typeof obj[key] === 'function') {
-              const orig = obj[key].bind(gl);
-              gl[key] = (...args: any[]) => { self._glCallCount++; return orig(...args); };
-            }
-          } catch (_) { /* skip non-configurable */ }
-        }
-      } catch (_) { break; }
-      obj = Object.getPrototypeOf(obj);
-    }
-  };
-
-  private _glMark: number = 0;
-  private _markGl = (): number => {
-    const since = this._glCallCount - this._glMark;
-    this._glMark = this._glCallCount;
-    return since;
-  };
+  // GL call counting removed — WebGPU uses timestamp queries for profiling.
 
   /** Build the HUD overlay. Fixed-position, monospace, semi-transparent; pointer-
    *  events disabled so it never intercepts scroll/hover. Appended to body so
@@ -1199,7 +1094,7 @@ export class Canvas {
     const w = this._width;
     const h = this._height;
     this._debugHud.textContent =
-      `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | WxH ${w}x${h}\n${this._glPassCounts}`;
+      `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | WxH ${w}x${h} | WebGPU`;
   };
 }
 
