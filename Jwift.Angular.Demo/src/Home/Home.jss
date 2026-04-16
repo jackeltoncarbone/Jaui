@@ -14,26 +14,37 @@
 
 Screen {
   Direction: Column
-  Background: rgba(12, 14, 20, 1)
   Background: rgb(255, 255, 255)
   FlexGrow: 1
-  BorderRadius: 60
+  BorderRadius: 90
   Overflow: Hidden
 }
 
-/* Toolbar floats over content — Position: Fixed so it doesn't push the
- * hero down. 3-column: title left, dropdown right. */
-ToolbarRow {
+/* Chrome frame — single uniformly-padded container the size of Screen.
+ * Toolbar sits at its top, TabBar at its bottom, both inset exactly 24 from
+ * every Screen edge. This uniform gap is what makes the concentric radius
+ * derivation unambiguous: children's radii = Screen radius - 24 everywhere. */
+ChromeFrame {
   Position: Fixed
   Top: 0
   Left: 0
+  Width: 100vw
+  Height: 100vh
+  Direction: Column
+  Justify: SpaceBetween
+  Align: Stretch
+  Padding: 24
+  Layer: 10
+  PointerEvents: None
+}
+
+ToolbarRow {
   Direction: Row
   Justify: SpaceBetween
   Align: Center
-  Padding: 20 24
-  Width: 100vw
-  Height: 72
+  Height: 48
   Layer: 20
+  PointerEvents: Auto
 }
 
 ToolbarLogo {
@@ -51,16 +62,11 @@ Scroll {
 }
 
 TabBarRow {
-  Position: Fixed
-  Bottom: 0
-  Left: 0
   Direction: Row
   Justify: Center
-  Align: Stretch
-  Padding: 8 24 24 24
-  Width: 100vw
-  Height: 100
-  Layer: 10
+  Align: Center
+  Height: 64
+  PointerEvents: Auto
 }
 
 /* Progressive blur feathers — Layer 5 sits above scroll content (Layer 0)
@@ -99,7 +105,6 @@ HeroStub {
   Gap: 50
   Height: 70vh
   Background: rgba(29, 43, 92, 0.18)
-  BorderRadius: 0
   FlexGrow: 0
   FlexShrink: 0
 }
@@ -133,16 +138,6 @@ HeroCtaLabel {
 }
 
 Section {
-  Direction: Column
-  Justify: Start
-  Align: Stretch
-  Gap: 14
-  Padding: 0 24 0 24
-  FlexGrow: 0
-  FlexShrink: 0
-}
-
-SectionCompact {
   Direction: Column
   Justify: Start
   Align: Stretch
@@ -234,14 +229,7 @@ Row {
   Height: 340
 }
 
-RowCompact {
-  Direction: Row
-  Justify: Start
-  Align: Stretch
-  Gap: 14
-  Padding: 2 4 2 4
-  FlexGrow: 0
-  FlexShrink: 0
+RowCompact : Row {
   Height: 220
 }
 
@@ -258,17 +246,12 @@ Card {
   FlexGrow: 1
 }
 
-CardCompact {
-  Direction: Column
-  Justify: End
-  Align: Start
+CardCompact : Card {
   Padding: 14 16 16 16
   Width: 200
-  BorderRadius: 28
   ShadowColor: rgba(0, 0, 0, 0.4)
   ShadowBlur: 20
   ShadowOffsetY: 8
-  FlexGrow: 1
 }
 
 CardKicker {
@@ -296,7 +279,8 @@ CardTitleCompact {
   Color: rgba(255, 255, 255, 0.97)
 }
 
-/* Glass dropdown — collapsed: single avatar pill. Expands on tap (TBD). */
+/* Glass dropdown — collapsed: single avatar pill. Expands on tap (TBD).
+ * Concentric with Screen: 100 - 24 (ChromeFrame padding) = 76. */
 ToolbarDropdown : LiquidGlass {
   Direction: Row
   Justify: Center
@@ -304,16 +288,17 @@ ToolbarDropdown : LiquidGlass {
   Padding: 4
   Width: 48
   Height: 48
-  BorderRadius: 24
+  BorderRadius: 76
 }
 
+/* Concentric with ToolbarDropdown: 76 - 4 (Dropdown padding) = 72. */
 ToolbarAvatar {
   Direction: Row
   Justify: Center
   Align: Center
   Width: 40
   Height: 40
-  BorderRadius: 20
+  BorderRadius: 72
   Background: rgba(255, 255, 255, 0.08)
 }
 
@@ -324,6 +309,7 @@ ToolbarAvatarGlyph {
   TextAlign: Center
 }
 
+/* Concentric with Screen: 100 - 24 (ChromeFrame padding) = 76. */
 TabBar : LiquidGlass {
   Direction: Row
   Justify: Start
@@ -333,15 +319,17 @@ TabBar : LiquidGlass {
   Width: 400
   MaxWidth: 100%
   Height: 64
+  BorderRadius: 76
 }
 
+/* Concentric with TabBar: 76 - 4 (TabBar padding) = 72. */
 TabItem {
   Direction: Column
   Justify: Center
   Align: Center
   Gap: 4
   Width: 20%
-  BorderRadius: 22
+  BorderRadius: 72
 }
 
 TabItemActive {
