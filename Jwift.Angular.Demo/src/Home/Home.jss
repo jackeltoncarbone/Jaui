@@ -325,43 +325,63 @@ TabBar : LiquidGlass {
   Direction: Row
   Justify: SpaceBetween
   Align: Stretch
-  Gap: 2
+  Gap: 4
   Padding: 6
   Width: 440
   Height: 64
 }
 
 TabItem {
-  Direction: Row
+  Direction: Column
   Justify: Center
   Align: Center
+  Gap: 4
   FlexGrow: 1
   FlexBasis: 0
-  BorderRadius: 26
+  BorderRadius: 22
 }
 
 TabItemActive {
-  Direction: Row
+  Direction: Column
   Justify: Center
   Align: Center
+  Gap: 4
   FlexGrow: 1
   FlexBasis: 0
-  BorderRadius: 26
-  Background: rgba(255, 255, 255, 0.18)
+  BorderRadius: 22
+  Background: rgba(255, 255, 255, 0.15)
+}
+
+TabIcon {
+  FontFamily: JwiftIcons
+  FontSize: 20
+  FontWeight: 400
+  Color: rgba(255, 255, 255, 0.6)
+  TextAlign: Center
+}
+
+TabIconActive {
+  FontFamily: JwiftIcons
+  FontSize: 20
+  FontWeight: 600
+  Color: rgba(255, 255, 255, 0.95)
+  TextAlign: Center
 }
 
 TabLabel {
   FontFamily: Inter
-  FontSize: 14
+  FontSize: 10
   FontWeight: 500
-  Color: rgba(255, 255, 255, 0.7)
+  Color: rgba(255, 255, 255, 0.6)
   TextAlign: Center
+  LetterSpacing: 0.1
 }
 
 TabLabelActive {
   FontFamily: Inter
-  FontSize: 14
+  FontSize: 10
   FontWeight: 600
-  Color: rgba(255, 255, 255, 0.98)
+  Color: rgba(255, 255, 255, 0.95)
   TextAlign: Center
+  LetterSpacing: 0.1
 }

@@ -122,6 +122,8 @@ type CardRef = { Kicker: string; Title: string; Color: string };
           @for (t of Tabs(); track t.Label; let i = $index) {
             <jiv [class]="i === Selected() ? 'TabItemActive' : 'TabItem'"
                  (click)="Select(i)">
+              <jext [class]="i === Selected() ? 'TabIconActive' : 'TabIcon'"
+                    [text]="i === Selected() ? t.IconFill : t.Icon" />
               <jext [class]="i === Selected() ? 'TabLabelActive' : 'TabLabel'"
                     [text]="t.Label" />
             </jiv>
@@ -171,10 +173,11 @@ export class Home {
   ]);
 
   readonly Tabs = signal([
-    { Label: 'Home' },
-    { Label: 'Discover' },
-    { Label: 'Activity' },
-    { Label: 'Profile' },
+    { Label: 'Home',    Icon: String.fromCodePoint(0xF238), IconFill: String.fromCodePoint(0xF243) },
+    { Label: 'Store',   Icon: String.fromCodePoint(0xE6D7), IconFill: String.fromCodePoint(0xE6DE) },
+    { Label: 'Library', Icon: String.fromCodePoint(0xE7C0), IconFill: String.fromCodePoint(0xE7C1) },
+    { Label: 'Band',    Icon: String.fromCodePoint(0xF64A), IconFill: String.fromCodePoint(0xF64A) },
+    { Label: 'Search',  Icon: String.fromCodePoint(0xF558), IconFill: String.fromCodePoint(0xF558) },
   ]);
 
   readonly Selected = signal(0);

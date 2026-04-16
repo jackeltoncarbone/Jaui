@@ -1,3 +1,11 @@
+/* JwiftIcons — SF Symbols subset, variable weight 100-900 */
+@font-face {
+  font-family: 'JwiftIcons';
+  src: url('/assets/JwiftIcons.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: block;
+}
+
 /* Global styles. Keep minimal — the whole UI lives on the Jwift canvas. */
 
 *{
