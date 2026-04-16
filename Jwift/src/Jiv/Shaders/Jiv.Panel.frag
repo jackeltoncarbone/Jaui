@@ -139,15 +139,17 @@ const vec2 SS_PILL_CURVE[33] = vec2[](
 
 const float SS_PILL_MAXEXTENT = 1.6236; // SS pill max horizontal extent / halfY
 
-// Polyline-based SDF for the SS pill. Pixel-accurate match to SS's
+// Polyline-based SDF + gradient for the SS pill. Pixel-accurate match to SS's
 // GeneratePillPath (within ~0.05 px on a 60-tall pill at 33 sample points).
 //
 // Folds query to first quadrant via abs(). Distinguishes:
 //   - flat zone     (|q.x| ≤ halfX − maxExtent): straight-edge SDF in y
 //   - endcap zone   (|q.x| > halfX − maxExtent): min distance to polyline
 //
-// Returns signed distance (negative inside).
-float SS_PillSDF(vec2 p, vec2 halfSize) {
+// Single-pass loop: tracks min-distance, closest point, AND bracketing segment
+// for inside test in one scan. Bit-exact equivalent to the old two-pass form
+// (proven in tests/Pill.SDF.MergedLoop.test.ts across ~715k samples).
+void SS_PillEval(vec2 p, vec2 halfSize, out float distOut, out vec2 gradOut) {
     bool horiz = halfSize.x >= halfSize.y;
     vec2 q = horiz ? abs(p) : abs(p.yx);
     vec2 hs = horiz ? halfSize : halfSize.yx;
@@ -158,66 +160,25 @@ float SS_PillSDF(vec2 p, vec2 halfSize) {
 
     if (q.x <= flatStart) {
         // Flat zone — top/bottom edge is the only boundary in this column
-        return q.y - halfY;
+        distOut = q.y - halfY;
+        vec2 g = vec2(0.0, sign(p.y));
+        gradOut = horiz ? g : g.yx;
+        return;
     }
 
     // Endcap zone — convert to local coords (0,0) at the flat-zone-end + middle
     vec2 qL = vec2(q.x - flatStart, q.y);
 
-    // Min unsigned distance to polyline (32 segments)
-    float minDSq = 1e9;
-    for (int i = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
-        vec2 a = vec2(SS_PILL_CURVE[i].x * maxExtent, SS_PILL_CURVE[i].y * halfY);
-        vec2 b = vec2(SS_PILL_CURVE[i+1].x * maxExtent, SS_PILL_CURVE[i+1].y * halfY);
-        vec2 ab = b - a;
-        vec2 ap = qL - a;
-        float t = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0);
-        vec2 closest = a + t * ab;
-        vec2 d = qL - closest;
-        minDSq = min(minDSq, dot(d, d));
-    }
-    float udist = sqrt(minDSq);
-
-    // Inside test: find boundary u_b on the curve at v = qL.y. The polyline
-    // is sorted by decreasing v (starts at v=1, ends at v=0), so a single
-    // linear scan finds the bracketing segment.
-    float u_b = -1.0;
-    for (int i = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
-        vec2 a = vec2(SS_PILL_CURVE[i].x * maxExtent, SS_PILL_CURVE[i].y * halfY);
-        vec2 b = vec2(SS_PILL_CURVE[i+1].x * maxExtent, SS_PILL_CURVE[i+1].y * halfY);
-        if (qL.y <= a.y && qL.y >= b.y) {
-            float dv = a.y - b.y;
-            float t = dv > 0.0001 ? (a.y - qL.y) / dv : 0.0;
-            u_b = mix(a.x, b.x, t);
-            break;
-        }
-    }
-    bool inside = qL.y <= halfY && u_b > 0.0 && qL.x <= u_b;
-    return inside ? -udist : udist;
-}
-
-// Polyline-based gradient. Same loop as SDF but tracks closest point, then
-// gradient direction = (qL - closest_point) / |qL - closest_point|, sign-
-// flipped for inside points. Restored to original quadrant via sign(p).
-vec2 SS_PillGrad(vec2 p, vec2 halfSize) {
-    bool horiz = halfSize.x >= halfSize.y;
-    vec2 q = horiz ? abs(p) : abs(p.yx);
-    vec2 hs = horiz ? halfSize : halfSize.yx;
-    float halfY = hs.y;
-    float halfX = hs.x;
-    float maxExtent = SS_PILL_MAXEXTENT * halfY;
-    float flatStart = halfX - maxExtent;
-
-    if (q.x <= flatStart) {
-        // Flat zone — outward normal is in y direction
-        vec2 g = vec2(0.0, sign(p.y));
-        return horiz ? g : g.yx;
-    }
-
-    vec2 qL = vec2(q.x - flatStart, q.y);
-
+    // Single scan: min distance + closest point + bracket-for-inside-test.
+    // Bracket short-circuits via `bracketFound` (equivalent to the old loop's
+    // `break`); the distance scan still runs to completion to find the true
+    // minimum. Polyline is sorted by decreasing v (starts at v=1, ends at v=0),
+    // so the first bracketing segment encountered is the correct one.
     float minDSq = 1e9;
     vec2 bestClosest = qL;
+    float u_b = -1.0;
+    bool bracketFound = false;
+
     for (int i = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
         vec2 a = vec2(SS_PILL_CURVE[i].x * maxExtent, SS_PILL_CURVE[i].y * halfY);
         vec2 b = vec2(SS_PILL_CURVE[i+1].x * maxExtent, SS_PILL_CURVE[i+1].y * halfY);
@@ -231,32 +192,77 @@ vec2 SS_PillGrad(vec2 p, vec2 halfSize) {
             minDSq = dSq;
             bestClosest = closest;
         }
+        if (!bracketFound && qL.y <= a.y && qL.y >= b.y) {
+            float dv = a.y - b.y;
+            float tb = dv > 0.0001 ? (a.y - qL.y) / dv : 0.0;
+            u_b = mix(a.x, b.x, tb);
+            bracketFound = true;
+        }
     }
 
-    // Inside check (same as SDF)
+    float udist = sqrt(minDSq);
+    bool inside = qL.y <= halfY && u_b > 0.0 && qL.x <= u_b;
+    distOut = inside ? -udist : udist;
+
+    // Outward normal: from closest point on polyline to query, sign-flipped
+    // if inside. Restored to original quadrant via sign(p).
+    vec2 dg = qL - bestClosest;
+    float L = length(dg);
+    vec2 g = L > 0.0001 ? dg / L : vec2(1.0, 0.0);
+    if (inside) g = -g;
+    g.x *= sign(p.x);
+    g.y *= sign(p.y);
+    gradOut = horiz ? g : g.yx;
+}
+
+// SDF-only entry point — used by shadow pass (no gradient needed).
+// Single-pass merged loop like SS_PillEval, minus the closest-point tracking.
+float SS_PillSDF(vec2 p, vec2 halfSize) {
+    bool horiz = halfSize.x >= halfSize.y;
+    vec2 q = horiz ? abs(p) : abs(p.yx);
+    vec2 hs = horiz ? halfSize : halfSize.yx;
+    float halfY = hs.y;
+    float halfX = hs.x;
+    float maxExtent = SS_PILL_MAXEXTENT * halfY;
+    float flatStart = halfX - maxExtent;
+
+    if (q.x <= flatStart) return q.y - halfY;
+
+    vec2 qL = vec2(q.x - flatStart, q.y);
+
+    float minDSq = 1e9;
     float u_b = -1.0;
+    bool bracketFound = false;
+
     for (int i = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
         vec2 a = vec2(SS_PILL_CURVE[i].x * maxExtent, SS_PILL_CURVE[i].y * halfY);
         vec2 b = vec2(SS_PILL_CURVE[i+1].x * maxExtent, SS_PILL_CURVE[i+1].y * halfY);
-        if (qL.y <= a.y && qL.y >= b.y) {
+        vec2 ab = b - a;
+        vec2 ap = qL - a;
+        float t = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0);
+        vec2 closest = a + t * ab;
+        vec2 d = qL - closest;
+        minDSq = min(minDSq, dot(d, d));
+        if (!bracketFound && qL.y <= a.y && qL.y >= b.y) {
             float dv = a.y - b.y;
-            float t = dv > 0.0001 ? (a.y - qL.y) / dv : 0.0;
-            u_b = mix(a.x, b.x, t);
-            break;
+            float tb = dv > 0.0001 ? (a.y - qL.y) / dv : 0.0;
+            u_b = mix(a.x, b.x, tb);
+            bracketFound = true;
         }
     }
+    float udist = sqrt(minDSq);
     bool inside = qL.y <= halfY && u_b > 0.0 && qL.x <= u_b;
+    return inside ? -udist : udist;
+}
 
-    // Outward normal: from closest point on polyline to query, sign-flipped if inside
-    vec2 d = qL - bestClosest;
-    float L = length(d);
-    vec2 g = L > 0.0001 ? d / L : vec2(1.0, 0.0);
-    if (inside) g = -g;
-
-    // Restore quadrant sign + axis swap
-    g.x *= sign(p.x);
-    g.y *= sign(p.y);
-    return horiz ? g : g.yx;
+// Gradient-only wrapper over SS_PillEval. Kept for API compatibility with
+// ShapeGrad dispatch; callers that need both dist and grad should use
+// ShapeEval to avoid recomputing the polyline scan.
+vec2 SS_PillGrad(vec2 p, vec2 halfSize) {
+    float d;
+    vec2 g;
+    SS_PillEval(p, halfSize, d, g);
+    return g;
 }
 
 // Master SDF — operates on a shape defined by halfSize + cornerBox (rx, ry) + exponent n.
@@ -380,6 +386,20 @@ vec2 ShapeGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
     return ShapeGrad_inner(p, halfSize, rAxis, n);
 }
 
+// Combined dist + gradient evaluation. Main shape fragments need both — this
+// dispatches to the single-pass pill eval (~4× cheaper than separate SDF+Grad
+// calls on the polyline), or to the rect/circle path (one SDF + one Grad call;
+// rect/circle pows are cheap enough that a merged inner function is overkill).
+void ShapeEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode,
+               out float distOut, out vec2 gradOut) {
+    if (mode == 1) {
+        SS_PillEval(p, halfSize, distOut, gradOut);
+        return;
+    }
+    distOut = ShapeSDF(p, halfSize, radii, smoothness, mode);
+    gradOut = ShapeGrad(p, halfSize, radii, smoothness, mode);
+}
+
 // Rec. 709 luma
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
@@ -443,9 +463,13 @@ void main() {
     float effectiveSmooth = smoothness;
 
     // ── SDF + normal ──
-    float dist = ShapeSDF(p, panelHalfSize, v_Radii, effectiveSmooth, mode);
+    // Single dispatch for pill mode → one polyline scan instead of two
+    // separate scans (SDF + Grad). Rect/circle still uses the cheap
+    // closed-form pair.
+    float dist;
+    vec2 normal;
+    ShapeEval(p, panelHalfSize, v_Radii, effectiveSmooth, mode, dist, normal);
     float edgeDist = max(-dist, 0.0);                 // positive inside
-    vec2 normal = ShapeGrad(p, panelHalfSize, v_Radii, effectiveSmooth, mode);
 
     // ── Bezel hump (pincushion profile) ──
     // Pincushion y = (x/s) * e^(1 - x/s) peaks at x=s and decays exponentially

@@ -119,50 +119,18 @@ fn shape_mode(half_size: vec2f, radii: vec4f) -> i32 {
   return 0;
 }
 
-// SS Pill polyline SDF
-fn ss_pill_sdf(p: vec2f, half_size: vec2f) -> f32 {
-  let horiz = half_size.x >= half_size.y;
-  let q = select(abs(p.yx), abs(p), horiz);
-  let hs = select(half_size.yx, half_size, horiz);
-  let half_y = hs.y;
-  let half_x = hs.x;
-  let max_extent = SS_PILL_MAXEXTENT * half_y;
-  let flat_start = half_x - max_extent;
-
-  if (q.x <= flat_start) { return q.y - half_y; }
-
-  let q_l = vec2f(q.x - flat_start, q.y);
-  var min_d_sq: f32 = 1e9;
-  for (var i: i32 = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
-    let a = vec2f(SS_PILL_CURVE[i].x * max_extent, SS_PILL_CURVE[i].y * half_y);
-    let b = vec2f(SS_PILL_CURVE[i + 1].x * max_extent, SS_PILL_CURVE[i + 1].y * half_y);
-    let ab = b - a;
-    let ap = q_l - a;
-    let t = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0);
-    let closest = a + t * ab;
-    let d = q_l - closest;
-    min_d_sq = min(min_d_sq, dot(d, d));
-  }
-  let u_dist = sqrt(min_d_sq);
-
-  // Inside test
-  var u_b: f32 = -1.0;
-  for (var i: i32 = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
-    let a = vec2f(SS_PILL_CURVE[i].x * max_extent, SS_PILL_CURVE[i].y * half_y);
-    let b = vec2f(SS_PILL_CURVE[i + 1].x * max_extent, SS_PILL_CURVE[i + 1].y * half_y);
-    if (q_l.y <= a.y && q_l.y >= b.y) {
-      let dv = a.y - b.y;
-      let t = select(0.0, (a.y - q_l.y) / dv, dv > 0.0001);
-      u_b = mix(a.x, b.x, t);
-      break;
-    }
-  }
-  let inside = q_l.y <= half_y && u_b > 0.0 && q_l.x <= u_b;
-  return select(u_dist, -u_dist, inside);
+// SS Pill polyline — single-pass SDF + gradient (merged loop).
+// Bit-exact equivalent to the old two-pass implementation (proven in
+// tests/Pill.SDF.MergedLoop.test.ts across ~715k samples). One polyline scan
+// tracks min-distance, closest point, and bracketing segment; bracket short-
+// circuits via `bracket_found` flag, distance scan runs to completion.
+struct PillEval {
+  dist: f32,
+  grad: vec2f,
 }
 
-// SS Pill polyline gradient
-fn ss_pill_grad(p: vec2f, half_size: vec2f) -> vec2f {
+fn ss_pill_eval(p: vec2f, half_size: vec2f) -> PillEval {
+  var out: PillEval;
   let horiz = half_size.x >= half_size.y;
   let q = select(abs(p.yx), abs(p), horiz);
   let hs = select(half_size.yx, half_size, horiz);
@@ -172,13 +140,18 @@ fn ss_pill_grad(p: vec2f, half_size: vec2f) -> vec2f {
   let flat_start = half_x - max_extent;
 
   if (q.x <= flat_start) {
+    out.dist = q.y - half_y;
     let g = vec2f(0.0, sign(p.y));
-    return select(g.yx, g, horiz);
+    out.grad = select(g.yx, g, horiz);
+    return out;
   }
 
   let q_l = vec2f(q.x - flat_start, q.y);
   var min_d_sq: f32 = 1e9;
   var best_closest = q_l;
+  var u_b: f32 = -1.0;
+  var bracket_found = false;
+
   for (var i: i32 = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
     let a = vec2f(SS_PILL_CURVE[i].x * max_extent, SS_PILL_CURVE[i].y * half_y);
     let b = vec2f(SS_PILL_CURVE[i + 1].x * max_extent, SS_PILL_CURVE[i + 1].y * half_y);
@@ -192,28 +165,71 @@ fn ss_pill_grad(p: vec2f, half_size: vec2f) -> vec2f {
       min_d_sq = d_sq;
       best_closest = closest;
     }
-  }
-
-  var u_b: f32 = -1.0;
-  for (var i: i32 = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
-    let a = vec2f(SS_PILL_CURVE[i].x * max_extent, SS_PILL_CURVE[i].y * half_y);
-    let b = vec2f(SS_PILL_CURVE[i + 1].x * max_extent, SS_PILL_CURVE[i + 1].y * half_y);
-    if (q_l.y <= a.y && q_l.y >= b.y) {
+    if (!bracket_found && q_l.y <= a.y && q_l.y >= b.y) {
       let dv = a.y - b.y;
-      let t = select(0.0, (a.y - q_l.y) / dv, dv > 0.0001);
-      u_b = mix(a.x, b.x, t);
-      break;
+      let tb = select(0.0, (a.y - q_l.y) / dv, dv > 0.0001);
+      u_b = mix(a.x, b.x, tb);
+      bracket_found = true;
     }
   }
-  let inside = q_l.y <= half_y && u_b > 0.0 && q_l.x <= u_b;
 
-  let d = q_l - best_closest;
-  let l = length(d);
-  var g = select(vec2f(1.0, 0.0), d / l, l > 0.0001);
+  let u_dist = sqrt(min_d_sq);
+  let inside = q_l.y <= half_y && u_b > 0.0 && q_l.x <= u_b;
+  out.dist = select(u_dist, -u_dist, inside);
+
+  let dg = q_l - best_closest;
+  let l = length(dg);
+  var g = select(vec2f(1.0, 0.0), dg / l, l > 0.0001);
   if (inside) { g = -g; }
   g.x *= sign(p.x);
   g.y *= sign(p.y);
-  return select(g.yx, g, horiz);
+  out.grad = select(g.yx, g, horiz);
+  return out;
+}
+
+// SDF-only entry — shadow pass calls this at p - shadow_offset; no grad needed.
+// Same single-pass structure, minus closest-point tracking.
+fn ss_pill_sdf(p: vec2f, half_size: vec2f) -> f32 {
+  let horiz = half_size.x >= half_size.y;
+  let q = select(abs(p.yx), abs(p), horiz);
+  let hs = select(half_size.yx, half_size, horiz);
+  let half_y = hs.y;
+  let half_x = hs.x;
+  let max_extent = SS_PILL_MAXEXTENT * half_y;
+  let flat_start = half_x - max_extent;
+
+  if (q.x <= flat_start) { return q.y - half_y; }
+
+  let q_l = vec2f(q.x - flat_start, q.y);
+  var min_d_sq: f32 = 1e9;
+  var u_b: f32 = -1.0;
+  var bracket_found = false;
+
+  for (var i: i32 = 0; i < SS_PILL_POINT_COUNT - 1; i++) {
+    let a = vec2f(SS_PILL_CURVE[i].x * max_extent, SS_PILL_CURVE[i].y * half_y);
+    let b = vec2f(SS_PILL_CURVE[i + 1].x * max_extent, SS_PILL_CURVE[i + 1].y * half_y);
+    let ab = b - a;
+    let ap = q_l - a;
+    let t = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0);
+    let closest = a + t * ab;
+    let d = q_l - closest;
+    min_d_sq = min(min_d_sq, dot(d, d));
+    if (!bracket_found && q_l.y <= a.y && q_l.y >= b.y) {
+      let dv = a.y - b.y;
+      let tb = select(0.0, (a.y - q_l.y) / dv, dv > 0.0001);
+      u_b = mix(a.x, b.x, tb);
+      bracket_found = true;
+    }
+  }
+  let u_dist = sqrt(min_d_sq);
+  let inside = q_l.y <= half_y && u_b > 0.0 && q_l.x <= u_b;
+  return select(u_dist, -u_dist, inside);
+}
+
+// Gradient-only wrapper — kept for shape_grad dispatch compatibility. Callers
+// that need both should use shape_eval to avoid a redundant polyline scan.
+fn ss_pill_grad(p: vec2f, half_size: vec2f) -> vec2f {
+  return ss_pill_eval(p, half_size).grad;
 }
 
 // Master SDF inner (superellipse corner)
@@ -288,6 +304,27 @@ fn shape_grad(p: vec2f, half_size: vec2f, radii: vec4f, smoothness: f32, mode: i
   return shape_grad_inner(p, half_size, r_axis, n);
 }
 
+struct ShapeEval {
+  dist: f32,
+  grad: vec2f,
+}
+
+// Combined dist + gradient. Main shape fragments need both — pill mode does
+// a single polyline scan (~4× cheaper than calling shape_sdf and shape_grad
+// separately); rect/circle just forwards to the existing pair.
+fn shape_eval(p: vec2f, half_size: vec2f, radii: vec4f, smoothness: f32, mode: i32) -> ShapeEval {
+  var out: ShapeEval;
+  if (mode == 1) {
+    let pe = ss_pill_eval(p, half_size);
+    out.dist = pe.dist;
+    out.grad = pe.grad;
+    return out;
+  }
+  out.dist = shape_sdf(p, half_size, radii, smoothness, mode);
+  out.grad = shape_grad(p, half_size, radii, smoothness, mode);
+  return out;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn apply_grading(color_in: vec3f, brightness: f32, saturation: f32, contrast: f32) -> vec3f {
@@ -346,10 +383,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let p = in.pixel_pos - panel_center;
   let mode = shape_mode(panel_half_size, inst.radii);
 
-  // SDF + normal
-  let dist = shape_sdf(p, panel_half_size, inst.radii, smoothness, mode);
+  // SDF + normal — single dispatch for pill mode → one polyline scan instead
+  // of two separate scans (SDF + Grad). Rect/circle still uses the cheap
+  // closed-form pair.
+  let shape = shape_eval(p, panel_half_size, inst.radii, smoothness, mode);
+  let dist = shape.dist;
   let edge_dist = max(-dist, 0.0);
-  let normal = shape_grad(p, panel_half_size, inst.radii, smoothness, mode);
+  let normal = shape.grad;
 
   // Bezel hump (pincushion profile)
   let x = edge_dist / bezel_width;
