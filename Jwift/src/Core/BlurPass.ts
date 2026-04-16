@@ -89,7 +89,6 @@ export class BlurPass {
   private _levels: Framebuffer[] = [];
   private _lastDepth: number = 0;
   get LastDepth(): number { return this._lastDepth; }
-  private _mipFbo: WebGLFramebuffer | null = null;
 
   private _downTexLoc: WebGLUniformLocation | null;
   private _downHpLoc: WebGLUniformLocation | null;
@@ -194,42 +193,10 @@ export class BlurPass {
     return this._levels[0].Texture;
   };
 
-  /** Build the mip chain by copying pyramid levels directly into the output
-   *  texture's mip slots. The dual-filter's 8-tap upsample kernel produces
-   *  smoother mips than gl.generateMipmap's box filter and avoids the
-   *  full-resolve cost that tanks iOS tile-based GPUs. */
+  /** Generate mipmaps on the output. Uses gl.generateMipmap which gives a
+   *  full LOD chain down to 1×1 — needed by both the glass shader (rim LOD
+   *  boost) and the progressive blur shader (textureLod across the gradient). */
   GenerateOutputMipmap = (): void => {
-    const gl = this._gl;
-    const depth = this._lastDepth;
-    if (depth === 0) return;
-
-    if (!this._mipFbo) {
-      const fb = gl.createFramebuffer();
-      if (!fb) return;
-      this._mipFbo = fb;
-    }
-
-    const outTex = this._levels[0].Texture;
-    gl.bindTexture(gl.TEXTURE_2D, outTex);
-    for (let i = 1; i <= depth; i++) {
-      const lvl = this._levels[i];
-      gl.texImage2D(gl.TEXTURE_2D, i, gl.RGBA, lvl.Width, lvl.Height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    }
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, depth);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-
-    for (let i = 1; i <= depth; i++) {
-      const lvl = this._levels[i];
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, lvl.Framebuffer);
-      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._mipFbo);
-      gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, outTex, i);
-      gl.blitFramebuffer(0, 0, lvl.Width, lvl.Height, 0, 0, lvl.Width, lvl.Height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-    }
-
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-    gl.bindTexture(gl.TEXTURE_2D, outTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.bindTexture(gl.TEXTURE_2D, null);
+    this._levels[0].GenerateMipmap();
   };
 }

@@ -110,7 +110,11 @@ export class Canvas {
 
     if (!gl) throw new Error('[Jwift] WebGL2 not supported');
     this.Gl = gl;
-    if (this._debugHud) this._wrapGlForCounting();
+    // GL wrapping adds per-call overhead that distorts measurements under
+    // CPU throttle. Only enable with ?glcalls explicitly.
+    if (this._debugHud && typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('glcalls')) {
+      this._wrapGlForCounting();
+    }
 
     this._panelRenderer = new JivRenderer(gl);
     this._textRenderer = new TextRenderer(gl);
@@ -260,8 +264,7 @@ export class Canvas {
     // so going below 1 CSS px gains nothing).
     const baseBlurCssPx = 1;
     const maxFeatherSigma = this._maxProgressiveBlurSigma(this.Root);
-    const needsDeepPyramid = maxFeatherSigma > 0 ? 3 : 0;
-    const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, baseBlurCssPx * this._dpr, needsDeepPyramid);
+    const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, baseBlurCssPx * this._dpr);
     // log2 of base sigma in DEVICE pixels — matches the instance-buffer frostLod
     // scale (`Math.log2(blurPx * dpr)`). Shader uses `frostLod - u_BaseFrostLod`
     // as the per-Jiv mipmap LOD offset.
@@ -285,10 +288,7 @@ export class Canvas {
       // log2(targetSigma / baseSigma). Clamped to the pyramid's depth.
       const baseSigmaDevice = baseBlurCssPx * this._dpr;
       const targetSigmaDevice = maxFeatherSigma * this._dpr;
-      const maxLod = Math.min(
-        Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice))),
-        this._blur.LastDepth,
-      );
+      const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
 
       this._featheredSceneFbo.Resize(w, h);
       this._featheredSceneFbo.Bind();
