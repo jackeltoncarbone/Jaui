@@ -248,10 +248,19 @@ export class Canvas {
       this._drawProgressiveBlur(this.Root, 0, 0, blurredScene, maxLod);
     }
 
-    // ─── Pass 4: glass panels — sample the blurred backdrop ───
+    // ─── Pass 4a: scroll-content glass (non-fixed) ───
     r.EnableBlend();
     this._panelBuffer.Begin();
-    this._collectGlass(this.Root);
+    this._collectGlassFiltered(this.Root, false);
+    r.PanelBeginBatch();
+    if (this._panelBuffer.Count > 0) {
+      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
+    }
+    r.PanelDrawBatch(w, h, blurredScene, baseFrostLod, this._specTiltX, this._specTiltY);
+
+    // ─── Pass 4b: fixed chrome glass (toolbar, tabbar — always on top) ───
+    this._panelBuffer.Begin();
+    this._collectGlassFiltered(this.Root, true);
     r.PanelBeginBatch();
     if (this._panelBuffer.Count > 0) {
       r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
@@ -294,6 +303,27 @@ export class Canvas {
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
     for (const child of node.Children as Jiv[]) this._collectGlass(child, dx, dy);
+  };
+
+  /** Collect glass panels filtered by fixed vs non-fixed ancestry.
+   *  When `fixedOnly` is true, only collect glass panels that are inside a
+   *  Fixed-position ancestor (toolbar, tabbar). When false, collect the rest.
+   *  This lets us draw fixed chrome glass in a separate draw call (on top). */
+  private _collectGlassFiltered = (
+    node: Jiv, fixedOnly: boolean,
+    offsetX: number = 0, offsetY: number = 0,
+    insideFixed: boolean = false,
+  ): void => {
+    const isFixed = insideFixed || node.ChildLayout.Position === 'Fixed';
+    if (node.Width > 0 && node.Height > 0 && node.Visible && _isGlass(node.RenderStyle.Material)) {
+      if (isFixed === fixedOnly) {
+        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
+      }
+    }
+    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+    for (const child of node.Children as Jiv[]) {
+      this._collectGlassFiltered(child, fixedOnly, dx, dy, isFixed);
+    }
   };
 
   /** Walk the tree to find the max `BackdropFrostBlur` across all visible
