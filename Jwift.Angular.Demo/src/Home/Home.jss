@@ -323,11 +323,11 @@ ToolbarAvatarGlyph {
 
 TabBar : LiquidGlass {
   Direction: Row
-  Justify: SpaceEvenly
+  Justify: Start
   Align: Stretch
   Gap: 0
-  Padding: 6
-  Width: 640
+  Padding: 4
+  Width: 400
   MaxWidth: 100%
   Height: 64
 }
