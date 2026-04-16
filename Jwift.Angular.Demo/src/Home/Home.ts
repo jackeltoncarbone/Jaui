@@ -28,15 +28,6 @@ type CardRef = { Kicker: string; Title: string; Color: string };
 
     <jiv class="Screen">
 
-      <!-- Toolbar floats over content (Position: Fixed) -->
-      <jiv class="ToolbarRow">
-        <jiv class="Toolbar">
-          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="◆" /></jiv>
-          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="🛒" /></jiv>
-          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="👤" /></jiv>
-        </jiv>
-      </jiv>
-
       <!-- Progressive blur feathers -->
       <jiv class="TopBlur" />
       <jiv class="ContentBlur" />
@@ -135,6 +126,16 @@ type CardRef = { Kicker: string; Title: string; Color: string };
                     [text]="t.Label" />
             </jiv>
           }
+        </jiv>
+      </jiv>
+
+      <!-- Toolbar LAST in tree = renders on top of all glass (z-order) -->
+      <jiv class="ToolbarRow">
+        <jext class="ToolbarTitle" text="Show Studio" />
+        <jiv class="ToolbarDropdown">
+          <jiv class="ToolbarAvatar">
+            <jext class="ToolbarAvatarGlyph" text="👤" />
+          </jiv>
         </jiv>
       </jiv>
 

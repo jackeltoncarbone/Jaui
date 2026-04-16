@@ -21,17 +21,25 @@ Screen {
 }
 
 /* Toolbar floats over content — Position: Fixed so it doesn't push the
- * hero down. pointer-events managed per-child. */
+ * hero down. 3-column: title left, dropdown right. */
 ToolbarRow {
   Position: Fixed
   Top: 0
-  Right: 0
+  Left: 0
   Direction: Row
-  Justify: End
+  Justify: SpaceBetween
   Align: Center
-  Padding: 24 24
+  Padding: 20 24
   Width: 100vw
   Height: 72
+}
+
+ToolbarTitle {
+  FontFamily: Inter
+  FontSize: 17
+  FontWeight: 600
+  Color: rgba(255, 255, 255, 0.96)
+  LetterSpacing: -0.2
 }
 
 Scroll {
@@ -285,18 +293,18 @@ CardTitleCompact {
   Color: rgba(255, 255, 255, 0.97)
 }
 
-/* Toolbar glass pill — collapsed avatar/action group. */
-Toolbar : LiquidGlass {
+/* Glass dropdown — collapsed: single avatar pill. Expands on tap (TBD). */
+ToolbarDropdown : LiquidGlass {
   Direction: Row
-  Justify: End
+  Justify: Center
   Align: Center
-  Gap: 4
   Padding: 4
+  Width: 48
   Height: 48
   BorderRadius: 24
 }
 
-ToolbarButton {
+ToolbarAvatar {
   Direction: Row
   Justify: Center
   Align: Center
@@ -306,10 +314,9 @@ ToolbarButton {
   Background: rgba(255, 255, 255, 0.08)
 }
 
-ToolbarButtonGlyph {
+ToolbarAvatarGlyph {
   FontFamily: Inter
-  FontSize: 15
-  FontWeight: 600
+  FontSize: 18
   Color: rgba(255, 255, 255, 0.9)
   TextAlign: Center
 }
