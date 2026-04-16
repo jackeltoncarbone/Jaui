@@ -14,9 +14,8 @@
 
 Screen {
   Direction: Column
-  Justify: Start
-  Align: Stretch
   Background: rgba(12, 14, 20, 1)
+  Background: rgb(255, 255, 255)
   FlexGrow: 1
   BorderRadius: 60
   Overflow: Hidden
@@ -38,7 +37,7 @@ ToolbarRow {
 }
 
 ToolbarLogo {
-  Height: 30
+  Height: 40
 }
 
 Scroll {
@@ -99,7 +98,7 @@ HeroStub {
   Padding: 48 28 48 28
   Gap: 50
   Height: 70vh
-  Background: rgb(22, 26, 42)
+  Background: rgba(29, 43, 92, 0.18)
   BorderRadius: 0
   FlexGrow: 0
   FlexShrink: 0

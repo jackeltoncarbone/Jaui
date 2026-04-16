@@ -15,6 +15,13 @@ export interface AnchorPoint {
 
 export type Overflow = 'Visible' | 'Hidden' | 'Scroll';
 
+/** Per-child override of the parent's clipping behavior.
+ *  - `Inherit` (default): child is clipped iff parent's `Overflow` is Hidden/Scroll.
+ *  - `Visible`: child escapes the parent's clip (back to grandparent's clip),
+ *    even if parent is Hidden/Scroll. Escapes one level only.
+ *  - `Hidden`: child is clipped to the parent's box even if parent is Visible. */
+export type ParentOverflow = 'Inherit' | 'Visible' | 'Hidden';
+
 /** Jwift's equivalent of CSS anchor-positioning / SwiftUI `.alignmentGuide`.
  *  Set Position:'Attach' on a Jiv, then its rect is derived from another Jiv's
  *  current layout on every solve pass — so the attached node tracks its target
@@ -97,6 +104,10 @@ export interface ChildLayout {
   AttachOffsetY: string;
   /** Space-separated shorthand, same as Padding. */
   AttachInset: string;
+
+  /** Override the parent's clipping behavior for this child only. See
+   *  `ParentOverflow` for semantics. Default `'Inherit'`. */
+  ParentOverflow: ParentOverflow;
 }
 
 export interface LayoutResult {
@@ -164,4 +175,5 @@ export const DefaultChildLayout: ChildLayout = {
   AttachOffsetX: '0',
   AttachOffsetY: '0',
   AttachInset: '0',
+  ParentOverflow: 'Inherit',
 };

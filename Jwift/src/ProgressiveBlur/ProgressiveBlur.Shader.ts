@@ -24,12 +24,14 @@ uniform vec4 u_Rect;                        // x, y, w, h in device px (y = top)
 
 out vec2 v_Local;                           // 0..1 across the Jiv; y=0 is top
 out vec2 v_SampleUv;                        // UV into the blur pyramid / scene
+out vec2 v_PixelPos;                        // device-pixel position (for clip SDF)
 
 void main() {
     v_Local = a_Position;
 
     // Jiv's pixel-space corner. y is top-anchored in our convention.
     vec2 pixel = u_Rect.xy + a_Position * u_Rect.zw;
+    v_PixelPos = pixel;
 
     // Sample UV into the sceneFbo-derived textures. sceneFbo was written by
     // shaders that flip clip.y, so its top-of-scene sits at high UV.y. We
@@ -50,6 +52,7 @@ precision highp float;
 
 in vec2 v_Local;
 in vec2 v_SampleUv;
+in vec2 v_PixelPos;
 
 uniform sampler2D u_Scene;                  // unblurred scene (level -1)
 uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = base blur, higher = more)
@@ -58,10 +61,52 @@ uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 
 uniform float u_Opacity;
 uniform vec4 u_Background;                  // tint mixed IN along the ramp (fades clear → authored alpha)
 uniform vec3 u_Grading;                     // (Brightness, Saturation, Contrast) — all 1 = identity
+uniform sampler2D u_ClipTex;                // per-frame clip-stack texture
+uniform ivec2 u_ClipMeta;                   // (offset, count) into clip stack
 
 out vec4 fragColor;
 
+float pickClipRadius(vec2 p, vec4 radii) {
+    if (p.x >= 0.0) {
+        return p.y <= 0.0 ? radii.y : radii.z;
+    }
+    return p.y <= 0.0 ? radii.x : radii.w;
+}
+
+bool insideClipShape(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
+    vec2 center = rect.xy + rect.zw * 0.5;
+    vec2 halfSize = rect.zw * 0.5;
+    vec2 qSigned = pixel - center;
+    vec2 qAbs = abs(qSigned);
+    if (qAbs.x > halfSize.x || qAbs.y > halfSize.y) return false;
+    float r = pickClipRadius(qSigned, radii);
+    vec2 cornerP = qAbs - (halfSize - vec2(r));
+    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) return true;
+    float n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
+    float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
+    return L <= 1.0;
+}
+
+const int MAX_CLIP_DEPTH = 16;
+
+bool insideClipStack(vec2 pixel, int offset, int count) {
+    for (int i = 0; i < MAX_CLIP_DEPTH; i++) {
+        if (i >= count) break;
+        int base = (offset + i) * 3;
+        vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
+        vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
+        vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
+        if (!insideClipShape(pixel, rect, radii, meta.x)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void main() {
+    if (!insideClipStack(v_PixelPos, u_ClipMeta.x, u_ClipMeta.y)) {
+        discard;
+    }
     // t = 0 at the clear end → 1 at the blurred end
     float t;
     if (u_Direction == 0)       t = 1.0 - v_Local.y;    // ToTop

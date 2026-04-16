@@ -33,7 +33,7 @@ struct JivInstance {
   lighting: vec4f,       // lightDirX, lightDirY, lightIntensity, fresnelStrength
   specular: vec4f,       // specIntensity, specSharpness, chromaticAberration, innerBlur
   rim_edge: vec4f,       // edgeLightTop, edgeLightBottom, borderVariance, bulge
-  outline: vec4f,        // borderAlphaVariance, borderFresnelBrightness, _pad, _pad
+  outline: vec4f,        // borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount
   border_filter: vec4f,  // brightnessMul, saturationMul, contrastMul, lodOffset
 }
 
@@ -41,6 +41,9 @@ struct JivInstance {
 @group(0) @binding(1) var backdrop: texture_2d<f32>;
 @group(0) @binding(2) var backdrop_sampler: sampler;
 @group(1) @binding(0) var<storage, read> instances: array<JivInstance>;
+// Each clip is 3 vec4s: rect(x,y,w,h), radii(tl,tr,br,bl), meta(smoothness,_,_,_).
+// Rect/radii in device pixels; smoothness is unitless (0=circle corners).
+@group(2) @binding(0) var<storage, read> clip_stack: array<vec4f>;
 
 // ─── Vertex → Fragment interface ────────────────────────────────────────────
 
@@ -108,14 +111,53 @@ fn pick_rect_radius(p: vec2f, radii: vec4f) -> f32 {
   return select(radii.w, radii.x, p.y <= 0.0);
 }
 
-// Classify shape: 0=Rect, 1=Pill, 2=Circle
+// Inside-test for overflow clipping — matches the panel's own squircle
+// superellipse so the clip exactly traces the painted rounded-rect edge.
+// `smoothness` maps to the same exponent as the panel SDF (n = 2 + 6*s).
+fn inside_clip_shape(pixel: vec2f, rect: vec4f, radii: vec4f, smoothness: f32) -> bool {
+  let center = rect.xy + rect.zw * 0.5;
+  let half_size = rect.zw * 0.5;
+  let q_signed = pixel - center;
+  let q_abs = abs(q_signed);
+  // Outside the bounding box — definitely outside the shape.
+  if (q_abs.x > half_size.x || q_abs.y > half_size.y) { return false; }
+  let r = pick_rect_radius(q_signed, radii);
+  // Inside a "straight" zone (not in any corner box) — inside the shape.
+  let corner_p = q_abs - (half_size - vec2f(r, r));
+  if (r <= 0.0 || corner_p.x <= 0.0 || corner_p.y <= 0.0) { return true; }
+  // Inside a corner box — check the superellipse inequality
+  // (cx/r)^n + (cy/r)^n <= 1.
+  let n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
+  let L = pow(corner_p.x / r, n) + pow(corner_p.y / r, n);
+  return L <= 1.0;
+}
+
+// Walk this instance's clip stack entries and return true if `pixel` is
+// inside every one. count=0 means no clipping — trivially inside.
+fn inside_clip_stack(pixel: vec2f, offset: u32, count: u32) -> bool {
+  for (var i: u32 = 0u; i < count; i = i + 1u) {
+    let base = (offset + i) * 3u;
+    let rect = clip_stack[base];
+    let radii = clip_stack[base + 1u];
+    let meta = clip_stack[base + 2u];
+    if (!inside_clip_shape(pixel, rect, radii, meta.x)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Shape classification: 0=Rect (superellipse), 1=Pill (SS polyline), 2=Circle (ellipse).
+// Pill threshold at 1.7× height matches Show Studio Jiv's getEdgeDistanceAndNormal —
+// below that aspect the SS pill endcaps overlap and the shape loses its superellipse
+// character. Between 1.43 and 1.7, rect mode preserves the squircle profile.
 fn shape_mode(half_size: vec2f, radii: vec4f) -> i32 {
   let min_half = min(half_size.x, half_size.y);
   let max_half = max(half_size.x, half_size.y);
   let aspect = max_half / max(min_half, 0.0001);
   let min_radius = min(min(radii.x, radii.y), min(radii.z, radii.w));
   if (aspect < 1.43 && min_radius >= min_half * 0.9) { return 2; }
-  if (aspect >= 1.3 && min_radius >= min_half - 1.0) { return 1; }
+  if (aspect >= 1.7 && min_radius >= min_half - 1.0) { return 1; }
   return 0;
 }
 
@@ -277,8 +319,11 @@ fn shape_sdf(p: vec2f, half_size: vec2f, radii: vec4f, smoothness: f32, mode: i3
   var r_axis: vec2f;
   var n: f32;
   if (mode == 2) {
-    let r = min(half_size.x, half_size.y);
-    r_axis = vec2f(r);
+    // Ellipse — r_axis matches half_size so the shape has continuous curvature
+    // everywhere. The old uniform-radius approach created a stadium (flat edges +
+    // semicircles) with a C1-but-not-C2 kink at the flat-to-curve junction,
+    // visibly non-smooth at narrow aspect ratios.
+    r_axis = half_size;
     n = 2.0;
   } else {
     let r = min(pick_rect_radius(p, radii), min(half_size.x, half_size.y));
@@ -293,8 +338,7 @@ fn shape_grad(p: vec2f, half_size: vec2f, radii: vec4f, smoothness: f32, mode: i
   var r_axis: vec2f;
   var n: f32;
   if (mode == 2) {
-    let r = min(half_size.x, half_size.y);
-    r_axis = vec2f(r);
+    r_axis = half_size;
     n = 2.0;
   } else {
     let r = min(pick_rect_radius(p, radii), min(half_size.x, half_size.y));
@@ -345,6 +389,13 @@ fn sample_backdrop(uv: vec2f, extra_lod: f32, frost_lod: f32) -> vec3f {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let inst = instances[in.instance_id];
+
+  // CSS-style overflow clipping — inherited rounded-rect clip stack. Discarding
+  // outside any single clip matches the semantics of nested `overflow: hidden`
+  // containers with independent `border-radius` values.
+  if (!inside_clip_stack(in.pixel_pos, u32(inst.outline.z), u32(inst.outline.w))) {
+    discard;
+  }
 
   let panel_center = inst.panel_geom.xy;
   let panel_half_size = inst.panel_geom.zw;

@@ -15,7 +15,7 @@ flat in vec4 v_Refraction;     // thickness, bezelWidth, refractionStrength, bez
 flat in vec4 v_Lighting;       // lightDirX, lightDirY, lightIntensity, fresnelStrength
 flat in vec4 v_Specular;       // specIntensity, specSharpness, chromaticAberration, innerBlur
 flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance, bulge
-flat in vec4 v_Outline;        // borderAlphaVariance, borderFresnelBrightness, _pad, _pad
+flat in vec4 v_Outline;        // borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount
 flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lodOffset
 
 // Dual-filter blurred backdrop pyramid (base sigma = u_BaseFrostLod equivalent).
@@ -26,6 +26,12 @@ flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lod
 uniform sampler2D u_Backdrop;
 uniform float u_BaseFrostLod;
 uniform vec2 u_Resolution;
+
+// Clip-stack texture — RGBA32F row where each clip occupies 3 texels:
+// texel[3i]   = (x, y, w, h)              device pixels
+// texel[3i+1] = (rTL, rTR, rBR, rBL)      device pixels
+// texel[3i+2] = (smoothness, _, _, _)     unitless (0 = pure circle corners)
+uniform sampler2D u_ClipTex;
 // Specular tilt — added to lightDir ONLY for specular computations (bevel
 // catchlight and rim-spec highlight), not for ambient/edge-light/border
 // directionality. Canvas-wide, set by pointer or gyro each frame. This
@@ -420,7 +426,61 @@ vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
     return textureLod(u_Backdrop, uv, lod).rgb;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+//  Clip stack — CSS-style overflow clipping, rounded-rect per ancestor.
+// ────────────────────────────────────────────────────────────────────────────
+
+float pickClipRadius(vec2 p, vec4 radii) {
+    // radii = (tl, tr, br, bl). p relative to clip center.
+    if (p.x >= 0.0) {
+        return p.y <= 0.0 ? radii.y : radii.z;
+    }
+    return p.y <= 0.0 ? radii.x : radii.w;
+}
+
+// Superellipse inside-test that matches the panel shader's painted shape:
+// n = 2 + 6*smoothness. smoothness=0 → pure circle corners; higher → squircle.
+bool insideClipShape(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
+    vec2 center = rect.xy + rect.zw * 0.5;
+    vec2 halfSize = rect.zw * 0.5;
+    vec2 qSigned = pixel - center;
+    vec2 qAbs = abs(qSigned);
+    if (qAbs.x > halfSize.x || qAbs.y > halfSize.y) return false;
+    float r = pickClipRadius(qSigned, radii);
+    vec2 cornerP = qAbs - (halfSize - vec2(r));
+    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) return true;
+    float n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
+    float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
+    return L <= 1.0;
+}
+
+// Loop bounded by a constant so drivers with stricter GLSL ES 3.00 loop
+// heuristics still unroll / accept it. Practical clip-stack depth never
+// exceeds a handful.
+const int MAX_CLIP_DEPTH = 16;
+
+bool insideClipStack(vec2 pixel, int offset, int count) {
+    for (int i = 0; i < MAX_CLIP_DEPTH; i++) {
+        if (i >= count) break;
+        int base = (offset + i) * 3;
+        vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
+        vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
+        vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
+        if (!insideClipShape(pixel, rect, radii, meta.x)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void main() {
+    // CSS-style overflow clipping — inherited rounded-rect clip stack. The
+    // meta is packed into v_Outline.zw to stay within WebGL2's 16-attribute
+    // cap (a 17th slot would overflow MAX_VERTEX_ATTRIBS on many drivers).
+    if (!insideClipStack(v_PixelPos, int(v_Outline.z), int(v_Outline.w))) {
+        discard;
+    }
+
     vec2 panelCenter = v_PanelGeom.xy;
     vec2 panelHalfSize = v_PanelGeom.zw;
     vec2 shadowOffset = v_ShadowParams.xy;

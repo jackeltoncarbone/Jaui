@@ -15,6 +15,7 @@ import { ResolveTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
+import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
 import type { Renderer, GpuTextureHandle } from './Renderer';
 import { WebGPURenderer } from './WebGPU.Renderer';
 import { WebGL2Renderer } from './WebGL2.Renderer';
@@ -44,6 +45,7 @@ export class Canvas {
   private _lastTime: number = 0;
   private _panelBuffer = new JivInstanceBuffer();
   private _textBuffer = new TextInstanceBuffer();
+  private _clipBuffer = new ClipStackBuffer();
   private _textCache!: TextCache;
   private _imageCache!: ImageCache;
 
@@ -239,15 +241,13 @@ export class Canvas {
     r.BeginFrame();
     this._textCache.BeginFrame();
 
-    // Render directly to screen in tree z-order.
-    // When we hit glass, snapshot + blur the current screen as its backdrop.
-    r.BindDefaultTarget();
+    // Render directly to the swap chain in tree z-order. When we hit glass,
+    // snapshot + blur the current screen as its backdrop. We clear the default
+    // target to black so that pixels discarded by overflow clipping (or any
+    // other reason) show the base canvas color rather than the HTML page
+    // behind the transparent canvas.
     r.DisableBlend();
-
-    // Clear screen
-    r.BeginScenePass(0.04, 0.04, 0.04);
-    r.EndScenePass();
-    r.BindDefaultTarget();
+    r.BindDefaultTarget({ R: 0, G: 0, B: 0 });
 
     // Track whether we've built a blur for the current snapshot
     let lastBackdrop: GpuTextureHandle | null = null;
@@ -269,8 +269,8 @@ export class Canvas {
     };
 
     // Single tree walk — renders everything in z-order
-    const renderNode = (node: Jiv, offsetX: number, offsetY: number, clip: { x: number; y: number; w: number; h: number } | null): void => {
-      if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
+    const renderNode = (node: Jiv, offsetX: number, offsetY: number, stack: ClipStack): void => {
+      if (!this._isInsideClipStack(node, offsetX, offsetY, stack)) return;
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
       // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
       // the loaded image. Without this, the node stays at 0 height forever.
@@ -284,11 +284,17 @@ export class Canvas {
       }
 
       if (node.Width <= 0 || node.Height <= 0 || !node.Visible) {
-        const childClip = this._enterClip(node, offsetX, offsetY, clip);
+        const boxClip = this._boxClip(node, offsetX, offsetY);
         const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-        for (const child of orderedChildren(node)) renderNode(child, dx, dy, childClip);
+        for (const child of orderedChildren(node)) {
+          renderNode(child, dx, dy, this._childClip(node, stack, boxClip, child));
+        }
         return;
       }
+
+      // Encode the current clip stack into the per-frame buffer so this Jiv's
+      // panel/text instances reference it by (offset, count).
+      const clipMeta = this._clipBuffer.Encode(stack, this._dpr);
 
       const material = node.RenderStyle.Material;
 
@@ -309,6 +315,7 @@ export class Canvas {
         const targetSigmaDevice = maxFeatherSigma * this._dpr;
         const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
         r.EnableBlend();
+        r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.DrawProgressiveBlur({
           Rect: { X: (node.X + offsetX) * d, Y: (node.Y + offsetY) * d, W: node.Width * d, H: node.Height * d },
           Scene: r.SnapshotScreen(), // unblurred scene for crossfade
@@ -322,6 +329,8 @@ export class Canvas {
             Saturation: node.RenderStyle.BackdropSaturation,
             Contrast: node.RenderStyle.BackdropContrast,
           },
+          ClipOffset: clipMeta.Offset,
+          ClipCount: clipMeta.Count,
         });
         backdropDirty = true;
 
@@ -337,8 +346,9 @@ export class Canvas {
 
         r.EnableBlend();
         this._panelBuffer.Begin();
-        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
+        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
         r.PanelBeginBatch();
+        r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY);
         backdropDirty = true;
@@ -347,8 +357,9 @@ export class Canvas {
         // Non-glass panel: render directly
         r.EnableBlend();
         this._panelBuffer.Begin();
-        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
+        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
         r.PanelBeginBatch();
+        r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
       }
@@ -391,19 +402,21 @@ export class Canvas {
           data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
           data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
           data[8] = node.RenderStyle ? node.RenderStyle.Opacity : 1;
-          data[9] = 0; data[10] = 0; data[11] = 0;
+          data[9] = clipMeta.Offset; data[10] = clipMeta.Count; data[11] = 0;
           r.TextBeginBatch();
+          r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(data, 0, TEXT_FLOATS_PER_INSTANCE);
           r.TextDrawBatch(w, h, imgEntry.Texture);
         }
       }
 
       // Render this node's text (directly after the panel, in z-order)
-      this._emitTextFor(node, offsetX, offsetY);
+      this._emitTextFor(node, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
       if (this._textBuffer.Count > 0) {
         const atlas = this._textCache.Atlas;
         if (atlas) {
           r.TextBeginBatch();
+          r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
           r.TextDrawBatch(w, h, atlas);
         }
@@ -411,91 +424,18 @@ export class Canvas {
       this._textBuffer.Begin();
 
       // Walk children in Layer order (ties break by tree order)
-      const childClip = this._enterClip(node, offsetX, offsetY, clip);
+      const boxClip = this._boxClip(node, offsetX, offsetY);
       const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-      for (const child of orderedChildren(node)) renderNode(child, dx, dy, childClip);
+      for (const child of orderedChildren(node)) {
+        renderNode(child, dx, dy, this._childClip(node, stack, boxClip, child));
+      }
     };
 
     this._textBuffer.Begin();
-    renderNode(this.Root, 0, 0, null);
+    this._clipBuffer.Begin();
+    renderNode(this.Root, 0, 0, EmptyClipStack);
 
     r.EndFrame();
-  };
-
-  private _collectNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
-    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
-    if (node.Width > 0 && node.Height > 0 && node.Visible
-        && node.RenderStyle.Material === 'None' && !this._hasGlassAncestor(node)) {
-      this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
-    }
-    const childClip = this._enterClip(node, offsetX, offsetY, clip);
-    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectNonGlass(child, dx, dy, childClip);
-  };
-
-  private _collectGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
-    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
-    if (node.Width > 0 && node.Height > 0 && node.Visible && _isGlass(node.RenderStyle.Material)) {
-      this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
-    }
-    const childClip = this._enterClip(node, offsetX, offsetY, clip);
-    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectGlass(child, dx, dy, childClip);
-  };
-
-  /** Walk the tree to find the max `BackdropFrostBlur` across all visible
-   *  ProgressiveBlur Jivs — this is the sigma the shared Gaussian chain's
-   *  fully-blurred level will be built at. Returns 0 when there are none
-   *  (callers skip the chain rebuild + compositing pass). */
-  private _maxProgressiveBlurSigma = (node: Jiv): number => {
-    let max = 0;
-    if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Visible
-        && node.Width > 0 && node.Height > 0) {
-      max = node.RenderStyle.BackdropFrostBlur;
-    }
-    for (const child of node.Children as Jiv[]) {
-      const childMax = this._maxProgressiveBlurSigma(child);
-      if (childMax > max) max = childMax;
-    }
-    return max;
-  };
-
-  /** Recursive draw for progressive-blur overlays. Unlike glass/text, these
-   *  aren't batched — each Jiv does one draw. We descend past scroll
-   *  containers the same way the other collect passes do.
-   *  @param pyramid  mipmapped blur pyramid texture (shared with glass)
-   *  @param maxLod   highest LOD to sample (ramp = 1.0 maps here) */
-  private _drawProgressiveBlur = (
-    node: Jiv,
-    offsetX: number,
-    offsetY: number,
-    pyramid: GpuTextureHandle,
-    maxLod: number,
-  ): void => {
-    if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Visible) {
-      const d = this._dpr;
-      this._renderer.DrawProgressiveBlur({
-        Rect: {
-          X: (node.X + offsetX) * d,
-          Y: (node.Y + offsetY) * d,
-          W: node.Width * d,
-          H: node.Height * d,
-        },
-        Scene: this._renderer.SceneTexture,
-        Pyramid: pyramid,
-        MaxLod: maxLod,
-        Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
-        Opacity: node.RenderStyle.Opacity,
-        Background: node.RenderStyle.Background,
-        Grading: {
-          Brightness: node.RenderStyle.BackdropBrightness,
-          Saturation: node.RenderStyle.BackdropSaturation,
-          Contrast: node.RenderStyle.BackdropContrast,
-        },
-      });
-    }
-    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._drawProgressiveBlur(child, dx, dy, pyramid, maxLod);
   };
 
   /** Compute the offset descendants see when descending past a scroll container. */
@@ -506,41 +446,62 @@ export class Canvas {
     return [offsetX, offsetY];
   };
 
-  /** Check if a node at (offsetX + node.X, offsetY + node.Y) is inside the
-   *  current clip rect. Returns true if visible (should render). Null clip
-   *  means no clipping (root level). */
-  private _isInsideClip = (
-    node: Jiv, offsetX: number, offsetY: number,
-    clip: { x: number; y: number; w: number; h: number } | null,
+  /** AABB cull against the inherited clip stack. Returns true if the node's
+   *  bounding box intersects every clip in the stack — false (skip) only if
+   *  the node lies completely outside any single clip. Per-pixel rounded-rect
+   *  clipping happens in the shader; this is just the cheap CPU-side cull. */
+  private _isInsideClipStack = (
+    node: Jiv, offsetX: number, offsetY: number, stack: ClipStack,
   ): boolean => {
-    if (!clip) return true;
+    if (stack.length === 0) return true;
     const nx = node.X + offsetX;
     const ny = node.Y + offsetY;
-    // AABB intersection test — skip if completely outside clip rect
-    return nx + node.Width > clip.x && nx < clip.x + clip.w
-        && ny + node.Height > clip.y && ny < clip.y + clip.h;
+    const nx2 = nx + node.Width;
+    const ny2 = ny + node.Height;
+    for (const c of stack) {
+      if (nx2 <= c.X || nx >= c.X + c.W) return false;
+      if (ny2 <= c.Y || ny >= c.Y + c.H) return false;
+    }
+    return true;
   };
 
-  /** Update clip rect when entering a scroll container. */
-  private _enterClip = (
+  /** Build the rounded-rect ClipShape for `node` — its box plus its
+   *  per-corner BorderRadius. Used both when a node clips its descendants
+   *  (Overflow: Hidden|Scroll) and when a child opts in (ParentOverflow:
+   *  Hidden). All values stay in CSS px; the buffer multiplies by dpr. */
+  private _boxClip = (
     node: Jiv, offsetX: number, offsetY: number,
-    parentClip: { x: number; y: number; w: number; h: number } | null,
-  ): { x: number; y: number; w: number; h: number } | null => {
-    if (node.Overflow !== 'Scroll') return parentClip;
-    const cx = node.X + offsetX;
-    const cy = node.Y + offsetY;
-    const clip = { x: cx, y: cy, w: node.Width, h: node.Height };
-    // Intersect with parent clip
-    if (parentClip) {
-      const x1 = Math.max(clip.x, parentClip.x);
-      const y1 = Math.max(clip.y, parentClip.y);
-      const x2 = Math.min(clip.x + clip.w, parentClip.x + parentClip.w);
-      const y2 = Math.min(clip.y + clip.h, parentClip.y + parentClip.h);
-      clip.x = x1; clip.y = y1;
-      clip.w = Math.max(0, x2 - x1);
-      clip.h = Math.max(0, y2 - y1);
-    }
-    return clip;
+  ): ClipShape => {
+    const radii = node.RenderStyle.BorderRadius;
+    return {
+      X: node.X + offsetX,
+      Y: node.Y + offsetY,
+      W: node.Width,
+      H: node.Height,
+      RTL: radii[0],
+      RTR: radii[1],
+      RBR: radii[2],
+      RBL: radii[3],
+      Smoothness: node.RenderStyle.BorderRadiusSmoothness,
+    };
+  };
+
+  /** Stack passed down to a child, factoring its `ParentOverflow`:
+   *  - `Visible` → escape one level (parent's contribution dropped if any).
+   *  - `Hidden`  → append parent's box clip even if parent is `Visible`.
+   *  - `Inherit` → append parent's box clip iff parent is Hidden/Scroll. */
+  private _childClip = (
+    parent: Jiv,
+    parentIncomingStack: ClipStack,
+    parentBoxClip: ClipShape,
+    child: Jiv,
+  ): ClipStack => {
+    const po = child.ChildLayout.ParentOverflow;
+    if (po === 'Visible') return parentIncomingStack;
+    if (po === 'Hidden') return [...parentIncomingStack, parentBoxClip];
+    return parent.Overflow === 'Visible'
+      ? parentIncomingStack
+      : [...parentIncomingStack, parentBoxClip];
   };
 
   /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px).
@@ -555,59 +516,7 @@ export class Canvas {
     for (const child of node.Children as Jiv[]) this._scanFrostBlur(child);
   };
 
-  /** Non-glass panels that live inside a glass subtree — rendered on top of the glass pass. */
-  private _collectNonGlassUnderGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
-    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
-    if (node.Width > 0 && node.Height > 0 && node.Visible
-        && node.RenderStyle.Material === 'None' && this._isUnderGlass(node) && node !== this.Root) {
-      if (this._hasGlassAncestor(node)) {
-        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
-      }
-    }
-    const childClip = this._enterClip(node, offsetX, offsetY, clip);
-    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectNonGlassUnderGlass(child, dx, dy, childClip);
-  };
-
-  /** True if any STRICT ancestor of node is a glass panel. ProgressiveBlur
-   *  Jivs are NOT glass — they're a compositing overlay — so descendants of
-   *  a progressive-blur Jiv shouldn't be re-routed to the over-glass pass. */
-  private _hasGlassAncestor = (node: Jiv): boolean => {
-    let p = node.Parent as Jiv | null;
-    while (p) {
-      if (_isGlass(p.RenderStyle.Material)) return true;
-      p = p.Parent as Jiv | null;
-    }
-    return false;
-  };
-
-  /** True if node itself or any ancestor is glass — text inside glass renders in pass 5. */
-  private _isUnderGlass = (node: Jiv): boolean => {
-    let cur: Jiv | null = node;
-    while (cur) {
-      if (_isGlass(cur.RenderStyle.Material)) return true;
-      cur = cur.Parent as Jiv | null;
-    }
-    return false;
-  };
-
-  private _collectTextInstancesForNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
-    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
-    if (!this._isUnderGlass(node)) this._emitTextFor(node, offsetX, offsetY);
-    const childClip = this._enterClip(node, offsetX, offsetY, clip);
-    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectTextInstancesForNonGlass(child, dx, dy, childClip);
-  };
-
-  private _collectTextInstancesForGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
-    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
-    if (this._isUnderGlass(node)) this._emitTextFor(node, offsetX, offsetY);
-    const childClip = this._enterClip(node, offsetX, offsetY, clip);
-    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectTextInstancesForGlass(child, dx, dy, childClip);
-  };
-
-  private _emitTextFor = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
+  private _emitTextFor = (node: Jiv, offsetX: number, offsetY: number, clipOffset: number, clipCount: number): void => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return;
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
@@ -641,6 +550,8 @@ export class Canvas {
         Height: entry.Height,
         Uv: entry.Uv,
         Opacity: opacity,
+        ClipOffset: clipOffset,
+        ClipCount: clipCount,
       });
     }
   };

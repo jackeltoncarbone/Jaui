@@ -14,8 +14,13 @@ import type { Jiv } from './Jiv';
 //   loc 11: a_Lighting     (lightDirX, lightDirY, lightIntensity, fresnelStrength)
 //   loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur)
 //   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, bulge)
-//   loc 14: a_Outline      (borderAlphaVariance, borderFresnelBrightness, _pad, _pad)
+//   loc 14: a_Outline      (borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount)
+//          clipOffset/clipCount index into the per-frame clip-stack buffer.
+//          count=0 means no clipping — shader short-circuits.
 //   loc 15: a_BorderFilter (brightnessMul, saturationMul, contrastMul, lodOffset)
+//
+// WebGL2 guarantees only 16 vertex attribute slots (locations 0..15), so we
+// pack clip_meta into `a_Outline`'s padding rather than adding a 17th slot.
 
 export const JIV_FLOATS_PER_INSTANCE = 60;
 
@@ -39,7 +44,8 @@ export class JivInstanceBuffer {
 
   Begin = (): void => { this._count = 0; };
 
-  Push = (jiv: Jiv, dpr: number, offsetX: number = 0, offsetY: number = 0): void => {
+  Push = (jiv: Jiv, dpr: number, offsetX: number = 0, offsetY: number = 0,
+          clipOffset: number = 0, clipCount: number = 0): void => {
     if (this._count >= this._capacity) this._grow();
 
     const style = jiv.RenderStyle;
@@ -133,8 +139,8 @@ export class JivInstanceBuffer {
 
     data[offset + 52] = style.BorderAlphaVariance;
     data[offset + 53] = style.BorderFresnelBrightness;
-    data[offset + 54] = 0;
-    data[offset + 55] = 0;
+    data[offset + 54] = clipOffset;
+    data[offset + 55] = clipCount;
 
     data[offset + 56] = style.BorderBrightness;
     data[offset + 57] = style.BorderSaturation;

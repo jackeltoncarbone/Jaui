@@ -34,12 +34,16 @@ const _unwrap = (handle: GpuTextureHandle): WebGLTexture =>
 
 const PANEL_FLOATS_PER_INSTANCE = 60;
 const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
-const PANEL_ATTR_COUNT = 15; // locations 1..15
+const PANEL_ATTR_COUNT = 15; // locations 1..15 — clip_meta is packed into a_Outline.zw
 const BYTES_PER_VEC4 = 16;
 
 const TEXT_FLOATS_PER_INSTANCE = 12;
 const TEXT_BYTES_PER_INSTANCE = TEXT_FLOATS_PER_INSTANCE * 4;
-const TEXT_ATTR_COUNT = 3; // locations 1..3
+const TEXT_ATTR_COUNT = 3; // locations 1..3 — clip_meta is packed into a_OpacityClip.yz
+
+/** Clip-stack texture: RGBA32F, one row. Each clip = 2 texels
+ *  (rect.xyzw, radii.xyzw). Sized so at least 1024 clips fit initially. */
+const CLIP_TEX_MIN_WIDTH = 2048;  // 512 clips × 2 texels
 
 const BLIT_VERT = `#version 300 es
 precision highp float;
@@ -111,7 +115,16 @@ export class WebGL2Renderer implements Renderer {
     opacity: WebGLUniformLocation | null;
     background: WebGLUniformLocation | null;
     grading: WebGLUniformLocation | null;
+    clipTex: WebGLUniformLocation | null;
+    clipMeta: WebGLUniformLocation | null;
   };
+
+  // Clip-stack texture (RGBA32F row buffer indexed by texelFetch)
+  private _clipTex!: WebGLTexture;
+  private _clipTexWidth: number = CLIP_TEX_MIN_WIDTH;
+  private _clipLastFloatsUploaded: number = 0;
+  private _panelClipTexLoc!: WebGLUniformLocation | null;
+  private _textClipTexLoc!: WebGLUniformLocation | null;
 
   private _width: number = 0;
   private _height: number = 0;
@@ -148,6 +161,52 @@ export class WebGL2Renderer implements Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.bindTexture(gl.TEXTURE_2D, null);
+
+    // Clip-stack texture — RGBA32F, one row. Each clip occupies 2 texels
+    // (rect, radii). Sampled via texelFetch in the fragment shaders.
+    // EXT_color_buffer_float is only required for rendering TO float textures;
+    // sampling from them is core WebGL2.
+    const clipTex = gl.createTexture();
+    if (!clipTex) throw new Error('[Jwift] failed to create clip texture');
+    this._clipTex = clipTex;
+    gl.bindTexture(gl.TEXTURE_2D, clipTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this._clipTexWidth, 1, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  };
+
+  SetClipBuffer = (data: Float32Array, floatCount: number): void => {
+    const gl = this._gl;
+    // Grow texture if the incoming data needs more texels than we have.
+    const texelsNeeded = Math.ceil(floatCount / 4);
+    if (texelsNeeded > this._clipTexWidth) {
+      let w = this._clipTexWidth * 2;
+      while (w < texelsNeeded) w *= 2;
+      this._clipTexWidth = w;
+      gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, 1, 0, gl.RGBA, gl.FLOAT, null);
+      this._clipLastFloatsUploaded = 0;
+    }
+    // Skip upload when no growth since the last call (same frame, re-issued).
+    if (floatCount <= this._clipLastFloatsUploaded) return;
+
+    // Upload the grown tail only — pad the sub-upload to a whole texel so
+    // texSubImage2D gets aligned RGBA data.
+    const startTexel = Math.floor(this._clipLastFloatsUploaded / 4);
+    const endTexel = Math.ceil(floatCount / 4);
+    const subWidth = endTexel - startTexel;
+    const subBuf = new Float32Array(subWidth * 4);
+    const srcStart = startTexel * 4;
+    for (let i = 0; i < subWidth * 4 && srcStart + i < floatCount; i++) {
+      subBuf[i] = data[srcStart + i];
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, startTexel, 0, subWidth, 1, gl.RGBA, gl.FLOAT, subBuf);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    this._clipLastFloatsUploaded = floatCount;
   };
 
   Destroy = (): void => {
@@ -162,7 +221,9 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Per-Frame ──
 
-  BeginFrame = (): void => { /* no-op for WebGL2 — state machine, no command encoder */ };
+  BeginFrame = (): void => {
+    this._clipLastFloatsUploaded = 0;
+  };
   EndFrame = (): void => { /* no-op */ };
 
   // ── Render Targets ──
@@ -227,11 +288,14 @@ export class WebGL2Renderer implements Renderer {
     gl.useProgram(this._panelShader.Program);
     gl.uniform2f(this._panelResolutionLoc, canvasWidth, canvasHeight);
     gl.uniform1i(this._panelBackdropLoc, 0);
+    gl.uniform1i(this._panelClipTexLoc, 1);
     gl.uniform1f(this._panelBaseFrostLodLoc, baseFrostLod);
     gl.uniform2f(this._panelSpecTiltLoc, specTiltX, specTiltY);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, backdrop ? _unwrap(backdrop) : this._dummyTex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
 
     gl.bindVertexArray(this._panelVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
@@ -268,9 +332,12 @@ export class WebGL2Renderer implements Renderer {
     gl.useProgram(this._textShader.Program);
     gl.uniform2f(this._textResolutionLoc, canvasWidth, canvasHeight);
     gl.uniform1i(this._textAtlasLoc, 0);
+    gl.uniform1i(this._textClipTexLoc, 1);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(atlas));
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
 
     gl.bindVertexArray(this._textVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._textInstanceCount);
@@ -303,6 +370,8 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform4f(this._progBlurLocs.rect, params.Rect.X, params.Rect.Y, params.Rect.W, params.Rect.H);
     gl.uniform1i(this._progBlurLocs.scene, 0);
     gl.uniform1i(this._progBlurLocs.pyramid, 1);
+    gl.uniform1i(this._progBlurLocs.clipTex, 2);
+    gl.uniform2i(this._progBlurLocs.clipMeta, params.ClipOffset, params.ClipCount);
     gl.uniform1f(this._progBlurLocs.maxLod, params.MaxLod);
     gl.uniform1i(this._progBlurLocs.direction, params.Direction);
     gl.uniform1f(this._progBlurLocs.opacity, params.Opacity);
@@ -315,6 +384,8 @@ export class WebGL2Renderer implements Renderer {
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(params.Scene));
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(params.Pyramid));
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
 
     gl.bindVertexArray(this._quad.Vao);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
@@ -405,10 +476,17 @@ export class WebGL2Renderer implements Renderer {
     this._gl.disable(this._gl.BLEND);
   };
 
-  BindDefaultTarget = (): void => {
+  BindDefaultTarget = (clear?: { R: number; G: number; B: number }): void => {
     const gl = this._gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this._width, this._height);
+    if (clear) {
+      // Disable blend so the clear color fully overwrites — otherwise a
+      // previously-enabled blend state could premultiply and leave a tint.
+      gl.disable(gl.BLEND);
+      gl.clearColor(clear.R, clear.G, clear.B, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
   };
 
   SetViewport = (x: number, y: number, width: number, height: number): void => {
@@ -428,6 +506,7 @@ export class WebGL2Renderer implements Renderer {
     this._panelBackdropLoc = gl.getUniformLocation(this._panelShader.Program, 'u_Backdrop');
     this._panelBaseFrostLodLoc = gl.getUniformLocation(this._panelShader.Program, 'u_BaseFrostLod');
     this._panelSpecTiltLoc = gl.getUniformLocation(this._panelShader.Program, 'u_SpecularTilt');
+    this._panelClipTexLoc = gl.getUniformLocation(this._panelShader.Program, 'u_ClipTex');
 
     // Dedicated VAO for panel rendering (separate from text)
     this._panelVao = this._createInstancedVao(gl, this._panelInstanceBuffer, PANEL_ATTR_COUNT, PANEL_BYTES_PER_INSTANCE);
@@ -442,6 +521,7 @@ export class WebGL2Renderer implements Renderer {
 
     this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
+    this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');
 
     // Dedicated VAO for text rendering (separate from panel)
     this._textVao = this._createInstancedVao(gl, this._textInstanceBuffer, TEXT_ATTR_COUNT, TEXT_BYTES_PER_INSTANCE);
@@ -500,6 +580,8 @@ export class WebGL2Renderer implements Renderer {
       opacity: gl.getUniformLocation(p, 'u_Opacity'),
       background: gl.getUniformLocation(p, 'u_Background'),
       grading: gl.getUniformLocation(p, 'u_Grading'),
+      clipTex: gl.getUniformLocation(p, 'u_ClipTex'),
+      clipMeta: gl.getUniformLocation(p, 'u_ClipMeta'),
     };
   };
 }

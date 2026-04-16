@@ -1,11 +1,12 @@
 import type { AtlasUv } from './Text.Cache';
 
 /** Per-instance data for instanced text rendering.
- *  9 floats per instance:
- *    a_Rect   (x, y, w, h)  — screen rect in device pixels  [loc 1, vec4]
- *    a_UvRect (u, v, uW, uH) — atlas UV rect                [loc 2, vec4]
- *    a_Opacity (opacity)     — per-word opacity               [loc 3, float]
- *  Padded to 12 floats (3 × vec4) for alignment.
+ *  3 × vec4 = 12 floats per instance:
+ *    a_Rect        (x, y, w, h)                           — device pixels [loc 1]
+ *    a_UvRect      (u, v, uW, uH)                         — atlas UV     [loc 2]
+ *    a_OpacityClip (opacity, clipOffset, clipCount, _pad) — clip meta     [loc 3]
+ *  clipOffset/clipCount index into the per-frame clip-stack buffer.
+ *  count=0 means no clipping — shader short-circuits.
  */
 export const TEXT_FLOATS_PER_INSTANCE = 12;
 
@@ -16,6 +17,8 @@ export interface TextDrawCommand {
   Height: number;
   Uv: AtlasUv;
   Opacity: number;
+  ClipOffset: number;
+  ClipCount: number;
 }
 
 /**
@@ -54,8 +57,8 @@ export class TextInstanceBuffer {
     data[offset + 7] = cmd.Uv.UHeight;
 
     data[offset + 8] = cmd.Opacity;
-    data[offset + 9] = 0;
-    data[offset + 10] = 0;
+    data[offset + 9] = cmd.ClipOffset;
+    data[offset + 10] = cmd.ClipCount;
     data[offset + 11] = 0;
 
     this._count++;

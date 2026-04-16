@@ -17,6 +17,7 @@ struct ProgressiveBlurUniforms {
   background: vec4f,        // RGBA tint mixed in along the ramp
   grading: vec3f,           // brightness, saturation, contrast (1 = identity)
   _pad1: f32,
+  clip_meta: vec4f,         // clipOffset, clipCount, _pad, _pad
 }
 
 @group(0) @binding(0) var<uniform> uniforms: ProgressiveBlurUniforms;
@@ -24,11 +25,14 @@ struct ProgressiveBlurUniforms {
 @group(0) @binding(2) var scene_sampler: sampler;
 @group(0) @binding(3) var pyramid: texture_2d<f32>;
 @group(0) @binding(4) var pyramid_sampler: sampler;
+// Each clip is 3 vec4s: rect(x,y,w,h), radii(tl,tr,br,bl), meta(smoothness,_,_,_).
+@group(1) @binding(0) var<storage, read> clip_stack: array<vec4f>;
 
 struct VertexOutput {
   @builtin(position) position: vec4f,
   @location(0) local: vec2f,       // 0..1 across the Jiv; y=0 is top
   @location(1) sample_uv: vec2f,   // UV into the blur pyramid / scene
+  @location(2) pixel_pos: vec2f,   // fragment position in device pixels
 }
 
 @vertex
@@ -44,11 +48,49 @@ fn vs_main(@location(0) a_position: vec2f) -> VertexOutput {
   out.position = vec4f(clip, 0.0, 1.0);
   out.local = local;
   out.sample_uv = sample_uv;
+  out.pixel_pos = pixel;
   return out;
+}
+
+fn pick_rect_radius(p: vec2f, radii: vec4f) -> f32 {
+  if (p.x >= 0.0) {
+    return select(radii.z, radii.y, p.y <= 0.0);
+  }
+  return select(radii.w, radii.x, p.y <= 0.0);
+}
+
+fn inside_clip_shape(pixel: vec2f, rect: vec4f, radii: vec4f, smoothness: f32) -> bool {
+  let center = rect.xy + rect.zw * 0.5;
+  let half_size = rect.zw * 0.5;
+  let q_signed = pixel - center;
+  let q_abs = abs(q_signed);
+  if (q_abs.x > half_size.x || q_abs.y > half_size.y) { return false; }
+  let r = pick_rect_radius(q_signed, radii);
+  let corner_p = q_abs - (half_size - vec2f(r, r));
+  if (r <= 0.0 || corner_p.x <= 0.0 || corner_p.y <= 0.0) { return true; }
+  let n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
+  let L = pow(corner_p.x / r, n) + pow(corner_p.y / r, n);
+  return L <= 1.0;
+}
+
+fn inside_clip_stack(pixel: vec2f, clip_meta: vec4f) -> bool {
+  let offset = u32(clip_meta.x);
+  let count = u32(clip_meta.y);
+  for (var i: u32 = 0u; i < count; i = i + 1u) {
+    let base = (offset + i) * 3u;
+    if (!inside_clip_shape(pixel, clip_stack[base], clip_stack[base + 1u], clip_stack[base + 2u].x)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+  if (!inside_clip_stack(in.pixel_pos, uniforms.clip_meta)) {
+    discard;
+  }
+
   // t = 0 at clear end → 1 at blurred end
   var t: f32;
   if (uniforms.direction == 0)      { t = 1.0 - in.local.y; }  // ToTop

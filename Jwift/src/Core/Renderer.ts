@@ -41,6 +41,9 @@ export interface ProgressiveBlurParams {
   Opacity: number;
   Background: { R: number; G: number; B: number; A: number };
   Grading: { Brightness: number; Saturation: number; Contrast: number };
+  /** Index into the per-frame clip-stack buffer. Count=0 means no clipping. */
+  ClipOffset: number;
+  ClipCount: number;
 }
 
 // ─── Renderer Interface ────────────────────────────────────────────────────
@@ -145,14 +148,25 @@ export interface Renderer {
     source: HTMLCanvasElement | ImageBitmap,
   ): void;
 
+  // ── Clip Stack ──
+
+  /** Upload the per-frame clip-stack buffer. Each clip occupies 8 floats
+   *  (rect.xyzw + radii.xyzw, device pixels). Instances and progressive-blur
+   *  params reference clips by (offset, count) indices into this buffer.
+   *  Called before each draw that depends on the current clip set. The
+   *  implementation should avoid re-uploading when `floatCount` hasn't grown. */
+  SetClipBuffer(data: Float32Array, floatCount: number): void;
+
   // ── Render State ──
 
   /** Enable standard alpha blending (srcAlpha, oneMinusSrcAlpha). */
   EnableBlend(): void;
   DisableBlend(): void;
 
-  /** Bind the default framebuffer / swap chain texture. */
-  BindDefaultTarget(): void;
+  /** Bind the default framebuffer / swap chain texture. Pass a clear color
+   *  to clear the bound target to that color before returning; omit to keep
+   *  whatever was already there (e.g. content drawn earlier in the frame). */
+  BindDefaultTarget(clear?: { R: number; G: number; B: number }): void;
 
   SetViewport(x: number, y: number, width: number, height: number): void;
 }

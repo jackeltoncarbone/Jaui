@@ -34,8 +34,9 @@ const QUAD_INDICES = new Uint16Array([0, 1, 2, 0, 2, 3]);
 
 // ─── Instance buffer constants ──────────────────────────────────────────────
 
-const PANEL_FLOATS_PER_INSTANCE = 60;  // 15 × vec4
-const TEXT_FLOATS_PER_INSTANCE = 12;   // 3 × vec4
+const PANEL_FLOATS_PER_INSTANCE = 60;  // 15 × vec4 — clip_meta packed into outline.zw
+const TEXT_FLOATS_PER_INSTANCE = 12;   // 3 × vec4 — clip_meta packed into opacity_clip.yz
+const MIN_CLIP_BUFFER_BYTES = 256;     // placeholder when no clips this frame
 
 // ─── WebGPU Renderer ────────────────────────────────────────────────────────
 
@@ -87,6 +88,14 @@ export class WebGPURenderer implements Renderer {
   private _progressiveBlurPipeline: GPURenderPipeline | null = null;
   private _progressiveBlurBindGroupLayout: GPUBindGroupLayout | null = null;
   private _progressiveBlurUniformBuffer: GPUBuffer | null = null;
+
+  // ── Clip stack ──
+  /** Per-frame storage buffer holding the flattened clip entries (8 floats
+   *  each). Bound to panel/text/progressive-blur pipelines at binding group 2. */
+  private _clipBuffer: GPUBuffer | null = null;
+  private _clipCapacity: number = 0;
+  private _lastClipFloatsUploaded: number = 0;
+  private _clipBindGroupLayout: GPUBindGroupLayout | null = null;
 
   // ── Lifecycle ──
 
@@ -140,8 +149,25 @@ export class WebGPURenderer implements Renderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this._progressiveBlurUniformBuffer = device.createBuffer({
-      size: 80, // ProgressiveBlurUniforms: see struct
+      size: 96, // ProgressiveBlurUniforms + clip_meta vec4 (see struct)
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Placeholder clip-stack storage buffer so bind groups can reference it
+    // before any clips have been uploaded (a bound storage buffer must be
+    // non-zero-size in WebGPU).
+    this._clipBuffer = device.createBuffer({
+      size: MIN_CLIP_BUFFER_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this._clipCapacity = MIN_CLIP_BUFFER_BYTES;
+
+    // Shared clip bind group layout — panel/text/progressive-blur pipelines
+    // all bind the clip storage buffer at group 2, binding 0.
+    this._clipBindGroupLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      ],
     });
 
     this._initPanelPipeline(device);
@@ -162,6 +188,7 @@ export class WebGPURenderer implements Renderer {
     this._textUniformBuffer?.destroy();
     this._textInstanceBuffer?.destroy();
     this._progressiveBlurUniformBuffer?.destroy();
+    this._clipBuffer?.destroy();
     this._gpu?.Destroy();
     this._gpu = null;
   };
@@ -186,6 +213,37 @@ export class WebGPURenderer implements Renderer {
 
   BeginFrame = (): void => {
     this._encoder = this._gpu!.Device.createCommandEncoder();
+    this._lastClipFloatsUploaded = 0;
+  };
+
+  SetClipBuffer = (data: Float32Array, floatCount: number): void => {
+    const device = this._gpu!.Device;
+    // Grow the storage buffer if needed — minimum is a small placeholder so
+    // bind groups always have a valid resource even when no clips are active.
+    const byteSize = Math.max(floatCount * 4, MIN_CLIP_BUFFER_BYTES);
+    if (!this._clipBuffer || this._clipCapacity < byteSize) {
+      this._clipBuffer?.destroy();
+      let cap = Math.max(MIN_CLIP_BUFFER_BYTES, this._clipCapacity * 2);
+      while (cap < byteSize) cap *= 2;
+      this._clipBuffer = device.createBuffer({
+        size: cap,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this._clipCapacity = cap;
+      // Capacity grew — force re-upload since the new buffer is empty.
+      this._lastClipFloatsUploaded = 0;
+    }
+    // Upload only the grown tail when the count strictly increases; otherwise
+    // callers are re-sending the same data and we can skip.
+    if (floatCount > this._lastClipFloatsUploaded) {
+      const byteOffset = this._lastClipFloatsUploaded * 4;
+      const byteLength = (floatCount - this._lastClipFloatsUploaded) * 4;
+      device.queue.writeBuffer(
+        this._clipBuffer!, byteOffset,
+        data.buffer, this._lastClipFloatsUploaded * 4, byteLength,
+      );
+      this._lastClipFloatsUploaded = floatCount;
+    }
   };
 
   EndFrame = (): void => {
@@ -287,10 +345,17 @@ export class WebGPURenderer implements Renderer {
         { binding: 0, resource: { buffer: this._panelInstanceBuffer! } },
       ],
     });
+    const bg2 = device.createBindGroup({
+      layout: this._clipBindGroupLayout!,
+      entries: [
+        { binding: 0, resource: { buffer: this._clipBuffer! } },
+      ],
+    });
 
     pass.setPipeline(this._panelPipeline!);
     pass.setBindGroup(0, bg0);
     pass.setBindGroup(1, bg1);
+    pass.setBindGroup(2, bg2);
     pass.setVertexBuffer(0, this._quadVB!);
     pass.setIndexBuffer(this._quadIB!, 'uint16');
     pass.drawIndexed(6, this._panelInstanceCount);
@@ -347,10 +412,17 @@ export class WebGPURenderer implements Renderer {
         { binding: 0, resource: { buffer: this._textInstanceBuffer! } },
       ],
     });
+    const bg2 = device.createBindGroup({
+      layout: this._clipBindGroupLayout!,
+      entries: [
+        { binding: 0, resource: { buffer: this._clipBuffer! } },
+      ],
+    });
 
     pass.setPipeline(this._textPipeline!);
     pass.setBindGroup(0, bg0);
     pass.setBindGroup(1, bg1);
+    pass.setBindGroup(2, bg2);
     pass.setVertexBuffer(0, this._quadVB!);
     pass.setIndexBuffer(this._quadIB!, 'uint16');
     pass.drawIndexed(6, this._textInstanceCount);
@@ -392,6 +464,7 @@ export class WebGPURenderer implements Renderer {
       0,                                      // _pad0
       params.Background.R, params.Background.G, params.Background.B, params.Background.A, // background
       params.Grading.Brightness, params.Grading.Saturation, params.Grading.Contrast, 0, // grading + pad
+      params.ClipOffset, params.ClipCount, 0, 0, // clip_meta + pad
     ]));
 
     const bg = device.createBindGroup({
@@ -404,9 +477,16 @@ export class WebGPURenderer implements Renderer {
         { binding: 4, resource: this._linearSampler! },
       ],
     });
+    const bg1 = device.createBindGroup({
+      layout: this._clipBindGroupLayout!,
+      entries: [
+        { binding: 0, resource: { buffer: this._clipBuffer! } },
+      ],
+    });
 
     pass.setPipeline(this._progressiveBlurPipeline!);
     pass.setBindGroup(0, bg);
+    pass.setBindGroup(1, bg1);
     pass.setVertexBuffer(0, this._quadVB!);
     pass.setIndexBuffer(this._quadIB!, 'uint16');
     pass.drawIndexed(6);
@@ -478,13 +558,14 @@ export class WebGPURenderer implements Renderer {
     // no blending. Callers switch pipelines rather than toggling GL state.
   };
 
-  BindDefaultTarget = (): void => {
+  BindDefaultTarget = (clear?: { R: number; G: number; B: number }): void => {
     // Begin a new render pass targeting the swap chain texture.
     const swapChainView = this._gpu!.GetCurrentTexture().createView();
     const pass = this._encoder!.beginRenderPass({
       colorAttachments: [{
         view: swapChainView,
-        loadOp: 'load',
+        loadOp: clear ? 'clear' : 'load',
+        clearValue: clear ? { r: clear.R, g: clear.G, b: clear.B, a: 1.0 } : undefined,
         storeOp: 'store',
       }],
     });
@@ -517,7 +598,7 @@ export class WebGPURenderer implements Renderer {
 
     this._panelPipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({
-        bindGroupLayouts: [this._panelBindGroupLayout0, this._panelBindGroupLayout1],
+        bindGroupLayouts: [this._panelBindGroupLayout0, this._panelBindGroupLayout1, this._clipBindGroupLayout!],
       }),
       vertex: {
         module,
@@ -560,7 +641,7 @@ export class WebGPURenderer implements Renderer {
 
     this._textPipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({
-        bindGroupLayouts: [this._textBindGroupLayout0, this._textBindGroupLayout1],
+        bindGroupLayouts: [this._textBindGroupLayout0, this._textBindGroupLayout1, this._clipBindGroupLayout!],
       }),
       vertex: {
         module,
@@ -631,7 +712,7 @@ export class WebGPURenderer implements Renderer {
 
     this._progressiveBlurPipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({
-        bindGroupLayouts: [this._progressiveBlurBindGroupLayout],
+        bindGroupLayouts: [this._progressiveBlurBindGroupLayout, this._clipBindGroupLayout!],
       }),
       vertex: {
         module,
