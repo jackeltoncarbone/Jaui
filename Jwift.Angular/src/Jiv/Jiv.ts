@@ -166,7 +166,7 @@ export class Jiv implements OnInit, OnDestroy {
     if (opts.Layout) Object.assign(this.Node.Layout, opts.Layout);
     if (opts.ChildLayout) Object.assign(this.Node.ChildLayout, opts.ChildLayout);
     if (opts.TextStyle) Object.assign(this.Node.TextStyle, opts.TextStyle);
-    if ('Text' in opts) this.Node.Text = opts.Text ?? null;
+    if ('Text' in opts) this.Node.SetText(opts.Text ?? null);
     this.Node.MarkLayoutDirty();
   }
 }

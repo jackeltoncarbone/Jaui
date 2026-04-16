@@ -337,8 +337,7 @@ TabItem {
   Justify: Center
   Align: Center
   Gap: 4
-  FlexGrow: 1
-  FlexBasis: 0
+  Width: 20%
   BorderRadius: 22
 }
 
@@ -347,9 +346,8 @@ TabItemActive {
   Justify: Center
   Align: Center
   Gap: 4
-  FlexGrow: 1
-  FlexBasis: 0
-  BorderRadius: 22
+  Width: 20%
+  BorderRadius: 100
   Background: rgba(255, 255, 255, 0.15)
 }
 
