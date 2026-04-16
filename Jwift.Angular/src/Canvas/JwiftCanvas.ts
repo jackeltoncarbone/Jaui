@@ -69,6 +69,7 @@ export class JwiftCanvas implements OnInit, OnDestroy {
     this._canvasEl.style.height = '100%';
     this._host.nativeElement.appendChild(this._canvasEl);
     this.Canvas = new Canvas(this._canvasEl);
+    (window as any).__jwift = { canvas: this.Canvas };
   }
 
   ngOnInit(): void {

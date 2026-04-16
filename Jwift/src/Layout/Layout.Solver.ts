@@ -250,9 +250,16 @@ const _solveNode = (
 
   if (node.Layout.Mode !== 'Flex') return;
 
+  // Scroll containers give children unlimited space on the scroll axis —
+  // content overflows and scrolls instead of shrinking.
+  const isScroll = node.Overflow === 'Scroll';
+  const horiz = node.Layout.Direction === 'Row' || node.Layout.Direction === 'RowReverse';
+  const scrollW = isScroll && horiz ? 1e6 : width;
+  const scrollH = isScroll && !horiz ? 1e6 : height;
+
   const container: FlexContainer = {
-    Width: width,
-    Height: height,
+    Width: scrollW,
+    Height: scrollH,
     Direction: node.Layout.Direction,
     Wrap: node.Layout.Wrap,
     Justify: node.Layout.Justify,
@@ -266,8 +273,6 @@ const _solveNode = (
 
   const flowIndices: number[] = [];
   const flexChildren: FlexChild[] = [];
-
-  const horiz = node.Layout.Direction === 'Row' || node.Layout.Direction === 'RowReverse';
 
   for (let i = 0; i < node.Children.length; i++) {
     const c = node.Children[i];
