@@ -248,19 +248,10 @@ export class Canvas {
       this._drawProgressiveBlur(this.Root, 0, 0, blurredScene, maxLod);
     }
 
-    // ─── Pass 4a: scroll-content glass (non-fixed) ───
+    // ─── Pass 4: glass panels — sample the blurred backdrop ───
     r.EnableBlend();
     this._panelBuffer.Begin();
-    this._collectGlassFiltered(this.Root, false);
-    r.PanelBeginBatch();
-    if (this._panelBuffer.Count > 0) {
-      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
-    }
-    r.PanelDrawBatch(w, h, blurredScene, baseFrostLod, this._specTiltX, this._specTiltY);
-
-    // ─── Pass 4b: fixed chrome glass (toolbar, tabbar — always on top) ───
-    this._panelBuffer.Begin();
-    this._collectGlassFiltered(this.Root, true);
+    this._collectGlass(this.Root);
     r.PanelBeginBatch();
     if (this._panelBuffer.Count > 0) {
       r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
@@ -288,42 +279,25 @@ export class Canvas {
     r.EndFrame();
   };
 
-  private _collectNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
+  private _collectNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
+    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
     if (node.Width > 0 && node.Height > 0 && node.Visible
         && node.RenderStyle.Material === 'None' && !this._hasGlassAncestor(node)) {
       this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
     }
+    const childClip = this._enterClip(node, offsetX, offsetY, clip);
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectNonGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectNonGlass(child, dx, dy, childClip);
   };
 
-  private _collectGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
+  private _collectGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
+    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
     if (node.Width > 0 && node.Height > 0 && node.Visible && _isGlass(node.RenderStyle.Material)) {
       this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
     }
+    const childClip = this._enterClip(node, offsetX, offsetY, clip);
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectGlass(child, dx, dy);
-  };
-
-  /** Collect glass panels filtered by fixed vs non-fixed ancestry.
-   *  When `fixedOnly` is true, only collect glass panels that are inside a
-   *  Fixed-position ancestor (toolbar, tabbar). When false, collect the rest.
-   *  This lets us draw fixed chrome glass in a separate draw call (on top). */
-  private _collectGlassFiltered = (
-    node: Jiv, fixedOnly: boolean,
-    offsetX: number = 0, offsetY: number = 0,
-    insideFixed: boolean = false,
-  ): void => {
-    const isFixed = insideFixed || node.ChildLayout.Position === 'Fixed';
-    if (node.Width > 0 && node.Height > 0 && node.Visible && _isGlass(node.RenderStyle.Material)) {
-      if (isFixed === fixedOnly) {
-        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
-      }
-    }
-    const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) {
-      this._collectGlassFiltered(child, fixedOnly, dx, dy, isFixed);
-    }
+    for (const child of node.Children as Jiv[]) this._collectGlass(child, dx, dy, childClip);
   };
 
   /** Walk the tree to find the max `BackdropFrostBlur` across all visible
@@ -389,6 +363,43 @@ export class Canvas {
     return [offsetX, offsetY];
   };
 
+  /** Check if a node at (offsetX + node.X, offsetY + node.Y) is inside the
+   *  current clip rect. Returns true if visible (should render). Null clip
+   *  means no clipping (root level). */
+  private _isInsideClip = (
+    node: Jiv, offsetX: number, offsetY: number,
+    clip: { x: number; y: number; w: number; h: number } | null,
+  ): boolean => {
+    if (!clip) return true;
+    const nx = node.X + offsetX;
+    const ny = node.Y + offsetY;
+    // AABB intersection test — skip if completely outside clip rect
+    return nx + node.Width > clip.x && nx < clip.x + clip.w
+        && ny + node.Height > clip.y && ny < clip.y + clip.h;
+  };
+
+  /** Update clip rect when entering a scroll container. */
+  private _enterClip = (
+    node: Jiv, offsetX: number, offsetY: number,
+    parentClip: { x: number; y: number; w: number; h: number } | null,
+  ): { x: number; y: number; w: number; h: number } | null => {
+    if (node.Overflow !== 'Scroll') return parentClip;
+    const cx = node.X + offsetX;
+    const cy = node.Y + offsetY;
+    const clip = { x: cx, y: cy, w: node.Width, h: node.Height };
+    // Intersect with parent clip
+    if (parentClip) {
+      const x1 = Math.max(clip.x, parentClip.x);
+      const y1 = Math.max(clip.y, parentClip.y);
+      const x2 = Math.min(clip.x + clip.w, parentClip.x + parentClip.w);
+      const y2 = Math.min(clip.y + clip.h, parentClip.y + parentClip.h);
+      clip.x = x1; clip.y = y1;
+      clip.w = Math.max(0, x2 - x1);
+      clip.h = Math.max(0, y2 - y1);
+    }
+    return clip;
+  };
+
   /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px).
    *  Reads from RenderStyle (resolved px), not Style (authorable string) so the
    *  blur pass picks the actually-rendered value. */
@@ -402,15 +413,17 @@ export class Canvas {
   };
 
   /** Non-glass panels that live inside a glass subtree — rendered on top of the glass pass. */
-  private _collectNonGlassUnderGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
+  private _collectNonGlassUnderGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
+    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
     if (node.Width > 0 && node.Height > 0 && node.Visible
         && node.RenderStyle.Material === 'None' && this._isUnderGlass(node) && node !== this.Root) {
       if (this._hasGlassAncestor(node)) {
         this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
       }
     }
+    const childClip = this._enterClip(node, offsetX, offsetY, clip);
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectNonGlassUnderGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectNonGlassUnderGlass(child, dx, dy, childClip);
   };
 
   /** True if any STRICT ancestor of node is a glass panel. ProgressiveBlur
@@ -435,16 +448,20 @@ export class Canvas {
     return false;
   };
 
-  private _collectTextInstancesForNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
+  private _collectTextInstancesForNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
+    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
     if (!this._isUnderGlass(node)) this._emitTextFor(node, offsetX, offsetY);
+    const childClip = this._enterClip(node, offsetX, offsetY, clip);
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectTextInstancesForNonGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectTextInstancesForNonGlass(child, dx, dy, childClip);
   };
 
-  private _collectTextInstancesForGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
+  private _collectTextInstancesForGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0, clip: { x: number; y: number; w: number; h: number } | null = null): void => {
+    if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
     if (this._isUnderGlass(node)) this._emitTextFor(node, offsetX, offsetY);
+    const childClip = this._enterClip(node, offsetX, offsetY, clip);
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children as Jiv[]) this._collectTextInstancesForGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectTextInstancesForGlass(child, dx, dy, childClip);
   };
 
   private _emitTextFor = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
