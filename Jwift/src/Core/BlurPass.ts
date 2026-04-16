@@ -87,6 +87,9 @@ export class BlurPass {
   private _up: ShaderProgram;
   private _quad: QuadGeometry;
   private _levels: Framebuffer[] = [];
+  private _lastDepth: number = 0;
+  get LastDepth(): number { return this._lastDepth; }
+  private _mipFbo: WebGLFramebuffer | null = null;
 
   private _downTexLoc: WebGLUniformLocation | null;
   private _downHpLoc: WebGLUniformLocation | null;
@@ -116,15 +119,18 @@ export class BlurPass {
    * `radius` is interpreted as approximate effective sigma in source pixels.
    * Internally it picks a pyramid depth + tap-offset that achieves it.
    */
-  Blur = (input: WebGLTexture, width: number, height: number, radius: number): WebGLTexture => {
+  Blur = (input: WebGLTexture, width: number, height: number, radius: number, minDepth: number = 0): WebGLTexture => {
     const gl = this._gl;
 
     // Pick pyramid depth from desired sigma. Each Down/Up pair roughly
     // doubles the effective sigma, with a baseline of ~3 px per level.
     //   depth 1: σ ≈ 4   depth 2: σ ≈ 9   depth 3: σ ≈ 20   depth 4: σ ≈ 45
     // Cap at MAX_LEVELS-1 (need 1 level above input for the down chain).
+    // minDepth allows callers (e.g. progressive blur) to ensure enough
+    // mipmap levels exist for textureLod sampling.
     const target = Math.max(1, radius);
-    let depth = Math.max(1, Math.min(MAX_LEVELS - 1, Math.ceil(Math.log2(target / 3 + 1))));
+    const depth = Math.max(Math.max(1, minDepth), Math.min(MAX_LEVELS - 1, Math.ceil(Math.log2(target / 3 + 1))));
+    this._lastDepth = depth;
     // Use the per-tap offset to fine-tune within the chosen depth.
     const baseSigma = 3 * Math.pow(2, depth);
     // Keep tap-offset near 1.0 — wider offsets create the visible "oil pastel"
@@ -142,8 +148,7 @@ export class BlurPass {
       this._levels[i].Resize(w, h);
     }
 
-    const wasBlend = gl.isEnabled(gl.BLEND);
-    if (wasBlend) gl.disable(gl.BLEND);
+    gl.disable(gl.BLEND);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(this._quad.Vao);
@@ -184,18 +189,47 @@ export class BlurPass {
       srcH = dst.Height;
     }
 
-    gl.bindVertexArray(null);
-    gl.bindTexture(gl.TEXTURE_2D, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    if (wasBlend) gl.enable(gl.BLEND);
 
     return this._levels[0].Texture;
   };
 
-  /** Generate mipmaps on the most-recent output. Caller invokes after Blur()
-   *  if it wants to use textureLod() to add additional spatially-varying blur
-   *  on top of the base Gaussian (Apple-style "more blur at the rim"). */
+  /** Build the mip chain by copying pyramid levels directly into the output
+   *  texture's mip slots. The dual-filter's 8-tap upsample kernel produces
+   *  smoother mips than gl.generateMipmap's box filter and avoids the
+   *  full-resolve cost that tanks iOS tile-based GPUs. */
   GenerateOutputMipmap = (): void => {
-    this._levels[0].GenerateMipmap();
+    const gl = this._gl;
+    const depth = this._lastDepth;
+    if (depth === 0) return;
+
+    if (!this._mipFbo) {
+      const fb = gl.createFramebuffer();
+      if (!fb) return;
+      this._mipFbo = fb;
+    }
+
+    const outTex = this._levels[0].Texture;
+    gl.bindTexture(gl.TEXTURE_2D, outTex);
+    for (let i = 1; i <= depth; i++) {
+      const lvl = this._levels[i];
+      gl.texImage2D(gl.TEXTURE_2D, i, gl.RGBA, lvl.Width, lvl.Height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, depth);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    for (let i = 1; i <= depth; i++) {
+      const lvl = this._levels[i];
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, lvl.Framebuffer);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._mipFbo);
+      gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, outTex, i);
+      gl.blitFramebuffer(0, 0, lvl.Width, lvl.Height, 0, 0, lvl.Width, lvl.Height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.bindTexture(gl.TEXTURE_2D, outTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.bindTexture(gl.TEXTURE_2D, null);
   };
 }

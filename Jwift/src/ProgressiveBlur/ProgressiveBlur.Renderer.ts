@@ -1,14 +1,14 @@
 import { ShaderCompiler, type ShaderProgram } from '../Core/Shader.Compiler';
 import { QuadGeometry } from '../Core/Geometry.Quad';
 import type { Jiv } from '../Jiv/Jiv';
-import type { ProgressiveBlurChain } from './ProgressiveBlur.Chain';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from './ProgressiveBlur.Shader';
 
 /**
  * ProgressiveBlurRenderer — draws a ProgressiveBlur Jiv as a quad over the
- * composited scene. The fragment shader reads from the unblurred scene plus
- * the 4 Gaussian levels of a ProgressiveBlurChain and blends them smoothly
- * per-pixel based on position along the gradient direction.
+ * composited scene. The fragment shader reads the unblurred scene (u_Scene)
+ * and a mipmapped blur pyramid (u_Pyramid) — the same pyramid built for
+ * glass panels — sampling at a ramp-driven LOD for continuously variable
+ * blur per fragment.
  *
  * Not batched — usually one of these on screen. If that ever changes, fold
  * per-instance data into an instance buffer like JivRenderer.
@@ -33,7 +33,8 @@ export class ProgressiveBlurRenderer {
   private _resolutionLoc: WebGLUniformLocation | null;
   private _rectLoc: WebGLUniformLocation | null;
   private _sceneLoc: WebGLUniformLocation | null;
-  private _blurLocs: (WebGLUniformLocation | null)[] = [];
+  private _pyramidLoc: WebGLUniformLocation | null;
+  private _maxLodLoc: WebGLUniformLocation | null;
   private _directionLoc: WebGLUniformLocation | null;
   private _opacityLoc: WebGLUniformLocation | null;
   private _backgroundLoc: WebGLUniformLocation | null;
@@ -48,9 +49,8 @@ export class ProgressiveBlurRenderer {
     this._resolutionLoc = gl.getUniformLocation(p, 'u_Resolution');
     this._rectLoc = gl.getUniformLocation(p, 'u_Rect');
     this._sceneLoc = gl.getUniformLocation(p, 'u_Scene');
-    for (let i = 0; i < 4; i++) {
-      this._blurLocs.push(gl.getUniformLocation(p, `u_Blur${i}`));
-    }
+    this._pyramidLoc = gl.getUniformLocation(p, 'u_Pyramid');
+    this._maxLodLoc = gl.getUniformLocation(p, 'u_MaxLod');
     this._directionLoc = gl.getUniformLocation(p, 'u_Direction');
     this._opacityLoc = gl.getUniformLocation(p, 'u_Opacity');
     this._backgroundLoc = gl.getUniformLocation(p, 'u_Background');
@@ -64,7 +64,8 @@ export class ProgressiveBlurRenderer {
    *  @param canvasHeight device-px canvas height
    *  @param dpr          device pixel ratio (Jiv dims are CSS px)
    *  @param scene        unblurred sceneFbo texture
-   *  @param chain        precomputed Gaussian-blur stack (same scene, 4 sigmas)
+   *  @param pyramid      mipmapped blur pyramid texture (same one glass uses)
+   *  @param maxLod       highest mipmap LOD to sample (maps to ramp = 1.0)
    */
   Draw = (
     jiv: Jiv,
@@ -74,7 +75,8 @@ export class ProgressiveBlurRenderer {
     canvasHeight: number,
     dpr: number,
     scene: WebGLTexture,
-    chain: ProgressiveBlurChain,
+    pyramid: WebGLTexture,
+    maxLod: number,
   ): void => {
     if (jiv.Width <= 0 || jiv.Height <= 0 || !jiv.Style.Visible) return;
 
@@ -92,7 +94,8 @@ export class ProgressiveBlurRenderer {
     gl.uniform2f(this._resolutionLoc, canvasWidth, canvasHeight);
     gl.uniform4f(this._rectLoc, rx, ry, rw, rh);
     gl.uniform1i(this._sceneLoc, 0);
-    for (let i = 0; i < 4; i++) gl.uniform1i(this._blurLocs[i], i + 1);
+    gl.uniform1i(this._pyramidLoc, 1);
+    gl.uniform1f(this._maxLodLoc, maxLod);
     gl.uniform1i(this._directionLoc, direction);
     gl.uniform1f(this._opacityLoc, jiv.RenderStyle.Opacity);
 
@@ -106,18 +109,10 @@ export class ProgressiveBlurRenderer {
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, scene);
-    for (let i = 0; i < 4; i++) {
-      gl.activeTexture(gl.TEXTURE0 + i + 1);
-      gl.bindTexture(gl.TEXTURE_2D, chain.Texture(i));
-    }
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, pyramid);
 
     gl.bindVertexArray(this._quad.Vao);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-    gl.bindVertexArray(null);
-
-    for (let i = 0; i <= 4; i++) {
-      gl.activeTexture(gl.TEXTURE0 + i);
-      gl.bindTexture(gl.TEXTURE_2D, null);
-    }
   };
 }

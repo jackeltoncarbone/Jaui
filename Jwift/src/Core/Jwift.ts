@@ -22,7 +22,6 @@ import { Framebuffer } from './Framebuffer';
 import { BlitRenderer } from './Blit';
 import { BlurPass } from './BlurPass';
 import { ProgressiveBlurRenderer } from '../ProgressiveBlur/ProgressiveBlur.Renderer';
-import { ProgressiveBlurChain } from '../ProgressiveBlur/ProgressiveBlur.Chain';
 import type { MaterialType } from '../Jiv/Jiv.Types';
 
 /** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
@@ -56,16 +55,7 @@ export class Canvas {
   // (LOD n ≈ 2ⁿ × base sigma). Single Gaussian sample per fragment — no raw↔blur
   // or disparate-tier mixing, so no ghosting/haze at intermediate values.
   private _blur!: BlurPass;
-  /** Separate BlurPass instance dedicated to the progressive-blur chain.
-   *  BlurPass reuses its internal FBOs across calls, so sharing the same
-   *  instance would have the chain rebuild clobber the glass pyramid that
-   *  Pass 4 still samples. Two instances cost a handful of extra FBOs. */
-  private _progressiveBlurPass!: BlurPass;
   private _progressiveBlur!: ProgressiveBlurRenderer;
-  /** Gaussian blur stack for progressive-blur Jivs. Lazily rebuilt per
-   *  frame, and only when at least one such Jiv is visible — so the extra
-   *  BlurPass calls don't cost us anything on screens that don't use it. */
-  private _progressiveBlurChain!: ProgressiveBlurChain;
   private _animationManager = new AnimationManager();
   private _animators = new Map<Jiv, JivAnimator>();
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
@@ -89,6 +79,9 @@ export class Canvas {
   /** Last HUD DOM update time (ms). Throttled to ~10Hz so textContent churn
    *  doesn't itself tank the frame budget we're trying to measure. */
   private _hudLastWrite: number = 0;
+  private _glCallCount: number = 0;
+  private _glPassCounts: string = '';
+  private _glWrapped: boolean = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.Element = canvas;
@@ -117,6 +110,7 @@ export class Canvas {
 
     if (!gl) throw new Error('[Jwift] WebGL2 not supported');
     this.Gl = gl;
+    if (this._debugHud) this._wrapGlForCounting();
 
     this._panelRenderer = new JivRenderer(gl);
     this._textRenderer = new TextRenderer(gl);
@@ -125,9 +119,7 @@ export class Canvas {
     this._featheredSceneFbo = new Framebuffer(gl);
     this._blit = new BlitRenderer(gl);
     this._blur = new BlurPass(gl);
-    this._progressiveBlurPass = new BlurPass(gl);
     this._progressiveBlur = new ProgressiveBlurRenderer(gl);
-    this._progressiveBlurChain = new ProgressiveBlurChain(gl);
 
     // Animation manager triggers re-render when springs step
     this._animationManager.OnFrame(() => this.RequestFrame());
@@ -225,6 +217,7 @@ export class Canvas {
     const gl = this.Gl;
     const w = gl.drawingBufferWidth;
     const h = gl.drawingBufferHeight;
+    if (this._glWrapped) { this._glCallCount = 0; this._glMark = 0; }
 
     // The scene FBO captures the "background" that Liquid Glass panels refract
     // through. One Jiv renderer handles ALL panels — Material='None' branches
@@ -247,35 +240,12 @@ export class Canvas {
     this._textCache.BeginFrame();
     this._textRenderer.BeginFrame();
     this._collectTextInstancesForNonGlass(this.Root);
-    this._textRenderer.DrawAll(w, h);
+    this._textRenderer.DrawAll(w, h, this._textCache);
+    const p1 = this._glWrapped ? this._markGl() : 0;
 
-    // ─── Pass 1.5: composite ProgressiveBlur overlays INTO a secondary
-    // FBO so the glass pyramid (Pass 2) and the screen blit (Pass 3) both
-    // see the feather. We can't write into _sceneFbo directly because the
-    // progressive-blur shader samples it as u_Scene — that would be a
-    // feedback loop. Ordering: build the Gaussian chain from the pre-
-    // feather scene first (so the feather reads clean content), then copy
-    // sceneFbo → featheredFbo, then draw each feather on top. ───
-    let sceneTex: WebGLTexture = this._sceneFbo.Texture;
-    const maxFeatherSigma = this._maxProgressiveBlurSigma(this.Root);
-    if (maxFeatherSigma > 0) {
-      this._progressiveBlurChain.Rebuild(this._sceneFbo.Texture, w, h, this._dpr, this._progressiveBlurPass, this._blit, maxFeatherSigma);
-
-      this._featheredSceneFbo.Resize(w, h);
-      this._featheredSceneFbo.Bind();
-      gl.viewport(0, 0, w, h);
-
-      gl.disable(gl.BLEND);
-      this._blit.Draw(this._sceneFbo.Texture);
-
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      this._drawProgressiveBlur(this.Root, 0, 0);
-
-      sceneTex = this._featheredSceneFbo.Texture;
-    }
-
-    // ─── Pass 2: blur scene with a Dual Filter pyramid ───
+    // ─── Pass 2 (MOVED UP): blur scene with a Dual Filter pyramid ───
+    // Built BEFORE the progressive-blur composite so Pass 1.5 can reuse the
+    // mipmapped pyramid instead of building its own 4-level Gaussian chain.
     // Dual Filtering (Bjørge 2015) — downsample/upsample chain that gives
     // Gaussian-equivalent blur in O(log N) sample count and never bands the way
     // a single 5-tap pass does at large radii. Blur radius driven by the max
@@ -289,14 +259,51 @@ export class Canvas {
     // pyramid cleanly (BlurPass's depth-1 minimum floors effective σ ≈ 2 px anyway,
     // so going below 1 CSS px gains nothing).
     const baseBlurCssPx = 1;
-    const blurredScene = this._blur.Blur(sceneTex, w, h, baseBlurCssPx * this._dpr);
+    const maxFeatherSigma = this._maxProgressiveBlurSigma(this.Root);
+    const needsDeepPyramid = maxFeatherSigma > 0 ? 3 : 0;
+    const blurredScene = this._blur.Blur(this._sceneFbo.Texture, w, h, baseBlurCssPx * this._dpr, needsDeepPyramid);
     // log2 of base sigma in DEVICE pixels — matches the instance-buffer frostLod
     // scale (`Math.log2(blurPx * dpr)`). Shader uses `frostLod - u_BaseFrostLod`
     // as the per-Jiv mipmap LOD offset.
     const baseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
     // Mipmap the pyramid so the glass shader can sample wider blurs (per-Jiv
-    // FrostBlur above base, plus rim-boost) via textureLod.
+    // FrostBlur above base, plus rim-boost) via textureLod — and so the
+    // progressive-blur shader can sample it at arbitrary LODs.
     this._blur.GenerateOutputMipmap();
+    const p2 = this._glWrapped ? this._markGl() : 0;
+
+    // ─── Pass 1.5: composite ProgressiveBlur overlays INTO a secondary
+    // FBO so the screen blit (Pass 3) sees the feather. We can't write
+    // into _sceneFbo directly because the progressive-blur shader samples
+    // it as u_Scene — that would be a feedback loop. The blur pyramid is
+    // already built (Pass 2 above), so the shader just samples it at a
+    // ramp-driven LOD — no separate chain rebuild needed. ───
+    let sceneTex: WebGLTexture = this._sceneFbo.Texture;
+    if (maxFeatherSigma > 0) {
+      // maxLod: LOD offset from the pyramid's base sigma to the desired
+      // feather sigma. Each LOD doubles effective sigma, so LOD =
+      // log2(targetSigma / baseSigma). Clamped to the pyramid's depth.
+      const baseSigmaDevice = baseBlurCssPx * this._dpr;
+      const targetSigmaDevice = maxFeatherSigma * this._dpr;
+      const maxLod = Math.min(
+        Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice))),
+        this._blur.LastDepth,
+      );
+
+      this._featheredSceneFbo.Resize(w, h);
+      this._featheredSceneFbo.Bind();
+      gl.viewport(0, 0, w, h);
+
+      gl.disable(gl.BLEND);
+      this._blit.Draw(this._sceneFbo.Texture);
+
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      this._drawProgressiveBlur(this.Root, 0, 0, blurredScene, maxLod);
+
+      sceneTex = this._featheredSceneFbo.Texture;
+    }
+    const p15 = this._glWrapped ? this._markGl() : 0;
 
     // ─── Pass 3: blit scene (UNBLURRED, with feather composited) to screen ───
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -320,7 +327,12 @@ export class Canvas {
     // ─── Pass 6: text belonging to glass subtree, on top of everything ───
     this._textRenderer.BeginFrame();
     this._collectTextInstancesForGlass(this.Root);
-    this._textRenderer.DrawAll(w, h);
+    this._textRenderer.DrawAll(w, h, this._textCache);
+
+    if (this._glWrapped) {
+      const p3456 = this._markGl();
+      this._glPassCounts = `GL ${this._glCallCount} (P1:${p1} P2:${p2} P1.5:${p15} P3-6:${p3456})`;
+    }
   };
 
   private _collectNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
@@ -359,21 +371,25 @@ export class Canvas {
 
   /** Recursive draw for progressive-blur overlays. Unlike glass/text, these
    *  aren't batched — each Jiv does one draw. We descend past scroll
-   *  containers the same way the other collect passes do. */
+   *  containers the same way the other collect passes do.
+   *  @param pyramid  mipmapped blur pyramid texture (shared with glass)
+   *  @param maxLod   highest LOD to sample (ramp = 1.0 maps here) */
   private _drawProgressiveBlur = (
     node: Jiv,
     offsetX: number,
     offsetY: number,
+    pyramid: WebGLTexture,
+    maxLod: number,
   ): void => {
     if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Style.Visible) {
       this._progressiveBlur.Draw(
         node, offsetX, offsetY,
         this.Gl.drawingBufferWidth, this.Gl.drawingBufferHeight,
-        this._dpr, this._sceneFbo.Texture, this._progressiveBlurChain,
+        this._dpr, this._sceneFbo.Texture, pyramid, maxLod,
       );
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children) this._drawProgressiveBlur(child, dx, dy);
+    for (const child of node.Children) this._drawProgressiveBlur(child, dx, dy, pyramid, maxLod);
   };
 
   /** Compute the offset descendants see when descending past a scroll container. */
@@ -470,11 +486,11 @@ export class Canvas {
       const wx = contentX + w.SpringX.Value;
       const wy = contentY + yOffset + w.SpringY.Value;
       this._textRenderer.AddText({
-        Texture: entry.Texture,
         X: wx * this._dpr,
         Y: wy * this._dpr,
         Width: entry.Width,
         Height: entry.Height,
+        Uv: entry.Uv,
         Opacity: opacity,
       });
     }
@@ -1092,6 +1108,37 @@ export class Canvas {
     if (debug) this._enableDebugHud();
   };
 
+  private _wrapGlForCounting = (): void => {
+    if (this._glWrapped || !this.Gl) return;
+    this._glWrapped = true;
+    const gl = this.Gl as any;
+    const self = this;
+    const seen = new Set<string>();
+    let obj = gl;
+    while (obj && obj !== Object.prototype) {
+      try {
+        for (const key of Object.getOwnPropertyNames(obj)) {
+          if (seen.has(key) || key === 'getError') continue;
+          seen.add(key);
+          try {
+            if (typeof obj[key] === 'function') {
+              const orig = obj[key].bind(gl);
+              gl[key] = (...args: any[]) => { self._glCallCount++; return orig(...args); };
+            }
+          } catch (_) { /* skip non-configurable */ }
+        }
+      } catch (_) { break; }
+      obj = Object.getPrototypeOf(obj);
+    }
+  };
+
+  private _glMark: number = 0;
+  private _markGl = (): number => {
+    const since = this._glCallCount - this._glMark;
+    this._glMark = this._glCallCount;
+    return since;
+  };
+
   /** Build the HUD overlay. Fixed-position, monospace, semi-transparent; pointer-
    *  events disabled so it never intercepts scroll/hover. Appended to body so
    *  it survives canvas re-parenting and doesn't need special CSS from hosts. */
@@ -1152,7 +1199,7 @@ export class Canvas {
     const w = this._width;
     const h = this._height;
     this._debugHud.textContent =
-      `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | WxH ${w}x${h}`;
+      `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | WxH ${w}x${h}\n${this._glPassCounts}`;
   };
 }
 

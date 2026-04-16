@@ -139,18 +139,17 @@ LiquidGlass {
   BorderRadius: 32
   /* Blurred rim: colorless band sampling the backdrop with extra blur,
    * plus brightness + saturation boost to read as "gathered light". */
-  BorderWidth: 2
-  BorderBlur: 2
-  BorderBrightness: 1.5
-  BorderSaturation: 1.5
+  BorderWidth: 0.5
+  BorderBlur: 0
+  BorderColor: rgba(255, 255, 255, 0.45)
 
   ShadowColor: rgba(0, 0, 0, 0.18)
   ShadowBlur: 22
   ShadowOffsetY: 6
 
   BackdropFrostBlur: 4
-  BackdropBrightness: 1.75
-  BackdropSaturation: 1.75
+  BackdropBrightness: 1.5
+  BackdropSaturation: 1.5
   BackdropContrast: 0.75
 
   Thickness: 2

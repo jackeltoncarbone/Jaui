@@ -50,15 +50,7 @@ export class BlitRenderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texture);
 
-    // Disable blending for the blit (fully replace destination)
-    const wasBlend = gl.isEnabled(gl.BLEND);
-    if (wasBlend) gl.disable(gl.BLEND);
-
     gl.bindVertexArray(this._quad.Vao);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-    gl.bindVertexArray(null);
-    gl.bindTexture(gl.TEXTURE_2D, null);
-
-    if (wasBlend) gl.enable(gl.BLEND);
   };
 }

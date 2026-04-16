@@ -1,19 +1,15 @@
 /**
  * ProgressiveBlur shader — draws a quad over the composited scene and
- * outputs a per-pixel continuously-variable Gaussian blur by lerping
- * between the levels of a ProgressiveBlurChain (each level is a real
- * full-resolution Gaussian at a geometrically-spaced sigma).
+ * outputs a per-pixel continuously-variable Gaussian blur by sampling a
+ * single mipmapped blur pyramid at a ramp-driven LOD. The pyramid is the
+ * same one built for glass panels (Dual Filter → generateMipmap), so the
+ * progressive-blur pass has zero extra blur work — just one textureLod
+ * per fragment.
  *
- * No mipmap sampling, no box-filter downsample hints — every fragment
- * reads crisp Gaussian data and interpolates smoothly. This is the GPU
- * version of Show Studio's 7-div stacked-backdrop-filter technique.
- *
- * Layers (4) interpolated + unblurred scene at the clear end:
- *   position 0.00 in [0..1] → unblurred scene (dest shows through)
- *   position 0.25            → scene ↔ blur[0]    (σ ≈ 4)
- *   position 0.50            → blur[0] ↔ blur[1] (σ ≈ 16)
- *   position 0.75            → blur[1] ↔ blur[2] (σ ≈ 64)
- *   position 1.00            → blur[3]           (σ ≈ 256, heavy)
+ * Ramp mapping:
+ *   ramp = 0.0 → unblurred scene (clear end, dest shows through)
+ *   ramp → 0+  → crossfade into pyramid LOD 0 (base Gaussian σ ≈ 2 px)
+ *   ramp = 1.0 → pyramid at u_MaxLod (heaviest available blur)
  *
  * Direction semantics — "ToX" = blurred AT X, clear at the opposite edge.
  */
@@ -56,21 +52,14 @@ in vec2 v_Local;
 in vec2 v_SampleUv;
 
 uniform sampler2D u_Scene;                  // unblurred scene (level -1)
-uniform sampler2D u_Blur0;                  // smallest sigma
-uniform sampler2D u_Blur1;
-uniform sampler2D u_Blur2;
-uniform sampler2D u_Blur3;                  // largest sigma
+uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = base blur, higher = more)
+uniform float u_MaxLod;                     // max mipmap LOD to sample (maps to ramp = 1.0)
 uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 ToRight
 uniform float u_Opacity;
 uniform vec4 u_Background;                  // tint mixed IN along the ramp (fades clear → authored alpha)
 uniform vec3 u_Grading;                     // (Brightness, Saturation, Contrast) — all 1 = identity
 
 out vec4 fragColor;
-
-/** Lerp between two stage samplers. */
-vec3 lerpStage(vec3 a, vec3 b, float f) {
-    return mix(a, b, clamp(f, 0.0, 1.0));
-}
 
 void main() {
     // t = 0 at the clear end → 1 at the blurred end
@@ -84,9 +73,10 @@ void main() {
     // uniform content; smoothstep is what the eye reads as "feathered".
     float ramp = smoothstep(0.0, 1.0, t);
 
-    // 5 slots along the ramp: scene, blur0, blur1, blur2, blur3 → 4 segments.
-    // Each segment lerps between two adjacent slots based on the ramp's
-    // position within [segStart .. segStart + 1/4].
+    // Sample the unblurred scene and a mipmap LOD from the blur pyramid.
+    // At ramp = 0 show pure scene; quickly crossfade into the pyramid so
+    // LOD 0 (already lightly blurred) kicks in almost immediately. At
+    // ramp = 1 we sample at u_MaxLod — the heaviest available blur.
     //
     // CRITICAL: all blending lives in the RGB channel. If we leaned on the
     // alpha channel for the ramp, dest (the unblurred scene that Pass 3
@@ -94,23 +84,17 @@ void main() {
     // a visible double-exposure — the blurred plate masked over the raw
     // plate. By fully opaque-writing a pre-blended RGB, the output at t=0
     // equals the raw scene sample (matching what dest already holds) and
-    // smoothly ramps to blur3 at t=1. Zero haze, truly progressive.
-    float seg = ramp * 4.0;
-    int idx = int(floor(seg));
-    float f = seg - float(idx);
-
-    vec3 rgb;
-    if (idx <= 0) {
-        rgb = lerpStage(texture(u_Scene, v_SampleUv).rgb, texture(u_Blur0, v_SampleUv).rgb, f);
-    } else if (idx == 1) {
-        rgb = lerpStage(texture(u_Blur0, v_SampleUv).rgb, texture(u_Blur1, v_SampleUv).rgb, f);
-    } else if (idx == 2) {
-        rgb = lerpStage(texture(u_Blur1, v_SampleUv).rgb, texture(u_Blur2, v_SampleUv).rgb, f);
-    } else if (idx == 3) {
-        rgb = lerpStage(texture(u_Blur2, v_SampleUv).rgb, texture(u_Blur3, v_SampleUv).rgb, f);
-    } else {
-        rgb = texture(u_Blur3, v_SampleUv).rgb;
-    }
+    // smoothly ramps to max blur at t=1. Zero haze, truly progressive.
+    vec3 sceneRgb = texture(u_Scene, v_SampleUv).rgb;
+    // Quadratic LOD curve — each mipmap LOD doubles sigma, so a linear LOD
+    // ramp looks exponential to the eye. Squaring makes the perceived blur
+    // increase feel linear (gentle near clear end, steeper near blurred end).
+    float lod = ramp * ramp * u_MaxLod;
+    vec3 blurRgb = textureLod(u_Pyramid, v_SampleUv, lod).rgb;
+    // Gradual crossfade from the unblurred scene into the pyramid over the
+    // first 20% of the gradient. Beyond 20%, fully in the pyramid.
+    float blendT = smoothstep(0.0, 0.2, ramp);
+    vec3 rgb = mix(sceneRgb, blurRgb, blendT);
 
     // Backdrop grading — each factor ramps from 1 (identity, clear end) to
     // its authored value (blurred end). Doing this per-pixel keeps the

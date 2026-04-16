@@ -110,7 +110,5 @@ export class JivRenderer {
 
     gl.bindVertexArray(this._quad.Vao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, count);
-    gl.bindVertexArray(null);
-    gl.bindTexture(gl.TEXTURE_2D, null);
   };
 }
