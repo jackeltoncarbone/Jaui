@@ -120,6 +120,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.BlendMode = target.BlendMode;
   render.ContainBorder = target.ContainBorder;
   render.InnerShadow = target.InnerShadow;
+  render.Layer = target.Layer;
 };
 
 export class JivStyleAnimator implements Animatable {

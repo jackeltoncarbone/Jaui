@@ -125,6 +125,12 @@ export interface JivStyle {
 
   // Appearance
   Opacity: string;
+
+  /** Sibling stacking order. Higher = paints on top. Default `0`.
+   *  Ties break by tree order (later sibling wins), just like the no-Layer
+   *  case. Layer is *sibling-local* — a child's Layer does not escape its
+   *  parent, same as CSS z-index within a stacking context. */
+  Layer: string;
 }
 
 /**
@@ -191,4 +197,6 @@ export interface JivRenderStyle {
   InnerShadow: boolean;
 
   Opacity: number;
+
+  Layer: number;
 }

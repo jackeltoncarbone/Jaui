@@ -53,7 +53,14 @@ export const LayoutWords = (
   ApplyTextStyle(c, style, 1);
 
   const lineHeight = style.FontSize * style.LineHeight;
-  const spaceWidth = c.measureText(' ').width;
+  // If the font isn't yet available to the 2D context, measureText(' ')
+  // can return 0 — causing words to render touching each other. Fall back
+  // to a quarter-em gap so the text remains readable. Text.Cache is flushed
+  // when fonts finish loading, so correct metrics replace this soon after.
+  const rawSpace = c.measureText(' ').width;
+  const spaceWidth = rawSpace > 0 && Number.isFinite(rawSpace)
+    ? rawSpace
+    : style.FontSize * 0.25;
   const words = Tokenize(content);
   if (words.length === 0) return [];
 

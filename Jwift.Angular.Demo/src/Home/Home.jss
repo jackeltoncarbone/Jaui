@@ -32,14 +32,11 @@ ToolbarRow {
   Padding: 20 24
   Width: 100vw
   Height: 72
+  Layer: 20
 }
 
-ToolbarTitle {
-  FontFamily: Inter
-  FontSize: 17
-  FontWeight: 600
-  Color: rgba(255, 255, 255, 0.96)
-  LetterSpacing: -0.2
+ToolbarLogo {
+  Height: 30
 }
 
 Scroll {
@@ -62,9 +59,11 @@ TabBarRow {
   Padding: 8 24 24 24
   Width: 100vw
   Height: 100
+  Layer: 10
 }
 
-/* Progressive blur feathers */
+/* Progressive blur feathers — Layer 5 sits above scroll content (Layer 0)
+ * and below the glass nav (Layer 10+). */
 ContentBlur {
   ProgressiveBlurDirection: ToBottom
   Position: Fixed
@@ -74,6 +73,7 @@ ContentBlur {
   Bottom: 0
   BackdropFrostBlur: 5
   Background: rgba(0, 0, 0, 0.5)
+  Layer: 5
 }
 
 TopBlur {
@@ -85,6 +85,7 @@ TopBlur {
   Top: 0
   BackdropFrostBlur: 8
   Background: rgba(0, 0, 0, 0)
+  Layer: 5
 }
 
 /* Hero — 70vh dark stub with title + CTA. Eventually replaced by
@@ -94,7 +95,7 @@ HeroStub {
   Justify: End
   Align: Start
   Padding: 48 28 48 28
-  Gap: 20
+  Gap: 50
   Height: 70vh
   Background: rgb(22, 26, 42)
   BorderRadius: 0
@@ -109,6 +110,7 @@ HeroTitle {
   LineHeight: 1.05
   Color: rgba(255, 255, 255, 0.98)
   LetterSpacing: -0.5
+  Width: 500
 }
 
 HeroCta {
@@ -315,8 +317,8 @@ ToolbarAvatar {
 }
 
 ToolbarAvatarGlyph {
-  FontFamily: Inter
-  FontSize: 18
+  FontFamily: JwiftIcons
+  FontSize: 20
   Color: rgba(255, 255, 255, 0.9)
   TextAlign: Center
 }

@@ -86,6 +86,19 @@ export class TextCache {
     this._nextShelfY = 0;
   };
 
+  /** Flush all cached entries and reset the atlas. Call when something
+   *  outside the cache invalidates existing measurements — notably, when
+   *  web fonts finish loading after the first render (entries rasterized
+   *  against the fallback font must be re-rasterized). */
+  Clear = (): void => {
+    this._cache.clear();
+    this._shelves.length = 0;
+    this._nextShelfY = 0;
+    if (this._atlas) {
+      this._atlas = this._renderer.CreateTexture(this._atlasSize, this._atlasSize);
+    }
+  };
+
   private _ensureAtlas = (): GpuTextureHandle => {
     if (this._atlas) return this._atlas;
     this._atlas = this._renderer.CreateTexture(this._atlasSize, this._atlasSize);

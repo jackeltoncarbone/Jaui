@@ -18,6 +18,7 @@ import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.Insta
 import type { Renderer, GpuTextureHandle } from './Renderer';
 import { WebGPURenderer } from './WebGPU.Renderer';
 import { WebGL2Renderer } from './WebGL2.Renderer';
+import { ImageCache } from '../Image/Image.Cache';
 import type { MaterialType } from '../Jiv/Jiv.Types';
 
 /** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
@@ -44,6 +45,10 @@ export class Canvas {
   private _panelBuffer = new JivInstanceBuffer();
   private _textBuffer = new TextInstanceBuffer();
   private _textCache!: TextCache;
+  private _imageCache!: ImageCache;
+
+  /** Public image cache — load images/SVGs here, reference them from Jivs. */
+  get Images(): ImageCache { return this._imageCache; }
   /** Specular tilt offset — added to lightDir for specular computations only. */
   private _specTiltX: number = 0;
   private _specTiltY: number = 0;
@@ -110,6 +115,25 @@ export class Canvas {
     this._initDebugFromUrl();
 
     this._textCache = new TextCache(renderer);
+    this._imageCache = new ImageCache(renderer);
+    this._imageCache.OnLoad = () => {
+      // Walk tree and set IntrinsicWidth/Height on nodes whose ImageSrc
+      // matches a now-loaded cache entry. This must happen BEFORE layout
+      // so the solver sees the intrinsics on the next tick.
+      const setIntrinsics = (node: JwiftElement): void => {
+        if (node.ImageSrc && node.IntrinsicWidth === null) {
+          const entry = this._imageCache.Get(node.ImageSrc);
+          if (entry && entry.Ready) {
+            const d = Math.max(1, this._dpr);
+            node.IntrinsicWidth = entry.Width / d;
+            node.IntrinsicHeight = entry.Height / d;
+            node.MarkLayoutDirty();
+          }
+        }
+        for (const child of node.Children) setIntrinsics(child);
+      };
+      setIntrinsics(this.Root);
+    };
 
     this._animationManager.OnFrame(() => this.RequestFrame());
     this._scrollManager = new ScrollManager(this.Root);
@@ -123,6 +147,7 @@ export class Canvas {
     this._listenForInteractionStates();
     this._listenForTextSelection();
     this._listenForSelectionKeys();
+    this._listenForFontLoad();
     void this._listenForSpecularTilt;
   }
 
@@ -133,7 +158,20 @@ export class Canvas {
     if (this._running) return;
     this._running = true;
     this._lastTime = 0;
-    this._frameId = requestAnimationFrame(this._tick);
+    // Defer the first tick until web fonts are loaded. Measuring text before
+    // the 2D canvas context has real font metrics produces zero-width spaces
+    // (words render touching) and caches those bad measurements until eviction.
+    // _listenForFontLoad() handles the follow-up case where fonts arrive
+    // AFTER this point (e.g. late-registered @font-face).
+    const begin = (): void => {
+      if (!this._running) return;
+      this._frameId = requestAnimationFrame(this._tick);
+    };
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      document.fonts.ready.then(begin, begin);
+    } else {
+      begin();
+    }
   };
 
   Stop = (): void => {
@@ -216,14 +254,39 @@ export class Canvas {
     let lastBaseFrostLod: number = 0;
     let backdropDirty = true; // Need new snapshot before next glass
 
+    // Order children by Layer (stable — tree order breaks ties). Fast-path
+    // when every child has Layer 0 (the common case): return the original
+    // array so we don't allocate or sort. Sort is only triggered when an
+    // author actually used Layer.
+    const orderedChildren = (node: Jiv): Jiv[] => {
+      const children = node.Children as Jiv[];
+      let needsSort = false;
+      for (let i = 0; i < children.length; i++) {
+        if (children[i].RenderStyle.Layer !== 0) { needsSort = true; break; }
+      }
+      if (!needsSort) return children;
+      return [...children].sort((a, b) => a.RenderStyle.Layer - b.RenderStyle.Layer);
+    };
+
     // Single tree walk — renders everything in z-order
     const renderNode = (node: Jiv, offsetX: number, offsetY: number, clip: { x: number; y: number; w: number; h: number } | null): void => {
       if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
+      // Set image intrinsic sizes even for zero-size nodes — this breaks the
+      // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
+      // the loaded image. Without this, the node stays at 0 height forever.
+      if (node.ImageSrc && node.IntrinsicWidth === null) {
+        const imgEntry = this._imageCache.Get(node.ImageSrc);
+        if (imgEntry && imgEntry.Ready) {
+          node.IntrinsicWidth = imgEntry.Width / this._dpr;
+          node.IntrinsicHeight = imgEntry.Height / this._dpr;
+          node.MarkLayoutDirty();
+        }
+      }
+
       if (node.Width <= 0 || node.Height <= 0 || !node.Visible) {
-        // Still walk children — a zero-size container can have visible children
         const childClip = this._enterClip(node, offsetX, offsetY, clip);
         const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-        for (const child of node.Children as Jiv[]) renderNode(child, dx, dy, childClip);
+        for (const child of orderedChildren(node)) renderNode(child, dx, dy, childClip);
         return;
       }
 
@@ -290,6 +353,51 @@ export class Canvas {
         r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
       }
 
+      // Render this node's image (if any — after panel, before text)
+      if (node.ImageSrc) {
+        const imgEntry = this._imageCache.Get(node.ImageSrc);
+        if (imgEntry && imgEntry.Ready) {
+          // Set intrinsic sizes from image so layout can auto-size
+          if (node.IntrinsicWidth === null) {
+            node.IntrinsicWidth = imgEntry.Width / this._dpr;
+            node.IntrinsicHeight = imgEntry.Height / this._dpr;
+            node.MarkLayoutDirty();
+          }
+
+          const d = this._dpr;
+          const elemW = node.Width * d;
+          const elemH = node.Height * d;
+          const imgAspect = imgEntry.Width / imgEntry.Height;
+          const elemAspect = elemW / elemH;
+
+          // Contain: fit image inside element, centered, preserving aspect
+          let drawW: number, drawH: number, drawX: number, drawY: number;
+          if (imgAspect > elemAspect) {
+            // Image wider than element — fit to width
+            drawW = elemW;
+            drawH = elemW / imgAspect;
+            drawX = (node.X + offsetX) * d;
+            drawY = (node.Y + offsetY) * d + (elemH - drawH) / 2;
+          } else {
+            // Image taller than element — fit to height
+            drawH = elemH;
+            drawW = elemH * imgAspect;
+            drawX = (node.X + offsetX) * d + (elemW - drawW) / 2;
+            drawY = (node.Y + offsetY) * d;
+          }
+
+          this._textBuffer.Begin();
+          const data = this._textBuffer.Data;
+          data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
+          data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
+          data[8] = node.RenderStyle ? node.RenderStyle.Opacity : 1;
+          data[9] = 0; data[10] = 0; data[11] = 0;
+          r.TextBeginBatch();
+          r.TextAddInstance(data, 0, TEXT_FLOATS_PER_INSTANCE);
+          r.TextDrawBatch(w, h, imgEntry.Texture);
+        }
+      }
+
       // Render this node's text (directly after the panel, in z-order)
       this._emitTextFor(node, offsetX, offsetY);
       if (this._textBuffer.Count > 0) {
@@ -302,10 +410,10 @@ export class Canvas {
       }
       this._textBuffer.Begin();
 
-      // Walk children in tree order
+      // Walk children in Layer order (ties break by tree order)
       const childClip = this._enterClip(node, offsetX, offsetY, clip);
       const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-      for (const child of node.Children as Jiv[]) renderNode(child, dx, dy, childClip);
+      for (const child of orderedChildren(node)) renderNode(child, dx, dy, childClip);
     };
 
     this._textBuffer.Begin();
@@ -582,8 +690,11 @@ export class Canvas {
       node.TextMeasurement = MeasureText(node.Text, resolved, null);
     } else if (node.Text === null) {
       node.TextMeasurement = null;
-      node.IntrinsicWidth = null;
-      node.IntrinsicHeight = null;
+      // Only clear intrinsics if they weren't set by an image source
+      if (!node.ImageSrc) {
+        node.IntrinsicWidth = null;
+        node.IntrinsicHeight = null;
+      }
     }
     for (const child of node.Children as Jiv[]) this._measureDirtyText(child);
   };
@@ -1112,6 +1223,42 @@ export class Canvas {
     for (const c of node.Children as Jiv[]) this._measureScrollContents(c);
   };
 
+  /** Flush every text-related cache and recompute from scratch on the next
+   *  tick. Called when fonts finish loading after the engine has already
+   *  rendered — cached measurements/atlases captured with the fallback font
+   *  are now stale and will produce wrong word spacing until replaced. */
+  private _invalidateAllText = (): void => {
+    this._textCache.Clear();
+    // Drop TextAnimators so _processTextTransitions rebuilds them fresh
+    // against the now-correct font metrics. Positions, widths, and the
+    // per-word springs all reset.
+    for (const anim of this._textAnimators.values()) {
+      this._animationManager.Unregister(anim);
+    }
+    this._textAnimators.clear();
+    // Invalidate each node's measurement so _measureDirtyText re-runs.
+    const invalidate = (node: JwiftElement): void => {
+      node.InvalidateText();
+      for (const child of node.Children) invalidate(child);
+    };
+    invalidate(this.Root);
+    this.Root.Dirty |= DirtyFlag.Layout;
+    this._animationManager.Kick();
+  };
+
+  /** Listen for fonts that arrive AFTER the first tick — e.g. a lazy
+   *  @font-face registered later, or a network-slow Google Font that
+   *  resolved fonts.ready optimistically on a different family.
+   *  FontFaceSet.loadingdone fires once per batch; that's our cue to
+   *  flush stale atlas entries. */
+  private _listenForFontLoad = (): void => {
+    if (typeof document === 'undefined' || !document.fonts) return;
+    // `addEventListener` on FontFaceSet — supported everywhere we ship.
+    document.fonts.addEventListener('loadingdone', () => {
+      this._invalidateAllText();
+    });
+  };
+
   private _watchDpr = (): void => {
     // matchMedia only fires when the specified dpr condition changes (e.g. on browser zoom).
     // We register a one-shot listener, then re-register with the new dpr.
@@ -1251,6 +1398,7 @@ export { TextCache } from '../Text/Text.Cache';
 
 // Image
 export type { ImageStyle, ObjectFit } from '../Image/Image.Types';
+export { ImageCache, RecolorSvg, type ImageEntry } from '../Image/Image.Cache';
 
 // Scroll
 export type { ScrollConfig } from '../Scroll/Scroll.Types';

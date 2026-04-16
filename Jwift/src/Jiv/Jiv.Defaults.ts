@@ -50,4 +50,5 @@ export const DefaultJivStyle: JivStyle = {
   ShadowOffsetY: '0',
   InnerShadow: false,
   Opacity: '1',
+  Layer: '0',
 };

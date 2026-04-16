@@ -126,6 +126,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     InnerShadow: s.InnerShadow,
 
     Opacity: Resolve(s.Opacity, ctx, 'W'),
+
+    Layer: Resolve(s.Layer, ctx, 'W'),
   };
 };
 

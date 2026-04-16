@@ -109,6 +109,11 @@ export class Element {
   Cursor: CursorStyle = 'Default';
   UserSelect: 'Auto' | 'None' = 'Auto';
 
+  // ── Image ──
+  /** Image source key — matches the key used with ImageCache.LoadUrl/LoadSvg.
+   *  When set, the renderer draws the cached image texture inside this element. */
+  ImageSrc: string | null = null;
+
   // ── Dirty tracking ──
   Dirty: DirtyFlags = DirtyFlag.Layout;
 
@@ -162,8 +167,30 @@ export class Element {
   };
 
   SetText = (text: string | null, style?: Partial<TextStyle>): void => {
+    let changed = text !== this.Text;
     this.Text = text;
-    if (style) Object.assign(this.TextStyle, style);
+    if (style) {
+      const current = this.TextStyle as unknown as Record<string, unknown>;
+      const next = style as unknown as Record<string, unknown>;
+      for (const key in next) {
+        const v = next[key];
+        if (v !== undefined && current[key] !== v) {
+          current[key] = v;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) return;
+    this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
+    if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
+  };
+
+  /** Force text re-measurement on next tick. Call after something outside
+   *  the node changes (e.g. fonts finished loading) that could invalidate
+   *  the cached TextMeasurement. */
+  InvalidateText = (): void => {
+    if (this.Text === null) return;
+    this.TextMeasurement = null;
     this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
     if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
   };

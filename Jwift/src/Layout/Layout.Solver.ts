@@ -224,8 +224,8 @@ const _solveNode = (
       child.ResolveCtx = childCtx;
       const declW = _resolveSize(child.ChildLayout.Width, width, childCtx, 'W');
       const declH = _resolveSize(child.ChildLayout.Height, height, childCtx, 'H');
-      const w = declW === 'Auto' ? child.Width : declW;
-      const h = declH === 'Auto' ? child.Height : declH;
+      const w = declW === 'Auto' ? (child.IntrinsicWidth ?? child.Width) : declW;
+      const h = declH === 'Auto' ? (child.IntrinsicHeight ?? child.Height) : declH;
 
       // Fixed: CSS-style viewport anchors via Top/Bottom/Left/Right beat
       // the imperative child.X / child.Y. Left wins over Right if both set

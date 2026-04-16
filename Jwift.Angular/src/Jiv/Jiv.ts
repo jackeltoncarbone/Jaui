@@ -55,6 +55,7 @@ export class Jiv implements OnInit, OnDestroy {
   readonly childLayout = input<Partial<ChildLayout> | undefined>(undefined);
   readonly text = input<string | null | undefined>(undefined);
   readonly textStyle = input<Partial<TextStyle> | undefined>(undefined);
+  readonly imageSrc = input<string | null | undefined>(undefined, { alias: 'image' });
 
   /** The underlying Jiv instance, created in the constructor. */
   readonly Node: JivCore;
@@ -165,11 +166,16 @@ export class Jiv implements OnInit, OnDestroy {
     }
     if (opts.Layout) Object.assign(this.Node.Layout, opts.Layout);
     if (opts.ChildLayout) Object.assign(this.Node.ChildLayout, opts.ChildLayout);
-    if (opts.TextStyle) Object.assign(this.Node.TextStyle, opts.TextStyle);
-    if ('Text' in opts) {
-      this.Node.Text = opts.Text ?? null;
-      this.Node.Dirty |= 0b10000001; // DirtyFlag.Text | DirtyFlag.Layout
+    // Route text + textStyle through SetText: it diffs before dirtying, so
+    // calling every effect run is cheap when nothing changed and still marks
+    // DirtyFlag.Text when font metrics (FontSize, FontFamily, LetterSpacing…)
+    // change — which Object.assign on TextStyle silently missed.
+    if ('Text' in opts || opts.TextStyle) {
+      const nextText = 'Text' in opts ? (opts.Text ?? null) : this.Node.Text;
+      this.Node.SetText(nextText, opts.TextStyle);
     }
+    const img = this.imageSrc();
+    if (img !== undefined) this.Node.ImageSrc = img;
     this.Node.MarkLayoutDirty();
   }
 }

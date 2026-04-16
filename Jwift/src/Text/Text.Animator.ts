@@ -102,6 +102,11 @@ export class TextAnimator implements Animatable {
     for (let i = 0; i < living.length && i < positions.length; i++) {
       const w = living[i];
       const p = positions[i];
+      // Refresh metrics every reflow — if the last LayoutWords ran before
+      // fonts were ready and returned bad Widths, the reflow that fires
+      // once fonts load is what recovers them.
+      w.Width = p.Width;
+      w.Height = p.Height;
       if (w.TargetX !== p.X) {
         if (w.SpringX.Set(p.X)) needsKick = true;
         w.TargetX = p.X;
