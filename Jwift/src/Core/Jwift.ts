@@ -17,6 +17,7 @@ import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceB
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import type { Renderer, GpuTextureHandle } from './Renderer';
 import { WebGPURenderer } from './WebGPU.Renderer';
+import { WebGL2Renderer } from './WebGL2.Renderer';
 import type { MaterialType } from '../Jiv/Jiv.Types';
 
 /** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
@@ -62,14 +63,45 @@ export class Canvas {
   private _hudCount: number = 0;
   private _hudLastWrite: number = 0;
 
-  /** Async factory — WebGPU device creation requires promises. */
+  /** Async factory — tries WebGPU first, falls back to WebGL2 automatically. */
   static Create = async (canvas: HTMLCanvasElement): Promise<Canvas> => {
-    const renderer = new WebGPURenderer();
-    await renderer.Init(canvas);
+    let renderer: Renderer;
+
+    // Try WebGPU first — better performance on capable hardware
+    if (typeof navigator !== 'undefined' && navigator.gpu) {
+      try {
+        const webgpu = new WebGPURenderer();
+        await webgpu.Init(canvas);
+        renderer = webgpu;
+        console.log('[Jwift] Using WebGPU renderer');
+      } catch (e) {
+        console.warn('[Jwift] WebGPU failed, falling back to WebGL2:', (e as Error).message);
+        const webgl2 = new WebGL2Renderer();
+        await webgl2.Init(canvas);
+        renderer = webgl2;
+        console.log('[Jwift] Using WebGL2 renderer');
+      }
+    } else {
+      const webgl2 = new WebGL2Renderer();
+      await webgl2.Init(canvas);
+      renderer = webgl2;
+      console.log('[Jwift] Using WebGL2 renderer (WebGPU not available)');
+    }
+
     return new Canvas(canvas, renderer);
   };
 
-  private constructor(canvas: HTMLCanvasElement, renderer: Renderer) {
+  /** Synchronous constructor — always uses WebGL2. For WebGPU with automatic
+   *  fallback, use the async `Canvas.Create()` factory instead. */
+  constructor(canvas: HTMLCanvasElement, renderer?: Renderer) {
+    if (!renderer) {
+      const webgl2 = new WebGL2Renderer();
+      // WebGL2 init is synchronous internally — the Promise resolves immediately.
+      // We call it here and trust that it completes synchronously for WebGL2.
+      // This is safe because WebGL2.Renderer.Init only does synchronous GL calls.
+      void webgl2.Init(canvas);
+      renderer = webgl2;
+    }
     this.Element = canvas;
     this.Root = new Jiv();
     this._renderer = renderer;
@@ -200,22 +232,24 @@ export class Canvas {
     const baseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
     r.GenerateBlurMipmap();
 
-    // ─── Pass 1.5: progressive blur overlays ───
-    let sceneTex: GpuTextureHandle = r.SceneTexture;
+    // ─── Pass 3: blit scene to screen ───
+    r.BindDefaultTarget();
+    r.DisableBlend();
+    r.Blit(r.SceneTexture);
+
+    // ─── Pass 1.5: progressive blur overlays (drawn to screen, reads from
+    // scene texture + blur pyramid — no feedback since we're writing to the
+    // default framebuffer, not the scene FBO) ───
     if (maxFeatherSigma > 0) {
       const baseSigmaDevice = baseBlurCssPx * this._dpr;
       const targetSigmaDevice = maxFeatherSigma * this._dpr;
       const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
-      // TODO: progressive blur needs a secondary render target to avoid feedback.
-      // For now, draw directly — full implementation in a follow-up.
+      r.EnableBlend();
       this._drawProgressiveBlur(this.Root, 0, 0, blurredScene, maxLod);
     }
 
-    // ─── Pass 3: blit scene to screen ───
-    r.BindDefaultTarget();
-    r.Blit(sceneTex);
-
     // ─── Pass 4: glass panels — sample the blurred backdrop ───
+    r.EnableBlend();
     this._panelBuffer.Begin();
     this._collectGlass(this.Root);
     r.PanelBeginBatch();

@@ -1,7 +1,7 @@
 import { Canvas, Jiv, LiquidGlass } from 'jwift';
 
 const el = document.getElementById('jwift') as HTMLCanvasElement;
-const canvas = new Canvas(el);
+const canvas = await Canvas.Create(el);
 
 // ─── Background screen ───
 
@@ -32,7 +32,7 @@ screen.AddChild(header);
 
 const contentColumn = new Jiv({
   Layout: { Direction: 'Column', Justify: 'Start', Align: 'Stretch', Gap: '18', Padding: '0 24 140 24' },
-  Style: { Overflow: 'Scroll' },
+  Overflow: 'Scroll',
   ChildLayout: { FlexGrow: 1 },
 });
 

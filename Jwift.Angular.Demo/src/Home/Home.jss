@@ -67,6 +67,17 @@ ContentBlur {
   Background: rgba(0, 0, 0, 0.5)
 }
 
+TopBlur {
+  ProgressiveBlurDirection: ToTop
+  Position: Fixed
+  Width: 100vw
+  Height: 80
+  Left: 0
+  Top: 0
+  BackdropFrostBlur: 8
+  Background: rgba(0, 0, 0, 0)
+}
+
 HeroStub {
   Direction: Column
   Justify: End

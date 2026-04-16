@@ -8,6 +8,7 @@
     "noPropertyAccessFromIndexSignature": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
+    "types": ["@webgpu/types"],
     "skipLibCheck": true,
     "isolatedModules": true,
     "experimentalDecorators": true,

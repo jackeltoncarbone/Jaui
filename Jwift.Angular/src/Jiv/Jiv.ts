@@ -70,7 +70,17 @@ export class Jiv implements OnInit, OnDestroy {
   private _registry = inject(JSS_REGISTRY, { optional: true });
 
   constructor() {
-    this.Node = new JivCore(this._buildOptions());
+    const opts = this._buildOptions();
+    // Extract Element-level properties from Style before constructing
+    const style = (opts.Style ?? {}) as Record<string, unknown>;
+    const elementProps: Record<string, unknown> = {};
+    for (const key of ['Overflow', 'Visible', 'Interactive', 'PointerEvents', 'Cursor', 'UserSelect']) {
+      if (key in style) {
+        elementProps[key] = style[key];
+        delete style[key];
+      }
+    }
+    this.Node = new JivCore({ ...opts, ...elementProps });
     // Reactively re-apply on input changes — spring animator handles the
     // smooth transition; we don't recreate the Jiv. Tracking the registry
     // version signal here is what makes live `.jss` hot-edits propagate:
@@ -123,7 +133,36 @@ export class Jiv implements OnInit, OnDestroy {
    *  animator picks up field deltas automatically — no manual transitions. */
   private _apply(): void {
     const opts = this._buildOptions();
-    if (opts.Style) Object.assign(this.Node.Style, opts.Style);
+    if (opts.Style) {
+      // Extract Element-level properties that JSS may have placed in the
+      // Style bucket (they moved from JivStyle to Element).
+      const style = opts.Style as Record<string, unknown>;
+      if ('Overflow' in style) {
+        this.Node.Overflow = style['Overflow'] as 'Visible' | 'Hidden' | 'Scroll';
+        delete style['Overflow'];
+      }
+      if ('Visible' in style) {
+        this.Node.Visible = style['Visible'] as boolean;
+        delete style['Visible'];
+      }
+      if ('Interactive' in style) {
+        this.Node.Interactive = style['Interactive'] as boolean;
+        delete style['Interactive'];
+      }
+      if ('PointerEvents' in style) {
+        this.Node.PointerEvents = style['PointerEvents'] as 'Auto' | 'None';
+        delete style['PointerEvents'];
+      }
+      if ('Cursor' in style) {
+        this.Node.Cursor = style['Cursor'] as 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
+        delete style['Cursor'];
+      }
+      if ('UserSelect' in style) {
+        this.Node.UserSelect = style['UserSelect'] as 'Auto' | 'None';
+        delete style['UserSelect'];
+      }
+      Object.assign(this.Node.Style, style);
+    }
     if (opts.Layout) Object.assign(this.Node.Layout, opts.Layout);
     if (opts.ChildLayout) Object.assign(this.Node.ChildLayout, opts.ChildLayout);
     if (opts.TextStyle) Object.assign(this.Node.TextStyle, opts.TextStyle);

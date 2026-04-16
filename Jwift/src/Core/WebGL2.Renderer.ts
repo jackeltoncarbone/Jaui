@@ -1,0 +1,470 @@
+/**
+ * WebGL2 implementation of the Renderer interface.
+ *
+ * Wraps the original WebGL2 rendering subsystems (ShaderCompiler, Framebuffer,
+ * BlurPass, Blit, Geometry.Quad) into the Renderer interface so Jwift.ts can
+ * use it as a drop-in alternative to WebGPURenderer. This is the default
+ * backend — works on every browser, every GPU, every driver.
+ */
+
+import type { Renderer, GpuTextureHandle, ProgressiveBlurParams } from './Renderer';
+import { ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
+import { Framebuffer } from './Framebuffer';
+import { BlurPass } from './BlurPass';
+import { QuadGeometry } from './Geometry.Quad';
+import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
+
+import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
+import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
+import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
+import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
+
+// ─── Opaque handle wrapping ─────────────────────────────────────────────────
+
+interface WrappedGlTexture extends GpuTextureHandle {
+  readonly _glTex: WebGLTexture;
+}
+
+const _wrap = (tex: WebGLTexture): GpuTextureHandle =>
+  ({ _brand: 'GpuTextureHandle', _glTex: tex } as unknown as GpuTextureHandle);
+const _unwrap = (handle: GpuTextureHandle): WebGLTexture =>
+  (handle as unknown as WrappedGlTexture)._glTex;
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+const PANEL_FLOATS_PER_INSTANCE = 60;
+const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
+const PANEL_ATTR_COUNT = 15; // locations 1..15
+const BYTES_PER_VEC4 = 16;
+
+const TEXT_FLOATS_PER_INSTANCE = 12;
+const TEXT_BYTES_PER_INSTANCE = TEXT_FLOATS_PER_INSTANCE * 4;
+const TEXT_ATTR_COUNT = 3; // locations 1..3
+
+const BLIT_VERT = `#version 300 es
+precision highp float;
+layout(location = 0) in vec2 a_Position;
+out vec2 v_Uv;
+void main() {
+    v_Uv = a_Position;
+    vec2 clip = a_Position * 2.0 - 1.0;
+    gl_Position = vec4(clip, 0.0, 1.0);
+}
+`;
+
+const BLIT_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_Uv;
+uniform sampler2D u_Tex;
+out vec4 fragColor;
+void main() {
+    fragColor = texture(u_Tex, v_Uv);
+}
+`;
+
+// ─── WebGL2 Renderer ────────────────────────────────────────────────────────
+
+export class WebGL2Renderer implements Renderer {
+  private _gl!: WebGL2RenderingContext;
+
+  // Geometry
+  private _quad!: QuadGeometry;
+
+  // Render targets
+  private _sceneFbo!: Framebuffer;
+  private _blur!: BlurPass;
+
+  // Panel shader
+  private _panelShader!: ShaderProgram;
+  private _panelVao!: WebGLVertexArrayObject;
+  private _panelInstanceBuffer!: WebGLBuffer;
+  private _panelInstanceData = new Float32Array(0);
+  private _panelInstanceCount = 0;
+  private _panelResolutionLoc!: WebGLUniformLocation | null;
+  private _panelBackdropLoc!: WebGLUniformLocation | null;
+  private _panelBaseFrostLodLoc!: WebGLUniformLocation | null;
+  private _panelSpecTiltLoc!: WebGLUniformLocation | null;
+  private _dummyTex!: WebGLTexture;
+
+  // Text shader
+  private _textShader!: ShaderProgram;
+  private _textVao!: WebGLVertexArrayObject;
+  private _textInstanceBuffer!: WebGLBuffer;
+  private _textInstanceData = new Float32Array(0);
+  private _textInstanceCount = 0;
+  private _textResolutionLoc!: WebGLUniformLocation | null;
+  private _textAtlasLoc!: WebGLUniformLocation | null;
+
+  // Blit shader
+  private _blitShader!: ShaderProgram;
+  private _blitTexLoc!: WebGLUniformLocation | null;
+
+  // Progressive blur shader
+  private _progBlurShader!: ShaderProgram;
+  private _progBlurLocs!: {
+    resolution: WebGLUniformLocation | null;
+    rect: WebGLUniformLocation | null;
+    scene: WebGLUniformLocation | null;
+    pyramid: WebGLUniformLocation | null;
+    maxLod: WebGLUniformLocation | null;
+    direction: WebGLUniformLocation | null;
+    opacity: WebGLUniformLocation | null;
+    background: WebGLUniformLocation | null;
+    grading: WebGLUniformLocation | null;
+  };
+
+  private _width: number = 0;
+  private _height: number = 0;
+
+  // ── Lifecycle ──
+
+  Init = async (canvas: HTMLCanvasElement): Promise<void> => {
+    const gl = canvas.getContext('webgl2', {
+      alpha: false,
+      antialias: false,
+      premultipliedAlpha: true,
+      preserveDrawingBuffer: false,
+      powerPreference: 'high-performance',
+    });
+    if (!gl) throw new Error('[Jwift] WebGL2 not supported');
+    this._gl = gl;
+
+    this._quad = new QuadGeometry(gl);
+    this._sceneFbo = new Framebuffer(gl);
+    this._blur = new BlurPass(gl);
+
+    this._initPanelShader(gl);
+    this._initTextShader(gl);
+    this._initBlitShader(gl);
+    this._initProgBlurShader(gl);
+
+    // 1x1 black placeholder texture
+    const dummy = gl.createTexture();
+    if (!dummy) throw new Error('[Jwift] failed to create placeholder texture');
+    this._dummyTex = dummy;
+    gl.bindTexture(gl.TEXTURE_2D, dummy);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+      new Uint8Array([0, 0, 0, 255]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  };
+
+  Destroy = (): void => {
+    // WebGL context is garbage-collected with the canvas
+  };
+
+  Resize = (width: number, height: number, _dpr: number): void => {
+    this._width = width;
+    this._height = height;
+    this._sceneFbo.Resize(width, height);
+  };
+
+  // ── Per-Frame ──
+
+  BeginFrame = (): void => { /* no-op for WebGL2 — state machine, no command encoder */ };
+  EndFrame = (): void => { /* no-op */ };
+
+  // ── Render Targets ──
+
+  get SceneTexture(): GpuTextureHandle { return _wrap(this._sceneFbo.Texture); }
+  get BlurPyramidTexture(): GpuTextureHandle {
+    // BlurPass stores its output internally — the last Blur() call's result
+    // is in levels[0].Texture. We don't expose it directly; it's accessed
+    // via the return value of ComputeBlur.
+    throw new Error('[Jwift WebGL2] Access blur output via ComputeBlur return value');
+  }
+
+  // ── Scene Pass ──
+
+  BeginScenePass = (clearR: number, clearG: number, clearB: number): void => {
+    const gl = this._gl;
+    this._sceneFbo.Bind();
+    gl.viewport(0, 0, this._width, this._height);
+    gl.clearColor(clearR, clearG, clearB, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  };
+
+  EndScenePass = (): void => {
+    // No explicit end needed — next FBO bind or bindFramebuffer(null) handles it
+  };
+
+  // ── Panel Rendering ──
+
+  PanelBeginBatch = (): void => { this._panelInstanceCount = 0; };
+
+  PanelAddInstance = (data: Float32Array, offset: number, count: number): void => {
+    const needed = this._panelInstanceCount * PANEL_FLOATS_PER_INSTANCE + count;
+    if (needed > this._panelInstanceData.length) {
+      const newCap = Math.max(needed, this._panelInstanceData.length * 2, 64 * PANEL_FLOATS_PER_INSTANCE);
+      const newData = new Float32Array(newCap);
+      newData.set(this._panelInstanceData);
+      this._panelInstanceData = newData;
+    }
+    this._panelInstanceData.set(
+      data.subarray(offset, offset + count),
+      this._panelInstanceCount * PANEL_FLOATS_PER_INSTANCE,
+    );
+    this._panelInstanceCount += count / PANEL_FLOATS_PER_INSTANCE;
+  };
+
+  PanelDrawBatch = (
+    canvasWidth: number, canvasHeight: number,
+    backdrop: GpuTextureHandle | null, baseFrostLod: number,
+    specTiltX: number, specTiltY: number,
+  ): void => {
+    if (this._panelInstanceCount === 0) return;
+    const gl = this._gl;
+
+    // Upload instance data
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._panelInstanceBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER,
+      this._panelInstanceData.subarray(0, this._panelInstanceCount * PANEL_FLOATS_PER_INSTANCE),
+      gl.DYNAMIC_DRAW);
+
+    gl.useProgram(this._panelShader.Program);
+    gl.uniform2f(this._panelResolutionLoc, canvasWidth, canvasHeight);
+    gl.uniform1i(this._panelBackdropLoc, 0);
+    gl.uniform1f(this._panelBaseFrostLodLoc, baseFrostLod);
+    gl.uniform2f(this._panelSpecTiltLoc, specTiltX, specTiltY);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, backdrop ? _unwrap(backdrop) : this._dummyTex);
+
+    gl.bindVertexArray(this._panelVao);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
+  };
+
+  // ── Text Rendering ──
+
+  TextBeginBatch = (): void => { this._textInstanceCount = 0; };
+
+  TextAddInstance = (data: Float32Array, offset: number, count: number): void => {
+    const needed = this._textInstanceCount * TEXT_FLOATS_PER_INSTANCE + count;
+    if (needed > this._textInstanceData.length) {
+      const newCap = Math.max(needed, this._textInstanceData.length * 2, 128 * TEXT_FLOATS_PER_INSTANCE);
+      const newData = new Float32Array(newCap);
+      newData.set(this._textInstanceData);
+      this._textInstanceData = newData;
+    }
+    this._textInstanceData.set(
+      data.subarray(offset, offset + count),
+      this._textInstanceCount * TEXT_FLOATS_PER_INSTANCE,
+    );
+    this._textInstanceCount += count / TEXT_FLOATS_PER_INSTANCE;
+  };
+
+  TextDrawBatch = (canvasWidth: number, canvasHeight: number, atlas: GpuTextureHandle): void => {
+    if (this._textInstanceCount === 0) return;
+    const gl = this._gl;
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._textInstanceBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER,
+      this._textInstanceData.subarray(0, this._textInstanceCount * TEXT_FLOATS_PER_INSTANCE),
+      gl.DYNAMIC_DRAW);
+
+    gl.useProgram(this._textShader.Program);
+    gl.uniform2f(this._textResolutionLoc, canvasWidth, canvasHeight);
+    gl.uniform1i(this._textAtlasLoc, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, _unwrap(atlas));
+
+    gl.bindVertexArray(this._textVao);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._textInstanceCount);
+  };
+
+  // ── Blur ──
+
+  ComputeBlur = (
+    input: GpuTextureHandle, width: number, height: number,
+    radius: number, minDepth?: number,
+  ): GpuTextureHandle => {
+    const result = this._blur.Blur(_unwrap(input), width, height, radius, minDepth);
+    return _wrap(result);
+  };
+
+  GenerateBlurMipmap = (): void => {
+    this._blur.GenerateOutputMipmap();
+  };
+
+  get LastBlurDepth(): number { return this._blur.LastDepth; }
+
+  // ── Progressive Blur ──
+
+  DrawProgressiveBlur = (params: ProgressiveBlurParams): void => {
+    const gl = this._gl;
+    const p = this._progBlurShader.Program;
+
+    gl.useProgram(p);
+    gl.uniform2f(this._progBlurLocs.resolution, this._width, this._height);
+    gl.uniform4f(this._progBlurLocs.rect, params.Rect.X, params.Rect.Y, params.Rect.W, params.Rect.H);
+    gl.uniform1i(this._progBlurLocs.scene, 0);
+    gl.uniform1i(this._progBlurLocs.pyramid, 1);
+    gl.uniform1f(this._progBlurLocs.maxLod, params.MaxLod);
+    gl.uniform1i(this._progBlurLocs.direction, params.Direction);
+    gl.uniform1f(this._progBlurLocs.opacity, params.Opacity);
+    gl.uniform4f(this._progBlurLocs.background,
+      params.Background.R, params.Background.G, params.Background.B, params.Background.A);
+    gl.uniform3f(this._progBlurLocs.grading,
+      params.Grading.Brightness, params.Grading.Saturation, params.Grading.Contrast);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, _unwrap(params.Scene));
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, _unwrap(params.Pyramid));
+
+    gl.bindVertexArray(this._quad.Vao);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+  };
+
+  // ── Blit ──
+
+  Blit = (source: GpuTextureHandle): void => {
+    const gl = this._gl;
+    gl.useProgram(this._blitShader.Program);
+    gl.uniform1i(this._blitTexLoc, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, _unwrap(source));
+    gl.bindVertexArray(this._quad.Vao);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+  };
+
+  // ── Texture Management ──
+
+  CreateTexture = (width: number, height: number): GpuTextureHandle => {
+    const gl = this._gl;
+    const tex = gl.createTexture();
+    if (!tex) throw new Error('[Jwift] Failed to create texture');
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return _wrap(tex);
+  };
+
+  UploadSubTexture = (
+    texture: GpuTextureHandle, x: number, y: number,
+    source: HTMLCanvasElement | ImageBitmap,
+  ): void => {
+    const gl = this._gl;
+    gl.bindTexture(gl.TEXTURE_2D, _unwrap(texture));
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  };
+
+  // ── Render State ──
+
+  EnableBlend = (): void => {
+    const gl = this._gl;
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  };
+
+  DisableBlend = (): void => {
+    this._gl.disable(this._gl.BLEND);
+  };
+
+  BindDefaultTarget = (): void => {
+    const gl = this._gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this._width, this._height);
+  };
+
+  SetViewport = (x: number, y: number, width: number, height: number): void => {
+    this._gl.viewport(x, y, width, height);
+  };
+
+  // ── Shader Initialization ─────────────────────────────────────────────────
+
+  private _initPanelShader = (gl: WebGL2RenderingContext): void => {
+    this._panelShader = ShaderCompiler.Compile(gl, panelVertSrc, panelFragSrc);
+
+    const buf = gl.createBuffer();
+    if (!buf) throw new Error('[Jwift] Failed to create panel instance buffer');
+    this._panelInstanceBuffer = buf;
+
+    this._panelResolutionLoc = gl.getUniformLocation(this._panelShader.Program, 'u_Resolution');
+    this._panelBackdropLoc = gl.getUniformLocation(this._panelShader.Program, 'u_Backdrop');
+    this._panelBaseFrostLodLoc = gl.getUniformLocation(this._panelShader.Program, 'u_BaseFrostLod');
+    this._panelSpecTiltLoc = gl.getUniformLocation(this._panelShader.Program, 'u_SpecularTilt');
+
+    // Dedicated VAO for panel rendering (separate from text)
+    this._panelVao = this._createInstancedVao(gl, this._panelInstanceBuffer, PANEL_ATTR_COUNT, PANEL_BYTES_PER_INSTANCE);
+  };
+
+  private _initTextShader = (gl: WebGL2RenderingContext): void => {
+    this._textShader = ShaderCompiler.Compile(gl, textVertSrc, textFragSrc);
+
+    const buf = gl.createBuffer();
+    if (!buf) throw new Error('[Jwift] Failed to create text instance buffer');
+    this._textInstanceBuffer = buf;
+
+    this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
+    this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
+
+    // Dedicated VAO for text rendering (separate from panel)
+    this._textVao = this._createInstancedVao(gl, this._textInstanceBuffer, TEXT_ATTR_COUNT, TEXT_BYTES_PER_INSTANCE);
+  };
+
+  /** Create a VAO with the unit quad at location 0 + instance attributes at locations 1..N. */
+  private _createInstancedVao = (
+    gl: WebGL2RenderingContext,
+    instanceBuffer: WebGLBuffer,
+    attrCount: number,
+    bytesPerInstance: number,
+  ): WebGLVertexArrayObject => {
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error('[Jwift] Failed to create VAO');
+    gl.bindVertexArray(vao);
+
+    // Quad position at location 0 (shared geometry data from _quad)
+    const posBuf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0,0, 1,0, 0,1, 1,1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    // Index buffer
+    const idxBuf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0,1,2, 2,1,3]), gl.STATIC_DRAW);
+
+    // Instance attributes at locations 1..attrCount
+    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+    for (let loc = 1; loc <= attrCount; loc++) {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, bytesPerInstance, (loc - 1) * BYTES_PER_VEC4);
+      gl.vertexAttribDivisor(loc, 1);
+    }
+
+    gl.bindVertexArray(null);
+    return vao;
+  };
+
+  private _initBlitShader = (gl: WebGL2RenderingContext): void => {
+    this._blitShader = ShaderCompiler.Compile(gl, BLIT_VERT, BLIT_FRAG);
+    this._blitTexLoc = gl.getUniformLocation(this._blitShader.Program, 'u_Tex');
+  };
+
+  private _initProgBlurShader = (gl: WebGL2RenderingContext): void => {
+    this._progBlurShader = ShaderCompiler.Compile(gl, PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG);
+    const p = this._progBlurShader.Program;
+    this._progBlurLocs = {
+      resolution: gl.getUniformLocation(p, 'u_Resolution'),
+      rect: gl.getUniformLocation(p, 'u_Rect'),
+      scene: gl.getUniformLocation(p, 'u_Scene'),
+      pyramid: gl.getUniformLocation(p, 'u_Pyramid'),
+      maxLod: gl.getUniformLocation(p, 'u_MaxLod'),
+      direction: gl.getUniformLocation(p, 'u_Direction'),
+      opacity: gl.getUniformLocation(p, 'u_Opacity'),
+      background: gl.getUniformLocation(p, 'u_Background'),
+      grading: gl.getUniformLocation(p, 'u_Grading'),
+    };
+  };
+}

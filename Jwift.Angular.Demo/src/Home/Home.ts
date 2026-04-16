@@ -42,6 +42,7 @@ type CardRef = { Kicker: string; Title: string; Color: string };
       <!-- Progressive blur feather — sits over the lower part of the
            scroll area and under the TabBar. All geometry comes from the
            .ContentBlur JSS class (Position: Fixed + Bottom/Left/Width). -->
+      <jiv class="TopBlur" />
       <jiv class="ContentBlur" />
 
       <jiv class="Scroll">
