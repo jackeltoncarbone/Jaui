@@ -32,6 +32,7 @@ const CHILD_LAYOUT_PROPS = new Set([
   'AspectRatio', 'ZIndex',
   'OffsetX', 'OffsetY',
   'StickyTop', 'StickyBottom', 'StickyLeft', 'StickyRight',
+  'Top', 'Bottom', 'Left', 'Right',
   'AttachTo', 'AttachMode',
   'AttachTargetAnchor', 'AttachSelfAnchor',
   'AttachOffsetX', 'AttachOffsetY', 'AttachInset',

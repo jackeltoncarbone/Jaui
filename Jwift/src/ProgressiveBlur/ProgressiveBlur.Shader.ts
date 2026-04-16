@@ -62,6 +62,8 @@ uniform sampler2D u_Blur2;
 uniform sampler2D u_Blur3;                  // largest sigma
 uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 ToRight
 uniform float u_Opacity;
+uniform vec4 u_Background;                  // tint mixed IN along the ramp (fades clear → authored alpha)
+uniform vec3 u_Grading;                     // (Brightness, Saturation, Contrast) — all 1 = identity
 
 out vec4 fragColor;
 
@@ -110,8 +112,26 @@ void main() {
         rgb = texture(u_Blur3, v_SampleUv).rgb;
     }
 
+    // Backdrop grading — each factor ramps from 1 (identity, clear end) to
+    // its authored value (blurred end). Doing this per-pixel keeps the
+    // transition smooth and matches how the blur itself ramps.
+    float brightness = mix(1.0, u_Grading.x, ramp);
+    float saturation = mix(1.0, u_Grading.y, ramp);
+    float contrast   = mix(1.0, u_Grading.z, ramp);
+    rgb *= brightness;
+    float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
+    rgb = mix(vec3(luma), rgb, saturation);
+    rgb = (rgb - 0.5) * contrast + 0.5;
+
+    // Background tint — mixed in with alpha = authored alpha × ramp so the
+    // clear end shows none of the background and the blurred end shows the
+    // authored amount. Lets authors e.g. darken scroll content as it feathers
+    // into the TabBar without touching the clear top edge.
+    float bgMix = u_Background.a * ramp;
+    rgb = mix(rgb, u_Background.rgb, bgMix);
+
     // Alpha = u_Opacity (Jiv-level fade only). No ramp in alpha — the ramp
-    // is already baked into rgb via the stage interpolation above.
+    // is already baked into rgb via the stage interpolation + grading above.
     fragColor = vec4(rgb, u_Opacity);
 }
 `;

@@ -1,5 +1,5 @@
-import { AfterViewInit, ChangeDetectionStrategy, Component, OnDestroy, effect, inject, signal, viewChild } from '@angular/core';
-import { Jiv, Jext, Jyle, JwiftCanvas } from 'jwift-angular';
+import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
+import { Jiv, Jext, Jyle } from 'jwift-angular';
 import HomeJss from './Home.jss';
 
 /**
@@ -15,11 +15,6 @@ import HomeJss from './Home.jss';
  *     from crisp at top of the feather to heavy GPU blur at the bottom,
  *     matching Show Studio's native look.
  */
-
-/** Height (CSS px) of the feather zone. Tuned so the blur ramp starts well
- *  above the TabBar and hits full strength where the TabBar sits — matches
- *  Show Studio's feel (strongest blur right behind the chrome). */
-const CONTENT_BLUR_HEIGHT = 240;
 
 type CardRef = { Kicker: string; Title: string; Color: string };
 
@@ -45,10 +40,9 @@ type CardRef = { Kicker: string; Title: string; Color: string };
       </jiv>
 
       <!-- Progressive blur feather — sits over the lower part of the
-           scroll area and under the TabBar. Dimensions set imperatively
-           from canvas size; the jiv layout engine doesn't yet have a
-           viewport-anchored bottom primitive. -->
-      <jiv class="ContentBlur" #contentBlur />
+           scroll area and under the TabBar. All geometry comes from the
+           .ContentBlur JSS class (Position: Fixed + Bottom/Left/Width). -->
+      <jiv class="ContentBlur" />
 
       <jiv class="Scroll">
 
@@ -148,12 +142,8 @@ type CardRef = { Kicker: string; Title: string; Color: string };
     </jiv>
   `,
 })
-export class Home implements AfterViewInit, OnDestroy {
+export class Home {
   readonly JssSource = HomeJss;
-
-  private _canvas = inject(JwiftCanvas);
-  private _contentBlurRef = viewChild<Jiv>('contentBlur');
-  private _resizeObserver: ResizeObserver | null = null;
 
   readonly Featured = signal<CardRef[]>([
     { Kicker: 'FEATURED', Title: 'Reflections',     Color: 'rgb(60, 92, 190)' },
@@ -189,42 +179,4 @@ export class Home implements AfterViewInit, OnDestroy {
 
   readonly Selected = signal(0);
   Select(i: number): void { this.Selected.set(i); }
-
-  ngAfterViewInit(): void {
-    // Canvas element dims drive the feather's viewport-anchored rect —
-    // observe it so the overlay follows browser resizes. Written via
-    // the Jiv's X/Y/Width/Height fields (Position: Fixed on the Jiv
-    // means these are treated as viewport-absolute by the solver).
-    //
-    // Read size from the ResizeObserver entry's contentRect, not from
-    // Canvas.Width — Jwift caches its own width/height and updates them
-    // on the next rAF, so the cached getter is stale inside this callback.
-    const el = this._canvas.Canvas.Element;
-    this._resizeObserver = new ResizeObserver((entries) => {
-      const rect = entries[0]?.contentRect;
-      if (rect) this._layoutContentBlur(rect.width, rect.height);
-    });
-    this._resizeObserver.observe(el);
-    this._layoutContentBlur(el.clientWidth, el.clientHeight);
-  }
-
-  ngOnDestroy(): void {
-    this._resizeObserver?.disconnect();
-    this._resizeObserver = null;
-  }
-
-  private _layoutContentBlur(w: number, h: number): void {
-    const node = this._contentBlurRef()?.Node;
-    if (!node) return;
-    if (w <= 0 || h <= 0) return;
-    // Pin flush to viewport bottom. The TabBar (glass, Pass 4) paints
-    // over the blur — so the blur extending behind the TabBar is fine
-    // and matches Show Studio: strongest blur sits directly under the
-    // chrome, with the chrome refracting the already-blurred backdrop.
-    node.X = 0;
-    node.Y = h - CONTENT_BLUR_HEIGHT;
-    node.Width = w;
-    node.Height = CONTENT_BLUR_HEIGHT;
-    node.MarkLayoutDirty();
-  }
 }

@@ -78,6 +78,16 @@ export interface ChildLayout {
   StickyLeft: string | null;
   StickyRight: string | null;
 
+  /** CSS-style anchors for Position: 'Fixed'. When set, override the
+   *  imperative X/Y with an offset from the named viewport edge. `Right`
+   *  anchors `viewportWidth - Width - Right`; `Bottom` does the same on Y.
+   *  Setting both `Left` and `Right` (or both `Top` and `Bottom`) is not
+   *  currently supported — the start-edge one wins. */
+  Top: string | null;
+  Bottom: string | null;
+  Left: string | null;
+  Right: string | null;
+
   // Attach — only meaningful when Position === 'Attach'
   AttachTo: AttachTarget | null;
   AttachMode: 'Anchor' | 'Fill';
@@ -143,6 +153,10 @@ export const DefaultChildLayout: ChildLayout = {
   StickyBottom: null,
   StickyLeft: null,
   StickyRight: null,
+  Top: null,
+  Bottom: null,
+  Left: null,
+  Right: null,
   AttachTo: null,
   AttachMode: 'Anchor',
   AttachTargetAnchor: { X: 0.5, Y: 0.5 },

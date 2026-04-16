@@ -1,4 +1,4 @@
-import type { JivStyle, JivRenderStyle, CornerShape } from '../Jiv/Jiv.Types';
+import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
 import type { ResolveContext } from './Length';
 import { Resolve } from './Length';
 import { ResolveLengthTuple4 } from './Length.Tuple';
@@ -52,13 +52,25 @@ const _resolveBound = (raw: string, ctx: ResolveContext, axis: 'W' | 'H'): numbe
 };
 export { _resolveBound as ResolveBound };
 
+/** Infer the render pipeline from what the author actually set. No explicit
+ *  `Material:` field — Jiv decides based on which props carry non-default
+ *  values. ProgressiveBlurDirection wins (it's unique to the feather); a
+ *  positive Thickness routes the Jiv through the glass pipeline; everything
+ *  else is a plain panel. */
+const _inferMaterial = (thickness: number, direction: ProgressiveBlurDirection | null): MaterialType => {
+  if (direction !== null) return 'ProgressiveBlur';
+  if (thickness > 0) return 'LiquidGlass';
+  return 'None';
+};
+
 /** Resolve a full JivStyle into a JivRenderStyle under the given context. */
 export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle => {
   const borderRadius = ResolveLengthTuple4(s.BorderRadius, ctx, ['W', 'W', 'W', 'W']);
+  const thickness = Resolve(s.Thickness, ctx, 'W');
 
   return {
-    Material: s.Material,
-    ProgressiveBlurDirection: s.ProgressiveBlurDirection,
+    Material: _inferMaterial(thickness, s.ProgressiveBlurDirection),
+    ProgressiveBlurDirection: s.ProgressiveBlurDirection ?? 'ToTop',
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 
     BorderRadius: borderRadius,
@@ -71,7 +83,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
     Frost: Resolve(s.Frost, ctx, 'W'),
     BackdropFrostBlur: Resolve(s.BackdropFrostBlur, ctx, 'W'),
-    Thickness: Resolve(s.Thickness, ctx, 'W'),
+    Thickness: thickness,
     Fillet: Resolve(s.Fillet, ctx, 'W'),
     Refraction: Resolve(s.Refraction, ctx, 'W'),
     BackdropBrightness: Resolve(s.BackdropBrightness, ctx, 'W'),

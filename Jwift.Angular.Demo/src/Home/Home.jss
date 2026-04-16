@@ -57,10 +57,14 @@ TabBarRow {
  * BackdropFrostBlur is reused as the max blur radius at the fully-blurred
  * end of the gradient. */
 ContentBlur {
-  Material: ProgressiveBlur
   ProgressiveBlurDirection: ToBottom
   Position: Fixed
-  BackdropFrostBlur: 60
+  Width: 100vw
+  Height: 150
+  Left: 0
+  Bottom: 0
+  BackdropFrostBlur: 5
+  Background: rgba(0, 0, 0, 0.5)
 }
 
 HeroStub {
@@ -131,44 +135,37 @@ SectionTitle {
  * that wants to look like glass extends this and only expresses its own
  * overrides (layout, shape). */
 LiquidGlass {
-  Material: LiquidGlass
   Background: rgba(255, 255, 255, 0)
   BorderColor: rgba(255, 255, 255, 0.12)
-  BorderWidth: 1
-  BorderBlur: 0.25
   BorderRadius: 32
-  BorderBrightness: 1.5
-  BorderSaturation: 1.5
-  BorderContrast: 1.0
-  BorderFrostLodOffset: -0.5
 
   ShadowColor: rgba(0, 0, 0, 0.18)
   ShadowBlur: 22
   ShadowOffsetY: 6
 
   BackdropFrostBlur: 4
-  BackdropBrightness: 1
-  BackdropSaturation: 1.25
+  BackdropBrightness: 1.75
+  BackdropSaturation: 1.75
   BackdropContrast: 0.75
 
-  Thickness: 1
-  Fillet: 0.125
+  Thickness: 2
+  Fillet: 0.25
   BezelWidth: 11
-  BezelScale: 0.5
-  Refraction: 11
+  BezelScale: 0.25
+  Refraction: 20
 
   LightAngle: 135
   LightIntensity: 1
-  SpecularIntensity: 0.55
+  SpecularIntensity: 0
   SpecularSharpness: 10
   FresnelStrength: 0.55
   ChromaticAberration: 0.3
-  EdgeLightTop: 0.16
+  EdgeLightTop: 0
   EdgeLightBottom: 0.03
-  BorderVariance: 0.3
-  BorderAlphaVariance: 0.2
-  BorderFresnelBrightness: 0.25
-  InnerBlur: 0.25
+  BorderVariance: 0
+  BorderAlphaVariance: 0
+  BorderFresnelBrightness: 0
+  InnerBlur: 0
 }
 
 SectionViewAll : LiquidGlass {

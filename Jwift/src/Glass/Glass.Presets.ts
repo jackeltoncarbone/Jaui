@@ -9,7 +9,7 @@ import type { JivStyle } from '../Jiv/Jiv.Types';
  */
 
 export const LiquidGlass: Partial<JivStyle> = {
-  Material: 'LiquidGlass',
+  // Material is inferred from `Thickness > 0` at resolve time — no explicit field.
 
   // Shape / alpha — fully transparent so only refracted backdrop + effects show
   Background: 'rgba(255, 255, 255, 0)',
@@ -73,25 +73,11 @@ export const LiquidGlass: Partial<JivStyle> = {
   InnerBlur: '0.25',
 };
 
-/** Opaque-tinted panel — no refraction, no specular. */
-export const SolidGlass: Partial<JivStyle> = {
-  Material: 'SolidGlass',
-  Background: 'rgba(255, 255, 255, 0.06)',
-  BorderColor: 'rgba(255, 255, 255, 0.12)',
-  BorderWidth: '1',
-  BorderBlur: '0.5',
-  BorderRadius: '32',
-  BackdropBrightness: '1',
-  BackdropSaturation: '1',
-  BackdropContrast: '1',
-};
-
 /**
  * Near-transparent glass with strong specular. Apple requires a dimming scrim
  * underneath for legibility.
  */
 export const ClearGlass: Partial<JivStyle> = {
-  Material: 'LiquidGlass',
   Background: 'rgba(255, 255, 255, 0)',
   BorderColor: 'rgba(255, 255, 255, 0.45)',
   BorderWidth: '1',

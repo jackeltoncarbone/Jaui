@@ -36,6 +36,8 @@ export class ProgressiveBlurRenderer {
   private _blurLocs: (WebGLUniformLocation | null)[] = [];
   private _directionLoc: WebGLUniformLocation | null;
   private _opacityLoc: WebGLUniformLocation | null;
+  private _backgroundLoc: WebGLUniformLocation | null;
+  private _gradingLoc: WebGLUniformLocation | null;
 
   constructor(gl: WebGL2RenderingContext) {
     this._gl = gl;
@@ -51,6 +53,8 @@ export class ProgressiveBlurRenderer {
     }
     this._directionLoc = gl.getUniformLocation(p, 'u_Direction');
     this._opacityLoc = gl.getUniformLocation(p, 'u_Opacity');
+    this._backgroundLoc = gl.getUniformLocation(p, 'u_Background');
+    this._gradingLoc = gl.getUniformLocation(p, 'u_Grading');
   }
 
   /** Draw one ProgressiveBlur Jiv.
@@ -91,6 +95,14 @@ export class ProgressiveBlurRenderer {
     for (let i = 0; i < 4; i++) gl.uniform1i(this._blurLocs[i], i + 1);
     gl.uniform1i(this._directionLoc, direction);
     gl.uniform1f(this._opacityLoc, jiv.RenderStyle.Opacity);
+
+    const bg = jiv.RenderStyle.Background;
+    gl.uniform4f(this._backgroundLoc, bg.R, bg.G, bg.B, bg.A);
+    gl.uniform3f(this._gradingLoc,
+      jiv.RenderStyle.BackdropBrightness,
+      jiv.RenderStyle.BackdropSaturation,
+      jiv.RenderStyle.BackdropContrast,
+    );
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, scene);

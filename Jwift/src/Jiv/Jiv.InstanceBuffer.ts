@@ -123,7 +123,7 @@ export class JivInstanceBuffer {
     data[offset + 28] = borderBlur;
     data[offset + 29] = style.BorderRadiusSmoothness;
     data[offset + 30] = style.Opacity;
-    data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : style.Material === 'SolidGlass' ? 2 : 0;
+    data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : 0;
 
     // loc 9 — a_Grading (frostLod derived from FrostBlur)
     data[offset + 32] = style.BackdropBrightness;

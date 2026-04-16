@@ -4,7 +4,12 @@ import type { Overflow } from '../Layout/Layout.Types';
 
 export type CornerShape = 'Round' | 'Squircle' | 'Bevel' | 'Scoop' | 'Notch' | number;
 
-export type MaterialType = 'None' | 'LiquidGlass' | 'SolidGlass' | 'ProgressiveBlur';
+/** Derived at resolve time from which props the author set. Not authorable —
+ *  Jiv infers the render pipeline from what you're actually using:
+ *    • Thickness > 0                   → 'LiquidGlass' (glass pipeline, refraction)
+ *    • ProgressiveBlurDirection != null → 'ProgressiveBlur' (compositing overlay)
+ *    • otherwise                       → 'None' (plain panel) */
+export type MaterialType = 'None' | 'LiquidGlass' | 'ProgressiveBlur';
 
 /** Direction the blur ramps TO — i.e. the edge that's fully blurred. The
  *  opposite edge is fully clear (unblurred scene shows through). */
@@ -32,13 +37,9 @@ export type BlendMode =
  *              any order, any subset
  */
 export interface JivStyle {
-  // Material — 'None' uses the default panel shader; 'LiquidGlass'/'SolidGlass'
-  // route through the glass pipeline (backdrop sampling, grading)
-  Material: MaterialType;
-
-  /** Only meaningful when Material === 'ProgressiveBlur'. Names the edge that
-   *  ramps to fully blurred; the opposite edge is clear. */
-  ProgressiveBlurDirection: ProgressiveBlurDirection;
+  /** Set this to turn the Jiv into a ProgressiveBlur feather — names the
+   *  edge that ramps to fully blurred. `null` means "not a feather". */
+  ProgressiveBlurDirection: ProgressiveBlurDirection | null;
 
   /** Cascading base unit. `1pt` anywhere in this Jiv's subtree resolves to
    *  `N × PointScale`. When resolving PointScale itself, `pt` refers to

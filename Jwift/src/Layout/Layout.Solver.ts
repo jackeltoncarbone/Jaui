@@ -226,8 +226,24 @@ const _solveNode = (
       const declH = _resolveSize(child.ChildLayout.Height, height, childCtx, 'H');
       const w = declW === 'Auto' ? child.Width : declW;
       const h = declH === 'Auto' ? child.Height : declH;
-      const absX = pos === 'Fixed' ? child.X : offsetX + child.X;
-      const absY = pos === 'Fixed' ? child.Y : offsetY + child.Y;
+
+      // Fixed: CSS-style viewport anchors via Top/Bottom/Left/Right beat
+      // the imperative child.X / child.Y. Left wins over Right if both set
+      // (same for Top/Bottom). Placed/Sticky still use child.X/Y for now.
+      let absX: number;
+      let absY: number;
+      if (pos === 'Fixed') {
+        const cl = child.ChildLayout;
+        if (cl.Left !== null)        absX = _r(cl.Left, childCtx, 'W');
+        else if (cl.Right !== null)  absX = viewport.Width - w - _r(cl.Right, childCtx, 'W');
+        else                         absX = child.X;
+        if (cl.Top !== null)         absY = _r(cl.Top, childCtx, 'H');
+        else if (cl.Bottom !== null) absY = viewport.Height - h - _r(cl.Bottom, childCtx, 'H');
+        else                         absY = child.Y;
+      } else {
+        absX = offsetX + child.X;
+        absY = offsetY + child.Y;
+      }
       _solveNode(child, w, h, absX, absY, results, childCtx, viewport, rootPointScale);
     }
   }

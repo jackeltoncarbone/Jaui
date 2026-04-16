@@ -28,7 +28,7 @@ import type { MaterialType } from '../Jiv/Jiv.Types';
 /** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
  *  materials like ProgressiveBlur are compositing overlays — they don't have
  *  a backdrop sample, border, or specular, and they render in their own pass. */
-const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass' || m === 'SolidGlass';
+const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 import { DirtyFlag } from './Types';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
@@ -223,8 +223,9 @@ export class Canvas {
     // feather scene first (so the feather reads clean content), then copy
     // sceneFbo → featheredFbo, then draw each feather on top. ───
     let sceneTex: WebGLTexture = this._sceneFbo.Texture;
-    if (this._anyProgressiveBlur(this.Root)) {
-      this._progressiveBlurChain.Rebuild(this._sceneFbo.Texture, w, h, this._dpr, this._progressiveBlurPass, this._blit);
+    const maxFeatherSigma = this._maxProgressiveBlurSigma(this.Root);
+    if (maxFeatherSigma > 0) {
+      this._progressiveBlurChain.Rebuild(this._sceneFbo.Texture, w, h, this._dpr, this._progressiveBlurPass, this._blit, maxFeatherSigma);
 
       this._featheredSceneFbo.Resize(w, h);
       this._featheredSceneFbo.Bind();
@@ -290,7 +291,7 @@ export class Canvas {
 
   private _collectNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible
-        && node.Style.Material === 'None' && !this._hasGlassAncestor(node)) {
+        && node.RenderStyle.Material === 'None' && !this._hasGlassAncestor(node)) {
       this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
@@ -298,23 +299,28 @@ export class Canvas {
   };
 
   private _collectGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
-    if (node.Width > 0 && node.Height > 0 && node.Style.Visible && _isGlass(node.Style.Material)) {
+    if (node.Width > 0 && node.Height > 0 && node.Style.Visible && _isGlass(node.RenderStyle.Material)) {
       this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
     for (const child of node.Children) this._collectGlass(child, dx, dy);
   };
 
-  /** Fast "is there any ProgressiveBlur Jiv visible?" probe — drives the
-   *  skip decision for the Pass 3.5 rebuild so screens that don't use
-   *  progressive blur pay zero cost for the feature. */
-  private _anyProgressiveBlur = (node: Jiv): boolean => {
-    if (node.Style.Material === 'ProgressiveBlur' && node.Style.Visible
-        && node.Width > 0 && node.Height > 0) return true;
-    for (const child of node.Children) {
-      if (this._anyProgressiveBlur(child)) return true;
+  /** Walk the tree to find the max `BackdropFrostBlur` across all visible
+   *  ProgressiveBlur Jivs — this is the sigma the shared Gaussian chain's
+   *  fully-blurred level will be built at. Returns 0 when there are none
+   *  (callers skip the chain rebuild + compositing pass). */
+  private _maxProgressiveBlurSigma = (node: Jiv): number => {
+    let max = 0;
+    if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Style.Visible
+        && node.Width > 0 && node.Height > 0) {
+      max = node.RenderStyle.BackdropFrostBlur;
     }
-    return false;
+    for (const child of node.Children) {
+      const childMax = this._maxProgressiveBlurSigma(child);
+      if (childMax > max) max = childMax;
+    }
+    return max;
   };
 
   /** Recursive draw for progressive-blur overlays. Unlike glass/text, these
@@ -325,7 +331,7 @@ export class Canvas {
     offsetX: number,
     offsetY: number,
   ): void => {
-    if (node.Style.Material === 'ProgressiveBlur' && node.Style.Visible) {
+    if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Style.Visible) {
       this._progressiveBlur.Draw(
         node, offsetX, offsetY,
         this.Gl.drawingBufferWidth, this.Gl.drawingBufferHeight,
@@ -349,7 +355,7 @@ export class Canvas {
    *  blur pass picks the actually-rendered value. */
   private _scanFrostBlur = (node: Jiv): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible
-        && node.Style.Material === 'LiquidGlass'
+        && node.RenderStyle.Material === 'LiquidGlass'
         && node.RenderStyle.BackdropFrostBlur > this._maxFrostBlur) {
       this._maxFrostBlur = node.RenderStyle.BackdropFrostBlur;
     }
@@ -359,7 +365,7 @@ export class Canvas {
   /** Non-glass panels that live inside a glass subtree — rendered on top of the glass pass. */
   private _collectNonGlassUnderGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (node.Width > 0 && node.Height > 0 && node.Style.Visible
-        && node.Style.Material === 'None' && this._isUnderGlass(node) && node !== this.Root) {
+        && node.RenderStyle.Material === 'None' && this._isUnderGlass(node) && node !== this.Root) {
       if (this._hasGlassAncestor(node)) {
         this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
       }
@@ -374,7 +380,7 @@ export class Canvas {
   private _hasGlassAncestor = (node: Jiv): boolean => {
     let p = node.Parent;
     while (p) {
-      if (_isGlass(p.Style.Material)) return true;
+      if (_isGlass(p.RenderStyle.Material)) return true;
       p = p.Parent;
     }
     return false;
@@ -384,7 +390,7 @@ export class Canvas {
   private _isUnderGlass = (node: Jiv): boolean => {
     let cur: Jiv | null = node;
     while (cur) {
-      if (_isGlass(cur.Style.Material)) return true;
+      if (_isGlass(cur.RenderStyle.Material)) return true;
       cur = cur.Parent;
     }
     return false;
@@ -1013,7 +1019,7 @@ export { DirtyFlag } from './Types';
 export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
 
 // Glass presets
-export { LiquidGlass, SolidGlass, ClearGlass } from '../Glass/Glass.Presets';
+export { LiquidGlass, ClearGlass } from '../Glass/Glass.Presets';
 
 // Layout
 export type {

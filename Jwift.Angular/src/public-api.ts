@@ -22,4 +22,4 @@ export type {
   ProgressiveBlurDirection,
   Stylesheet, Ruleset,
 } from 'jwift';
-export { LiquidGlass, SolidGlass, ClearGlass, ParseJss, Canvas } from 'jwift';
+export { LiquidGlass, ClearGlass, ParseJss, Canvas } from 'jwift';
