@@ -87,7 +87,7 @@ TopBlur {
   ProgressiveBlurDirection: ToTop
   Position: Fixed
   Width: 100vw
-  Height: 80
+  Height: 100
   Left: 0
   Top: 0
   BackdropFrostBlur: 8
@@ -95,14 +95,17 @@ TopBlur {
   Layer: 5
 }
 
-/* Hero — 70vh dark stub with title + CTA. Eventually replaced by
- * 3D reality view. Title positioned at bottom via Justify: End. */
+/* Hero — matches Show Studio's HeroContent pattern:
+ * vertically centered, left-aligned, generous left inset, title above CTA
+ * with a small 20px gap. Top padding is tall (128) to clear the floating
+ * Toolbar chrome; left inset (80) matches SS's min(7%, 12.5em) at desktop.
+ * Eventually replaced by 3D reality view. */
 HeroStub {
   Direction: Column
-  Justify: End
+  Justify: Center
   Align: Start
-  Padding: 48 28 48 28
-  Gap: 50
+  Padding: 128 32 32 80
+  Gap: 20
   Height: 70vh
   Background: rgba(29, 43, 92, 0.18)
   FlexGrow: 0
@@ -111,11 +114,11 @@ HeroStub {
 
 HeroTitle {
   FontFamily: Inter
-  FontSize: 40
-  FontWeight: 700
-  LineHeight: 1.05
+  FontSize: 36
+  FontWeight: 600
+  LineHeight: 1.15
   Color: rgba(255, 255, 255, 0.98)
-  LetterSpacing: -0.5
+  LetterSpacing: -0.72
   Width: 500
 }
 
@@ -123,18 +126,17 @@ HeroCta {
   Direction: Row
   Justify: Center
   Align: Center
-  Padding: 14 28
+  Padding: 12 32
   BorderRadius: 999
-  Background: rgba(255, 255, 255, 0.15)
-  BorderColor: rgba(255, 255, 255, 0.2)
-  BorderWidth: 1
+  Background: rgba(255, 255, 255, 0.1)
+  FlexShrink: 0
 }
 
 HeroCtaLabel {
   FontFamily: Inter
-  FontSize: 16
-  FontWeight: 600
-  Color: rgba(255, 255, 255, 0.95)
+  FontSize: 15
+  FontWeight: 500
+  Color: rgba(255, 255, 255, 0.85)
 }
 
 Section {
@@ -280,7 +282,7 @@ CardTitleCompact {
 }
 
 /* Glass dropdown — collapsed: single avatar pill. Expands on tap (TBD).
- * Concentric with Screen: 100 - 24 (ChromeFrame padding) = 76. */
+ * Concentric with Screen: 90 - 24 (ChromeFrame padding) = 66. */
 ToolbarDropdown : LiquidGlass {
   Direction: Row
   Justify: Center
@@ -288,17 +290,17 @@ ToolbarDropdown : LiquidGlass {
   Padding: 4
   Width: 48
   Height: 48
-  BorderRadius: 76
+  BorderRadius: 66
 }
 
-/* Concentric with ToolbarDropdown: 76 - 4 (Dropdown padding) = 72. */
+/* Concentric with ToolbarDropdown: 66 - 4 (Dropdown padding) = 62. */
 ToolbarAvatar {
   Direction: Row
   Justify: Center
   Align: Center
   Width: 40
   Height: 40
-  BorderRadius: 72
+  BorderRadius: 62
   Background: rgba(255, 255, 255, 0.08)
 }
 
@@ -309,7 +311,7 @@ ToolbarAvatarGlyph {
   TextAlign: Center
 }
 
-/* Concentric with Screen: 100 - 24 (ChromeFrame padding) = 76. */
+/* Concentric with Screen: 90 - 24 (ChromeFrame padding) = 66. */
 TabBar : LiquidGlass {
   Direction: Row
   Justify: Start
@@ -319,17 +321,17 @@ TabBar : LiquidGlass {
   Width: 400
   MaxWidth: 100%
   Height: 64
-  BorderRadius: 76
+  BorderRadius: 66
 }
 
-/* Concentric with TabBar: 76 - 4 (TabBar padding) = 72. */
+/* Concentric with TabBar: 66 - 4 (TabBar padding) = 62. */
 TabItem {
   Direction: Column
   Justify: Center
   Align: Center
   Gap: 4
   Width: 20%
-  BorderRadius: 72
+  BorderRadius: 62
 }
 
 TabItemActive {
