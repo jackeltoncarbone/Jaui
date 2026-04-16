@@ -78,7 +78,7 @@ export class ProgressiveBlurRenderer {
     pyramid: WebGLTexture,
     maxLod: number,
   ): void => {
-    if (jiv.Width <= 0 || jiv.Height <= 0 || !jiv.Style.Visible) return;
+    if (jiv.Width <= 0 || jiv.Height <= 0 || !jiv.Visible) return;
 
     const gl = this._gl;
 

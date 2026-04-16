@@ -1,10 +1,10 @@
-import type { Jiv } from '../Jiv/Jiv';
+import type { Element } from '../Element/Element';
 import { Resolve, type ResolveContext } from '../Core/Length';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import type { Viewport } from './Layout.Solver';
 
 /**
- * Compute IntrinsicWidth / IntrinsicHeight for container Jivs based on their children.
+ * Compute IntrinsicWidth / IntrinsicHeight for container Elements based on their children.
  * Runs bottom-up so children's intrinsics are known before computing the parent.
  *
  * Length handling: intrinsic runs BEFORE SolveLayout, so parent dims aren't
@@ -13,7 +13,7 @@ import type { Viewport } from './Layout.Solver';
  * width). `pt` / `rpt` / `px` / `vw` / `vh` all resolve normally because they
  * depend only on the PointScale cascade + viewport, both of which we can
  * establish before sizes are known. This function does a top-down PointScale
- * cascade first, stashing a seed `ResolveCtx` on each Jiv, then runs the
+ * cascade first, stashing a seed `ResolveCtx` on each Element, then runs the
  * bottom-up intrinsic computation using those seed contexts.
  */
 
@@ -21,22 +21,22 @@ const DEFAULT_POINT_SCALE = 16;
 
 const DEFAULT_VIEWPORT: Viewport = { Width: 0, Height: 0 };
 
-export const ComputeIntrinsicSizes = (root: Jiv, viewport: Viewport = DEFAULT_VIEWPORT): void => {
+export const ComputeIntrinsicSizes = (root: Element, viewport: Viewport = DEFAULT_VIEWPORT): void => {
   CascadePointScale(root, viewport);
   _compute(root);
 };
 
-/** Top-down PointScale cascade. Each Jiv gets a seed ResolveCtx with
+/** Top-down PointScale cascade. Each Element gets a seed ResolveCtx with
  *  ParentWidth/Height = 0 (unknown pre-solve) but real PointScale +
  *  viewport. Parent PointScale flows to child; child's PointScale expressed
  *  in `pt` resolves against parent's PointScale (ptRefersToParent=true).
  *  Idempotent — safe to call multiple times per frame. */
-export const CascadePointScale = (root: Jiv, viewport: Viewport = DEFAULT_VIEWPORT): void => {
+export const CascadePointScale = (root: Element, viewport: Viewport = DEFAULT_VIEWPORT): void => {
   _cascadePointScale(root, null, viewport);
 };
 
 const _cascadePointScale = (
-  node: Jiv,
+  node: Element,
   parentPointScale: number | null,
   viewport: Viewport,
 ): void => {
@@ -50,7 +50,7 @@ const _cascadePointScale = (
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
   };
-  const pointScale = Resolve(node.Style.PointScale, seed, 'W', true);
+  const pointScale = Resolve(node.PointScale, seed, 'W', true);
 
   // RootPointScale: root uses its own; children inherit from parent ctx.
   const rootPointScale = node.Parent?.ResolveCtx?.RootPointScale ?? pointScale;
@@ -68,7 +68,7 @@ const _cascadePointScale = (
   for (const child of node.Children) _cascadePointScale(child, pointScale, viewport);
 };
 
-const _compute = (node: Jiv): void => {
+const _compute = (node: Element): void => {
   for (const child of node.Children) _compute(child);
 
   const ctx = node.ResolveCtx!;

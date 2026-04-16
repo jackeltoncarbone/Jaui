@@ -117,15 +117,9 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.Material = target.Material;
   render.ProgressiveBlurDirection = target.ProgressiveBlurDirection;
   render.CornerShape = target.CornerShape;
-  render.Overflow = target.Overflow;
   render.BlendMode = target.BlendMode;
   render.ContainBorder = target.ContainBorder;
   render.InnerShadow = target.InnerShadow;
-  render.Visible = target.Visible;
-  render.Cursor = target.Cursor;
-  render.Interactive = target.Interactive;
-  render.PointerEvents = target.PointerEvents;
-  render.UserSelect = target.UserSelect;
 };
 
 export class JivStyleAnimator implements Animatable {

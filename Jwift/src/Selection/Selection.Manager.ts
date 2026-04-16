@@ -103,8 +103,8 @@ export class SelectionManager implements Animatable {
   IsSelectable = (textJiv: Jiv): boolean => {
     let cur: Jiv | null = textJiv;
     while (cur) {
-      if (cur.Style.UserSelect === 'None') return false;
-      cur = cur.Parent;
+      if (cur.UserSelect === 'None') return false;
+      cur = cur.Parent as Jiv | null;
     }
     return true;
   };
@@ -122,7 +122,7 @@ export class SelectionManager implements Animatable {
     let cur: Jiv | null = hit;
     while (cur) {
       if (this._hasText(cur)) return cur;
-      cur = cur.Parent;
+      cur = cur.Parent as Jiv | null;
     }
     let bestInside: Jiv | null = null;
     let bestArea = Infinity;
@@ -248,7 +248,7 @@ export class SelectionManager implements Animatable {
 
   private _walk = (node: Jiv, fn: (j: Jiv) => void): void => {
     fn(node);
-    for (const c of node.Children) this._walk(c, fn);
+    for (const c of node.Children as Jiv[]) this._walk(c, fn);
   };
 
   /** Fade out all highlights across all text Jivs. */

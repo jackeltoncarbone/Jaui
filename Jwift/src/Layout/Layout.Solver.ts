@@ -1,4 +1,4 @@
-import type { Jiv } from '../Jiv/Jiv';
+import type { Element } from '../Element/Element';
 import type { LayoutResult } from './Layout.Types';
 import type { ResolveContext } from '../Core/Length';
 import { Resolve } from '../Core/Length';
@@ -12,22 +12,22 @@ import { SolveFlex, type FlexContainer, type FlexChild } from './Layout.Flex';
  * Two-phase: (1) resolve Flow/Offset/Placed/Fixed/Sticky; (2) resolve Attach
  * against already-computed target rects, iterating until stable.
  *
- * Length handling: every Jiv carries a `ResolveCtx` computed top-down here.
+ * Length handling: every Element carries a `ResolveCtx` computed top-down here.
  * Parent dims + cascading PointScale + viewport feed each child's context
  * so `pt`, `%`, `vw/vh` etc. resolve to the right pixel counts. The ctx is
- * stored on the Jiv so downstream consumers (style animator) can reuse it.
+ * stored on the Element so downstream consumers (style animator) can reuse it.
  */
 
 export interface Viewport { Width: number; Height: number; }
 
-/** Default PointScale used when the root Jiv's own PointScale is expressed
- *  as `1pt` (self-ref fallback) or when a non-root Jiv has no parent ctx. */
+/** Default PointScale used when the root Element's own PointScale is expressed
+ *  as `1pt` (self-ref fallback) or when a non-root Element has no parent ctx. */
 const DEFAULT_POINT_SCALE = 16;
 
 const DEFAULT_VIEWPORT: Viewport = { Width: 0, Height: 0 };
 
-export const SolveLayout = (root: Jiv, viewport: Viewport = DEFAULT_VIEWPORT): Map<Jiv, LayoutResult> => {
-  const results = new Map<Jiv, LayoutResult>();
+export const SolveLayout = (root: Element, viewport: Viewport = DEFAULT_VIEWPORT): Map<Element, LayoutResult> => {
+  const results = new Map<Element, LayoutResult>();
 
   // Root's ResolveCtx: no parent, so ParentWidth/Height = viewport,
   // ParentPointScale = DEFAULT_POINT_SCALE, RootPointScale = root's own
@@ -41,7 +41,7 @@ export const SolveLayout = (root: Jiv, viewport: Viewport = DEFAULT_VIEWPORT): M
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
   };
-  const rootPointScale = Resolve(root.Style.PointScale, rootSeedCtx, 'W', true);
+  const rootPointScale = Resolve(root.PointScale, rootSeedCtx, 'W', true);
 
   const rootCtx: ResolveContext = {
     ParentWidth: viewport.Width,
@@ -62,7 +62,7 @@ export const SolveLayout = (root: Jiv, viewport: Viewport = DEFAULT_VIEWPORT): M
 /** Build a child's ResolveContext from its parent's context. Child's
  *  PointScale is resolved against parent's PointScale (ptRefersToParent). */
 const _buildChildCtx = (
-  child: Jiv,
+  child: Element,
   containerWidth: number,
   containerHeight: number,
   parentPointScale: number,
@@ -78,7 +78,7 @@ const _buildChildCtx = (
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
   };
-  const pointScale = Resolve(child.Style.PointScale, seed, 'W', true);
+  const pointScale = Resolve(child.PointScale, seed, 'W', true);
   return { ...seed, PointScale: pointScale };
 };
 
@@ -86,25 +86,25 @@ const _buildChildCtx = (
 const _r = (v: string, ctx: ResolveContext, axis: 'W' | 'H'): number =>
   Resolve(v, ctx, axis);
 
-/** Post-pass: for every Jiv with Position:'Attach', derive its rect from its
+/** Post-pass: for every Element with Position:'Attach', derive its rect from its
  *  target's current result. Iterate until nothing changes (handles attach
  *  chains where target is itself attached). Capped at ATTACH_MAX_ITER to
  *  prevent infinite loops on cycles. */
 const ATTACH_MAX_ITER = 8;
 const _resolveAttachPass = (
-  root: Jiv,
-  results: Map<Jiv, LayoutResult>,
+  root: Element,
+  results: Map<Element, LayoutResult>,
   viewport: Viewport,
   rootPointScale: number,
 ): void => {
-  const attached: Jiv[] = [];
+  const attached: Element[] = [];
   _collectAttached(root, attached);
   if (attached.length === 0) return;
 
   for (let iter = 0; iter < ATTACH_MAX_ITER; iter++) {
     let changed = false;
     for (const node of attached) {
-      const target = node.ChildLayout.AttachTo as Jiv | null;
+      const target = node.ChildLayout.AttachTo as Element | null;
       if (!target) continue;
       const targetRect = results.get(target);
       if (!targetRect) continue;
@@ -116,7 +116,7 @@ const _resolveAttachPass = (
           || prior.Width !== rect.Width || prior.Height !== rect.Height) {
         results.set(node, rect);
         // Recurse into the attached subtree with a freshly-derived ctx — the
-        // parent for ctx purposes is whatever ancestor the Jiv lives under,
+        // parent for ctx purposes is whatever ancestor the Element lives under,
         // not the attach target. Use the attached node's own ResolveCtx if
         // set (from main pass); otherwise synthesize from the parent chain.
         const parentCtx = node.Parent?.ResolveCtx ?? node.ResolveCtx;
@@ -132,12 +132,12 @@ const _resolveAttachPass = (
   }
 };
 
-const _collectAttached = (node: Jiv, out: Jiv[]): void => {
+const _collectAttached = (node: Element, out: Element[]): void => {
   if (node.ChildLayout.Position === 'Attach') out.push(node);
   for (const c of node.Children) _collectAttached(c, out);
 };
 
-const _computeAttachRect = (node: Jiv, target: LayoutResult): LayoutResult => {
+const _computeAttachRect = (node: Element, target: LayoutResult): LayoutResult => {
   const cl = node.ChildLayout;
   // Use parent's ctx (or own as fallback) to resolve attach offsets/insets.
   const ctx = node.Parent?.ResolveCtx ?? node.ResolveCtx;
@@ -185,8 +185,8 @@ const _resolveAttachSize = (
 };
 
 const _solveSubtree = (
-  node: Jiv, width: number, height: number, x: number, y: number,
-  results: Map<Jiv, LayoutResult>,
+  node: Element, width: number, height: number, x: number, y: number,
+  results: Map<Element, LayoutResult>,
   ctx: ResolveContext,
   viewport: Viewport,
   rootPointScale: number,
@@ -195,12 +195,12 @@ const _solveSubtree = (
 };
 
 const _solveNode = (
-  node: Jiv,
+  node: Element,
   width: number,
   height: number,
   offsetX: number,
   offsetY: number,
-  results: Map<Jiv, LayoutResult>,
+  results: Map<Element, LayoutResult>,
   ctx: ResolveContext,
   viewport: Viewport,
   rootPointScale: number,

@@ -10,7 +10,6 @@ export const DefaultJivStyle: JivStyle = {
   BorderRadius: '0',
   CornerShape: 'Round',
   BorderRadiusSmoothness: '0.3',
-  Overflow: 'Visible',
   Background: 'rgba(0, 0, 0, 0)',
   BlendMode: 'Normal',
   Frost: '0',
@@ -51,9 +50,4 @@ export const DefaultJivStyle: JivStyle = {
   ShadowOffsetY: '0',
   InnerShadow: false,
   Opacity: '1',
-  Visible: true,
-  Cursor: 'Default',
-  Interactive: false,
-  PointerEvents: 'Auto',
-  UserSelect: 'Auto',
 };

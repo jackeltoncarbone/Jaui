@@ -1,6 +1,5 @@
 import type { Color } from '../Core/Types';
 import type { Transform } from '../Transform/Transform.Types';
-import type { Overflow } from '../Layout/Layout.Types';
 
 export type CornerShape = 'Round' | 'Squircle' | 'Bevel' | 'Scoop' | 'Notch' | number;
 
@@ -55,8 +54,6 @@ export interface JivStyle {
   /** Corner curvature smoothness — superellipse exponent interpolating
    *  between round (0) and squircle (1). */
   BorderRadiusSmoothness: string;
-  Overflow: Overflow;
-
   // Fill
   Background: string;
   BlendMode: BlendMode;
@@ -128,13 +125,6 @@ export interface JivStyle {
 
   // Appearance
   Opacity: string;
-  Visible: boolean;
-
-  // Interaction
-  Cursor: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
-  Interactive: boolean;
-  PointerEvents: 'Auto' | 'None';
-  UserSelect: 'Auto' | 'None';
 }
 
 /**
@@ -150,7 +140,6 @@ export interface JivRenderStyle {
   BorderRadius: [number, number, number, number];          // tl, tr, br, bl
   CornerShape: [CornerShape, CornerShape, CornerShape, CornerShape];
   BorderRadiusSmoothness: number;
-  Overflow: Overflow;
 
   Background: Color;
   BlendMode: BlendMode;
@@ -202,10 +191,4 @@ export interface JivRenderStyle {
   InnerShadow: boolean;
 
   Opacity: number;
-  Visible: boolean;
-
-  Cursor: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
-  Interactive: boolean;
-  PointerEvents: 'Auto' | 'None';
-  UserSelect: 'Auto' | 'None';
 }

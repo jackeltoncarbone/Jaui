@@ -29,6 +29,7 @@ import type { MaterialType } from '../Jiv/Jiv.Types';
  *  a backdrop sample, border, or specular, and they render in their own pass. */
 const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 import { DirtyFlag } from './Types';
+import { Element as JwiftElement } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
@@ -57,9 +58,9 @@ export class Canvas {
   private _blur!: BlurPass;
   private _progressiveBlur!: ProgressiveBlurRenderer;
   private _animationManager = new AnimationManager();
-  private _animators = new Map<Jiv, JivAnimator>();
+  private _animators = new Map<JwiftElement, JivAnimator>();
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
-  private _textAnimators = new Map<Jiv, TextAnimator>();
+  private _textAnimators = new Map<JwiftElement, TextAnimator>();
   private _scrollManager!: ScrollManager;
   private _selectionManager!: SelectionManager;
   /** Largest FrostBlur of any glass collected this frame (CSS px). Drives the dual-filter pyramid. */
@@ -336,20 +337,20 @@ export class Canvas {
   };
 
   private _collectNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
-    if (node.Width > 0 && node.Height > 0 && node.Style.Visible
+    if (node.Width > 0 && node.Height > 0 && node.Visible
         && node.RenderStyle.Material === 'None' && !this._hasGlassAncestor(node)) {
       this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children) this._collectNonGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectNonGlass(child, dx, dy);
   };
 
   private _collectGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
-    if (node.Width > 0 && node.Height > 0 && node.Style.Visible && _isGlass(node.RenderStyle.Material)) {
+    if (node.Width > 0 && node.Height > 0 && node.Visible && _isGlass(node.RenderStyle.Material)) {
       this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children) this._collectGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectGlass(child, dx, dy);
   };
 
   /** Walk the tree to find the max `BackdropFrostBlur` across all visible
@@ -358,11 +359,11 @@ export class Canvas {
    *  (callers skip the chain rebuild + compositing pass). */
   private _maxProgressiveBlurSigma = (node: Jiv): number => {
     let max = 0;
-    if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Style.Visible
+    if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Visible
         && node.Width > 0 && node.Height > 0) {
       max = node.RenderStyle.BackdropFrostBlur;
     }
-    for (const child of node.Children) {
+    for (const child of node.Children as Jiv[]) {
       const childMax = this._maxProgressiveBlurSigma(child);
       if (childMax > max) max = childMax;
     }
@@ -381,7 +382,7 @@ export class Canvas {
     pyramid: WebGLTexture,
     maxLod: number,
   ): void => {
-    if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Style.Visible) {
+    if (node.RenderStyle.Material === 'ProgressiveBlur' && node.Visible) {
       this._progressiveBlur.Draw(
         node, offsetX, offsetY,
         this.Gl.drawingBufferWidth, this.Gl.drawingBufferHeight,
@@ -389,12 +390,12 @@ export class Canvas {
       );
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children) this._drawProgressiveBlur(child, dx, dy, pyramid, maxLod);
+    for (const child of node.Children as Jiv[]) this._drawProgressiveBlur(child, dx, dy, pyramid, maxLod);
   };
 
   /** Compute the offset descendants see when descending past a scroll container. */
   private _descendOffset = (node: Jiv, offsetX: number, offsetY: number): [number, number] => {
-    if (node.Style.Overflow === 'Scroll') {
+    if (node.Overflow === 'Scroll') {
       return [offsetX - node.ScrollX, offsetY - node.ScrollY];
     }
     return [offsetX, offsetY];
@@ -404,34 +405,34 @@ export class Canvas {
    *  Reads from RenderStyle (resolved px), not Style (authorable string) so the
    *  blur pass picks the actually-rendered value. */
   private _scanFrostBlur = (node: Jiv): void => {
-    if (node.Width > 0 && node.Height > 0 && node.Style.Visible
+    if (node.Width > 0 && node.Height > 0 && node.Visible
         && node.RenderStyle.Material === 'LiquidGlass'
         && node.RenderStyle.BackdropFrostBlur > this._maxFrostBlur) {
       this._maxFrostBlur = node.RenderStyle.BackdropFrostBlur;
     }
-    for (const child of node.Children) this._scanFrostBlur(child);
+    for (const child of node.Children as Jiv[]) this._scanFrostBlur(child);
   };
 
   /** Non-glass panels that live inside a glass subtree — rendered on top of the glass pass. */
   private _collectNonGlassUnderGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
-    if (node.Width > 0 && node.Height > 0 && node.Style.Visible
+    if (node.Width > 0 && node.Height > 0 && node.Visible
         && node.RenderStyle.Material === 'None' && this._isUnderGlass(node) && node !== this.Root) {
       if (this._hasGlassAncestor(node)) {
         this._panelRenderer.AddInstance(node, this._dpr, offsetX, offsetY);
       }
     }
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children) this._collectNonGlassUnderGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectNonGlassUnderGlass(child, dx, dy);
   };
 
   /** True if any STRICT ancestor of node is a glass panel. ProgressiveBlur
    *  Jivs are NOT glass — they're a compositing overlay — so descendants of
    *  a progressive-blur Jiv shouldn't be re-routed to the over-glass pass. */
   private _hasGlassAncestor = (node: Jiv): boolean => {
-    let p = node.Parent;
+    let p = node.Parent as Jiv | null;
     while (p) {
       if (_isGlass(p.RenderStyle.Material)) return true;
-      p = p.Parent;
+      p = p.Parent as Jiv | null;
     }
     return false;
   };
@@ -441,7 +442,7 @@ export class Canvas {
     let cur: Jiv | null = node;
     while (cur) {
       if (_isGlass(cur.RenderStyle.Material)) return true;
-      cur = cur.Parent;
+      cur = cur.Parent as Jiv | null;
     }
     return false;
   };
@@ -449,17 +450,17 @@ export class Canvas {
   private _collectTextInstancesForNonGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (!this._isUnderGlass(node)) this._emitTextFor(node, offsetX, offsetY);
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children) this._collectTextInstancesForNonGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectTextInstancesForNonGlass(child, dx, dy);
   };
 
   private _collectTextInstancesForGlass = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
     if (this._isUnderGlass(node)) this._emitTextFor(node, offsetX, offsetY);
     const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
-    for (const child of node.Children) this._collectTextInstancesForGlass(child, dx, dy);
+    for (const child of node.Children as Jiv[]) this._collectTextInstancesForGlass(child, dx, dy);
   };
 
   private _emitTextFor = (node: Jiv, offsetX: number = 0, offsetY: number = 0): void => {
-    if (node.Width <= 0 || node.Height <= 0 || !node.Style.Visible) return;
+    if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return;
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
 
@@ -521,12 +522,12 @@ export class Canvas {
         }
       }
     }
-    for (const child of node.Children) this._processTextTransitions(child);
+    for (const child of node.Children as Jiv[]) this._processTextTransitions(child);
   };
 
   private _hasDirtyText = (node: Jiv): boolean => {
     if (node.Dirty & DirtyFlag.Text) return true;
-    for (const child of node.Children) {
+    for (const child of node.Children as Jiv[]) {
       if (this._hasDirtyText(child)) return true;
     }
     return false;
@@ -544,7 +545,7 @@ export class Canvas {
       node.IntrinsicWidth = null;
       node.IntrinsicHeight = null;
     }
-    for (const child of node.Children) this._measureDirtyText(child);
+    for (const child of node.Children as Jiv[]) this._measureDirtyText(child);
   };
 
   // ─── Layout Integration ───
@@ -562,10 +563,8 @@ export class Canvas {
 
       let animator = this._animators.get(node);
       if (!animator) {
-        // First layout — create BOTH animators, snap both to targets (no
-        // entry animation). Style animator springs every animatable JivStyle
-        // field toward node.EffectiveStyle() thereafter; hover/active/focus
-        // state changes animate smoothly by default.
+        // First layout — create layout animator, snap to targets (no entry
+        // animation). JivAnimator works with any Element (X/Y/W/H springs).
         animator = new JivAnimator(node);
         animator.SetTargets({
           X: result.X, Y: result.Y, Width: result.Width, Height: result.Height,
@@ -574,18 +573,19 @@ export class Canvas {
         this._animators.set(node, animator);
         this._animationManager.Register(animator);
 
-        const styleAnim = new JivStyleAnimator(node);
-        styleAnim.SnapToTargets();
-        this._styleAnimators.set(node, styleAnim);
-        this._animationManager.Register(styleAnim);
+        // Style animator is Jiv-specific — it springs every animatable
+        // JivStyle field toward EffectiveStyle. Only created for Jivs.
+        if (node instanceof Jiv) {
+          const styleAnim = new JivStyleAnimator(node);
+          styleAnim.SnapToTargets();
+          this._styleAnimators.set(node, styleAnim);
+          this._animationManager.Register(styleAnim);
+        }
       } else {
         const needsKick = animator.SetTargets({
           X: result.X, Y: result.Y, Width: result.Width, Height: result.Height,
         });
         if (node.SnapLayout) {
-          // Opt-out of position/size spring — this Jiv's layout is driven
-          // imperatively every frame (e.g. selection highlight following
-          // a drag) and spring-chasing would lag behind the cursor.
           animator.SnapToTargets();
         } else if (needsKick) {
           this._animationManager.Kick();
@@ -616,7 +616,7 @@ export class Canvas {
 
   private _hasDirtyLayout = (node: Jiv): boolean => {
     if (node.Dirty & DirtyFlag.Layout) return true;
-    for (const child of node.Children) {
+    for (const child of node.Children as Jiv[]) {
       if (this._hasDirtyLayout(child)) return true;
     }
     return false;
@@ -624,7 +624,7 @@ export class Canvas {
 
   private _clearDirty = (node: Jiv): void => {
     node.Dirty &= ~(DirtyFlag.Layout | DirtyFlag.Children | DirtyFlag.Text);
-    for (const child of node.Children) this._clearDirty(child);
+    for (const child of node.Children as Jiv[]) this._clearDirty(child);
   };
 
   private _resize = (): void => {
@@ -1051,7 +1051,7 @@ export class Canvas {
   /** Walk the tree, compute ContentWidth/Height for each Overflow:Scroll Jiv from
    *  the bounding box of its children. Cheap; needed for clamping scroll target. */
   private _measureScrollContents = (node: Jiv): void => {
-    if (node.Style.Overflow === 'Scroll') {
+    if (node.Overflow === 'Scroll') {
       let maxRight = 0;
       let maxBottom = 0;
       for (const c of node.Children) {
@@ -1069,7 +1069,7 @@ export class Canvas {
       node.ContentWidth = maxRight + padR;
       node.ContentHeight = maxBottom + padB;
     }
-    for (const c of node.Children) this._measureScrollContents(c);
+    for (const c of node.Children as Jiv[]) this._measureScrollContents(c);
   };
 
   private _watchDpr = (): void => {

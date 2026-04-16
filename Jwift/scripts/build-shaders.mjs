@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, '..', 'src');
 
-const SHADER_EXTS = new Set(['.vert', '.frag', '.glsl']);
+const SHADER_EXTS = new Set(['.vert', '.frag', '.glsl', '.wgsl']);
 
 const walk = (dir, out = []) => {
   for (const entry of readdirSync(dir)) {

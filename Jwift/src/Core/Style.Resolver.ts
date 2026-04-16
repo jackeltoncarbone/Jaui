@@ -76,7 +76,6 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderRadius: borderRadius,
     CornerShape: _parseCornerShape(s.CornerShape),
     BorderRadiusSmoothness: Resolve(s.BorderRadiusSmoothness, ctx, 'W'),
-    Overflow: s.Overflow,
 
     Background: ParseColor(s.Background),
     BlendMode: s.BlendMode,
@@ -127,12 +126,6 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     InnerShadow: s.InnerShadow,
 
     Opacity: Resolve(s.Opacity, ctx, 'W'),
-    Visible: s.Visible,
-
-    Cursor: s.Cursor,
-    Interactive: s.Interactive,
-    PointerEvents: s.PointerEvents,
-    UserSelect: s.UserSelect,
   };
 };
 

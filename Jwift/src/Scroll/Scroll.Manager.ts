@@ -136,8 +136,8 @@ export class ScrollManager implements Animatable {
     if (!hit) return null;
     let cur: Jiv | null = hit;
     while (cur) {
-      if (cur.Style.Overflow === 'Scroll') return cur;
-      cur = cur.Parent;
+      if (cur.Overflow === 'Scroll') return cur;
+      cur = cur.Parent as Jiv | null;
     }
     return null;
   };
@@ -236,12 +236,12 @@ export class ScrollManager implements Animatable {
   };
 
   private _stepWalk = (node: Jiv, fn: (j: Jiv) => void): void => {
-    if (node.Style.Overflow === 'Scroll') fn(node);
-    for (const c of node.Children) this._stepWalk(c, fn);
+    if (node.Overflow === 'Scroll') fn(node);
+    for (const c of node.Children as Jiv[]) this._stepWalk(c, fn);
   };
 
   private _hitTopmost = (node: Jiv, x: number, y: number, offX: number, offY: number): Jiv | null => {
-    if (!node.Style.Visible || node.Style.PointerEvents === 'None') return null;
+    if (!node.Visible || node.PointerEvents === 'None') return null;
 
     const ox = node.X + offX;
     const oy = node.Y + offY;
@@ -251,10 +251,10 @@ export class ScrollManager implements Animatable {
 
     if (!inside) return null;
 
-    const dx = node.Style.Overflow === 'Scroll' ? offX - node.ScrollX : offX;
-    const dy = node.Style.Overflow === 'Scroll' ? offY - node.ScrollY : offY;
+    const dx = node.Overflow === 'Scroll' ? offX - node.ScrollX : offX;
+    const dy = node.Overflow === 'Scroll' ? offY - node.ScrollY : offY;
     for (let i = node.Children.length - 1; i >= 0; i--) {
-      const hit = this._hitTopmost(node.Children[i], x, y, dx, dy);
+      const hit = this._hitTopmost(node.Children[i] as Jiv, x, y, dx, dy);
       if (hit) return hit;
     }
     return node;
