@@ -928,13 +928,14 @@ export class Canvas {
   };
 
   /** Mouse-driven text selection. Match web behavior:
-   *    • Mousedown ANYWHERE — maps to the nearest text Jiv + word. If the
-   *      tree has no text at all, clears selection.
-   *    • Drag — extends selection to the nearest word of the anchor Jiv at
-   *      the current pointer position (past-bounds points clamp to the
-   *      nearest line/word, same as browser selection).
-   *    • Double-click — selects the word at the click point.
-   *    • Triple-click — selects the whole line.
+   *    • Single mousedown — arms an anchor; a bare click without drag leaves
+   *      NO visible selection (collapses any prior selection). Selection
+   *      only materializes once the pointer crosses DRAG_SLOP.
+   *    • Drag past slop — extends selection to the nearest word of the
+   *      anchor Jiv at the current pointer position (past-bounds points
+   *      clamp to the nearest line/word, same as browser selection).
+   *    • Double-click — selects the word at the click point (immediate).
+   *    • Triple-click — selects the whole line (immediate).
    *  Mobile (touch): long-press to start selection with handle UI is a
    *  deliberate follow-up — touch is currently reserved for scroll.
    *
@@ -951,7 +952,13 @@ export class Canvas {
     let lastClickAt = 0;
     let lastClickX = 0, lastClickY = 0;
     let clickCount = 0;
+    /** Armed (pointerdown recorded, no visible range yet) vs dragging
+     *  (range is live). Single-click stays armed until the pointer moves
+     *  past DRAG_SLOP — matches native: bare click = no visible highlight. */
+    let armed = false;
     let dragging = false;
+    let armedX = 0, armedY = 0;
+    const DRAG_SLOP = 3;
 
     const selMgr = this._selectionManager;
 
@@ -985,33 +992,63 @@ export class Canvas {
 
       anchorJiv = textJiv;
       anchorWord = wordIdx;
-      dragging = true;
 
       if (clickCount >= 3) {
+        // Triple-click: select the whole line immediately. Further drag
+        // extends line-by-line.
         granularity = 'line';
+        armed = false;
+        dragging = true;
         const [s, eIdx] = selMgr.LineRangeFor(textJiv, wordIdx);
         selMgr.Set({
           AnchorJiv: textJiv, AnchorWord: s,
           ExtentJiv: textJiv, ExtentWord: eIdx,
         }, this.Root);
-      } else {
-        granularity = clickCount === 2 ? 'word' : 'char';
+        this._animationManager.Kick();
+      } else if (clickCount === 2) {
+        // Double-click: select the clicked word immediately. Word is our
+        // atom, so a collapsed range already paints one word.
+        granularity = 'word';
+        armed = false;
+        dragging = true;
         selMgr.Set({
           AnchorJiv: textJiv, AnchorWord: wordIdx,
           ExtentJiv: textJiv, ExtentWord: wordIdx,
         }, this.Root);
+        this._animationManager.Kick();
+      } else {
+        // Single-click: arm only. Collapse any existing selection (native
+        // collapses to caret on mousedown) but paint nothing — the user
+        // has to drag past DRAG_SLOP before a highlight appears.
+        granularity = 'char';
+        armed = true;
+        dragging = false;
+        armedX = cssX;
+        armedY = cssY;
+        if (selMgr.Current) {
+          selMgr.Set(null, this.Root);
+          this._animationManager.Kick();
+        }
       }
 
-      this._animationManager.Kick();
       this.Element.setPointerCapture(e.pointerId);
       e.preventDefault();
     });
 
     this.Element.addEventListener('pointermove', (e: PointerEvent) => {
-      if (!dragging || !anchorJiv) return;
+      if (!anchorJiv) return;
       const rect = this.Element.getBoundingClientRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
+
+      // Promote armed → dragging once the pointer travels past slop. This is
+      // the point where a bare click becomes a drag-select.
+      if (armed && !dragging) {
+        if (Math.hypot(cssX - armedX, cssY - armedY) < DRAG_SLOP) return;
+        armed = false;
+        dragging = true;
+      }
+      if (!dragging) return;
 
       // Re-resolve which text Jiv the cursor is over on every tick — selection
       // flows across Jiv boundaries like web selection. When the pointer is
@@ -1054,6 +1091,7 @@ export class Canvas {
     const end = (e: PointerEvent): void => {
       if (e.pointerType !== 'mouse') return;
       dragging = false;
+      armed = false;
       anchorJiv = null;
       if (this.Element.hasPointerCapture(e.pointerId)) {
         this.Element.releasePointerCapture(e.pointerId);

@@ -18,6 +18,8 @@ Screen {
   Align: Stretch
   Background: rgba(12, 14, 20, 1)
   FlexGrow: 1
+  BorderRadius: 60
+  Overflow: Hidden
 }
 
 /* Toolbar floats over content — Position: Fixed so it doesn't push the
