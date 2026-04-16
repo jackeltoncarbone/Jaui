@@ -2,7 +2,7 @@
 
 A canvas-based UI rendering engine for the web. Every pixel is yours.
 
-Jwift renders UI to a WebGL canvas — no DOM compositing, no browser CSS layout, no platform rendering differences. The same glass material looks identical on Chrome, Safari, Firefox, and every mobile browser. You own the rendering pipeline.
+Jwift renders UI to a WebGPU canvas — no DOM compositing, no browser CSS layout, no platform rendering differences. The same glass material looks identical on Chrome, Safari, Firefox, and every mobile browser. You own the rendering pipeline.
 
 ## Why
 
@@ -17,13 +17,13 @@ The DOM was built for documents. We're building interfaces. The gap between what
 - Forced synchronous reflows from measuring layout
 - Memory crashes on mobile from too many GPU compositor layers
 
-These aren't bugs we can fix. They're architectural limits of asking a document renderer to be a GPU compositor. Jwift sidesteps all of them by rendering directly to a WebGL canvas.
+These aren't bugs we can fix. They're architectural limits of asking a document renderer to be a GPU compositor. Jwift sidesteps all of them by rendering directly to a WebGPU canvas.
 
 ## What
 
 Jwift is three things:
 
-1. **Jwift Core** — the rendering engine. TypeScript + WebGL. Handles layout, painting, hit testing, text, animation, materials, and input. Framework-agnostic — works with any JS framework or none.
+1. **Jwift Core** — the rendering engine. TypeScript + WebGPU. Handles layout, painting, hit testing, text, animation, materials, and input. Framework-agnostic — works with any JS framework or none.
 
 2. **Jwift.Angular** — Angular bindings. Components and directives that let Angular templates describe Jwift UI. Angular handles state, routing, and data flow. Jwift handles rendering.
 
@@ -35,7 +35,7 @@ Show Studio (`show-studio/ShowStudio.Web/src/Libraries/Jwift/`) contains the DOM
 
 | Show Studio (DOM) | Jwift (Canvas) |
 |---|---|
-| `Jiv.ts` — component with clip-path, backdrop-filter, SVG borders | `Panel` — GPU-rendered rounded rect with blur, border, shadow shaders |
+| `Jiv.ts` — component with clip-path, backdrop-filter, SVG borders | `Panel` — WebGPU-rendered rounded rect with blur, border, shadow shaders |
 | `Jiv.Layout.Engine.ts` — spring-animated flex layout via DOM measurement | `Layout` — flex layout computed in JS, positioned by the engine, spring-animated |
 | `Spring.ts` / `Spring.Animation.Manager.ts` — spring physics | `Spring` — same physics, drives layout and property animation |
 | `ProgressiveBlur.Component.ts` — 7 stacked backdrop-filter layers | `BlurGradient` — single fragment shader with variable kernel |
@@ -66,7 +66,7 @@ Show Studio (`show-studio/ShowStudio.Web/src/Libraries/Jwift/`) contains the DOM
 │  │  Materials (Shaders)               │ │
 │  │  Glass, Blur, Shadow, Refraction   │ │
 │  ├────────────────────────────────────┤ │
-│  │  WebGL 2                           │ │
+│  │  WebGPU                            │ │
 │  └────────────────────────────────────┘ │
 ├─────────────────────────────────────────┤
 │  Accessibility Shadow DOM               │
@@ -90,7 +90,7 @@ Each frame:
 2. **Animation pass** — step springs, update animated properties
 3. **Cull pass** — skip nodes outside the viewport
 4. **Batch pass** — group nodes by material/texture to minimize draw calls
-5. **Render pass** — issue WebGL draw calls
+5. **Render pass** — issue WebGPU draw calls
 6. **Post-process pass** — blur, bloom, color grading (full-screen shaders)
 
 ### Materials
@@ -174,21 +174,30 @@ Jwift/
       Node.ts              — base scene graph node
       Layout.ts            — flex layout solver
       Spring.ts            — spring physics
-      Renderer.ts          — WebGL draw pipeline
+      Renderer.ts          — Renderer interface (GPU backend abstraction)
+      WebGPU.Renderer.ts   — WebGPU implementation of Renderer
+      WebGPU.Device.ts     — GPUDevice/GPUAdapter lifecycle, surface config
+      WebGPU.Pipeline.Cache.ts — render/compute pipeline cache
       HitTest.ts           — point-in-shape testing
       Input.ts             — pointer + keyboard dispatch
       Text.ts              — text measurement + texture cache
       Accessibility.ts     — shadow DOM sync
     Materials/
-      Glass.ts             — Liquid Glass shader
-      Blur.ts              — Gaussian + progressive blur shaders
-      Shadow.ts            — drop shadow shader
-      Border.ts            — SDF border shader
-      Refraction.ts        — displacement/dome shader
+      Glass.ts             — Liquid Glass material
+      Blur.ts              — compute blur dispatch
+      Shadow.ts            — drop shadow
+      Border.ts            — SDF border
+      Refraction.ts        — displacement/dome
+      Progressive.Blur.ts  — progressive blur overlay
     Shaders/
-      glass.frag           — fragment shaders (GLSL)
-      blur.frag
-      sdf.glsl             — superellipse SDF functions
+      panel.wgsl           — non-glass panel rendering (WGSL)
+      glass.wgsl           — glass composite (refraction, CA, rim, specular)
+      blur_down.wgsl       — compute: downsample kernel
+      blur_up.wgsl         — compute: upsample kernel
+      text.wgsl            — text atlas quad rendering
+      blit.wgsl            — fullscreen quad blit
+      progressive.wgsl     — progressive blur overlay
+      sdf.wgsl             — superellipse SDF functions
     Primitives/
       Panel.ts             — rounded rect with material
       Text.ts              — text node

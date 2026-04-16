@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Jwift is a canvas-based UI rendering engine for the web. It renders all UI to a WebGL canvas — no DOM compositing, no browser CSS layout. The goal is pixel-identical rendering across all browsers by owning the entire rendering pipeline.
+Jwift is a canvas-based UI rendering engine for the web. It renders all UI to a WebGPU canvas — no DOM compositing, no browser CSS layout. The goal is pixel-identical rendering across all browsers by owning the entire rendering pipeline.
 
 This repo currently contains **specification documents only** — no source code has been written yet. The specs define the target architecture, API, conventions, and style system. Implementation will follow the milestone plan in Specification.md.
 
@@ -18,7 +18,7 @@ This repo currently contains **specification documents only** — no source code
 
 ## Three Components
 
-1. **Jwift Core** — TypeScript + WebGL rendering engine (layout, painting, hit testing, text, animation, materials, input)
+1. **Jwift Core** — TypeScript + WebGPU rendering engine (layout, painting, hit testing, text, animation, materials, input)
 2. **Jwift.Angular** — Angular bindings (components/directives that describe Jwift UI in Angular templates)
 3. **Jwift Materials** — GPU shader system (glass, blur, refraction, shadows, borders)
 
@@ -38,8 +38,8 @@ Show Studio's DOM-based Jiv library (`show-studio/ShowStudio.Web/src/Libraries/J
 
 ## Architecture Rules
 
-- **Vertical slices**, not horizontal layers — each feature owns everything from shader to public API (e.g., `Glass/Glass.Material.ts`, `Glass/Glass.Shader.frag`, `Glass/Glass.Style.ts`)
-- **Shared infrastructure** (WebGL context, math) lives in `Core/`
+- **Vertical slices**, not horizontal layers — each feature owns everything from shader to public API (e.g., `Glass/Glass.Material.ts`, `Glass/Glass.Shader.wgsl`, `Glass/Glass.Style.ts`)
+- **Shared infrastructure** (WebGPU device, math) lives in `Core/`
 - **Dependencies flow inward only**: Feature → Core (ok), Core → Feature (never), Feature A → Feature B (avoid — extract to Core)
 - **Injectable services** over static classes (exception: pure math utilities like `Jath` can be static)
 - **Config objects express constraints**, not concrete values — consumers derive actual values
