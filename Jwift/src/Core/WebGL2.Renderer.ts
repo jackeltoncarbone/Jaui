@@ -320,6 +320,41 @@ export class WebGL2Renderer implements Renderer {
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
   };
 
+  // ── Snapshot ──
+
+  private _snapshotFbo: WebGLFramebuffer | null = null;
+  private _snapshotTex: WebGLTexture | null = null;
+  private _snapshotW: number = 0;
+  private _snapshotH: number = 0;
+
+  SnapshotScreen = (): GpuTextureHandle => {
+    const gl = this._gl;
+    // Ensure snapshot texture exists at current size
+    if (!this._snapshotTex || this._snapshotW !== this._width || this._snapshotH !== this._height) {
+      if (this._snapshotTex) gl.deleteTexture(this._snapshotTex);
+      if (this._snapshotFbo) gl.deleteFramebuffer(this._snapshotFbo);
+      this._snapshotTex = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, this._snapshotTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      this._snapshotFbo = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._snapshotFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._snapshotTex, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._snapshotW = this._width;
+      this._snapshotH = this._height;
+    }
+    // Copy default framebuffer → snapshot texture via blit
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._snapshotFbo);
+    gl.blitFramebuffer(0, 0, this._width, this._height, 0, 0, this._width, this._height, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return _wrap(this._snapshotTex);
+  };
+
   // ── Blit ──
 
   Blit = (source: GpuTextureHandle): void => {

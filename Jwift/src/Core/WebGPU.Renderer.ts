@@ -412,6 +412,14 @@ export class WebGPURenderer implements Renderer {
     pass.drawIndexed(6);
   };
 
+  // ── Snapshot ──
+
+  SnapshotScreen = (): GpuTextureHandle => {
+    // WebGPU: copy current render target to a texture
+    // TODO: implement when WebGPU backend is tested on real hardware
+    throw new Error('[Jwift WebGPU] SnapshotScreen not yet implemented');
+  };
+
   // ── Blit ──
 
   Blit = (source: GpuTextureHandle): void => {

@@ -199,82 +199,117 @@ export class Canvas {
 
     r.Resize(w, h, this._dpr);
     r.BeginFrame();
-
-    // ─── Pass 1: non-glass panels + text into scene texture ───
-    r.BeginScenePass(0.04, 0.04, 0.04);
-
-    this._panelBuffer.Begin();
-    this._collectNonGlass(this.Root);
-    r.PanelBeginBatch();
-    if (this._panelBuffer.Count > 0) {
-      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
-    }
-    r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
-
     this._textCache.BeginFrame();
-    this._textBuffer.Begin();
-    this._collectTextInstancesForNonGlass(this.Root);
-    r.TextBeginBatch();
-    if (this._textBuffer.Count > 0) {
-      r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
-    }
-    const atlas = this._textCache.Atlas;
-    if (atlas) r.TextDrawBatch(w, h, atlas);
 
-    r.EndScenePass();
-
-    // ─── Pass 2: blur scene with a compute-shader pyramid ───
-    this._maxFrostBlur = 0;
-    this._scanFrostBlur(this.Root);
-    const baseBlurCssPx = 1;
-    const maxFeatherSigma = this._maxProgressiveBlurSigma(this.Root);
-    const blurredScene = r.ComputeBlur(r.SceneTexture, w, h, baseBlurCssPx * this._dpr);
-    const baseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
-    r.GenerateBlurMipmap();
-
-    // ─── Pass 3: blit scene to screen ───
+    // Render directly to screen in tree z-order.
+    // When we hit glass, snapshot + blur the current screen as its backdrop.
     r.BindDefaultTarget();
     r.DisableBlend();
-    r.Blit(r.SceneTexture);
 
-    // ─── Pass 1.5: progressive blur overlays (drawn to screen, reads from
-    // scene texture + blur pyramid — no feedback since we're writing to the
-    // default framebuffer, not the scene FBO) ───
-    if (maxFeatherSigma > 0) {
-      const baseSigmaDevice = baseBlurCssPx * this._dpr;
-      const targetSigmaDevice = maxFeatherSigma * this._dpr;
-      const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
-      r.EnableBlend();
-      this._drawProgressiveBlur(this.Root, 0, 0, blurredScene, maxLod);
-    }
+    // Clear screen
+    r.BeginScenePass(0.04, 0.04, 0.04);
+    r.EndScenePass();
+    r.BindDefaultTarget();
 
-    // ─── Pass 4: glass panels — sample the blurred backdrop ───
-    r.EnableBlend();
-    this._panelBuffer.Begin();
-    this._collectGlass(this.Root);
-    r.PanelBeginBatch();
-    if (this._panelBuffer.Count > 0) {
-      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
-    }
-    r.PanelDrawBatch(w, h, blurredScene, baseFrostLod, this._specTiltX, this._specTiltY);
+    // Track whether we've built a blur for the current snapshot
+    let lastBackdrop: GpuTextureHandle | null = null;
+    let lastBaseFrostLod: number = 0;
+    let backdropDirty = true; // Need new snapshot before next glass
 
-    // ─── Pass 5: non-glass descendants of glass nodes ───
-    this._panelBuffer.Begin();
-    this._collectNonGlassUnderGlass(this.Root);
-    r.PanelBeginBatch();
-    if (this._panelBuffer.Count > 0) {
-      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
-    }
-    r.PanelDrawBatch(w, h, blurredScene, baseFrostLod, this._specTiltX, this._specTiltY);
+    // Single tree walk — renders everything in z-order
+    const renderNode = (node: Jiv, offsetX: number, offsetY: number, clip: { x: number; y: number; w: number; h: number } | null): void => {
+      if (!this._isInsideClip(node, offsetX, offsetY, clip)) return;
+      if (node.Width <= 0 || node.Height <= 0 || !node.Visible) {
+        // Still walk children — a zero-size container can have visible children
+        const childClip = this._enterClip(node, offsetX, offsetY, clip);
+        const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+        for (const child of node.Children as Jiv[]) renderNode(child, dx, dy, childClip);
+        return;
+      }
 
-    // ─── Pass 6: text belonging to glass subtree ───
+      const material = node.RenderStyle.Material;
+
+      if (material === 'ProgressiveBlur') {
+        // Progressive blur: reads from last backdrop snapshot
+        if (backdropDirty || !lastBackdrop) {
+          const snap = r.SnapshotScreen();
+          const baseBlurCssPx = 1;
+          lastBackdrop = r.ComputeBlur(snap, w, h, baseBlurCssPx * this._dpr);
+          lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
+          r.GenerateBlurMipmap();
+          r.BindDefaultTarget();
+          backdropDirty = false;
+        }
+        const d = this._dpr;
+        const maxFeatherSigma = node.RenderStyle.BackdropFrostBlur;
+        const baseSigmaDevice = this._dpr;
+        const targetSigmaDevice = maxFeatherSigma * this._dpr;
+        const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
+        r.EnableBlend();
+        r.DrawProgressiveBlur({
+          Rect: { X: (node.X + offsetX) * d, Y: (node.Y + offsetY) * d, W: node.Width * d, H: node.Height * d },
+          Scene: r.SnapshotScreen(), // unblurred scene for crossfade
+          Pyramid: lastBackdrop,
+          MaxLod: maxLod,
+          Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
+          Opacity: node.RenderStyle.Opacity,
+          Background: node.RenderStyle.Background,
+          Grading: {
+            Brightness: node.RenderStyle.BackdropBrightness,
+            Saturation: node.RenderStyle.BackdropSaturation,
+            Contrast: node.RenderStyle.BackdropContrast,
+          },
+        });
+        backdropDirty = true;
+
+      } else if (_isGlass(material)) {
+        // Glass: snapshot screen, blur, render glass sampling blur
+        const snap = r.SnapshotScreen();
+        const baseBlurCssPx = 1;
+        lastBackdrop = r.ComputeBlur(snap, w, h, baseBlurCssPx * this._dpr);
+        lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
+        r.GenerateBlurMipmap();
+        r.BindDefaultTarget();
+        backdropDirty = false;
+
+        r.EnableBlend();
+        this._panelBuffer.Begin();
+        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
+        r.PanelBeginBatch();
+        r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY);
+        backdropDirty = true;
+
+      } else {
+        // Non-glass panel: render directly
+        r.EnableBlend();
+        this._panelBuffer.Begin();
+        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY);
+        r.PanelBeginBatch();
+        r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+        r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
+      }
+
+      // Render this node's text (directly after the panel, in z-order)
+      this._emitTextFor(node, offsetX, offsetY);
+      if (this._textBuffer.Count > 0) {
+        const atlas = this._textCache.Atlas;
+        if (atlas) {
+          r.TextBeginBatch();
+          r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
+          r.TextDrawBatch(w, h, atlas);
+        }
+      }
+      this._textBuffer.Begin();
+
+      // Walk children in tree order
+      const childClip = this._enterClip(node, offsetX, offsetY, clip);
+      const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+      for (const child of node.Children as Jiv[]) renderNode(child, dx, dy, childClip);
+    };
+
     this._textBuffer.Begin();
-    this._collectTextInstancesForGlass(this.Root);
-    r.TextBeginBatch();
-    if (this._textBuffer.Count > 0) {
-      r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
-    }
-    if (atlas) r.TextDrawBatch(w, h, atlas);
+    renderNode(this.Root, 0, 0, null);
 
     r.EndFrame();
   };

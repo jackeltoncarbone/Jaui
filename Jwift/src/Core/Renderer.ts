@@ -128,6 +128,10 @@ export interface Renderer {
   /** Full-screen textured-quad copy to the current render target. */
   Blit(source: GpuTextureHandle): void;
 
+  /** Copy the current screen (default framebuffer) to an offscreen texture
+   *  for use as a glass backdrop. Returns a handle to the snapshot. */
+  SnapshotScreen(): GpuTextureHandle;
+
   // ── Texture Management ──
 
   /** Create a 2D texture (e.g. for the text atlas). */
