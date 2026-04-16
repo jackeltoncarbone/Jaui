@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, signal, computed, inject, afterNextRender } from '@angular/core';
+import { ChangeDetectionStrategy, Component, HostListener, signal, computed, inject, afterNextRender } from '@angular/core';
 import { Jiv, Jext, Jyle, JwiftCanvas } from 'jwift-angular';
 import HomeJss from './Home.jss';
 
@@ -138,19 +138,35 @@ export class Home {
     { Kicker: 'NEW',      Title: 'Flowstate',       Color: 'rgb(60, 160, 130)' },
   ]);
 
+  /** Double-click anywhere toggles an extra card in the Featured row — a
+   *  visual probe for whether nodes entering/leaving the tree pick up any
+   *  @enter/@exit animation. Right now it's a hard pop; once those hooks
+   *  land it should spring/fade. Listens on document since Jiv's `<jiv>`
+   *  tag sits beside the canvas in the DOM, not inside it — canvas
+   *  dblclicks wouldn't otherwise reach Angular's template bindings. */
+  readonly ExtraCard = signal(false);
+  @HostListener('document:dblclick')
+  ToggleExtra(): void { this.ExtraCard.update(v => !v); }
+
   /** Drives the carousel sections. Big = Featured/Trending; Compact =
    *  Continue/Store. The template loops this once instead of four near-
    *  identical hand-written blocks. */
-  readonly Sections = computed<SectionData[]>(() => [
-    { Title: 'Featured', Items: this.Featured(),
-      RowClass: 'Row', CardClass: 'Card', TitleClass: 'CardTitle' },
-    { Title: 'Trending', Items: this.Trending(),
-      RowClass: 'Row', CardClass: 'Card', TitleClass: 'CardTitle' },
-    { Title: 'Continue Where You Left Off', Items: this.Continue(),
-      RowClass: 'RowCompact', CardClass: 'CardCompact', TitleClass: 'CardTitleCompact' },
-    { Title: 'New in the Store', Items: this.Store(),
-      RowClass: 'RowCompact', CardClass: 'CardCompact', TitleClass: 'CardTitleCompact' },
-  ]);
+  readonly Sections = computed<SectionData[]>(() => {
+    const featured: CardRef[] = [...this.Featured()];
+    if (this.ExtraCard()) {
+      featured.push({ Kicker: 'BONUS', Title: 'Toggle me', Color: 'rgb(220, 60, 200)' });
+    }
+    return [
+      { Title: 'Featured', Items: featured,
+        RowClass: 'Row', CardClass: 'Card', TitleClass: 'CardTitle' },
+      { Title: 'Trending', Items: this.Trending(),
+        RowClass: 'Row', CardClass: 'Card', TitleClass: 'CardTitle' },
+      { Title: 'Continue Where You Left Off', Items: this.Continue(),
+        RowClass: 'RowCompact', CardClass: 'CardCompact', TitleClass: 'CardTitleCompact' },
+      { Title: 'New in the Store', Items: this.Store(),
+        RowClass: 'RowCompact', CardClass: 'CardCompact', TitleClass: 'CardTitleCompact' },
+    ];
+  });
 
   readonly Tabs = signal([
     { Label: 'Home',    Icon: String.fromCodePoint(0xF238), IconFill: String.fromCodePoint(0xF243) },

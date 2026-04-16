@@ -190,6 +190,11 @@ Animation is declarative, not imperative:
 }
 ```
 
+Entry / exit animations — when a Jiv is added to or removed from the
+tree — are driven by a built-in `@Presence` variable on every node. See
+**`Presence.md`** for the full spec: implicit opacity fade by default,
+customization via `@Presence` arithmetic, `@spring Presence` overrides.
+
 ## Materials
 
 Materials are first-class values, not a bag of filter hacks:
