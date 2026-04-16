@@ -112,13 +112,13 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderColor: ParseColor(s.BorderColor),
     BorderWidth: Resolve(s.BorderWidth, ctx, 'W'),
     BorderBlur: Resolve(s.BorderBlur, ctx, 'W'),
+    BorderBackdropBlur: Resolve(s.BorderBackdropBlur, ctx, 'W'),
     BorderOffset: Resolve(s.BorderOffset, ctx, 'W'),
     ContainBorder: s.ContainBorder,
 
     BorderBrightness: Resolve(s.BorderBrightness, ctx, 'W'),
     BorderSaturation: Resolve(s.BorderSaturation, ctx, 'W'),
     BorderContrast: Resolve(s.BorderContrast, ctx, 'W'),
-    BorderFrostLodOffset: Resolve(s.BorderFrostLodOffset, ctx, 'W'),
 
     ShadowColor: ParseColor(s.ShadowColor),
     ShadowBlur: Resolve(s.ShadowBlur, ctx, 'W'),

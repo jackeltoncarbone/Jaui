@@ -85,11 +85,11 @@ const BINDINGS: Array<[RenderGetter, RenderSetter]> = [
   [s => s.BorderColor.A,                (s, v) => { s.BorderColor.A = v; }],
   [s => s.BorderWidth,                  (s, v) => { s.BorderWidth = v; }],
   [s => s.BorderBlur,                   (s, v) => { s.BorderBlur = v; }],
+  [s => s.BorderBackdropBlur,           (s, v) => { s.BorderBackdropBlur = v; }],
   [s => s.BorderOffset,                 (s, v) => { s.BorderOffset = v; }],
   [s => s.BorderBrightness,             (s, v) => { s.BorderBrightness = v; }],
   [s => s.BorderSaturation,             (s, v) => { s.BorderSaturation = v; }],
   [s => s.BorderContrast,               (s, v) => { s.BorderContrast = v; }],
-  [s => s.BorderFrostLodOffset,         (s, v) => { s.BorderFrostLodOffset = v; }],
 
   // Shadow
   [s => s.ShadowColor.R,                (s, v) => { s.ShadowColor.R = v; }],

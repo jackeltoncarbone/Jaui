@@ -59,7 +59,6 @@ for (const c of cards) {
     HoverStyle: {
       BorderColor: 'rgba(255, 255, 255, 0.95)',
       BorderWidth: '2',
-      BorderBlur: '6',
       ShadowColor: 'rgba(255, 255, 255, 0.28)',
       ShadowBlur: '40',
       ShadowOffsetY: '0',

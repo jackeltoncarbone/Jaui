@@ -17,15 +17,16 @@ export const LiquidGlass: Partial<JivStyle> = {
   // stroke. Low alpha = subtle white wash. Set to 0 for pure backdrop-tinted rim.
   BorderColor: 'rgba(255, 255, 255, 0.12)',
   BorderWidth: '1.4',
-  BorderBlur: '0.5',
   BorderRadius: '32',
-  // Border-zone backdrop refilter — brighter + more saturated + sharper than
-  // the panel face, so the rim catches color like a real glass bevel. These
-  // multiply the panel's grading.
+  // Border-zone backdrop refilter — brighter + more saturated than the
+  // panel face so the rim catches color like a real glass bevel. These
+  // multiply the panel's grading. BorderBackdropBlur is the extra LOD
+  // octave offset applied on top of the panel's own blur LOD — negative
+  // = sharper border, positive = wider, softer rim.
   BorderBrightness: '1.35',
   BorderSaturation: '1.25',
   BorderContrast: '1.0',
-  BorderFrostLodOffset: '-0.5',
+  BorderBackdropBlur: '-0.5',
 
   // Ambient drop shadow — Apple shadows are SUBTLE; ~18% alpha, soft blur
   ShadowColor: 'rgba(0, 0, 0, 0.18)',
@@ -81,7 +82,6 @@ export const ClearGlass: Partial<JivStyle> = {
   Background: 'rgba(255, 255, 255, 0)',
   BorderColor: 'rgba(255, 255, 255, 0.45)',
   BorderWidth: '1',
-  BorderBlur: '0.5',
   BorderRadius: '32',
 
   BackdropFrostBlur: '1',

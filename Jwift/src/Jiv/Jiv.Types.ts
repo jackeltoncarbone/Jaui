@@ -101,7 +101,16 @@ export interface JivStyle {
   // Border
   BorderColor: string;
   BorderWidth: string;
+  /** Edge feather half-width in CSS px. Controls how soft the border
+   *  stroke's silhouette edge is — larger = softer/glowier outline. At
+   *  `0.5` the edge is antialiased over ~1 physical px (the old hardcoded
+   *  default). At `0` the edge is a hard step (aliased). */
   BorderBlur: string;
+  /** Extra blur applied to the backdrop sample in the border-zone rim
+   *  (mipmap LOD octave offset; positive = wider blur than the panel
+   *  face, negative = sharper). 0 = border uses the same blur as the
+   *  panel. Not edge antialiasing — see `BorderBlur` for that. */
+  BorderBackdropBlur: string;
   BorderOffset: string;
   ContainBorder: boolean;
 
@@ -109,7 +118,6 @@ export interface JivStyle {
   BorderBrightness: string;
   BorderSaturation: string;
   BorderContrast: string;
-  BorderFrostLodOffset: string;
 
   // Shadow
   ShadowColor: string;
@@ -179,13 +187,13 @@ export interface JivRenderStyle {
   BorderColor: Color;
   BorderWidth: number;
   BorderBlur: number;
+  BorderBackdropBlur: number;
   BorderOffset: number;
   ContainBorder: boolean;
 
   BorderBrightness: number;
   BorderSaturation: number;
   BorderContrast: number;
-  BorderFrostLodOffset: number;
 
   ShadowColor: Color;
   ShadowBlur: number;

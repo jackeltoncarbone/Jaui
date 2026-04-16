@@ -8,7 +8,9 @@ import type { Jiv } from './Jiv';
 //   loc  5: a_BorderColor  (R, G, B, A)
 //   loc  6: a_ShadowColor  (R, G, B, A)
 //   loc  7: a_ShadowParams (offsetX, offsetY, blur, borderWidth)
-//   loc  8: a_StyleParams  (borderBlur, smoothness, opacity, materialType)
+//   loc  8: a_StyleParams  (borderEdgeAa, smoothness, opacity, materialType)
+//                          borderEdgeAa: half-width of the border-edge feather
+//                            in physical px (driven by style.BorderBlur).
 //                          materialType: 1=LiquidGlass, 2=SolidGlass
 //   loc  9: a_Grading      (brightness, saturation, contrast, frostLod)
 //   loc 10: a_Refraction   (thickness, bezelWidth, refractionStrength, bezelScale)
@@ -63,7 +65,11 @@ export class JivInstanceBuffer {
     const w = jiv.Width * d;
     const h = jiv.Height * d;
     const borderWidth = style.BorderWidth * d;
-    const borderBlur = style.BorderBlur * d;
+    // Edge antialiasing softness — half-width of the border feather in
+    // physical px. Driven by `BorderBlur` (CSS px). The border-zone
+    // backdrop-blur LOD offset is `BorderBackdropBlur`, packed into
+    // a_BorderFilter.w below.
+    const borderEdgeAa = style.BorderBlur * d;
     const shadowBlur = style.ShadowBlur * d;
     const shadowOffX = style.ShadowOffsetX * d;
     const shadowOffY = style.ShadowOffsetY * d;
@@ -71,7 +77,7 @@ export class JivInstanceBuffer {
     // Expand draw rect for shadow/border bleed
     const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
     const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
-    const borderMargin = borderWidth + borderBlur;
+    const borderMargin = borderWidth + borderEdgeAa;
     const marginX = Math.max(shadowMarginX, borderMargin);
     const marginY = Math.max(shadowMarginY, borderMargin);
 
@@ -120,7 +126,7 @@ export class JivInstanceBuffer {
     data[offset + 27] = borderWidth;
 
     // loc 8 — a_StyleParams
-    data[offset + 28] = borderBlur;
+    data[offset + 28] = borderEdgeAa;
     data[offset + 29] = style.BorderRadiusSmoothness;
     data[offset + 30] = style.Opacity;
     data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : 0;
@@ -166,11 +172,12 @@ export class JivInstanceBuffer {
     data[offset + 54] = 0;
     data[offset + 55] = 0;
 
-    // loc 15 — a_BorderFilter (border-zone backdrop grading multipliers)
+    // loc 15 — a_BorderFilter (border-zone backdrop grading multipliers +
+    // LOD offset on top of the panel's own blur sample).
     data[offset + 56] = style.BorderBrightness;
     data[offset + 57] = style.BorderSaturation;
     data[offset + 58] = style.BorderContrast;
-    data[offset + 59] = style.BorderFrostLodOffset;
+    data[offset + 59] = style.BorderBackdropBlur;
 
     this._count++;
   };

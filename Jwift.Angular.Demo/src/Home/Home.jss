@@ -136,8 +136,13 @@ SectionTitle {
  * overrides (layout, shape). */
 LiquidGlass {
   Background: rgba(255, 255, 255, 0)
-  BorderColor: rgba(255, 255, 255, 0.12)
   BorderRadius: 32
+  /* Blurred rim: colorless band sampling the backdrop with extra blur,
+   * plus brightness + saturation boost to read as "gathered light". */
+  BorderWidth: 2
+  BorderBlur: 2
+  BorderBrightness: 1.5
+  BorderSaturation: 1.5
 
   ShadowColor: rgba(0, 0, 0, 0.18)
   ShadowBlur: 22

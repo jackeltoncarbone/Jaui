@@ -8,7 +8,8 @@ flat in vec4 v_Tint;
 flat in vec4 v_BorderColor;
 flat in vec4 v_ShadowColor;
 flat in vec4 v_ShadowParams;   // shadowOffX, shadowOffY, shadowBlur, borderWidth
-flat in vec4 v_StyleParams;    // borderBlur, smoothness, opacity, materialType
+flat in vec4 v_StyleParams;    // borderEdgeAa, smoothness, opacity, materialType
+                               // borderEdgeAa: half-width of border/silhouette feather (physical px)
 flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
 flat in vec4 v_Refraction;     // thickness, bezelWidth, refractionStrength, bezelScale
 flat in vec4 v_Lighting;       // lightDirX, lightDirY, lightIntensity, fresnelStrength
@@ -405,7 +406,7 @@ void main() {
     vec2 shadowOffset = v_ShadowParams.xy;
     float shadowBlur = v_ShadowParams.z;
     float borderWidth = v_ShadowParams.w;
-    float borderBlur = v_StyleParams.x;
+    float borderEdgeAa = v_StyleParams.x;
     float smoothness = v_StyleParams.y;
     float opacity = v_StyleParams.z;
     float materialType = v_StyleParams.w;
@@ -458,7 +459,13 @@ void main() {
     float hump = clamp((x / s) * exp(1.0 - x / s), 0.0, 1.0);
 
     // ── Fill alpha (shape mask) ──
+    // Silhouette AA is hardcoded ~0.5px — BorderBlur must NOT fade the
+    // panel outline, or a soft border would just dissolve the whole edge.
+    // `aa` below is the border-stroke feather, applied only to the border
+    // smoothsteps. Floor at a tiny epsilon so BorderBlur=0 still yields a
+    // valid (hard-step) smoothstep.
     float fillAlpha = 1.0 - smoothstep(-0.5, 0.5, dist);
+    float aa = max(borderEdgeAa, 1e-4);
 
     // ── Backdrop sample with refraction + chromatic aberration + variable LOD ──
     //
@@ -551,7 +558,7 @@ void main() {
     float alignment = dot(normal, lightDir);            // +1 lit, -1 unlit
     float widthScale = 1.0 + borderVariance * alignment;
     float localBorderWidth = borderWidth * widthScale;
-    float localBorderBlur = borderBlur * widthScale;
+    float localBorderEdgeAa = borderEdgeAa * widthScale;
 
     // ── Edge lighting (Apple Liquid Glass) ──────────────────────────────
     // Two bands stacked:
@@ -726,8 +733,8 @@ void main() {
         // while the first stayed at 1, so the "thin line" was actually a 55%
         // wash over the entire lit-side interior. Now: inside-outline mask
         // multiplied by a reverse ramp that goes to 0 past rimSpecW inward.
-        float insideOutline = 1.0 - smoothstep(-0.5, 0.5, dist);
-        float withinBand = smoothstep(-rimSpecW - 0.5, -rimSpecW + 0.5, dist);
+        float insideOutline = 1.0 - smoothstep(-aa, aa, dist);
+        float withinBand = smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
         float rimSpecBand = insideOutline * withinBand;
         // Directional alignment uses the TILTED light direction so the
         // rim-spec line slides around the perimeter as pointer/gyro moves.
@@ -754,8 +761,8 @@ void main() {
         // overlaid on top with its alpha as a tint, NOT a solid stroke.
         // This is what gives Apple's rim its "light-gathering" quality
         // without the static UI-border feel.
-        float borderOuter = smoothstep(-0.5, 0.5, dist);
-        float borderInner = smoothstep(-0.5, 0.5, dist + localBorderWidth);
+        float borderOuter = smoothstep(-aa, aa, dist);
+        float borderInner = smoothstep(-aa, aa, dist + localBorderWidth);
         float borderBase = (1.0 - borderOuter) * borderInner;
 
         if (borderBase > 0.001) {
@@ -787,8 +794,8 @@ void main() {
             result.a = max(result.a, borderBase * fillAlpha);
         }
     } else {
-        float borderOuter = smoothstep(-0.5, 0.5, dist);
-        float borderInner = smoothstep(-0.5, 0.5, dist + localBorderWidth);
+        float borderOuter = smoothstep(-aa, aa, dist);
+        float borderInner = smoothstep(-aa, aa, dist + localBorderWidth);
         float borderBase = (1.0 - borderOuter) * borderInner;
         float borderAlpha = borderBase * v_BorderColor.a;
         result.rgb = result.rgb * (1.0 - borderAlpha) + v_BorderColor.rgb * borderAlpha;

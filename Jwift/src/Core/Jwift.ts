@@ -75,9 +75,37 @@ export class Canvas {
   /** Largest FrostBlur of any glass collected this frame (CSS px). Drives the dual-filter pyramid. */
   private _maxFrostBlur: number = 0;
 
+  // ─── Debug HUD ───
+  /** User-requested DPR override from `?dpr=N`, null to use auto. */
+  private _dprOverride: number | null = null;
+  /** Overlay <div> — created only when Debug is on. */
+  private _debugHud: HTMLDivElement | null = null;
+  /** Rolling window of ms-per-frame deltas. Fixed-size buffer, written in-place
+   *  to avoid per-frame allocations. `_hudIdx` is the write cursor, `_hudCount`
+   *  caps growth until the buffer is full. */
+  private _hudDeltas: Float32Array = new Float32Array(30);
+  private _hudIdx: number = 0;
+  private _hudCount: number = 0;
+  /** Last HUD DOM update time (ms). Throttled to ~10Hz so textContent churn
+   *  doesn't itself tank the frame budget we're trying to measure. */
+  private _hudLastWrite: number = 0;
+
   constructor(canvas: HTMLCanvasElement) {
     this.Element = canvas;
     this.Root = new Jiv();
+
+    // Tell Safari we own all gestures on this canvas. Without this, iOS waits
+    // ~300ms on each touch to decide if it's a browser-owned gesture (pan-zoom,
+    // double-tap-to-zoom) before delivering pointermove — and batches the
+    // resulting moves to ~20Hz. Setting `touch-action: none` unblocks the
+    // compositor fast-path and lets coalesced pointer events flow at 60Hz.
+    this.Element.style.touchAction = 'none';
+
+    // Debug HUD — enabled by URL (`?debug` or `#debug`) so the user can flip
+    // it on iPad without rebuilding. Creates a fixed-position overlay next to
+    // the canvas showing FPS, frame-time, DPR, and dims. Optional `?dpr=N`
+    // overrides the auto-DPR for experimenting with fragment pressure.
+    this._initDebugFromUrl();
 
     const gl = canvas.getContext('webgl2', {
       alpha: false,
@@ -157,14 +185,20 @@ export class Canvas {
   });
   get Dpr(): number { return this._dpr; }
 
-  /** Request an immediate re-render (called by animation manager). */
+  /** Request a re-render. When the loop is running, _tick already renders
+   *  every frame — no extra render needed. */
   RequestFrame = (): void => {
-    if (this._running) this._render(0);
   };
 
   private _tick = (time: number): void => {
     if (!this._running) return;
     this._frameId = requestAnimationFrame(this._tick);
+
+    // Feed the HUD BEFORE we overwrite _lastTime — the HUD uses it to derive
+    // the rAF-to-rAF delta (which, on iOS, includes time the main thread spent
+    // blocked — a better signal than render-only dt for "is the browser
+    // actually waking us at 60Hz?").
+    this._updateHud(time);
 
     const dt = this._lastTime === 0 ? 0.016 : Math.min((time - this._lastTime) / 1000, 0.033);
     this._lastTime = time;
@@ -578,11 +612,27 @@ export class Canvas {
   };
 
   private _resize = (): void => {
-    // Use native DPR uncapped — browser zoom increases DPR above 2 (e.g. 125% zoom on a
-    // 1.5x display = DPR 1.875), and capping would render at lower res than the display,
-    // producing blurry text/edges. Text cache naturally invalidates because its hash
-    // includes DPR; higher DPR costs more memory/fill but keeps strokes crisp.
-    this._dpr = window.devicePixelRatio || 1;
+    // Browser-zoom can push DPR above native (e.g. 125% on a 1.5x display = DPR 1.875).
+    // Text cache naturally invalidates — its hash includes DPR — so higher DPR costs
+    // memory/fill but keeps strokes crisp on desktop.
+    //
+    // Touch-primary devices (iPad, iPhone) are usually fragment-bound: an iPad Pro
+    // at DPR 2 pushes ~5.6MP/frame, which the dual-filter blur chain can't sustain
+    // at 60Hz. Clamp to 2 on those devices to preserve framerate — most iPad users
+    // report native DPR 2 anyway, so this is a no-op today but protects against
+    // future DPR 3 devices and 125% Safari zoom on DPR 2 displays.
+    //
+    // `?dpr=N` in the URL overrides both paths, so the user can A/B on device
+    // without rebuilding. NaN/≤0 is ignored.
+    const raw = window.devicePixelRatio || 1;
+    const override = this._dprOverride;
+    if (override !== null) {
+      this._dpr = override;
+    } else {
+      const isTouchPrimary = typeof window !== 'undefined' && !!window.matchMedia
+        && window.matchMedia('(pointer: coarse)').matches;
+      this._dpr = isTouchPrimary ? Math.min(raw, 2) : raw;
+    }
     this._width = this.Element.clientWidth;
     this._height = this.Element.clientHeight;
     this.Element.width = Math.round(this._width * this._dpr);
@@ -939,19 +989,34 @@ export class Canvas {
     this.Element.addEventListener('pointermove', (e: PointerEvent) => {
       const ctx = drags.get(e.pointerId);
       if (!ctx) return;
-      const now = performance.now();
-      const dt = Math.max(1e-3, (now - ctx.lastT) / 1000);
-      // Dragging pulls content the opposite direction of finger motion (finger
-      // moves up → content scrolls down, same as native).
-      const dx = -(e.clientX - ctx.lastX);
-      const dy = -(e.clientY - ctx.lastY);
-      this._scrollManager.DragMove(ctx.target, dx, dy, dt);
+
+      // iOS batches pointermove to ~20Hz during touch — renders run at 60Hz
+      // but scroll offset was only updating 3x/frame with the raw event.
+      // getCoalescedEvents() recovers the missed samples; we feed each one
+      // through DragMove so scroll offset tracks the finger at native rate.
+      // Fall back to the single event if the browser doesn't support it.
+      const samples: readonly PointerEvent[] =
+        typeof e.getCoalescedEvents === 'function'
+          ? (e.getCoalescedEvents() as PointerEvent[]) : [];
+      const events: readonly PointerEvent[] = samples.length > 0 ? samples : [e];
+
+      for (const sample of events) {
+        const now = performance.now();
+        const dt = Math.max(1e-3, (now - ctx.lastT) / 1000);
+        // Dragging pulls content the opposite direction of finger motion (finger
+        // moves up → content scrolls down, same as native).
+        const dx = -(sample.clientX - ctx.lastX);
+        const dy = -(sample.clientY - ctx.lastY);
+        this._scrollManager.DragMove(ctx.target, dx, dy, dt);
+        ctx.lastX = sample.clientX;
+        ctx.lastY = sample.clientY;
+        ctx.lastT = now;
+      }
       this._animationManager.Kick();
-      ctx.lastX = e.clientX;
-      ctx.lastY = e.clientY;
-      ctx.lastT = now;
-      e.preventDefault();
-    }, { passive: false });
+      // No preventDefault — listener is passive. `touch-action: none` on the
+      // canvas (set in the constructor) keeps the browser's native scroll
+      // from competing, so we don't need to block it imperatively.
+    }, { passive: true });
 
     const finish = (e: PointerEvent): void => {
       const ctx = drags.get(e.pointerId);
@@ -1003,6 +1068,91 @@ export class Canvas {
     if (mql.addEventListener) {
       mql.addEventListener('change', handler, { once: true } as AddEventListenerOptions);
     }
+  };
+
+  /** Parse `?debug` / `#debug` and `?dpr=N` from the URL. Calling this early
+   *  in the constructor lets `_resize()` pick up the DPR override on its
+   *  first run, and attaches the HUD once the canvas is in the DOM. */
+  private _initDebugFromUrl = (): void => {
+    if (typeof window === 'undefined') return;
+
+    const search = window.location.search || '';
+    const hash = window.location.hash || '';
+    const params = new URLSearchParams(search);
+    const debug = params.has('debug') || hash.includes('debug');
+
+    // `?dpr=N` — explicit user override (clamped to a sane range so a typo
+    // doesn't lock the browser with a 50MP backbuffer). null = auto.
+    const dprStr = params.get('dpr');
+    if (dprStr !== null) {
+      const n = Number(dprStr);
+      if (Number.isFinite(n) && n > 0 && n <= 4) this._dprOverride = n;
+    }
+
+    if (debug) this._enableDebugHud();
+  };
+
+  /** Build the HUD overlay. Fixed-position, monospace, semi-transparent; pointer-
+   *  events disabled so it never intercepts scroll/hover. Appended to body so
+   *  it survives canvas re-parenting and doesn't need special CSS from hosts. */
+  private _enableDebugHud = (): void => {
+    if (this._debugHud || typeof document === 'undefined') return;
+    const el = document.createElement('div');
+    el.style.cssText = [
+      'position:fixed',
+      'top:8px',
+      'left:8px',
+      'z-index:2147483647',
+      'padding:4px 8px',
+      'background:rgba(0,0,0,0.6)',
+      'color:#0f0',
+      'font:12px/1.3 ui-monospace,Menlo,Consolas,monospace',
+      'pointer-events:none',
+      'white-space:pre',
+      'border-radius:4px',
+    ].join(';');
+    el.textContent = 'FPS --';
+    const attach = (): void => { document.body.appendChild(el); };
+    if (document.body) attach();
+    else document.addEventListener('DOMContentLoaded', attach, { once: true });
+    this._debugHud = el;
+  };
+
+  /** Called from `_tick` with the current rAF timestamp. Writes the delta into
+   *  the rolling buffer, then (throttled) updates the HUD textContent. Keeps
+   *  the hot path allocation-free — the template literal produces one string
+   *  per DOM write, not per frame. */
+  private _updateHud = (time: number): void => {
+    if (!this._debugHud) return;
+
+    // _lastTime is 0 on the very first frame (set by Start); skip it so we
+    // don't feed a huge bogus delta into the window.
+    if (this._lastTime === 0) return;
+    const dtMs = time - this._lastTime;
+
+    const buf = this._hudDeltas;
+    buf[this._hudIdx] = dtMs;
+    this._hudIdx = (this._hudIdx + 1) % buf.length;
+    if (this._hudCount < buf.length) this._hudCount++;
+
+    // Throttle DOM writes to ~10Hz. Every frame would make the HUD itself
+    // a measurable cost on low-power devices.
+    if (time - this._hudLastWrite < 100) return;
+    this._hudLastWrite = time;
+
+    let sum = 0, min = Infinity, max = 0;
+    for (let i = 0; i < this._hudCount; i++) {
+      const v = buf[i];
+      sum += v;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    const avg = sum / Math.max(1, this._hudCount);
+    const fps = avg > 0 ? 1000 / avg : 0;
+    const w = this._width;
+    const h = this._height;
+    this._debugHud.textContent =
+      `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | WxH ${w}x${h}`;
   };
 }
 

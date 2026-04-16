@@ -34,7 +34,8 @@ SDF-based. Computed from the superellipse distance field in the fragment shader.
 
 - `BorderColor` — any color, per-side possible
 - `BorderWidth` — thickness
-- `BorderBlur` — soft/glowing border (SDF blur margin, not Gaussian)
+- `BorderBlur` — edge feather half-width (SDF AA / soft silhouette, not Gaussian)
+- `BorderBackdropBlur` — extra LOD octave offset on the border-zone backdrop sample (sharper/softer rim optics; distinct from edge feather)
 - `BorderOffset` — shift inward or outward from the edge
 - `ContainBorder` — clip the border glow to the shape interior (prevents bleed outside the node)
 
