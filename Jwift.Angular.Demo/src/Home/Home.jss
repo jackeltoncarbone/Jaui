@@ -2,11 +2,11 @@
  *
  * Layout:
  *   Screen        — full-viewport dark background
- *   Scroll        — vertical scroll container (content + padding for floating chrome)
- *   HeroStub      — large hero title (stub for the 3D reality view)
+ *   Scroll        — vertical scroll container
+ *   HeroStub      — large hero (70vh) with title + CTA
  *   Section       — carousel section (header + card row)
  *   Card          — cover art tile; opaque content, large rounded corners
- *   Toolbar       — floating top chrome (glass, pill)
+ *   Toolbar       — floating top chrome (glass, pill, Position: Fixed)
  *   TabBar        — floating bottom nav (glass, pill)
  *
  * Spacing follows the 8pt grid. Corners are generous (iOS 26 convention).
@@ -20,14 +20,18 @@ Screen {
   FlexGrow: 1
 }
 
+/* Toolbar floats over content — Position: Fixed so it doesn't push the
+ * hero down. pointer-events managed per-child. */
 ToolbarRow {
+  Position: Fixed
+  Top: 0
+  Right: 0
   Direction: Row
   Justify: End
   Align: Center
-  Padding: 16 20
-  FlexGrow: 0
-  FlexShrink: 0
-  Height: 80
+  Padding: 24 24
+  Width: 100vw
+  Height: 72
 }
 
 Scroll {
@@ -41,21 +45,18 @@ Scroll {
 }
 
 TabBarRow {
+  Position: Fixed
+  Bottom: 0
+  Left: 0
   Direction: Row
   Justify: Center
   Align: Center
   Padding: 8 20 24 20
-  FlexGrow: 0
-  FlexShrink: 0
+  Width: 100vw
   Height: 100
 }
 
-/* Progressive blur feather — renders between the unblurred scene blit and
- * the glass chrome, so scroll content visually fades into the TabBar above
- * it. Width/X/Y get set imperatively on resize (the layout engine doesn't
- * yet have a "viewport-fixed, bottom-anchored" primitive).
- * BackdropFrostBlur is reused as the max blur radius at the fully-blurred
- * end of the gradient. */
+/* Progressive blur feathers */
 ContentBlur {
   ProgressiveBlurDirection: ToBottom
   Position: Fixed
@@ -78,31 +79,46 @@ TopBlur {
   Background: rgba(0, 0, 0, 0)
 }
 
+/* Hero — 70vh dark stub with title + CTA. Eventually replaced by
+ * 3D reality view. Title positioned at bottom via Justify: End. */
 HeroStub {
   Direction: Column
   Justify: End
   Align: Start
-  Padding: 24 28 28 28
-  Height: 520
-  Background: rgb(32, 36, 52)
+  Padding: 48 28 48 28
+  Gap: 20
+  Height: 70vh
+  Background: rgb(22, 26, 42)
   BorderRadius: 0
-}
-
-HeroKicker {
-  FontFamily: Inter
-  FontSize: 13
-  FontWeight: 600
-  Color: rgba(255, 120, 140, 1)
-  LetterSpacing: 0.2
+  FlexGrow: 0
+  FlexShrink: 0
 }
 
 HeroTitle {
   FontFamily: Inter
-  FontSize: 48
+  FontSize: 40
   FontWeight: 700
   LineHeight: 1.05
   Color: rgba(255, 255, 255, 0.98)
   LetterSpacing: -0.5
+}
+
+HeroCta {
+  Direction: Row
+  Justify: Center
+  Align: Center
+  Padding: 14 28
+  BorderRadius: 999
+  Background: rgba(255, 255, 255, 0.15)
+  BorderColor: rgba(255, 255, 255, 0.2)
+  BorderWidth: 1
+}
+
+HeroCtaLabel {
+  FontFamily: Inter
+  FontSize: 16
+  FontWeight: 600
+  Color: rgba(255, 255, 255, 0.95)
 }
 
 Section {
@@ -113,7 +129,6 @@ Section {
   Padding: 0 24 0 24
   FlexGrow: 0
   FlexShrink: 0
-  Height: 400
 }
 
 SectionCompact {
@@ -124,7 +139,6 @@ SectionCompact {
   Padding: 0 24 0 24
   FlexGrow: 0
   FlexShrink: 0
-  Height: 280
 }
 
 SectionHeader {
@@ -142,14 +156,10 @@ SectionTitle {
   LetterSpacing: -0.2
 }
 
-/* Shared LiquidGlass base for every glass surface in this screen. Any class
- * that wants to look like glass extends this and only expresses its own
- * overrides (layout, shape). */
+/* Shared LiquidGlass base for every glass surface. */
 LiquidGlass {
   Background: rgba(255, 255, 255, 0)
   BorderRadius: 32
-  /* Blurred rim: colorless band sampling the backdrop with extra blur,
-   * plus brightness + saturation boost to read as "gathered light". */
   BorderWidth: 0.5
   BorderBlur: 0
   BorderColor: rgba(255, 255, 255, 0.45)
@@ -205,7 +215,7 @@ SectionViewAllLabel {
 Row {
   Direction: Row
   Justify: Start
-  Align: Center
+  Align: Stretch
   Gap: 14
   Padding: 2 4 2 4
   FlexGrow: 0
@@ -216,7 +226,7 @@ Row {
 RowCompact {
   Direction: Row
   Justify: Start
-  Align: Center
+  Align: Stretch
   Gap: 14
   Padding: 2 4 2 4
   FlexGrow: 0
@@ -230,11 +240,11 @@ Card {
   Align: Start
   Padding: 16 18 18 18
   Width: 260
-  Height: 320
-  BorderRadius: 48
+  BorderRadius: 28
   ShadowColor: rgba(0, 0, 0, 0.45)
   ShadowBlur: 24
   ShadowOffsetY: 10
+  FlexGrow: 1
 }
 
 CardCompact {
@@ -243,11 +253,11 @@ CardCompact {
   Align: Start
   Padding: 14 16 16 16
   Width: 200
-  Height: 200
-  BorderRadius: 48
+  BorderRadius: 28
   ShadowColor: rgba(0, 0, 0, 0.4)
   ShadowBlur: 20
   ShadowOffsetY: 8
+  FlexGrow: 1
 }
 
 CardKicker {
@@ -275,27 +285,25 @@ CardTitleCompact {
   Color: rgba(255, 255, 255, 0.97)
 }
 
-/* Toolbar + TabBar: floating chrome pills. Inherit the full glass tuning
- * from LiquidGlass; override only layout. */
-
+/* Toolbar glass pill — collapsed avatar/action group. */
 Toolbar : LiquidGlass {
   Direction: Row
   Justify: End
   Align: Center
-  Gap: 8
-  Padding: 6
-  Width: 220
-  Height: 56
+  Gap: 4
+  Padding: 4
+  Height: 48
+  BorderRadius: 24
 }
 
 ToolbarButton {
   Direction: Row
   Justify: Center
   Align: Center
-  Width: 44
-  Height: 44
-  BorderRadius: 22
-  Background: rgba(255, 255, 255, 0.1)
+  Width: 40
+  Height: 40
+  BorderRadius: 20
+  Background: rgba(255, 255, 255, 0.08)
 }
 
 ToolbarButtonGlyph {

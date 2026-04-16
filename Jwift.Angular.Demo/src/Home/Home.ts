@@ -28,29 +28,27 @@ type CardRef = { Kicker: string; Title: string; Color: string };
 
     <jiv class="Screen">
 
-      <!-- Top toolbar row (inline for v1; floating-over-content comes
-           with X/Y inputs on <jiv> — task TBD) -->
+      <!-- Toolbar floats over content (Position: Fixed) -->
       <jiv class="ToolbarRow">
         <jiv class="Toolbar">
-          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="▾" /></jiv>
-          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="⚲" /></jiv>
-          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="＋" /></jiv>
-          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="☰" /></jiv>
+          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="◆" /></jiv>
+          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="🛒" /></jiv>
+          <jiv class="ToolbarButton"><jext class="ToolbarButtonGlyph" text="👤" /></jiv>
         </jiv>
       </jiv>
 
-      <!-- Progressive blur feather — sits over the lower part of the
-           scroll area and under the TabBar. All geometry comes from the
-           .ContentBlur JSS class (Position: Fixed + Bottom/Left/Width). -->
+      <!-- Progressive blur feathers -->
       <jiv class="TopBlur" />
       <jiv class="ContentBlur" />
 
       <jiv class="Scroll">
 
-        <!-- Hero stub (will become the 3D reality view) -->
+        <!-- Hero stub — will become 3D reality view -->
         <jiv class="HeroStub">
-          <jext class="HeroKicker" text="TODAY" />
-          <jext class="HeroTitle" text="Your Show Studio" />
+          <jext class="HeroTitle" text="The greatest marching band software in the land" />
+          <jiv class="HeroCta">
+            <jext class="HeroCtaLabel" text="Get Started" />
+          </jiv>
         </jiv>
 
         <!-- Featured (big cards) -->
