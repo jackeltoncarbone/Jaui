@@ -177,8 +177,8 @@ LiquidGlass {
   ShadowOffsetY: 6
 
   BackdropFrostBlur: 4
-  BackdropBrightness: 1.5
-  BackdropSaturation: 1.5
+  BackdropBrightness: 1.25
+  BackdropSaturation: 1.25
   BackdropContrast: 0.75
 
   Thickness: 2
