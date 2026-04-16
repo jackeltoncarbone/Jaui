@@ -327,8 +327,9 @@ TabBar : LiquidGlass {
   Align: Stretch
   Gap: 0
   Padding: 6
+  Width: 640
+  MaxWidth: 100%
   Height: 64
-  FlexGrow: 1
 }
 
 TabItem {
