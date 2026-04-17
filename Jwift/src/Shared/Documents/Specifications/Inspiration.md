@@ -12,9 +12,9 @@ What Jwift takes from SwiftUI:
 
 **Layout as a protocol.** SwiftUI's layout contract is simple: parent proposes size, child responds with size, parent positions child. Jwift's flex solver follows the same top-down pattern — parent provides constraints, children resolve within them, no backtracking.
 
-**Implicit animation.** In SwiftUI, `.animation(.spring())` makes any state change animate automatically. JSS's `@spring *` does the same — declare the physics once, every property change animates. No imperative `UIView.animate` calls.
+**Implicit animation.** In SwiftUI, `.animation(.spring())` makes any state change animate automatically. JSS's `@Spring *` does the same — declare the physics once, every property change animates. No imperative `UIView.animate` calls.
 
-**View identity and lifetime.** SwiftUI tracks views by identity (structural position or explicit `id`). When identity changes, the view exits and a new one enters. Jwift's `@enter`/`@exit` system works the same way — node identity drives animation lifecycle.
+**View identity and lifetime.** SwiftUI tracks views by identity (structural position or explicit `id`). When identity changes, the view exits and a new one enters. Jwift's `@Enter`/`@Exit` system works the same way — node identity drives animation lifecycle.
 
 **Primitives, not widgets.** SwiftUI ships `Text`, `Image`, `Color`, `Shape` — not `UIButton`, `UITableView`. Complex components are compositions of primitives. Jwift follows this: `Panel`, `Text`, `Image`, `ScrollView`, `Stack`. No premade widgets.
 

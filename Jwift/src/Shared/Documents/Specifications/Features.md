@@ -26,7 +26,7 @@ Pure-math flex solver. No DOM. Runs every frame (< 1ms for 200 nodes).
 
 **Spring-animated**: Layout targets update instantly. Springs animate every node from current position to target simultaneously. Per-property spring config (`Stiffness`, `Damping`, `Mass`).
 
-**Entry/exit**: Nodes entering spring from an entry state (configurable: scale, opacity, translate). Nodes exiting animate to exit state, then are removed from the tree. Siblings reflow simultaneously. Modes: `opacity`, `scale`, `both`, `none`, or custom `@enter`/`@exit` in JSS.
+**Entry/exit**: Nodes entering spring from an entry state (configurable: scale, opacity, translate). Nodes exiting animate to exit state, then are removed from the tree. Siblings reflow simultaneously. Modes: `opacity`, `scale`, `both`, `none`, or custom `@Enter`/`@Exit` in JSS.
 
 ## Borders
 

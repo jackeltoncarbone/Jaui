@@ -62,16 +62,16 @@ The template is clean markup. The style lives in a `.jss` file.
 
 **Toolbar.jss**
 ```jss
-@style GlassPill {
+@Style GlassPill {
   Material: LiquidGlass
   LiquidBrightness: 1.7
   BorderColor: rgba(255, 255, 255, 0.4)
   BorderWidth: 0.1em
 }
 
-@style Interactive {
+@Style Interactive {
   Cursor: Pointer
-  @spring Transform { Stiffness: 200, Damping: 28 }
+  @Spring Transform { Stiffness: 200, Damping: 28 }
 
   :Hover { Transform: Scale(1.06) }
   :Active { Transform: Scale(0.92) }

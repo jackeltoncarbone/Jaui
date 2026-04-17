@@ -72,7 +72,7 @@ No `!important`. No specificity math. If two rules conflict, the more specific c
 Styles can extend multiple bases. This is the key feature CSS doesn't have cleanly:
 
 ```jss
-@style GlassPill {
+@Style GlassPill {
   Material: LiquidGlass
   LiquidBrightness: 1.7
   BorderRadius: 100em
@@ -80,7 +80,7 @@ Styles can extend multiple bases. This is the key feature CSS doesn't have clean
   BorderWidth: 0.1em
 }
 
-@style Interactive {
+@Style Interactive {
   Cursor: Pointer
   Transition: Transform 160ms ease
 
@@ -95,7 +95,7 @@ Styles can extend multiple bases. This is the key feature CSS doesn't have clean
   }
 }
 
-@style Pressable {
+@Style Pressable {
   :Active {
     Transform: Scale(0.96)
     Transition: Transform 100ms ease
@@ -115,25 +115,32 @@ Styles can extend multiple bases. This is the key feature CSS doesn't have clean
 }
 ```
 
-`@style` defines a reusable style mixin. The `: Base1, Base2` syntax inherits from multiple bases. Properties are merged left-to-right — if `Interactive` and `Pressable` both define `:Active`, `Pressable` wins because it's listed last.
+`@Style` defines a reusable style mixin. The `: Base1, Base2` syntax inherits from multiple bases. Properties are merged left-to-right — if `Interactive` and `Pressable` both define `:Active`, `Pressable` wins because it's listed last.
 
 ## Variables
 
-Typed variables with defaults:
+Declared and referenced with a leading `@` — no keyword prefix, the
+colon after the name is the signal:
 
 ```jss
-@var ChromePadding: 1.875em
-@var AppCornerRadius: 4.5em
-@var GlassTint: rgba(255, 255, 255, 0.4)
+@ChromePadding: 1.875em
+@AppCornerRadius: 4.5em
+@GlassTint: rgba(255, 255, 255, 0.4)
 
 .Drawer {
-  BorderRadius: calc(@AppCornerRadius - @ChromePadding)
+  BorderRadius: @AppCornerRadius - @ChromePadding
   Padding: @ChromePadding
   BorderColor: @GlassTint
 }
 ```
 
-Variables are `@name` — distinct from properties (no prefix) and selectors (`.name` or `TagName`).
+Variables are `@Name` (PascalCase) — distinct from properties (no
+prefix) and selectors (`.Name` or `TagName`). Arithmetic uses the
+Length parser's `+ - * /` and parens directly (no `calc()` wrapper).
+
+See **`Var.md`** for the full spec: declaration rules, the
+`concentric` keyword, built-in identifiers (`Presence`), error
+behavior, and implementation milestones.
 
 ## Concentric Radii
 
@@ -160,13 +167,18 @@ First-class support — no manual math:
 
 ## Springs
 
+`@Spring` always lives inside a selector — it's a per-class declaration
+of how one property animates when its target changes. There's no top-
+level `@Spring` form; if you want stylesheet-wide defaults, use a
+universal selector (`*`).
+
 Animation is declarative, not imperative:
 
 ```jss
 .Panel {
   Width: 10em
 
-  @spring Width {
+  @Spring Width {
     Stiffness: 170
     Damping: 26
     Mass: 1
@@ -177,7 +189,7 @@ Animation is declarative, not imperative:
 
 .Card {
   // Shorthand — default spring on all animatable properties
-  @spring * {
+  @Spring * {
     Stiffness: 200
     Damping: 28
   }
@@ -185,15 +197,16 @@ Animation is declarative, not imperative:
 
 .ListItem {
   // Per-property springs
-  @spring Opacity { Stiffness: 300, Damping: 30 }
-  @spring Transform { Stiffness: 170, Damping: 22 }
+  @Spring Opacity { Stiffness: 300, Damping: 30 }
+  @Spring Transform { Stiffness: 170, Damping: 22 }
 }
 ```
 
 Entry / exit animations — when a Jiv is added to or removed from the
-tree — are driven by a built-in `@Presence` variable on every node. See
+tree — are driven by a built-in `Presence` identifier on every node.
+See
 **`Presence.md`** for the full spec: implicit opacity fade by default,
-customization via `@Presence` arithmetic, `@spring Presence` overrides.
+customization via `Presence` arithmetic, `@Spring Presence` overrides.
 
 ## Materials
 
@@ -279,7 +292,7 @@ Breakpoints are part of the style, not detached media queries:
   Height: min(60vh, 30em)
   BorderRadius: concentric
 
-  @when Width > 900 {
+  @If Width > 900 {
     // Wide layout
     Top: calc(@ChromePadding + 3em + @ChromePadding)
     Left: auto
@@ -289,7 +302,7 @@ Breakpoints are part of the style, not detached media queries:
 }
 ```
 
-`@when` replaces media queries. Conditions reference the viewport or the element itself (`@when Self.Width > 300`).
+`@If` replaces media queries. Conditions reference the viewport or the element itself (`@If Self.Width > 300`).
 
 ## Usage in Angular
 
@@ -307,7 +320,7 @@ Breakpoints are part of the style, not detached media queries:
 ```jss
 /* app.jss */
 
-@var ChromePadding: 1.875em
+@ChromePadding: 1.875em
 
 .Toolbar : GlassPill {
   Direction: Row

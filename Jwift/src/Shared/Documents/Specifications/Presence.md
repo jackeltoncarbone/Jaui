@@ -10,37 +10,39 @@ The whole point: no Jiv ever pops in or out. Adding `<jiv>` to an Angular
 template dissolves it in; removing it dissolves it out. Authors customize
 how per class with one variable.
 
-## The built-in var
+## The built-in identifier
 
-`@Presence` is a reserved JSS variable, provided by the engine per Jiv.
-It behaves like a `@var` authors declared themselves — readable inside
-arithmetic, resolved against the current Jiv's state at layout time, and
-re-evaluated every frame as the spring moves.
+`Presence` is a reserved built-in identifier, provided by the engine
+per Jiv. In any property value context it resolves to the current
+Jiv's Presence spring value (0..1), re-evaluated each frame as the
+spring moves.
+
+It lives in a separate namespace from user-declared `@Name` vars — no
+`@` prefix because the author didn't declare it. The distinction is
+visual and meaningful: `@MyR` = "I defined this at the top," `Presence`
+= "the engine hands me this per Jiv."
 
 ```jss
-@spring Presence {
-  Stiffness: 220
-  Damping: 26
-}
-
 Card {
-  Opacity: @Presence
-  Transform: scale(0.96 + 0.04 * @Presence)
+  Opacity: Presence
+  Transform: scale(0.96 + 0.04 * Presence)
 }
 
 Toast {
-  Opacity: @Presence
-  OffsetY: -20 * (1 - @Presence)
+  Opacity: Presence
+  OffsetY: -20 * (1 - Presence)
 }
 ```
 
-Reading `@Presence` outside a Jiv context (e.g. in a top-level `@var`) is
-an error — it's a node-scoped value by definition.
+Reading `Presence` outside a Jiv context (e.g. in a top-level `@Name:`
+declaration) is an error — it's a node-scoped value by definition.
+Authors cannot declare `@Presence: …` (reserved identifier) or redefine
+`Presence` at the property level.
 
 ## Default behavior
 
-If an author writes no `@Presence` reference, the engine still drives
-entry/exit via an **implicit `Opacity: @Presence` binding**. Every Jiv
+If an author writes no `Presence` reference, the engine still drives
+entry/exit via an **implicit `Opacity: Presence` binding**. Every Jiv
 fades in and out by default. This matches the engine's "everything
 animates, no hard seams" posture.
 
@@ -53,7 +55,7 @@ InstantPopup {
 ```
 
 The implicit binding is applied only when the author hasn't set `Opacity`
-themselves (whether or not `@Presence` is referenced elsewhere).
+themselves (whether or not `Presence` is referenced elsewhere).
 
 ## Lifecycle
 
@@ -64,7 +66,7 @@ Four moments in a Jiv's existence:
    The spring takes over.
 
 2. **Steady state.** Once `Presence ≥ 1 − ε`, the Jiv is fully present.
-   The spring holds at 1. Properties bound to `@Presence` sit at their
+   The spring holds at 1. Properties bound to `Presence` sit at their
    fully-there value.
 
 3. **Leave intent.** The framework binding wants to remove the Jiv (e.g.
@@ -87,86 +89,102 @@ By default, a leaving Jiv **keeps its layout space** until Presence reaches
 0. Siblings do not reflow while it fades. This preserves visual stability
 during exit.
 
-Authors can opt into collapsing-on-exit by binding sizing to `@Presence`:
+Authors can opt into collapsing-on-exit by binding sizing to `Presence`:
 
 ```jss
 Collapsing {
-  Opacity: @Presence
-  Height: @Presence * 48        /* node shrinks to 0 height as it leaves */
+  Opacity: Presence
+  Height: Presence * 48        /* node shrinks to 0 height as it leaves */
 }
 ```
 
-The layout solver reads the `@Presence`-resolved `Height` value each pass.
+The layout solver reads the `Presence`-resolved `Height` value each pass.
 Neighbors flex into the vacated space smoothly, no special-case.
 
-## Directional cues — @Entering / @Exiting
+## Directional cues — Entering / Exiting
 
 Most UIs look fine with symmetric enter/exit (the node enters from the
 same place it exits to). For asymmetric cases, the engine provides two
 boolean flags on the Jiv:
 
-- `@Entering` — true while Presence is below 1 AND the target is 1
-- `@Exiting` — true while Presence is above 0 AND the target is 0
+- `Entering` — true while Presence is below 1 AND the target is 1
+- `Exiting` — true while Presence is above 0 AND the target is 0
 
 These let an author branch via `when(...)` inside JSS:
 
 ```jss
 Toast {
-  Opacity: @Presence
+  Opacity: Presence
   /* enter from top, exit to the right */
-  OffsetX: when(@Exiting, 40 * (1 - @Presence), 0)
-  OffsetY: when(@Entering, -20 * (1 - @Presence), 0)
+  OffsetX: when(Exiting, 40 * (1 - Presence), 0)
+  OffsetY: when(Entering, -20 * (1 - Presence), 0)
 }
 ```
 
-If you don't need asymmetry, you don't need these flags — `@Presence`
+If you don't need asymmetry, you don't need these flags — `Presence`
 alone produces clean symmetric animation.
 
-## Interaction with `@spring`
+## Interaction with `@Spring`
 
 The Presence spring has sensible defaults (Stiffness 220, Damping 26,
-Mass 1). Authors override per class the same way they override any
-property spring:
+Mass 1). Override per-class with `@Spring Presence { ... }` — same as
+any other property spring. For a stylesheet-wide default, use the
+universal selector `*`:
 
 ```jss
+/* App-wide default — a touch gentler than the engine's 220/26. */
+* {
+  @Spring Presence { Stiffness: 200, Damping: 26 }
+}
+
+/* Modals feel heavier — override for just this class. */
 Modal {
-  @spring Presence {
+  @Spring Presence {
     Stiffness: 140
     Damping: 30
   }
 }
+
+/* Toasts snap in and out faster than the default. */
+Toast {
+  @Spring Presence {
+    Stiffness: 320
+    Damping: 28
+  }
+}
 ```
 
-The override cascades by selector, just like any other JSS rule.
+Same cascade rules as any other JSS property: more specific selector
+wins, later declaration wins within equal specificity.
 
 ## Driving other animations off Presence
 
-Because `@Presence` is just a value, any animatable property can reference
+Because `Presence` is just a value, any animatable property can reference
 it. Common idioms:
 
 ```jss
 /* fade + scale (default-ish Apple feel) */
 .Card {
-  Opacity: @Presence
-  Transform: scale(0.94 + 0.06 * @Presence)
+  Opacity: Presence
+  Transform: scale(0.94 + 0.06 * Presence)
 }
 
 /* slide up from below the viewport */
 .BottomSheet {
-  Opacity: @Presence
-  OffsetY: 400 * (1 - @Presence)
+  Opacity: Presence
+  OffsetY: 400 * (1 - Presence)
 }
 
 /* fade and blur out */
 .Page {
-  Opacity: @Presence
-  BlurAmount: (1 - @Presence) * 12
+  Opacity: Presence
+  BlurAmount: (1 - Presence) * 12
 }
 
 /* entry-only bounce, clean exit */
 .Hero {
-  Opacity: @Presence
-  Transform: when(@Entering, scale(0.9 + 0.15 * @Presence), scale(1))
+  Opacity: Presence
+  Transform: when(Entering, scale(0.9 + 0.15 * Presence), scale(1))
 }
 ```
 
@@ -185,15 +203,15 @@ everything else via the resolver.
   registers a settle callback that removes the node from its parent.
   Idempotent — calling twice is a no-op after the first.
 
-- **Resolver.** `@Presence` is a reserved variable. When the style
+- **Resolver.** `Presence` is a reserved variable. When the style
   resolver encounters it in an expression, it substitutes the current Jiv's
-  `Presence` value. Properties whose expressions contain `@Presence` are
+  `Presence` value. Properties whose expressions contain `Presence` are
   marked "Presence-dependent" and re-resolved each frame (not spring-
   animated — the spring is on Presence, not on the derived property).
-  Properties without `@Presence` use the normal spring-to-target pipeline.
+  Properties without `Presence` use the normal spring-to-target pipeline.
 
 - **Implicit Opacity.** During style resolution, if `Opacity` is not set by
-  any rule, it implicitly resolves to `@Presence`. This is a one-line
+  any rule, it implicitly resolves to `Presence`. This is a one-line
   fallback at the end of style resolution — doesn't require any AST
   rewriting.
 
@@ -225,7 +243,7 @@ the spring settles.
 
 When a parent calls `RequestLeave`, only the parent's Presence springs.
 Children keep their own Presence at 1 — they don't get their own fade.
-The parent's opacity (via the implicit `Opacity: @Presence` or an
+The parent's opacity (via the implicit `Opacity: Presence` or an
 explicit binding) cascades through the scene graph so children fade
 along with the parent visually. When the parent's spring settles at 0
 and is hard-removed, its entire subtree is hard-removed with it (no
@@ -248,8 +266,8 @@ of the visual fade finishing.
 
 Spring targets can change mid-flight. If a Jiv is entering (target=1,
 current=0.6) and the binding calls `RequestLeave` (target=0), the spring
-reverses from its current velocity. `@Entering` becomes false and
-`@Exiting` becomes true the moment the target changes, regardless of
+reverses from its current velocity. `Entering` becomes false and
+`Exiting` becomes true the moment the target changes, regardless of
 current value. The Jiv never "snaps" — one continuous spring trajectory.
 
 Re-entering during a leave works the same way: setting target back to 1
@@ -259,11 +277,11 @@ long as the target is 1 (or newly set to 1 before settle).
 ## Not in scope
 
 - **Staggered entry.** List children entering with offset delays. Doable
-  via per-child `@enter-delay` or on the parent as a stagger config, but
+  via per-child `@EnterDelay` or on the parent as a stagger config, but
   out of this spec.
-- **Per-property entry/exit curves** beyond what `@Presence * f` can
+- **Per-property entry/exit curves** beyond what `Presence * f` can
   express. If someone wants a completely different curve shape for exit
-  than entry, they use `@Entering` / `@Exiting` branching — good enough.
+  than entry, they use `Entering` / `Exiting` branching — good enough.
 - **Imperative Presence scrubbing.** Author code setting `jiv.Presence`
   directly (e.g. for drag-driven reveal gestures) is not part of V1.
   Presence is engine-managed. Gesture-driven appearance is expressible
@@ -272,10 +290,10 @@ long as the target is 1 (or newly set to 1 before settle).
   and springs to 1, so the app fades in on first load. For environments
   that need instant-on (e.g. SSR hydration), a future `InstantMount` mode
   would set Presence = 1 on the first frame without a spring. Out of V1.
-- **`when(cond, a, b)` expression syntax** used in the @Entering /
-  @Exiting examples. Requires a small Length grammar extension; specced
+- **`when(cond, a, b)` expression syntax** used in the Entering /
+  Exiting examples. Requires a small Length grammar extension; specced
   separately when that feature lands. Without it, authors can express
-  the same logic with arithmetic: `@Entering * (-20) * (1 - @Presence)`.
+  the same logic with arithmetic: `Entering * (-20) * (1 - Presence)`.
 
 ## Milestones
 
@@ -283,10 +301,10 @@ long as the target is 1 (or newly set to 1 before settle).
    mount. Hook into animation manager. Visual: newly-created Jivs fade in.
 2. **M-Presence-2** — `RequestLeave()` + settle-then-remove + framework
    binding change. Visual: removed Jivs fade out and clear from the tree.
-3. **M-Presence-3** — JSS `@Presence` reserved var + resolver support.
+3. **M-Presence-3** — JSS `Presence` reserved var + resolver support.
    Visual: authors can customize per class (scale on Cards, slide on
    Toasts).
-4. **M-Presence-4** — `@Entering` / `@Exiting` flags + `when(...)`
+4. **M-Presence-4** — `Entering` / `Exiting` flags + `when(...)`
    branching. Visual: asymmetric animations.
-5. **M-Presence-5** — `@spring Presence` override per class. Visual:
+5. **M-Presence-5** — `@Spring Presence` override per class. Visual:
    different materials get different feels.

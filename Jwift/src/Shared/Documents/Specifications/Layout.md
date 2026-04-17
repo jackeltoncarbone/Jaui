@@ -51,9 +51,9 @@ Style sheets provide the constraints. When a JSS property changes (class toggle,
 .Sidebar {
   Width: 20em
 
-  @spring Width { Stiffness: 170, Damping: 26 }
+  @Spring Width { Stiffness: 170, Damping: 26 }
 
-  @when Viewport.Width < 900 {
+  @If Viewport.Width < 900 {
     Width: 0em   // collapses — springs animate the width to 0
   }
 }
@@ -97,14 +97,14 @@ The entry/exit mode is configurable per node via JSS:
 
 ```jss
 .ListItem {
-  @spring * { Stiffness: 200, Damping: 28 }
-  @enter { Scale: 0.9, Opacity: 0 }
-  @exit { Scale: 0.9, Opacity: 0 }
+  @Spring * { Stiffness: 200, Damping: 28 }
+  @Enter { Scale: 0.9, Opacity: 0 }
+  @Exit { Scale: 0.9, Opacity: 0 }
 }
 
 .ModalPanel {
-  @enter { Transform: TranslateY(100%) }
-  @exit { Transform: TranslateY(100%) }
+  @Enter { Transform: TranslateY(100%) }
+  @Exit { Transform: TranslateY(100%) }
 }
 ```
 
@@ -139,7 +139,7 @@ A scroll container is a layout node with `Overflow: Scroll`. Its content can exc
 .ListView {
   Overflow: Scroll
   Direction: Column
-  @spring ScrollPosition { Stiffness: 120, Damping: 20 }
+  @Spring ScrollPosition { Stiffness: 120, Damping: 20 }
 }
 ```
 
