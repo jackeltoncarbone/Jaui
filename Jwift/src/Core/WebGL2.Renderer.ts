@@ -611,6 +611,24 @@ export class WebGL2Renderer implements Renderer {
     this._lastProgram = program;
   };
 
+  /** Hardware color-buffer copy from sceneFbo → default framebuffer.
+   *  Faster than `Blit(SceneTexture)` (which runs a shader pass) because
+   *  the GPU uses a dedicated copy path — no fragment shader invocation,
+   *  no sampler setup, often a DMA operation on integrated parts. On
+   *  tile-based renderers this can avoid rendering the scene back out
+   *  from tile memory at all. */
+  PresentScene = (): void => {
+    const gl = this._gl;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(
+      0, 0, this._width, this._height,
+      0, 0, this._width, this._height,
+      gl.COLOR_BUFFER_BIT, gl.NEAREST, // NEAREST: 1:1 same-size copy, no filter cost
+    );
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  };
+
   InvalidateFrameTransients = (): void => {
     const gl = this._gl;
     // Default framebuffer: we never touch depth for the final blit — tell

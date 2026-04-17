@@ -197,5 +197,14 @@ export interface Renderer {
    *  main memory — a meaningful bandwidth saving. No-op on desktop. */
   InvalidateFrameTransients(): void;
 
+  /** Composite the scene FBO onto the default framebuffer (swap chain)
+   *  using the backend's fastest available path. WebGL2 uses
+   *  `blitFramebuffer` (hardware color-buffer copy — no shader pass, no
+   *  sampler). WebGPU uses a native copyTextureToTexture or equivalent.
+   *  Replaces the old shader-based `Blit(SceneTexture)` for end-of-frame
+   *  composite: 2–3× faster on integrated GPUs, can fuse with tile-memory
+   *  invalidation on mobile so the scene never round-trips to main memory. */
+  PresentScene(): void;
+
   SetViewport(x: number, y: number, width: number, height: number): void;
 }

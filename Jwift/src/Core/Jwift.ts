@@ -429,6 +429,14 @@ export class Canvas {
           h: Math.min(h, Math.ceil(ph + lodMargin * 2)),
         };
         const baseBlurCssPx = 1;
+        // Don't force deeper pyramid here: forcing depth > natural radius
+        // over-blurs level 0 itself, which the shader uses as the "clear"
+        // end of the gradient. The visible progression (clear → heavy) only
+        // works when level 0 is LIGHTLY blurred (σ≈3-4) and higher LODs
+        // stack on top via mip sampling. Let BlurPass pick depth from the
+        // radius; mip levels beyond the dual-filter depth fall back to
+        // generateMipmap's box filter, which is adequate when level 0 is
+        // already smoothly dual-filtered.
         lastBackdrop = r.ComputeBlur(sceneSnap, w, h, baseBlurCssPx * d, undefined, scissor);
         lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
         r.GenerateBlurMipmap();
@@ -612,14 +620,12 @@ export class Canvas {
     // image/text/glass/pblur encountered during the walk.
     flushPanels();
 
-    // Final composite: the whole frame lives in sceneFbo. Bind the default
-    // framebuffer and blit the scene texture onto the swap chain. This is
-    // the single full-canvas copy per frame — everything else the render
-    // walk did was to the scene FBO. Disable blend so the clear+blit fully
-    // overwrites whatever was in the swap chain texture.
-    r.BindDefaultTarget({ R: 0, G: 0, B: 0 });
-    r.DisableBlend();
-    r.Blit(r.SceneTexture);
+    // Final composite: the whole frame lives in sceneFbo. `PresentScene`
+    // does a hardware `blitFramebuffer` from sceneFbo into the swap chain —
+    // 2-3× faster than the old shader-based Blit(SceneTexture) path on
+    // integrated GPUs, and can fuse with InvalidateFrameTransients on
+    // tile-based mobile renderers (scene never leaves tile memory).
+    r.PresentScene();
 
     // Tell the driver we don't need the default framebuffer's depth or the
     // scene FBO's color for the rest of this frame. On tile-based mobile

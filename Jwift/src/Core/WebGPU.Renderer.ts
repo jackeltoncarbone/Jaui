@@ -581,6 +581,14 @@ export class WebGPURenderer implements Renderer {
    *  than via an explicit invalidate call — this is a no-op here. */
   InvalidateFrameTransients = (): void => { /* no-op on WebGPU */ };
 
+  /** WebGPU scene composite. Not wired for the Angular demo path (WebGL2
+   *  is the active backend there). Proper implementation: `copyTextureToTexture`
+   *  from sceneTex to the swap chain texture view, or a minimal render pass
+   *  with loadOp: clear and a single full-quad draw sampling the scene. */
+  PresentScene = (): void => {
+    // TODO: implement for WebGPU when that backend is routed in.
+  };
+
   BindDefaultTarget = (clear?: { R: number; G: number; B: number }): void => {
     // Begin a new render pass targeting the swap chain texture.
     const swapChainView = this._gpu!.GetCurrentTexture().createView();

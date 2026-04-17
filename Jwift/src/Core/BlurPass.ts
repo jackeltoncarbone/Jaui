@@ -79,7 +79,12 @@ void main() {
 }
 `;
 
-const MAX_LEVELS = 5;
+// 9 levels: covers LOD 0..8 with dual-filter quality. Progressive blur
+// samples up to LOD ~6 for heavy BackdropFrostBlur settings; extra headroom
+// keeps the smooth mipmap chain populated deeper than we'll typically read.
+// Memory cost is negligible (each level halves the previous texel count —
+// the entire mip chain at 1920×1080 is ~11MB, same as one full canvas).
+const MAX_LEVELS = 9;
 
 export class BlurPass {
   private _gl: WebGL2RenderingContext;
@@ -234,51 +239,89 @@ export class BlurPass {
     return this._levels[0].Texture;
   };
 
-  /** Generate mipmaps on the output. The default `gl.generateMipmap` fills
-   *  every level via a 2×2 box filter of the level above — cheap, but it
-   *  preserves high-contrast edges in the source as discrete color blocks
+  /** Populate the output texture's mipmap chain with a Gaussian-quality
+   *  smooth pyramid instead of the driver's 2×2 box-filter output.
+   *
+   *  The driver's `gl.generateMipmap` uses a minimal 2×2 box filter per
+   *  level, which preserves high-contrast edges as discrete color blocks
    *  at mid/high LODs (visible as "blocky clusters" in heavy progressive-
-   *  blur regions).
+   *  blur regions). Replacing those levels with the dual-filter output
+   *  gives a Gaussian-approximation pyramid at every level and eliminates
+   *  the banding.
    *
-   *  We already produced better versions during the dual-filter up-chain —
-   *  `_levels[1..depth]` each hold a wider-kernel, progressively-low-pass-
-   *  filtered rendition of the scene at the right mipmap size. Blit each
-   *  into the corresponding mipmap slot of `_levels[0].Texture`, overwriting
-   *  the driver's box result. Deeper levels (beyond `depth`) stay as box-
-   *  filter — they're <~16×16 and rarely sampled visibly.
+   *  Two-stage pipeline:
+   *    1. `_levels[1..depth]` already hold upsample-chain results from
+   *       the just-finished `Blur()` — same-σ smooth representations at
+   *       mip-appropriate sizes. Blit each into the matching mip slot.
+   *    2. `_levels[depth]` holds a pure-downsample result. Extend the
+   *       chain by running `_down` (5-tap kernel) against it iteratively,
+   *       storing each output in `_levels[depth+1..]`, until we've covered
+   *       every mip level that the progressive-blur shader might sample
+   *       (up to MAX_LEVELS − 1). Blit those into their mip slots too.
    *
-   *  Cost: 1 call to `generateMipmap` + `depth` blit passes. Each blit is a
-   *  1:1 copy (matching sizes) so there's no filter cost. Net: equal or
-   *  cheaper than before (the box-filtered mid levels we were using are
-   *  replaced with dual-filter output that was being computed anyway). */
+   *  Only levels past the extended chain still use generateMipmap's box
+   *  result — by that point the texture is ≤4×4 so banding is invisible.
+   *
+   *  Cost: ~8 mip blits (1:1 size, free) + a handful of tiny DOWN passes.
+   *  Replaces the driver generateMipmap's work on levels 1..depth+N.  */
   GenerateOutputMipmap = (): void => {
     const gl = this._gl;
     const out = this._levels[0];
     const depth = this._lastDepth;
 
-    // Allocate the mipmap chain + flip to trilinear sampling first; this
-    // fills every level via box filter. We'll overwrite levels 1..depth
-    // with the higher-quality dual-filter versions below.
+    // Allocate the mip chain + set trilinear sampling. Fill via box first;
+    // we'll overwrite the levels that matter with dual-filter quality.
     out.GenerateMipmap();
 
     if (depth < 1) return;
 
-    // Ensure the single reusable blit FBO exists.
+    // ── Stage 2: extend the pyramid past `depth` by iterating DOWN on the
+    // deepest existing level. This is the key insight vs. the previous
+    // implementation — instead of leaving mip levels N > depth as box-
+    // filtered garbage, we produce Gaussian-quality downsamples for every
+    // level we'll actually sample.
+    //
+    // Guards: stop when we'd go below 1×1 or run out of framebuffer slots.
+    let extW = this._levels[depth].Width;
+    let extH = this._levels[depth].Height;
+    let extTex = this._levels[depth].Texture;
+    let extendedDepth = depth;
+    for (let i = depth + 1; i < MAX_LEVELS; i++) {
+      const newW = Math.max(1, Math.floor(extW / 2));
+      const newH = Math.max(1, Math.floor(extH / 2));
+      if (newW === extW && newH === extH) break; // already at 1×1
+      this._levels[i].Resize(newW, newH);
+      const dst = this._levels[i];
+      dst.Bind();
+      gl.viewport(0, 0, newW, newH);
+      gl.disable(gl.SCISSOR_TEST); // extended levels are full-mip regardless of input scissor
+      gl.useProgram(this._down.Program);
+      gl.uniform1i(this._downTexLoc, 0);
+      gl.uniform1f(this._downOffLoc, 1.0);
+      gl.uniform2f(this._downHpLoc, 0.5 / extW, 0.5 / extH);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, extTex);
+      gl.bindVertexArray(this._quad.Vao);
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      extTex = dst.Texture;
+      extW = newW;
+      extH = newH;
+      extendedDepth = i;
+    }
+
+    // ── Stage 1: blit every populated level (1..extendedDepth) into the
+    // corresponding mip slot of the output texture.
     if (!this._mipBlitFbo) {
       const fbo = gl.createFramebuffer();
       if (!fbo) throw new Error('[Jwift] Failed to create mip-blit FBO');
       this._mipBlitFbo = fbo;
     }
-
     const prevRead = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
     const prevDraw = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
-
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._mipBlitFbo);
-    for (let i = 1; i <= depth; i++) {
+    for (let i = 1; i <= extendedDepth; i++) {
       const src = this._levels[i];
-      // Attach mip level i of the output texture as the draw target.
       gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out.Texture, i);
-      // Read from the dual-filter up-chain result at matching size.
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, src.Framebuffer);
       gl.blitFramebuffer(
         0, 0, src.Width, src.Height,
@@ -286,7 +329,6 @@ export class BlurPass {
         gl.COLOR_BUFFER_BIT, gl.NEAREST,
       );
     }
-    // Detach so the blit FBO isn't holding a dangling attachment.
     gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
 
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead);
