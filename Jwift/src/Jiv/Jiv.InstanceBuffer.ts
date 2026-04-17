@@ -107,7 +107,8 @@ export class JivInstanceBuffer {
 
     data[offset + 28] = borderEdgeAa;
     data[offset + 29] = style.BorderRadiusSmoothness;
-    data[offset + 30] = style.Opacity;
+    // Multiply by Presence so every Jiv fades in / out on mount / leave.
+    data[offset + 30] = style.Opacity * jiv.Presence;
     data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : 0;
 
     data[offset + 32] = style.BackdropBrightness;

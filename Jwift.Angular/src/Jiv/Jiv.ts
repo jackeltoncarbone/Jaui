@@ -97,10 +97,18 @@ export class Jiv implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this._parent().AddChild(this.Node);
+    // Kick the animation loop so the new Jiv's Presence spring (0 → 1)
+    // starts animating on the next RAF. Idempotent when already running.
+    this._canvas?.Canvas.Animations.Kick();
   }
 
   ngOnDestroy(): void {
-    this._parent().RemoveChild(this.Node);
+    // Defer the actual tree removal to the engine: RequestLeave flips the
+    // Presence spring's target to 0, and the PresenceManager hard-removes
+    // the node once the spring settles. Gives the Jiv a fade-out instead
+    // of a hard pop when the Angular component goes away.
+    this.Node.RequestLeave();
+    this._canvas?.Canvas.Animations.Kick();
   }
 
   /** Nearest ancestor Jiv or the canvas root. Always defined if this

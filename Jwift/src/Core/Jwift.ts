@@ -30,6 +30,7 @@ import { DirtyFlag } from './Types';
 import { Element as JwiftElement } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
+import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 
 export class Canvas {
@@ -140,6 +141,11 @@ export class Canvas {
     this._animationManager.OnFrame(() => this.RequestFrame());
     this._scrollManager = new ScrollManager(this.Root);
     this._animationManager.Register(this._scrollManager);
+    this._animationManager.Register(new PresenceManager(this.Root));
+    // Kick once so the very first newly-added Jiv (Presence 0 → 1) starts
+    // animating even if nothing else is active. After this, the animation
+    // loop self-sustains while any spring is unsettled.
+    this._animationManager.Kick();
     this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv), this._animationManager);
 
     this._resize();
@@ -422,7 +428,7 @@ export class Canvas {
           const data = this._textBuffer.Data;
           data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
           data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
-          data[8] = node.RenderStyle ? node.RenderStyle.Opacity : 1;
+          data[8] = (node.RenderStyle ? node.RenderStyle.Opacity : 1) * node.Presence;
           data[9] = imgClipMeta.Offset; data[10] = imgClipMeta.Count; data[11] = 0;
           r.TextBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -559,7 +565,7 @@ export class Canvas {
     const yOffset = (contentH - totalTextHeight) / 2;
 
     for (const w of anim.Words) {
-      const opacity = node.RenderStyle.Opacity * w.Opacity.Value;
+      const opacity = node.RenderStyle.Opacity * w.Opacity.Value * node.Presence;
       if (opacity <= 0.001) continue;
       const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
       const wx = contentX + w.SpringX.Value;

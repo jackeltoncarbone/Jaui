@@ -17,6 +17,7 @@ import type { TextStyle, TextMeasurement } from '../Text/Text.Types';
 import { DefaultTextStyle } from '../Text/Text.Types';
 import type { ResolveContext } from '../Core/Length';
 import { DirtyFlag, type DirtyFlags } from '../Core/Types';
+import { Spring } from '../Animation/Spring';
 
 export type CursorStyle = 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
 
@@ -129,6 +130,17 @@ export class Element {
   /** How the image fills the element's box. Default `'Contain'`. */
   FitMode: FitMode = 'Contain';
 
+  // ── Presence ──
+  /** Spring-driven existence value in [0, 1]. Rises 0→1 on mount, falls 1→0
+   *  on `RequestLeave`. The renderer multiplies this into the final opacity,
+   *  so every Jiv fades in and out by default. See Presence.md for the full
+   *  contract — implicit-opacity fallback, settle-then-remove, etc. */
+  PresenceSpring: Spring = new Spring(0, 220, 26);
+  /** True once `RequestLeave` has been called — further calls are no-ops,
+   *  and the engine will hard-remove this element from its parent once the
+   *  spring settles at 0. */
+  LeaveRequested: boolean = false;
+
   // ── Dirty tracking ──
   Dirty: DirtyFlags = DirtyFlag.Layout;
 
@@ -159,7 +171,24 @@ export class Element {
       this.Text = options.Text;
       this.Dirty |= DirtyFlag.Text;
     }
+
+    // Start off-screen of the Presence range so mount springs us in. The
+    // settle-then-remove logic in the engine uses Target=0 to decide when
+    // to hard-remove; Target=1 is "be here".
+    this.PresenceSpring.Target = 1;
   }
+
+  /** Current Presence value (spring's current position). */
+  get Presence(): number { return this.PresenceSpring.Value; }
+
+  /** Schedule this element for animated removal. Flips the Presence spring's
+   *  target to 0; the engine walks the tree each frame and hard-removes
+   *  the element from its parent once the spring settles. Idempotent. */
+  RequestLeave = (): void => {
+    if (this.LeaveRequested) return;
+    this.LeaveRequested = true;
+    this.PresenceSpring.Target = 0;
+  };
 
   AddChild = (child: Element): void => {
     if (child.Parent) child.Parent.RemoveChild(child);
