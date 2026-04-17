@@ -338,7 +338,6 @@ ToolbarDropdown : LiquidGlass {
   Direction: Row
   Justify: Center
   Align: Center
-  Padding: @GlassPad
   Width: 48pt
   Height: 48pt
   BorderRadius: @ScreenR - @ChromePad
@@ -348,10 +347,9 @@ ToolbarAvatar {
   Direction: Row
   Justify: Center
   Align: Center
-  Width: 40pt
-  Height: 40pt
-  BorderRadius: @ScreenR - @ChromePad - @GlassPad
-  Background: rgba(255, 255, 255, 0.08)
+  Width: 100%
+  Height: 100%
+  BorderRadius: @ScreenR - @ChromePad
 }
 
 ToolbarAvatarGlyph {
