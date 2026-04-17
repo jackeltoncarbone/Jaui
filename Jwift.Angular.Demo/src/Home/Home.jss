@@ -237,11 +237,15 @@ RowCompact : Row {
   Height: 220pt
 }
 
+/* Card — image cover fills the whole box (FitMode: Cover set from template).
+ * No padding here; the CardFooter child owns its own breathing room and
+ * supplies the dark tint that keeps title/description legible against
+ * whatever image sits behind. Overflow: Hidden clips the image to the
+ * rounded-rect corners. */
 Card {
   Direction: Column
   Justify: End
-  Align: Start
-  Padding: 20pt
+  Align: Stretch
   Width: 260pt
   BorderRadius: 48pt
   ShadowColor: rgba(0, 0, 0, 0.45)
@@ -249,22 +253,45 @@ Card {
   ShadowOffsetY: 10pt
   FlexGrow: 1
   Overflow: Hidden
+  FitMode: Cover
 }
 
 CardCompact : Card {
-  Padding: 14pt 16pt 16pt 16pt
   Width: 200pt
   ShadowColor: rgba(0, 0, 0, 0.4)
   ShadowBlur: 20pt
   ShadowOffsetY: 8pt
 }
 
-CardKicker {
+/* Tinted footer — a dark semi-transparent band over the bottom of the
+ * cover image. Stand-in for the gradient overlay that Show Studio's
+ * CSS uses; solid alpha is enough to keep white text legible. */
+CardFooter {
+  Direction: Column
+  Justify: Start
+  Align: Start
+  Padding: 18pt
+  Gap: 8pt
+  Background: rgba(0, 0, 0, 0.55)
+}
+
+/* Small pill badge showing item type ("SHOW" / "SONG"). Sits above
+ * the title with the same visual weight as Show Studio's type-badge. */
+CardBadge {
+  Direction: Row
+  Justify: Center
+  Align: Center
+  Padding: 3pt 8pt
+  BorderRadius: 999pt
+  Background: rgba(255, 255, 255, 0.18)
+}
+
+CardBadgeLabel {
   FontFamily: Inter
-  FontSize: 11pt
+  FontSize: 10pt
   FontWeight: 700
-  Color: rgba(255, 255, 255, 0.72)
-  LetterSpacing: 0.6pt
+  Color: rgba(255, 255, 255, 0.95)
+  LetterSpacing: 0.8pt
 }
 
 CardTitle {
@@ -282,6 +309,39 @@ CardTitleCompact {
   FontWeight: 600
   LineHeight: 1.15
   Color: rgba(255, 255, 255, 0.97)
+}
+
+/* Creator row — avatar placeholder + company name. Mirrors Show
+ * Studio's .creator block in Content.Item.Widget. */
+CardMeta {
+  Direction: Row
+  Justify: Start
+  Align: Center
+  Gap: 8pt
+}
+
+CardAvatar {
+  Width: 20pt
+  Height: 20pt
+  BorderRadius: 999pt
+  Background: rgba(255, 255, 255, 0.25)
+}
+
+CardMetaLabel {
+  FontFamily: Inter
+  FontSize: 12pt
+  FontWeight: 500
+  Color: rgba(255, 255, 255, 0.85)
+}
+
+CardDescription {
+  FontFamily: Inter
+  FontSize: 12pt
+  FontWeight: 400
+  LineHeight: 1.3
+  Color: rgba(255, 255, 255, 0.75)
+  MaxLines: 2
+  TextOverflow: Ellipsis
 }
 
 /* Glass dropdown — collapsed: single avatar pill. Expands on tap (TBD).

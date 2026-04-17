@@ -20,6 +20,11 @@ import { DirtyFlag, type DirtyFlags } from '../Core/Types';
 
 export type CursorStyle = 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
 
+/** How an image fills its Element's box.
+ *  - `Contain` (default) — image fits inside the box, centered, aspect preserved.
+ *  - `Cover` — image fills the box, aspect preserved, excess cropped. */
+export type FitMode = 'Contain' | 'Cover';
+
 export interface ElementOptions {
   X?: number;
   Y?: number;
@@ -38,6 +43,7 @@ export interface ElementOptions {
   PointerEvents?: 'Auto' | 'None';
   Cursor?: CursorStyle;
   UserSelect?: 'Auto' | 'None';
+  FitMode?: FitMode;
 }
 
 export class Element {
@@ -120,6 +126,8 @@ export class Element {
   /** Image source key — matches the key used with ImageCache.LoadUrl/LoadSvg.
    *  When set, the renderer draws the cached image texture inside this element. */
   ImageSrc: string | null = null;
+  /** How the image fills the element's box. Default `'Contain'`. */
+  FitMode: FitMode = 'Contain';
 
   // ── Dirty tracking ──
   Dirty: DirtyFlags = DirtyFlag.Layout;
@@ -131,6 +139,7 @@ export class Element {
     this.Height = options?.Height ?? 0;
     this.SnapLayout = options?.SnapLayout ?? false;
     this.PointScale = options?.PointScale ?? '1pt';
+    if (options?.FitMode !== undefined) this.FitMode = options.FitMode;
 
     this.Visible = options?.Visible ?? true;
     this.Overflow = options?.Overflow ?? 'Visible';

@@ -366,7 +366,25 @@ export class Canvas {
 
       // Render this node's image (if any — after panel, before text)
       if (node.ImageSrc) {
-        const imgEntry = this._imageCache.Get(node.ImageSrc);
+        let imgEntry = this._imageCache.Get(node.ImageSrc);
+        // Auto-load on first sight — ImageSrc accepts any real src (URL,
+        // path, data URI). If it's not in the cache yet, kick off LoadUrl
+        // now; the cache's OnLoad will fire a relayout when it finishes.
+        // Pre-rasterized SVGs are inserted via LoadSvg under a chosen key
+        // and will be found here on the first lookup, skipping this branch.
+        if (!imgEntry) {
+          this._imageCache.LoadUrl(node.ImageSrc, this._dpr);
+          imgEntry = this._imageCache.Get(node.ImageSrc);
+        }
+        // The panel shader self-clips to its own rounded rect (its SDF is
+        // the painted silhouette) but the image pipeline draws a plain
+        // rectangle — without appending the node's own box clip here, a
+        // Cover-fit image overflows the node's rounded corners. Mirror
+        // the panel's self-clip by encoding stack+boxClip for this draw.
+        const imgStack = node.Overflow !== 'Visible'
+          ? [...stack, this._boxClip(node, offsetX, offsetY)]
+          : stack;
+        const imgClipMeta = imgStack === stack ? clipMeta : this._clipBuffer.Encode(imgStack, this._dpr);
         if (imgEntry && imgEntry.Ready) {
           // Set intrinsic sizes from image so layout can auto-size
           if (node.IntrinsicWidth === null) {
@@ -380,17 +398,20 @@ export class Canvas {
           const elemH = node.Height * d;
           const imgAspect = imgEntry.Width / imgEntry.Height;
           const elemAspect = elemW / elemH;
+          // Cover inverts Contain's branch: pick the dim whose scale fills the
+          // box (the other overflows and gets clipped by the node's Overflow).
+          const fit = node.FitMode;
+          const fillLong = fit === 'Cover' ? imgAspect < elemAspect : imgAspect > elemAspect;
 
-          // Contain: fit image inside element, centered, preserving aspect
           let drawW: number, drawH: number, drawX: number, drawY: number;
-          if (imgAspect > elemAspect) {
-            // Image wider than element — fit to width
+          if (fillLong) {
+            // Scale so image width = element width; height follows aspect.
             drawW = elemW;
             drawH = elemW / imgAspect;
             drawX = (node.X + offsetX) * d;
             drawY = (node.Y + offsetY) * d + (elemH - drawH) / 2;
           } else {
-            // Image taller than element — fit to height
+            // Scale so image height = element height; width follows aspect.
             drawH = elemH;
             drawW = elemH * imgAspect;
             drawX = (node.X + offsetX) * d + (elemW - drawW) / 2;
@@ -402,7 +423,7 @@ export class Canvas {
           data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
           data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
           data[8] = node.RenderStyle ? node.RenderStyle.Opacity : 1;
-          data[9] = clipMeta.Offset; data[10] = clipMeta.Count; data[11] = 0;
+          data[9] = imgClipMeta.Offset; data[10] = imgClipMeta.Count; data[11] = 0;
           r.TextBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(data, 0, TEXT_FLOATS_PER_INSTANCE);
