@@ -147,6 +147,7 @@ HeroCtaLabel {
   FontSize: 15pt
   FontWeight: 500
   Color: rgba(255, 255, 255, 0.85)
+  TextAlign: Center
   FlexGrow: 1
 }
 
