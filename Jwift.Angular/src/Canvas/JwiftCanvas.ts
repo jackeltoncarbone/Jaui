@@ -86,9 +86,8 @@ export class JwiftCanvas implements OnInit, OnDestroy {
   ngOnInit(): void {
     const sheet = this.stylesheet();
     if (sheet) this._registry.Merge(sheet);
-    // Canvas.Start() defers the first tick until document.fonts.ready and
-    // re-flushes text caches on any later font-load batch — nothing to
-    // await here.
+    // Canvas.Start() kicks rAF immediately; text re-measures on
+    // FontFaceSet.loadingdone via Canvas' own listener.
     this.Canvas.Start();
     this.ready.emit(this.Canvas);
   }

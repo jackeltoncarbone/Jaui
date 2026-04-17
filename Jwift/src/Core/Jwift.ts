@@ -189,34 +189,14 @@ export class Canvas {
     if (this._running) return;
     this._running = true;
     this._lastTime = 0;
-    // Defer the first tick until web fonts are actually loaded. Measuring
-    // text before the 2D canvas context has real font metrics produces
-    // zero-width spaces (words render touching) and locks in wrong widths
-    // until eviction.
-    //
-    // `document.fonts.ready` alone is unreliable: it resolves when the
-    // *current* load batch completes, but late-registered @font-face rules
-    // (e.g. a Google Fonts stylesheet that's still parsing when we ask) add
-    // new FontFaces to the set *after* ready resolves. That produces the
-    // classic "pill text starts wrapped, then animates to correct width
-    // after a second" bug. Awaiting each FontFace's own `.loaded` promise
-    // catches these late additions. Cap with a 2s ceiling so a single
-    // flaky font doesn't hold the whole app back.
-    const begin = (): void => {
-      if (!this._running) return;
-      this._frameId = requestAnimationFrame(this._tick);
-    };
-    if (typeof document !== 'undefined' && document.fonts?.ready) {
-      const waitAll = async (): Promise<void> => {
-        await document.fonts.ready;
-        const all = Array.from(document.fonts);
-        await Promise.all(all.map(f => f.loaded.catch(() => {})));
-      };
-      const timeout = new Promise<void>(r => setTimeout(r, 2000));
-      Promise.race([waitAll(), timeout]).then(begin, begin);
-    } else {
-      begin();
-    }
+    // Start rendering immediately — don't block on web fonts. The browser
+    // does the same thing with `font-display: swap`: render with fallback
+    // metrics, re-measure when the real font lands. `_listenForFontLoad`
+    // fires `_invalidateAllText()` on every `FontFaceSet.loadingdone`, so
+    // late-registered @font-face rules (Google Fonts batches) get picked
+    // up automatically. First paint is instant; text reflows once as fonts
+    // settle, animated by the existing wrap cross-fade.
+    this._frameId = requestAnimationFrame(this._tick);
   };
 
   Stop = (): void => {
