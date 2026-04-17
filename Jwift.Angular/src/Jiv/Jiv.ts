@@ -75,7 +75,7 @@ export class Jiv implements OnInit, OnDestroy {
     // Extract Element-level properties from Style before constructing
     const style = (opts.Style ?? {}) as Record<string, unknown>;
     const elementProps: Record<string, unknown> = {};
-    for (const key of ['Overflow', 'Visible', 'Interactive', 'PointerEvents', 'Cursor', 'UserSelect']) {
+    for (const key of ['Overflow', 'Visible', 'Interactive', 'PointerEvents', 'Cursor', 'UserSelect', 'PointScale']) {
       if (key in style) {
         elementProps[key] = style[key];
         delete style[key];
@@ -161,6 +161,14 @@ export class Jiv implements OnInit, OnDestroy {
       if ('UserSelect' in style) {
         this.Node.UserSelect = style['UserSelect'] as 'Auto' | 'None';
         delete style['UserSelect'];
+      }
+      if ('PointScale' in style) {
+        const next = String(style['PointScale']);
+        if (this.Node.PointScale !== next) {
+          this.Node.PointScale = next;
+          this.Node.MarkLayoutDirty();
+        }
+        delete style['PointScale'];
       }
       Object.assign(this.Node.Style, style);
     }

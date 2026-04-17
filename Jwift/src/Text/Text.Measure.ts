@@ -44,8 +44,10 @@ export const MeasureText = (
   const lineHeightPx = style.FontSize * style.LineHeight;
 
   if (content === '') {
-    return { Width: 0, Height: lineHeightPx, Lines: [''] };
+    return { Width: 0, MinWidth: 0, Height: lineHeightPx, Lines: [''] };
   }
+
+  const minWidth = _measureLongestWord(content, c);
 
   // No wrap — single line (preserves explicit \n split)
   if (maxWidth === null || maxWidth === Infinity) {
@@ -56,7 +58,7 @@ export const MeasureText = (
       const w = c.measureText(line).width;
       if (w > width) width = w;
     }
-    return { Width: width, Height: lines.length * lineHeightPx, Lines: lines };
+    return { Width: width, MinWidth: minWidth, Height: lines.length * lineHeightPx, Lines: lines };
   }
 
   // Word wrap
@@ -71,7 +73,21 @@ export const MeasureText = (
     const w = c.measureText(line).width;
     if (w > width) width = w;
   }
-  return { Width: width, Height: clipped.length * lineHeightPx, Lines: clipped };
+  return { Width: width, MinWidth: minWidth, Height: clipped.length * lineHeightPx, Lines: clipped };
+};
+
+/** Longest individual word's width. Drives min-content sizing — the smallest
+ *  width the text can take without a word overflowing. */
+const _measureLongestWord = (content: string, ctx: CanvasRenderingContext2D): number => {
+  let max = 0;
+  for (const paragraph of content.split('\n')) {
+    for (const word of paragraph.split(/\s+/)) {
+      if (word.length === 0) continue;
+      const w = ctx.measureText(word).width;
+      if (w > max) max = w;
+    }
+  }
+  return max;
 };
 
 /** Wrap a single paragraph into lines, pushing into `out`. */

@@ -85,6 +85,28 @@ fn inside_clip_stack(pixel: vec2f, clip_meta: vec4f) -> bool {
   return true;
 }
 
+// Intersection of all active clip AABBs in sample_uv space (scene UV has y
+// flipped vs device px). Used to clamp pyramid lookups so the mip's spatial
+// neighborhood never reaches past the parent's clip — prevents beyond-clip
+// content from leaking into blurred pixels along the edges.
+fn clip_stack_uv_aabb(clip_meta: vec4f, resolution: vec2f) -> vec4f {
+  let offset = u32(clip_meta.x);
+  let count = u32(clip_meta.y);
+  var uv_min = vec2f(0.0, 0.0);
+  var uv_max = vec2f(1.0, 1.0);
+  for (var i: u32 = 0u; i < count; i = i + 1u) {
+    let base = (offset + i) * 3u;
+    let rect = clip_stack[base];
+    let px_min = rect.xy;
+    let px_max = rect.xy + rect.zw;
+    let c_uv_min = vec2f(px_min.x / resolution.x, 1.0 - px_max.y / resolution.y);
+    let c_uv_max = vec2f(px_max.x / resolution.x, 1.0 - px_min.y / resolution.y);
+    uv_min = max(uv_min, c_uv_min);
+    uv_max = min(uv_max, c_uv_max);
+  }
+  return vec4f(uv_min, uv_max);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   if (!inside_clip_stack(in.pixel_pos, uniforms.clip_meta)) {
@@ -100,12 +122,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
   let ramp = smoothstep(0.0, 1.0, t);
 
-  let scene_rgb = textureSample(scene, scene_sampler, in.sample_uv).rgb;
+  // Clamp sample_uv so mipmap neighborhoods never reach past the parent's
+  // clip AABB. Inset by half a texel at the current LOD so the bilinear
+  // footprint at that level lands entirely inside the clip — no beyond-clip
+  // pixels bleeding into blurred results along the clip edges.
+  let clip_uv = clip_stack_uv_aabb(uniforms.clip_meta, uniforms.resolution);
+  let lod = ramp * ramp * uniforms.max_lod;
+  let texel_uv = exp2(lod) / uniforms.resolution;
+  let uv_min = clip_uv.xy + texel_uv * 0.5;
+  let uv_max = clip_uv.zw - texel_uv * 0.5;
+  let safe_uv = clamp(in.sample_uv, min(uv_min, uv_max), max(uv_min, uv_max));
+
+  let scene_rgb = textureSample(scene, scene_sampler, safe_uv).rgb;
 
   // Quadratic LOD curve — each mipmap LOD doubles sigma, so squaring makes
   // perceived blur increase feel linear.
-  let lod = ramp * ramp * uniforms.max_lod;
-  let blur_rgb = textureSampleLevel(pyramid, pyramid_sampler, in.sample_uv, lod).rgb;
+  let blur_rgb = textureSampleLevel(pyramid, pyramid_sampler, safe_uv, lod).rgb;
 
   // Gradual crossfade from unblurred scene into pyramid over first 20%.
   let blend_t = smoothstep(0.0, 0.2, ramp);

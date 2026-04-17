@@ -65,8 +65,15 @@ export class Element {
   PointScale: string;
 
   // ── Intrinsic sizing ──
+  /** Max-content width/height — natural size assuming no wrapping. This is
+   *  what `Auto` resolves to when there's no other constraint. */
   IntrinsicWidth: number | null = null;
   IntrinsicHeight: number | null = null;
+  /** Min-content width/height — the smallest size the element can take
+   *  without its contents overflowing (longest word for text; max child
+   *  MinContent on the cross axis for containers). */
+  IntrinsicMinWidth: number | null = null;
+  IntrinsicMinHeight: number | null = null;
 
   // ── Scroll state ──
   /** Current scroll offset (CSS px). Only meaningful when Overflow === 'Scroll'. */

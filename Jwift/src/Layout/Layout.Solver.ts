@@ -174,13 +174,13 @@ const _computeAttachRect = (node: Element, target: LayoutResult): LayoutResult =
 };
 
 const _resolveAttachSize = (
-  size: string | 'Auto',
+  size: string | 'Auto' | 'MinContent' | 'MaxContent',
   _containerSize: number,
   fallback: number,
   ctx: ResolveContext,
   axis: 'W' | 'H',
 ): number => {
-  if (size === 'Auto') return fallback;
+  if (size === 'Auto' || size === 'MinContent' || size === 'MaxContent') return fallback;
   return _r(size, ctx, axis);
 };
 
@@ -224,8 +224,18 @@ const _solveNode = (
       child.ResolveCtx = childCtx;
       const declW = _resolveSize(child.ChildLayout.Width, width, childCtx, 'W');
       const declH = _resolveSize(child.ChildLayout.Height, height, childCtx, 'H');
-      const w = declW === 'Auto' ? (child.IntrinsicWidth ?? child.Width) : declW;
-      const h = declH === 'Auto' ? (child.IntrinsicHeight ?? child.Height) : declH;
+      const resolveKeyword = (
+        v: number | 'Auto' | 'MinContent' | 'MaxContent',
+        intrinsic: number | null,
+        intrinsicMin: number | null,
+        fallback: number,
+      ): number => {
+        if (typeof v === 'number') return v;
+        if (v === 'MinContent') return intrinsicMin ?? intrinsic ?? fallback;
+        return intrinsic ?? fallback;   // Auto + MaxContent → max-content intrinsic
+      };
+      const w = resolveKeyword(declW, child.IntrinsicWidth, child.IntrinsicMinWidth, child.Width);
+      const h = resolveKeyword(declH, child.IntrinsicHeight, child.IntrinsicMinHeight, child.Height);
 
       // Fixed: CSS-style viewport anchors via Top/Bottom/Left/Right beat
       // the imperative child.X / child.Y. Left wins over Right if both set
@@ -293,18 +303,37 @@ const _solveNode = (
         : c.ChildLayout.AlignSelf;
       const crossStretches = effectiveAlign === 'Stretch';
 
+      // MinContent / MaxContent resolve to the corresponding intrinsic.
+      // Auto: max-content on the main axis; cross axis behaves the same
+      // unless the child stretches (then cross defers to the flex solver).
+      const autoW = c.IntrinsicWidth;
+      const autoH = c.IntrinsicHeight;
+      const minW = c.IntrinsicMinWidth ?? autoW;
+      const minH = c.IntrinsicMinHeight ?? autoH;
+
+      const pickW = (keyword: 'Auto' | 'MinContent' | 'MaxContent'): number | 'Auto' => {
+        if (keyword === 'MinContent') return minW ?? 'Auto';
+        return autoW ?? 'Auto';   // Auto + MaxContent → max-content intrinsic
+      };
+      const pickH = (keyword: 'Auto' | 'MinContent' | 'MaxContent'): number | 'Auto' => {
+        if (keyword === 'MinContent') return minH ?? 'Auto';
+        return autoH ?? 'Auto';
+      };
+      const isKeyword = (v: unknown): v is 'Auto' | 'MinContent' | 'MaxContent' =>
+        v === 'Auto' || v === 'MinContent' || v === 'MaxContent';
+
       let finalW: number | 'Auto';
       let finalH: number | 'Auto';
       if (horiz) {
-        finalW = resolvedW === 'Auto' && c.IntrinsicWidth !== null ? c.IntrinsicWidth : resolvedW;
-        finalH = resolvedH === 'Auto' && c.IntrinsicHeight !== null && !crossStretches
-          ? c.IntrinsicHeight
-          : resolvedH;
+        finalW = isKeyword(resolvedW) ? pickW(resolvedW) : resolvedW;
+        if (isKeyword(resolvedH) && !crossStretches) finalH = pickH(resolvedH);
+        else if (isKeyword(resolvedH)) finalH = 'Auto';
+        else finalH = resolvedH;
       } else {
-        finalH = resolvedH === 'Auto' && c.IntrinsicHeight !== null ? c.IntrinsicHeight : resolvedH;
-        finalW = resolvedW === 'Auto' && c.IntrinsicWidth !== null && !crossStretches
-          ? c.IntrinsicWidth
-          : resolvedW;
+        finalH = isKeyword(resolvedH) ? pickH(resolvedH) : resolvedH;
+        if (isKeyword(resolvedW) && !crossStretches) finalW = pickW(resolvedW);
+        else if (isKeyword(resolvedW)) finalW = 'Auto';
+        else finalW = resolvedW;
       }
 
       const flexBasis: number | 'Auto' = c.ChildLayout.FlexBasis === 'Auto'
@@ -356,11 +385,16 @@ const _solveNode = (
 };
 
 const _resolveSize = (
-  size: string | 'Auto',
+  size: string | 'Auto' | 'MinContent' | 'MaxContent',
   _containerSize: number,
   ctx: ResolveContext,
   axis: 'W' | 'H',
-): number | 'Auto' => {
-  if (size === 'Auto') return 'Auto';
+): number | 'Auto' | 'MinContent' | 'MaxContent' => {
+  // Keyword match is case-insensitive so authors can write any casing
+  // (`Auto`, `auto`, `MinContent`, `mincontent`, …).
+  const lower = typeof size === 'string' ? size.toLowerCase() : '';
+  if (lower === 'auto') return 'Auto';
+  if (lower === 'mincontent') return 'MinContent';
+  if (lower === 'maxcontent') return 'MaxContent';
   return _r(size, ctx, axis);
 };

@@ -67,7 +67,9 @@ export const DefaultTextStyle: TextStyle = {
 };
 
 export interface TextMeasurement {
-  Width: number;        // CSS px — widest line
+  Width: number;        // CSS px — widest line (max-content width of the text)
+  /** Longest unbreakable word's width — the min-content width of the text. */
+  MinWidth: number;
   Height: number;       // CSS px — total height = lines * FontSize * LineHeight
   Lines: string[];      // text broken into lines
 }

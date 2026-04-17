@@ -70,8 +70,8 @@ export interface ChildLayout {
   /** Space-separated shorthand or number (uniform). "Auto" permitted in any
    *  component for flex auto-margin behavior (pass via explicit "auto" token). */
   Margin: string;
-  Width: string | 'Auto';
-  Height: string | 'Auto';
+  Width: string | 'Auto' | 'MinContent' | 'MaxContent';
+  Height: string | 'Auto' | 'MinContent' | 'MaxContent';
   MinWidth: string;
   MaxWidth: string;
   MinHeight: string;

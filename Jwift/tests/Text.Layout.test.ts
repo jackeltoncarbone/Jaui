@@ -229,7 +229,7 @@ describe('Text / intrinsic size integration', () => {
     // Simulate MeasureText having run: set TextMeasurement manually.
     const btn = new Jiv({ Layout: { Padding: '8 14 8 14' } });
     btn.Text = 'Save';
-    btn.TextMeasurement = { Width: 30, Height: 20, Lines: ['Save'] };
+    btn.TextMeasurement = { Width: 30, MinWidth: 30, Height: 20, Lines: ['Save'] };
 
     ComputeIntrinsicSizes(btn);
 
@@ -246,7 +246,7 @@ describe('Text / intrinsic size integration', () => {
       ChildLayout: { FlexGrow: 0, Height: 36 },
     });
     btn.Text = 'Save';
-    btn.TextMeasurement = { Width: 30, Height: 20, Lines: ['Save'] };
+    btn.TextMeasurement = { Width: 30, MinWidth: 30, Height: 20, Lines: ['Save'] };
     header.AddChild(btn);
 
     ComputeIntrinsicSizes(header);

@@ -521,10 +521,12 @@ const _positionLines = (
 ): void => {
   if (lines.length === 0) return;
 
-  // Single line: stretch to fill, position at 0
+  // Single line: stretch to fill, position at 0. Stretch only ever grows
+  // the line — never shrinks it below what the items need (otherwise a
+  // child's cross-axis margin gets clipped by a too-small container).
   if (lines.length === 1) {
     lines[0].CrossPos = 0;
-    if (alignContent === 'Stretch') {
+    if (alignContent === 'Stretch' && crossAvailable > lines[0].CrossSize) {
       lines[0].CrossSize = crossAvailable;
     }
     return;

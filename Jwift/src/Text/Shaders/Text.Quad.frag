@@ -21,40 +21,45 @@ float pickClipRadius(vec2 p, vec4 radii) {
     return p.y <= 0.0 ? radii.x : radii.w;
 }
 
-bool insideClipShape(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
+// Signed distance to the rounded-rect clip boundary. Negative inside,
+// positive outside, in device pixels. Enables fwidth-free 1px AA at the
+// clip edge via a fixed ±0.5px smoothstep instead of a hard discard.
+float clipShapeDistance(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
     vec2 center = rect.xy + rect.zw * 0.5;
     vec2 halfSize = rect.zw * 0.5;
     vec2 qSigned = pixel - center;
     vec2 qAbs = abs(qSigned);
-    if (qAbs.x > halfSize.x || qAbs.y > halfSize.y) return false;
     float r = pickClipRadius(qSigned, radii);
     vec2 cornerP = qAbs - (halfSize - vec2(r));
-    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) return true;
+    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) {
+        return max(qAbs.x - halfSize.x, qAbs.y - halfSize.y);
+    }
     float n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
     float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
-    return L <= 1.0;
+    return r * (pow(max(L, 0.0), 1.0 / n) - 1.0);
 }
 
 const int MAX_CLIP_DEPTH = 16;
 
-bool insideClipStack(vec2 pixel, int offset, int count) {
+// Intersection of a clip stack — a pixel is inside the combined clip iff
+// it's inside every individual clip. Signed distance = max of per-clip SDFs.
+float clipStackDistance(vec2 pixel, int offset, int count) {
+    float d = -1e20;
     for (int i = 0; i < MAX_CLIP_DEPTH; i++) {
         if (i >= count) break;
         int base = (offset + i) * 3;
         vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
         vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
         vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
-        if (!insideClipShape(pixel, rect, radii, meta.x)) {
-            return false;
-        }
+        d = max(d, clipShapeDistance(pixel, rect, radii, meta.x));
     }
-    return true;
+    return d;
 }
 
 void main() {
-    if (!insideClipStack(v_PixelPos, v_ClipOffset, v_ClipCount)) {
-        discard;
-    }
+    float clipD = clipStackDistance(v_PixelPos, v_ClipOffset, v_ClipCount);
+    if (clipD > 1.0) discard;
+    float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
     vec4 texel = texture(u_Atlas, v_TexCoord);
-    fragColor = texel * v_Opacity;
+    fragColor = texel * v_Opacity * clipAlpha;
 }

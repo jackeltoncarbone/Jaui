@@ -54,6 +54,7 @@ in vec2 v_Local;
 in vec2 v_SampleUv;
 in vec2 v_PixelPos;
 
+uniform vec2 u_Resolution;                  // canvas w/h, device px
 uniform sampler2D u_Scene;                  // unblurred scene (level -1)
 uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = base blur, higher = more)
 uniform float u_MaxLod;                     // max mipmap LOD to sample (maps to ramp = 1.0)
@@ -73,40 +74,64 @@ float pickClipRadius(vec2 p, vec4 radii) {
     return p.y <= 0.0 ? radii.x : radii.w;
 }
 
-bool insideClipShape(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
+// Signed distance to the rounded-rect clip boundary. Negative inside,
+// positive outside, in device pixels. Enables a 1-pixel smoothstep at the
+// clip edge instead of a hard discard.
+float clipShapeDistance(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
     vec2 center = rect.xy + rect.zw * 0.5;
     vec2 halfSize = rect.zw * 0.5;
     vec2 qSigned = pixel - center;
     vec2 qAbs = abs(qSigned);
-    if (qAbs.x > halfSize.x || qAbs.y > halfSize.y) return false;
     float r = pickClipRadius(qSigned, radii);
     vec2 cornerP = qAbs - (halfSize - vec2(r));
-    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) return true;
+    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) {
+        return max(qAbs.x - halfSize.x, qAbs.y - halfSize.y);
+    }
     float n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
     float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
-    return L <= 1.0;
+    return r * (pow(max(L, 0.0), 1.0 / n) - 1.0);
 }
 
 const int MAX_CLIP_DEPTH = 16;
 
-bool insideClipStack(vec2 pixel, int offset, int count) {
+float clipStackDistance(vec2 pixel, int offset, int count) {
+    float d = -1e20;
     for (int i = 0; i < MAX_CLIP_DEPTH; i++) {
         if (i >= count) break;
         int base = (offset + i) * 3;
         vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
         vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
         vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
-        if (!insideClipShape(pixel, rect, radii, meta.x)) {
-            return false;
-        }
+        d = max(d, clipShapeDistance(pixel, rect, radii, meta.x));
     }
-    return true;
+    return d;
+}
+
+// Intersection of all active clip AABBs in sample_uv space (scene UV has
+// y flipped vs device px). Used to clamp pyramid lookups so the mip's
+// spatial neighborhood never reaches past the parent's clip — prevents
+// beyond-clip content from leaking into blurred pixels along the edges.
+vec4 clipStackUvAabb(int offset, int count, vec2 resolution) {
+    vec2 uvMin = vec2(0.0);
+    vec2 uvMax = vec2(1.0);
+    for (int i = 0; i < MAX_CLIP_DEPTH; i++) {
+        if (i >= count) break;
+        int base = (offset + i) * 3;
+        vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
+        vec2 pxMin = rect.xy;
+        vec2 pxMax = rect.xy + rect.zw;
+        vec2 cUvMin = vec2(pxMin.x / resolution.x, 1.0 - pxMax.y / resolution.y);
+        vec2 cUvMax = vec2(pxMax.x / resolution.x, 1.0 - pxMin.y / resolution.y);
+        uvMin = max(uvMin, cUvMin);
+        uvMax = min(uvMax, cUvMax);
+    }
+    return vec4(uvMin, uvMax);
 }
 
 void main() {
-    if (!insideClipStack(v_PixelPos, u_ClipMeta.x, u_ClipMeta.y)) {
-        discard;
-    }
+    float clipD = clipStackDistance(v_PixelPos, u_ClipMeta.x, u_ClipMeta.y);
+    if (clipD > 1.0) discard;
+    float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
     // t = 0 at the clear end → 1 at the blurred end
     float t;
     if (u_Direction == 0)       t = 1.0 - v_Local.y;    // ToTop
@@ -130,12 +155,22 @@ void main() {
     // plate. By fully opaque-writing a pre-blended RGB, the output at t=0
     // equals the raw scene sample (matching what dest already holds) and
     // smoothly ramps to max blur at t=1. Zero haze, truly progressive.
-    vec3 sceneRgb = texture(u_Scene, v_SampleUv).rgb;
+    // Clamp sample_uv so mipmap neighborhoods never reach past the parent's
+    // clip AABB. Inset by half a texel at the current LOD so the bilinear
+    // footprint at that level lands entirely inside the clip — no beyond-clip
+    // pixels bleeding into blurred results along the clip edges.
+    vec4 clipUv = clipStackUvAabb(u_ClipMeta.x, u_ClipMeta.y, u_Resolution);
     // Quadratic LOD curve — each mipmap LOD doubles sigma, so a linear LOD
     // ramp looks exponential to the eye. Squaring makes the perceived blur
     // increase feel linear (gentle near clear end, steeper near blurred end).
     float lod = ramp * ramp * u_MaxLod;
-    vec3 blurRgb = textureLod(u_Pyramid, v_SampleUv, lod).rgb;
+    vec2 texelUv = exp2(lod) / u_Resolution;
+    vec2 uvMin = clipUv.xy + texelUv * 0.5;
+    vec2 uvMax = clipUv.zw - texelUv * 0.5;
+    vec2 safeUv = clamp(v_SampleUv, min(uvMin, uvMax), max(uvMin, uvMax));
+
+    vec3 sceneRgb = texture(u_Scene, safeUv).rgb;
+    vec3 blurRgb = textureLod(u_Pyramid, safeUv, lod).rgb;
     // Gradual crossfade from the unblurred scene into the pyramid over the
     // first 20% of the gradient. Beyond 20%, fully in the pyramid.
     float blendT = smoothstep(0.0, 0.2, ramp);
@@ -161,6 +196,8 @@ void main() {
 
     // Alpha = u_Opacity (Jiv-level fade only). No ramp in alpha — the ramp
     // is already baked into rgb via the stage interpolation + grading above.
-    fragColor = vec4(rgb, u_Opacity);
+    // clipAlpha feathers the rounded-rect clip edge so the blur's visible
+    // silhouette has proper AA instead of a hard boolean cut.
+    fragColor = vec4(rgb, u_Opacity * clipAlpha);
 }
 `;

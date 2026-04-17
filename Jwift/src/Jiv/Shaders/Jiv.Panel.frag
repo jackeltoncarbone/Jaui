@@ -438,20 +438,24 @@ float pickClipRadius(vec2 p, vec4 radii) {
     return p.y <= 0.0 ? radii.x : radii.w;
 }
 
-// Superellipse inside-test that matches the panel shader's painted shape:
+// Signed distance to the rounded-rect clip boundary. Negative inside,
+// positive outside, in device pixels. Replaces the old boolean inside-test
+// so callers can produce a 1-pixel smoothstep at the clip edge instead of
+// a hard discard (which hard-cut AA'd borders and glyphs).
 // n = 2 + 6*smoothness. smoothness=0 → pure circle corners; higher → squircle.
-bool insideClipShape(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
+float clipShapeDistance(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
     vec2 center = rect.xy + rect.zw * 0.5;
     vec2 halfSize = rect.zw * 0.5;
     vec2 qSigned = pixel - center;
     vec2 qAbs = abs(qSigned);
-    if (qAbs.x > halfSize.x || qAbs.y > halfSize.y) return false;
     float r = pickClipRadius(qSigned, radii);
     vec2 cornerP = qAbs - (halfSize - vec2(r));
-    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) return true;
+    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) {
+        return max(qAbs.x - halfSize.x, qAbs.y - halfSize.y);
+    }
     float n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
     float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
-    return L <= 1.0;
+    return r * (pow(max(L, 0.0), 1.0 / n) - 1.0);
 }
 
 // Loop bounded by a constant so drivers with stricter GLSL ES 3.00 loop
@@ -459,27 +463,31 @@ bool insideClipShape(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
 // exceeds a handful.
 const int MAX_CLIP_DEPTH = 16;
 
-bool insideClipStack(vec2 pixel, int offset, int count) {
+// Intersection of a clip stack — a pixel is inside the combined clip iff
+// it's inside every individual clip. Signed distance = max of per-clip SDFs.
+float clipStackDistance(vec2 pixel, int offset, int count) {
+    float d = -1e20;
     for (int i = 0; i < MAX_CLIP_DEPTH; i++) {
         if (i >= count) break;
         int base = (offset + i) * 3;
         vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
         vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
         vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
-        if (!insideClipShape(pixel, rect, radii, meta.x)) {
-            return false;
-        }
+        d = max(d, clipShapeDistance(pixel, rect, radii, meta.x));
     }
-    return true;
+    return d;
 }
 
 void main() {
     // CSS-style overflow clipping — inherited rounded-rect clip stack. The
     // meta is packed into v_Outline.zw to stay within WebGL2's 16-attribute
     // cap (a 17th slot would overflow MAX_VERTEX_ATTRIBS on many drivers).
-    if (!insideClipStack(v_PixelPos, int(v_Outline.z), int(v_Outline.w))) {
-        discard;
-    }
+    // SDF-based so AA'd panel silhouettes, borders, and glyphs fade smoothly
+    // at the clip edge instead of being hard-cut (the old boolean discard
+    // nullified the 1-pixel feather on everything it touched).
+    float clipD = clipStackDistance(v_PixelPos, int(v_Outline.z), int(v_Outline.w));
+    if (clipD > 1.0) discard;
+    float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
 
     vec2 panelCenter = v_PanelGeom.xy;
     vec2 panelHalfSize = v_PanelGeom.zw;
@@ -886,6 +894,6 @@ void main() {
         result.a = result.a * (1.0 - borderAlpha) + borderAlpha;
     }
 
-    result.a *= opacity;
+    result.a *= opacity * clipAlpha;
     fragColor = result;
 }

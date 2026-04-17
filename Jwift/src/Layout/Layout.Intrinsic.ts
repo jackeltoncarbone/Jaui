@@ -77,6 +77,8 @@ const _compute = (node: Element): void => {
   if (node.Text !== null && node.TextMeasurement !== null) {
     node.IntrinsicWidth = node.TextMeasurement.Width + pl + pr;
     node.IntrinsicHeight = node.TextMeasurement.Height + pt + pb;
+    node.IntrinsicMinWidth = node.TextMeasurement.MinWidth + pl + pr;
+    node.IntrinsicMinHeight = node.TextMeasurement.Height + pt + pb;
     return;
   }
 
@@ -92,8 +94,14 @@ const _compute = (node: Element): void => {
   const general = Resolve(node.Layout.Gap, ctx, axis);
   const gap = specific || general;
 
+  // Max-content: sum on main axis, max on cross axis.
+  // Min-content: main axis = max of children's main-axis min (row) or sum
+  // (column — vertical stacking doesn't collapse). Cross axis = max of
+  // children's cross-axis min.
   let mainSum = 0;
   let crossMax = 0;
+  let mainMin = 0;        // row: max(child.MinMain); column: sum(child.MinMain)
+  let crossMin = 0;       // max of child min on cross axis
   let count = 0;
 
   for (const c of node.Children) {
@@ -109,29 +117,58 @@ const _compute = (node: Element): void => {
     const explicitH = _intrinsicOf(h, childCtx, 'H');
     const effectiveW = explicitW ?? c.IntrinsicWidth ?? 0;
     const effectiveH = explicitH ?? c.IntrinsicHeight ?? 0;
+    // For min-content: explicit sizes pin the child (an explicit 200px child
+    // contributes 200px even to min-content); only auto/content-sized children
+    // fall back to their IntrinsicMin.
+    const effectiveMinW = explicitW ?? c.IntrinsicMinWidth ?? c.IntrinsicWidth ?? 0;
+    const effectiveMinH = explicitH ?? c.IntrinsicMinHeight ?? c.IntrinsicHeight ?? 0;
 
-    const childMain = horiz ? effectiveW : effectiveH;
-    const childCross = horiz ? effectiveH : effectiveW;
+    // Child's own margins participate in its intrinsic contribution —
+    // otherwise a child with a big cross-axis margin makes the parent too
+    // small to honor that margin, and the flex solver silently eats it.
+    const [mt, mr, mb, ml] = ResolveLengthTuple4(c.ChildLayout.Margin, childCtx, ['H', 'W', 'H', 'W']);
+    const mainMargin = horiz ? ml + mr : mt + mb;
+    const crossMargin = horiz ? mt + mb : ml + mr;
+
+    const childMain = (horiz ? effectiveW : effectiveH) + mainMargin;
+    const childCross = (horiz ? effectiveH : effectiveW) + crossMargin;
+    const childMinMain = (horiz ? effectiveMinW : effectiveMinH) + mainMargin;
+    const childMinCross = (horiz ? effectiveMinH : effectiveMinW) + crossMargin;
 
     mainSum += childMain;
     if (childCross > crossMax) crossMax = childCross;
+
+    if (horiz) {
+      if (childMinMain > mainMin) mainMin = childMinMain;   // row: unbreakable widest
+    } else {
+      mainMin += childMinMain;                               // column: still stacks
+    }
+    if (childMinCross > crossMin) crossMin = childMinCross;
+
     count++;
   }
 
   const totalGaps = Math.max(0, count - 1) * gap;
   mainSum += totalGaps;
+  if (!horiz) mainMin += totalGaps;
 
   const mainPadding = horiz ? pl + pr : pt + pb;
   const crossPadding = horiz ? pt + pb : pl + pr;
   mainSum += mainPadding;
   crossMax += crossPadding;
+  mainMin += mainPadding;
+  crossMin += crossPadding;
 
   if (horiz) {
     node.IntrinsicWidth = mainSum;
     node.IntrinsicHeight = crossMax;
+    node.IntrinsicMinWidth = mainMin;
+    node.IntrinsicMinHeight = crossMin;
   } else {
     node.IntrinsicHeight = mainSum;
     node.IntrinsicWidth = crossMax;
+    node.IntrinsicMinHeight = mainMin;
+    node.IntrinsicMinWidth = crossMin;
   }
 };
 
@@ -141,11 +178,11 @@ const _compute = (node: Element): void => {
  *  pre-layout). Plain numbers, `pt`, `rpt`, `vw`, `vh`, and arithmetic
  *  over those all resolve — they don't need parent dims. */
 const _intrinsicOf = (
-  size: string | 'Auto',
+  size: string | 'Auto' | 'MinContent' | 'MaxContent',
   ctx: ResolveContext,
   axis: 'W' | 'H',
 ): number | null => {
-  if (size === 'Auto') return null;
+  if (size === 'Auto' || size === 'MinContent' || size === 'MaxContent') return null;
   if (typeof size === 'number') return size;
   if (size.includes('%')) return null;   // parent-relative — skip
   return Resolve(size, ctx, axis);
