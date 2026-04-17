@@ -80,4 +80,33 @@ describe('JivInstanceBuffer (single unified renderer for every Jiv)', () => {
     }
     expect(buf.Count).toBe(5);
   });
+
+  it('default Opacity is Presence — resolves to 0 at mount', () => {
+    // Spec: implicit `Opacity: Presence` when the author doesn't set it.
+    // At construction, Presence is 0, so resolved Opacity is 0. The style
+    // animator's per-frame tick will spring it up to match Presence as the
+    // spring value rises toward 1.
+    const j = new Jiv({});
+    expect(j.Style.Opacity).toBe('Presence');
+    expect(j.RenderStyle.Opacity).toBe(0);
+  });
+
+  it('explicit Opacity wins over the Presence default — no fade', () => {
+    const j = new Jiv({ Style: { Opacity: 1 } });
+    expect(j.Style.Opacity).toBe(1);
+    expect(j.RenderStyle.Opacity).toBe(1);
+  });
+
+  it('packed opacity is style.Opacity alone (no double Presence multiply)', () => {
+    // Sanity: InstanceBuffer must pack RenderStyle.Opacity directly —
+    // the implicit Presence fade lives in the style default, not in a
+    // separate multiply here. Otherwise `Opacity: Presence` would
+    // double-fade (Presence × Presence).
+    const buf = new JivInstanceBuffer();
+    const j = new Jiv({ Style: { Opacity: 1 } });
+    buf.Begin();
+    buf.Push(j, 1);
+    // loc 8 a_StyleParams.z = opacity
+    expect(buf.Data[30]).toBe(1);
+  });
 });

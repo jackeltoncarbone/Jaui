@@ -445,7 +445,7 @@ export class Canvas {
           const data = this._textBuffer.Data;
           data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
           data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
-          data[8] = (node.RenderStyle ? node.RenderStyle.Opacity : 1) * node.Presence;
+          data[8] = node.RenderStyle ? node.RenderStyle.Opacity : 1;
           data[9] = imgClipMeta.Offset; data[10] = imgClipMeta.Count; data[11] = 0;
           r.TextBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -582,7 +582,7 @@ export class Canvas {
     const yOffset = (contentH - totalTextHeight) / 2;
 
     for (const w of anim.Words) {
-      const opacity = node.RenderStyle.Opacity * w.Opacity.Value * node.Presence;
+      const opacity = node.RenderStyle.Opacity * w.Opacity.Value;
       if (opacity <= 0.001) continue;
       const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
       const wx = contentX + w.SpringX.Value;

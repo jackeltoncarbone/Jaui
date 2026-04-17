@@ -105,12 +105,23 @@ describe('Length resolver: @Name references', () => {
     expect(() => Resolve('X', ctx, 'W')).toThrow(/Unknown identifier "X"/);
   });
 
-  it('accepts the Presence built-in but falls back to 0 pre-M3', () => {
-    // Pre-M3: Presence identifier parses as a builtin ref that resolves to 0
-    // (the implicit Opacity * Presence multiplication happens in InstanceBuffer,
-    // not through the style resolver yet).
+  it('resolves Presence / Entering / Exiting from the context', () => {
+    const ctx: ResolveContext = { ...seed, Vars: new Map(), Presence: 0.5, Entering: 1, Exiting: 0 };
+    expect(Resolve('Presence', ctx, 'W')).toBe(0.5);
+    expect(Resolve('Entering', ctx, 'W')).toBe(1);
+    expect(Resolve('Exiting', ctx, 'W')).toBe(0);
+    expect(Resolve('0.96 + 0.04 * Presence', ctx, 'W')).toBeCloseTo(0.98);
+    expect(Resolve('Entering * -20 * (1 - Presence)', ctx, 'W')).toBe(-10);
+  });
+
+  it('falls back to 0 for Presence builtins when ctx omits them', () => {
+    // Layout-pass / seed contexts don't carry per-frame Presence values.
+    // They fall through to 0 so layout is deterministic and sizing
+    // expressions don't pick up transient animator state.
     const ctx = ctxWith({});
     expect(Resolve('Presence', ctx, 'W')).toBe(0);
+    expect(Resolve('Entering', ctx, 'W')).toBe(0);
+    expect(Resolve('Exiting', ctx, 'W')).toBe(0);
     expect(Resolve('0.96 + 0.04 * Presence', ctx, 'W')).toBe(0.96);
   });
 });

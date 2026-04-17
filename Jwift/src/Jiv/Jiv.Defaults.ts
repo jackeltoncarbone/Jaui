@@ -49,6 +49,10 @@ export const DefaultJivStyle: JivStyle = {
   ShadowOffsetX: '0',
   ShadowOffsetY: '0',
   InnerShadow: false,
-  Opacity: '1',
+  // Implicit fade: resolving `Presence` at style-resolution time yields the
+  // Jiv's current PresenceSpring value (0 on mount, springing to 1). Authors
+  // who want no fade override explicitly (`Opacity: 1`); authors who want a
+  // custom fade curve replace the default with their own expression.
+  Opacity: 'Presence',
   Layer: '0',
 };

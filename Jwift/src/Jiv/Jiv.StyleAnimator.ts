@@ -130,18 +130,33 @@ export class JivStyleAnimator implements Animatable {
     // Resolve the initial target under the seed ctx (or the Jiv's ctx if
     // it has one already from a prior pass). Springs start settled at the
     // initial values so there's no entry animation.
-    const ctx = _jiv.ResolveCtx ?? SEED_CONTEXT;
-    const target = ResolveStyle(_jiv.Style, ctx);
+    const target = ResolveStyle(_jiv.Style, this._ctx());
     this._springs = BINDINGS.map(([get]) =>
       new Spring(get(target), DEFAULT_STIFFNESS, DEFAULT_DAMPING, DEFAULT_MASS));
   }
+
+  /** Extend the Jiv's layout context with current Presence spring state so
+   *  style expressions like `OffsetY: -20 * (1 - Presence)` resolve against
+   *  the live spring position each tick. Layout-pass contexts don't carry
+   *  these (layout doesn't run per-frame), so builtins fall back to 0
+   *  there — which is what we want for sizing-affecting expressions. */
+  private _ctx = () => {
+    const base = this._jiv.ResolveCtx ?? SEED_CONTEXT;
+    const spring = this._jiv.PresenceSpring;
+    const p = spring.Value;
+    return {
+      ...base,
+      Presence: p,
+      Entering: (spring.Target === 1 && p < 1) ? 1 : 0,
+      Exiting:  (spring.Target === 0 && p > 0) ? 1 : 0,
+    };
+  };
 
   /** Force all springs to their current targets (zero velocity) and mirror
    *  back onto RenderStyle. Used on first layout so newly-created Jivs
    *  render at the target without a frame of catch-up animation. */
   SnapToTargets = (): void => {
-    const ctx = this._jiv.ResolveCtx ?? SEED_CONTEXT;
-    const target = ResolveStyle(this._jiv.EffectiveStyle(), ctx);
+    const target = ResolveStyle(this._jiv.EffectiveStyle(), this._ctx());
     _copyNonAnimated(this._jiv.RenderStyle, target);
     for (let i = 0; i < BINDINGS.length; i++) {
       const [get, set] = BINDINGS[i];
@@ -153,8 +168,7 @@ export class JivStyleAnimator implements Animatable {
   };
 
   Tick = (dt: number): boolean => {
-    const ctx = this._jiv.ResolveCtx ?? SEED_CONTEXT;
-    const target = ResolveStyle(this._jiv.EffectiveStyle(), ctx);
+    const target = ResolveStyle(this._jiv.EffectiveStyle(), this._ctx());
     const render = this._jiv.RenderStyle;
     _copyNonAnimated(render, target);
     let active = false;

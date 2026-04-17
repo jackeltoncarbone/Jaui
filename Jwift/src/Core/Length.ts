@@ -53,6 +53,19 @@ export interface ResolveContext {
    *  imperative code) can skip it; a missing table just produces warnings
    *  when a `@Name` reference is encountered. */
   Vars?: ReadonlyMap<string, string>;
+  /** Current per-Jiv Presence value (0..1). Resolved into expressions that
+   *  reference the bare `Presence` identifier. Absent in layout-pass
+   *  contexts (layout doesn't re-run per frame); populated by the style
+   *  animator each tick so authored fade/slide/scale curves re-resolve
+   *  against the current spring position. */
+  Presence?: number;
+  /** 1 while the Jiv's Presence spring is mounting toward 1 (Presence < 1
+   *  AND spring target === 1); 0 otherwise. Lets authors branch entry vs
+   *  exit via arithmetic: `OffsetY: Entering * -20 * (1 - Presence)`. */
+  Entering?: number;
+  /** 1 while the Jiv is leaving (Presence > 0 AND spring target === 0);
+   *  0 otherwise. Symmetric counterpart to `Entering`. */
+  Exiting?: number;
 }
 
 // ─── Authoring helpers (PascalCase, return strings) ─────────────────────
@@ -97,8 +110,10 @@ type _Parsed = number | _Relative | _Expr | _VarRef;
 
 /** Built-in identifiers resolved per-Jiv by the renderer. In expression
  *  contexts they parse as numeric tokens (not `@var` references), looked
- *  up in `ResolveContext` at resolve time. V1 ships no lookups here yet —
- *  Presence M3 wires them in. For now they parse to 0. */
+ *  up in `ResolveContext` at resolve time. When the context doesn't carry
+ *  a value (layout pass, seed context, imperative callers), they fall
+ *  back to 0 — which matches the "nothing is present yet" default and
+ *  keeps layout-time resolutions deterministic. */
 const _BUILTIN_IDENTS = new Set(['Presence', 'Entering', 'Exiting']);
 
 const _parseCache = new Map<string, _Parsed>();
@@ -136,12 +151,17 @@ const _resolveParsed = (
   }
   if ('Name' in length) {
     const name = length.Name;
-    // Built-in per-Jiv identifier (Presence, Entering, Exiting). V1 has
-    // no resolver hook for these yet — Presence M3 will wire current
-    // spring values into ctx. Until then, they fall through to 0 so the
-    // implicit Opacity * Presence multiplication in Jiv.InstanceBuffer
-    // stays the single source of truth for fade behavior.
-    if (_BUILTIN_IDENTS.has(name)) return 0;
+    // Built-in per-Jiv identifiers read from the resolve context. The
+    // style animator extends each Jiv's layout ctx with current spring
+    // state before resolving style expressions, so `Presence`, `Entering`,
+    // `Exiting` produce live values. Contexts that omit them (layout pass,
+    // seed) fall back to 0 — "nothing is present yet."
+    if (_BUILTIN_IDENTS.has(name)) {
+      if (name === 'Presence') return ctx.Presence ?? 0;
+      if (name === 'Entering') return ctx.Entering ?? 0;
+      if (name === 'Exiting')  return ctx.Exiting  ?? 0;
+      return 0;
+    }
     if (!ctx.Vars) {
       if (!_warnedMissingVars.has(name)) {
         _warnedMissingVars.add(name);

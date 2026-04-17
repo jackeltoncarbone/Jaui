@@ -107,8 +107,11 @@ export class JivInstanceBuffer {
 
     data[offset + 28] = borderEdgeAa;
     data[offset + 29] = style.BorderRadiusSmoothness;
-    // Multiply by Presence so every Jiv fades in / out on mount / leave.
-    data[offset + 30] = style.Opacity * jiv.Presence;
+    // Implicit Presence fade now lives in the default `Opacity: Presence`
+    // (Jiv.Defaults) — RenderStyle.Opacity already carries the current
+    // spring value. Authors override via `Opacity: 1` for no fade or
+    // `Opacity: <expr>` for a custom curve.
+    data[offset + 30] = style.Opacity;
     data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : 0;
 
     data[offset + 32] = style.BackdropBrightness;
