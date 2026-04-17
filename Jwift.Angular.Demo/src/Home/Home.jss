@@ -135,6 +135,10 @@ HeroCta {
   Padding: 12pt 32pt
   BorderRadius: 999pt
   Background: rgba(255, 255, 255, 0.1)
+  /* Explicit width — MaxContent sizes the container but the child text
+   * still wraps at sub-container width (known intrinsic-sizing bug,
+   * tracked in NextUp). Pin to 180pt until that's fixed. */
+  Width: 180pt
   FlexShrink: 0
 }
 
@@ -143,6 +147,7 @@ HeroCtaLabel {
   FontSize: 15pt
   FontWeight: 500
   Color: rgba(255, 255, 255, 0.85)
+  FlexGrow: 1
 }
 
 Section {
