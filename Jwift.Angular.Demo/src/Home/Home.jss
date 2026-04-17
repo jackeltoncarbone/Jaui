@@ -49,7 +49,11 @@ ToolbarRow {
 }
 
 ToolbarLogo {
+  /* Aspect-preserving at image intrinsic 120:46 → 40pt × 104pt = same
+   * effective height as the Avatar (also 40pt) so the two sit at equal
+   * visible heights in the Toolbar row. */
   Height: 40pt
+  Width: 104pt
   FlexShrink: 0
 }
 
