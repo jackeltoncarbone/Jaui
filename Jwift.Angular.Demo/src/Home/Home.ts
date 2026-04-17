@@ -33,7 +33,7 @@ interface SectionData {
   Id: string;
   Title: string;
   Items: Item[];
-  Layout: 'standard' | 'compact';
+  Layout: 'hero' | 'standard' | 'compact';
   ShowViewAll: boolean;
 }
 
@@ -111,9 +111,9 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
                 </jiv>
               }
             </jiv>
-            <jiv [class]="s.Layout === 'compact' ? 'RowCompact' : 'Row'">
+            <jiv [class]="RowClass(s.Layout)">
               @for (c of s.Items; track c.Id) {
-                <jiv [class]="s.Layout === 'compact' ? 'CardCompact' : 'Card'"
+                <jiv [class]="CardClass(s.Layout)"
                      [image]="c.CoverUrl">
                   <jiv class="CardFooter">
                     <jiv class="CardBadge">
@@ -188,7 +188,7 @@ export class Home {
     },
     {
       Id: 'show-reg-2026', Type: 'Show', Title: 'Riverside Regiment 2026',
-      CoverUrl: 'https://images.unsplash.com/photo-1520523839897-bd6e18d2d0f3?w=800&q=80',
+      CoverUrl: 'https://images.unsplash.com/photo-1516737490857-847e6377eeb7?w=800&q=80',
       Description: 'A bold new chapter for Riverside Regiment.',
       Company: Riverside, Channel: Season2026,
     },
@@ -262,7 +262,7 @@ export class Home {
       });
     }
     return [
-      { Id: 'featured',  Title: 'Featured',                     Items: featured,             Layout: 'standard', ShowViewAll: false },
+      { Id: 'featured',  Title: 'Featured',                     Items: featured,             Layout: 'hero',     ShowViewAll: false },
       { Id: 'trending',  Title: 'Trending',                     Items: this.Trending(),      Layout: 'standard', ShowViewAll: true  },
       { Id: 'continue',  Title: 'Continue Where You Left Off',  Items: this.Continue(),      Layout: 'compact',  ShowViewAll: false },
       { Id: 'store',     Title: 'New in the Store',             Items: this.Store(),         Layout: 'compact',  ShowViewAll: false },
@@ -283,4 +283,15 @@ export class Home {
   Select(i: number): void { this.Selected.set(i); }
 
   Upper(s: string): string { return s.toUpperCase(); }
+
+  RowClass(layout: 'hero' | 'standard' | 'compact'): string {
+    if (layout === 'hero')    return 'RowHero';
+    if (layout === 'compact') return 'RowCompact';
+    return 'Row';
+  }
+  CardClass(layout: 'hero' | 'standard' | 'compact'): string {
+    if (layout === 'hero')    return 'CardHero';
+    if (layout === 'compact') return 'CardCompact';
+    return 'Card';
+  }
 }

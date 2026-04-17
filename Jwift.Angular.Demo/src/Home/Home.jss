@@ -14,7 +14,7 @@
 
 Screen {
   Direction: Column
-  Background: rgb(255, 255, 255)
+  Background: rgb(0, 0, 0)
   FlexGrow: 1
   BorderRadius: 80pt
   Overflow: Hidden
@@ -109,7 +109,7 @@ HeroStub {
   Padding: 128pt 32pt 32pt 80pt
   Gap: 20pt
   Height: 70vh
-  Background: rgba(29, 43, 92, 0.18)
+  Background: rgba(81, 81, 81, 0.24)
   FlexGrow: 0
   FlexShrink: 0
 }
@@ -170,9 +170,10 @@ SectionTitle {
 LiquidGlass {
   Background: rgba(255, 255, 255, 0)
   BorderRadius: 32pt
-  BorderWidth: 0.5pt
-  BorderBlur: 0pt
-  BorderColor: rgba(255, 255, 255, 0.45)
+  BorderWidth: 1pt
+  BorderBlur: 0.25pt
+  BorderBrightness: 1.25
+  BorderSaturation: 1.5
 
   ShadowColor: rgba(0, 0, 0, 0.18)
   ShadowBlur: 22pt
@@ -222,19 +223,30 @@ SectionViewAllLabel {
   Color: rgba(255, 255, 255, 0.85)
 }
 
+/* Carousel row — fixed-size cards flow left-to-right and wrap to a new
+ * line once they run out of horizontal room. Show Studio's horizontal
+ * overflow-scroll is replaced by a multi-line wrap so everything the
+ * user has is visible on page without a sideways scrub. */
 Row {
   Direction: Row
+  Wrap: Wrap
   Justify: Start
-  Align: Stretch
+  Align: Start
   Gap: 14pt
+  RowGap: 14pt
   Padding: 2pt 4pt 2pt 4pt
   FlexGrow: 0
   FlexShrink: 0
-  Height: 340pt
 }
 
 RowCompact : Row {
-  Height: 220pt
+  Gap: 12pt
+  RowGap: 12pt
+}
+
+RowHero : Row {
+  Gap: 16pt
+  RowGap: 16pt
 }
 
 /* Card — image cover fills the whole box (FitMode: Cover set from template).
@@ -242,25 +254,42 @@ RowCompact : Row {
  * supplies the dark tint that keeps title/description legible against
  * whatever image sits behind. Overflow: Hidden clips the image to the
  * rounded-rect corners. */
+/* Show Studio sizing: 20em × 4:3 (standard) = 320 × 240, 15em × 4:3
+ * (compact) = 240 × 180. Fixed width + fixed height keeps aspect and
+ * lets the Row wrap cleanly to new lines once the viewport fills up. */
 Card {
   Direction: Column
   Justify: End
   Align: Stretch
   Width: 260pt
+  Height: 195pt
   BorderRadius: 48pt
   ShadowColor: rgba(0, 0, 0, 0.45)
   ShadowBlur: 24pt
   ShadowOffsetY: 10pt
-  FlexGrow: 1
+  FlexGrow: 0
+  FlexShrink: 0
   Overflow: Hidden
   FitMode: Cover
 }
 
 CardCompact : Card {
   Width: 200pt
+  Height: 150pt
   ShadowColor: rgba(0, 0, 0, 0.4)
   ShadowBlur: 20pt
   ShadowOffsetY: 8pt
+}
+
+/* Hero tier — the "grand" Featured cards. Show Studio: 38em × 4:3
+ * ≈ 608 × 456. At PointScale 1.25 → 480pt × 360pt. */
+CardHero : Card {
+  Width: 480pt
+  Height: 360pt
+  BorderRadius: 56pt
+  ShadowColor: rgba(0, 0, 0, 0.5)
+  ShadowBlur: 32pt
+  ShadowOffsetY: 14pt
 }
 
 /* Tinted footer — a dark semi-transparent band over the bottom of the

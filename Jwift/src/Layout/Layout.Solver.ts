@@ -287,6 +287,12 @@ const _solveNode = (
   for (let i = 0; i < node.Children.length; i++) {
     const c = node.Children[i];
     const pos = c.ChildLayout.Position;
+    // Leaving children drop out of the flex flow immediately — layout is
+    // the instant truth, so siblings spring into the vacated slot while
+    // the leaving node fades in place via its own X/Y animator. This
+    // overrides Presence.md's "keep layout space until settle" default
+    // in favor of the engine's "instant compute, spring motion" posture.
+    if (c.LeaveRequested) continue;
     if (pos === 'Flow' || pos === 'Offset') {
       // Give each flow child a ctx now so intrinsic fields/margins resolve
       // against its own parent dims + PointScale. The ctx is re-set once
@@ -336,14 +342,32 @@ const _solveNode = (
         else finalW = resolvedW;
       }
 
-      const flexBasis: number | 'Auto' = c.ChildLayout.FlexBasis === 'Auto'
-        ? 'Auto'
-        : _r(c.ChildLayout.FlexBasis, childCtx, horiz ? 'W' : 'H');
-
       // Margin: single string shorthand (or bare number for all-sides). No
       // per-component 'Auto' support for now — flex auto-margin was barely
       // used and can come back as a CSS token parse later if needed.
       const [mt, mr, mb, ml] = ResolveLengthTuple4(c.ChildLayout.Margin, childCtx, ['H', 'W', 'H', 'W']);
+
+      // Wrap-aware height override — when a Row-direction wrap child is
+      // stretched cross-axis by its parent, we know exactly how wide the
+      // row will be (parent content width minus the row's cross margins)
+      // before flex runs. Use that to simulate how many lines its children
+      // will break into and set finalH accordingly. Without this the Row
+      // gets its Height from intrinsic (which guessed against ViewportWidth
+      // and always overestimated available space → lines overflowed and
+      // cards stacked on top of each other).
+      const childHoriz = c.Layout.Direction === 'Row' || c.Layout.Direction === 'RowReverse';
+      const childWraps = c.Layout.Wrap === 'Wrap' || c.Layout.Wrap === 'WrapReverse';
+      if (!horiz && crossStretches && childHoriz && childWraps && isKeyword(resolvedH)) {
+        const parentPad = container.Padding;
+        const contentCross = Math.max(0, width - parentPad[1] - parentPad[3]);
+        const allocatedMain = Math.max(0, contentCross - ml - mr);
+        const wrapH = _simulateWrapHeight(c, allocatedMain, childCtx);
+        finalH = wrapH;
+      }
+
+      const flexBasis: number | 'Auto' = c.ChildLayout.FlexBasis === 'Auto'
+        ? 'Auto'
+        : _r(c.ChildLayout.FlexBasis, childCtx, horiz ? 'W' : 'H');
 
       flexChildren.push({
         Index: flowIndices.length,
@@ -397,4 +421,58 @@ const _resolveSize = (
   if (lower === 'mincontent') return 'MinContent';
   if (lower === 'maxcontent') return 'MaxContent';
   return _r(size, ctx, axis);
+};
+
+/** Simulate how a Row-direction wrap container's children bin-pack into
+ *  lines at a known main-axis width. Returns the total cross-axis extent
+ *  needed = sum(line max cross) + (lines-1) × crossGap + vertical padding.
+ *  Used at solve time once we know the row's actual allocated width. */
+const _simulateWrapHeight = (
+  row: Element,
+  mainAvailable: number,
+  rowCtx: ResolveContext,
+): number => {
+  const [pt, pr, pb, pl] = ResolveLengthTuple4(row.Layout.Padding, rowCtx, ['H', 'W', 'H', 'W']);
+  const innerMain = Math.max(0, mainAvailable - pl - pr);
+  const mainGap = _r(row.Layout.ColumnGap, rowCtx, 'W') || _r(row.Layout.Gap, rowCtx, 'W');
+  const crossGap = _r(row.Layout.RowGap, rowCtx, 'H') || _r(row.Layout.Gap, rowCtx, 'H');
+
+  let lineMain = 0;
+  let lineCross = 0;
+  let total = 0;
+  let lineCount = 0;
+  for (const c of row.Children) {
+    if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed') continue;
+    if (c.LeaveRequested) continue;
+
+    const childCtx = c.ResolveCtx!;
+    const rawW = c.ChildLayout.Width;
+    const rawH = c.ChildLayout.Height;
+    const explicitW = typeof rawW === 'number' ? rawW
+      : (rawW === 'Auto' || rawW === 'MinContent' || rawW === 'MaxContent' || rawW.includes('%')) ? null
+      : Resolve(rawW, childCtx, 'W');
+    const explicitH = typeof rawH === 'number' ? rawH
+      : (rawH === 'Auto' || rawH === 'MinContent' || rawH === 'MaxContent' || rawH.includes('%')) ? null
+      : Resolve(rawH, childCtx, 'H');
+    const [cmt, cmr, cmb, cml] = ResolveLengthTuple4(c.ChildLayout.Margin, childCtx, ['H', 'W', 'H', 'W']);
+
+    const w = (explicitW ?? c.IntrinsicWidth ?? 0) + cml + cmr;
+    const h = (explicitH ?? c.IntrinsicHeight ?? 0) + cmt + cmb;
+
+    const addWithGap = lineMain === 0 ? w : lineMain + mainGap + w;
+    if (lineMain > 0 && addWithGap > innerMain) {
+      total += lineCross;
+      lineCount++;
+      lineMain = w;
+      lineCross = h;
+    } else {
+      lineMain = addWithGap;
+      if (h > lineCross) lineCross = h;
+    }
+  }
+  if (lineMain > 0) {
+    total += lineCross;
+    lineCount++;
+  }
+  return total + Math.max(0, lineCount - 1) * crossGap + pt + pb;
 };

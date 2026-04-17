@@ -30,6 +30,10 @@ export class ImageCache {
   private _renderer: Renderer;
   private _cache = new Map<string, ImageEntry>();
   private _loading = new Set<string>();
+  /** Keys that failed to load — prevents the renderer's per-frame auto-load
+   *  from retrying a broken URL every tick (which otherwise spams the console
+   *  with thousands of 404s over a few seconds). */
+  private _failed = new Set<string>();
   private _svgSources = new Map<string, _SvgSource>();
   private _lastSvgDpr = new Map<string, number>();
   private _rasterCanvas: HTMLCanvasElement | null = null;
@@ -52,9 +56,10 @@ export class ImageCache {
   };
 
   /** Load an image from a URL. Async — returns immediately; the entry
-   *  becomes Ready when the image finishes loading. */
+   *  becomes Ready when the image finishes loading. Failed loads are
+   *  remembered so a subsequent call for the same URL is a no-op. */
   LoadUrl = (url: string, _dpr: number = 1): void => {
-    if (this._cache.has(url) || this._loading.has(url)) return;
+    if (this._cache.has(url) || this._loading.has(url) || this._failed.has(url)) return;
     this._loading.add(url);
 
     const img = new Image();
@@ -70,6 +75,7 @@ export class ImageCache {
     };
     img.onerror = () => {
       this._loading.delete(url);
+      this._failed.add(url);
       console.warn(`[Jwift] Failed to load image: ${url}`);
     };
     img.src = url;
@@ -150,6 +156,7 @@ export class ImageCache {
     this._cache.delete(key);
     this._svgSources.delete(key);
     this._lastSvgDpr.delete(key);
+    this._failed.delete(key);
   };
 
   /** Clear all cached entries. */
@@ -157,6 +164,7 @@ export class ImageCache {
     this._cache.clear();
     this._svgSources.clear();
     this._lastSvgDpr.clear();
+    this._failed.clear();
   };
 
   private _getRasterCtx = (): CanvasRenderingContext2D => {

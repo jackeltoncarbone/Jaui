@@ -106,6 +106,9 @@ const _compute = (node: Element): void => {
 
   for (const c of node.Children) {
     if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed') continue;
+    // Leaving children don't contribute to intrinsic size either — the
+    // parent collapses around them as if they were already removed.
+    if (c.LeaveRequested) continue;
 
     // Explicit size participates in intrinsic sum only if it's purely
     // numeric (px) or resolvable without parent dims. Length that's `%`
@@ -159,6 +162,22 @@ const _compute = (node: Element): void => {
   mainMin += mainPadding;
   crossMin += crossPadding;
 
+  // Wrap-aware cross size — if this container flex-wraps on the main axis,
+  // its cross dimension grows with how many lines the children break into.
+  // Without this, Intrinsic*H* for a wrap Row would equal a single line's
+  // height, so the parent allocates too little space and wrapped lines
+  // stack on top of each other. Uses ViewportWidth (minus our padding) as
+  // the main-axis bound — parent dims aren't known pre-solve, but this is
+  // a reasonable upper bound for any top-level flow.
+  if (node.Layout.Wrap === 'Wrap' || node.Layout.Wrap === 'WrapReverse') {
+    const crossGapSpec = Resolve(horiz ? node.Layout.RowGap : node.Layout.ColumnGap, ctx, horiz ? 'H' : 'W');
+    const crossGap = crossGapSpec || Resolve(node.Layout.Gap, ctx, horiz ? 'H' : 'W');
+    const mainBudget = Math.max(0, ctx.ViewportWidth - mainPadding);
+    const wrapCross = _simulateWrapCrossSize(node, horiz, gap, crossGap, mainBudget);
+    if (horiz) crossMax = wrapCross + crossPadding;
+    else crossMax = wrapCross + crossPadding;
+  }
+
   if (horiz) {
     node.IntrinsicWidth = mainSum;
     node.IntrinsicHeight = crossMax;
@@ -170,6 +189,49 @@ const _compute = (node: Element): void => {
     node.IntrinsicMinHeight = mainMin;
     node.IntrinsicMinWidth = crossMin;
   }
+};
+
+/** Bin-pack children onto wrap lines using `mainBudget` as the line-break
+ *  threshold. Returns total cross size = sum(line max-cross) + (N-1) * gap.
+ *  Used to compute a wrap container's intrinsic cross size, which is
+ *  otherwise wrong (single-line max) for `Wrap: Wrap` containers. */
+const _simulateWrapCrossSize = (
+  node: Element,
+  horiz: boolean,
+  mainGap: number,
+  crossGap: number,
+  mainBudget: number,
+): number => {
+  let lineMain = 0;
+  let lineCross = 0;
+  let total = 0;
+  let lineCount = 0;
+  for (const c of node.Children) {
+    if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed') continue;
+    if (c.LeaveRequested) continue;
+    const childCtx = c.ResolveCtx!;
+    const explicitW = _intrinsicOf(c.ChildLayout.Width, childCtx, 'W');
+    const explicitH = _intrinsicOf(c.ChildLayout.Height, childCtx, 'H');
+    const effW = explicitW ?? c.IntrinsicWidth ?? 0;
+    const effH = explicitH ?? c.IntrinsicHeight ?? 0;
+    const childMain = horiz ? effW : effH;
+    const childCross = horiz ? effH : effW;
+    const addWithGap = lineMain === 0 ? childMain : lineMain + mainGap + childMain;
+    if (lineMain > 0 && addWithGap > mainBudget) {
+      total += lineCross;
+      lineCount++;
+      lineMain = childMain;
+      lineCross = childCross;
+    } else {
+      lineMain = addWithGap;
+      if (childCross > lineCross) lineCross = childCross;
+    }
+  }
+  if (lineMain > 0) {
+    total += lineCross;
+    lineCount++;
+  }
+  return total + Math.max(0, lineCount - 1) * crossGap;
 };
 
 /** Return a pixel value if the dimension is "known" without parent dims.

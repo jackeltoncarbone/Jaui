@@ -555,8 +555,12 @@ const _positionLines = (
     case 'Stretch': {
       pos = 0;
       lineGap = crossGap;
-      const extra = freeSpace / lines.length;
-      for (const line of lines) line.CrossSize += extra;
+      // Only grow lines when there's slack. If the container is SMALLER
+      // than the sum of line natural sizes, lines keep their natural size
+      // and simply overflow — shrinking them produced negative sizes that
+      // made cards stack on top of each other during wrap transitions.
+      const extra = freeSpace > 0 ? freeSpace / lines.length : 0;
+      if (extra > 0) for (const line of lines) line.CrossSize += extra;
       break;
     }
     case 'SpaceBetween':

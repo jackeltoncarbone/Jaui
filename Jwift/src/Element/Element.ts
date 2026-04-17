@@ -183,11 +183,17 @@ export class Element {
 
   /** Schedule this element for animated removal. Flips the Presence spring's
    *  target to 0; the engine walks the tree each frame and hard-removes
-   *  the element from its parent once the spring settles. Idempotent. */
+   *  the element from its parent once the spring settles. Idempotent.
+   *
+   *  Layout is the instant truth — siblings reflow immediately on this call
+   *  as if the element were already gone (see layout solver's LeaveRequested
+   *  check). The leaving element keeps its last animated X/Y and fades in
+   *  place via the opacity multiply on Presence. */
   RequestLeave = (): void => {
     if (this.LeaveRequested) return;
     this.LeaveRequested = true;
     this.PresenceSpring.Target = 0;
+    this.MarkLayoutDirty();
   };
 
   AddChild = (child: Element): void => {
