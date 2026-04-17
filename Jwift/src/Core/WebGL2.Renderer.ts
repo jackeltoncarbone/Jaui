@@ -19,6 +19,27 @@ import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
 import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
 import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
 
+// ─── Panel-shader uniform-location bundle ───────────────────────────────────
+// Holds the per-program uniform locations for the panel shader. We compile
+// two variants (glass + non-glass), each produces its own set of locations
+// even though the uniform names match. Bundling keeps the draw path's
+// variant-swap a one-liner rather than a ladder of conditionals.
+interface _PanelLocs {
+  resolution:   WebGLUniformLocation | null;
+  backdrop:     WebGLUniformLocation | null;
+  baseFrostLod: WebGLUniformLocation | null;
+  specTilt:     WebGLUniformLocation | null;
+  clipTex:      WebGLUniformLocation | null;
+}
+
+const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelLocs => ({
+  resolution:   gl.getUniformLocation(p, 'u_Resolution'),
+  backdrop:     gl.getUniformLocation(p, 'u_Backdrop'),
+  baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
+  specTilt:     gl.getUniformLocation(p, 'u_SpecularTilt'),
+  clipTex:      gl.getUniformLocation(p, 'u_ClipTex'),
+});
+
 // ─── Opaque handle wrapping ─────────────────────────────────────────────────
 
 interface WrappedGlTexture extends GpuTextureHandle {
@@ -79,15 +100,23 @@ export class WebGL2Renderer implements Renderer {
   private _blur!: BlurPass;
 
   // Panel shader
-  private _panelShader!: ShaderProgram;
+  // Two compiled variants of the panel shader. `MATERIAL_GLASS` constant-
+  // folds in the glass program → DCE strips the `else` branches for ~60%
+  // of non-glass fragments on Home, the `MATERIAL_NONE` variant strips
+  // the glass branches for the batched non-glass panel draws. Uniform
+  // layout is identical, so a single `_panelUniformLocs` dict works when
+  // populated with locations from whichever program is currently bound.
+  private _panelShaderGlass!: ShaderProgram;
+  private _panelShaderNone!: ShaderProgram;
+  // Uniform location bundles per variant — each program has its own
+  // location IDs even when the uniform names match.
+  private _panelLocsGlass!: _PanelLocs;
+  private _panelLocsNone!: _PanelLocs;
   private _panelVao!: WebGLVertexArrayObject;
   private _panelInstanceBuffer!: WebGLBuffer;
   private _panelInstanceData = new Float32Array(0);
   private _panelInstanceCount = 0;
-  private _panelResolutionLoc!: WebGLUniformLocation | null;
-  private _panelBackdropLoc!: WebGLUniformLocation | null;
-  private _panelBaseFrostLodLoc!: WebGLUniformLocation | null;
-  private _panelSpecTiltLoc!: WebGLUniformLocation | null;
+  // (moved to _panelLocsGlass / _panelLocsNone bundles)
   private _dummyTex!: WebGLTexture;
 
   // Text shader
@@ -123,7 +152,7 @@ export class WebGL2Renderer implements Renderer {
   private _clipTex!: WebGLTexture;
   private _clipTexWidth: number = CLIP_TEX_MIN_WIDTH;
   private _clipLastFloatsUploaded: number = 0;
-  private _panelClipTexLoc!: WebGLUniformLocation | null;
+  // (panel clip-tex loc moved into _panelLocsGlass / _panelLocsNone)
   private _textClipTexLoc!: WebGLUniformLocation | null;
 
   private _width: number = 0;
@@ -370,12 +399,19 @@ export class WebGL2Renderer implements Renderer {
       this._panelInstanceData.subarray(0, this._panelInstanceCount * PANEL_FLOATS_PER_INSTANCE),
       gl.DYNAMIC_DRAW);
 
-    this._useProgram(this._panelShader.Program);
-    gl.uniform2f(this._panelResolutionLoc, canvasWidth, canvasHeight);
-    gl.uniform1i(this._panelBackdropLoc, 0);
-    gl.uniform1i(this._panelClipTexLoc, 1);
-    gl.uniform1f(this._panelBaseFrostLodLoc, baseFrostLod);
-    gl.uniform2f(this._panelSpecTiltLoc, specTiltX, specTiltY);
+    // Pick the shader variant. `backdrop != null` means the caller is
+    // drawing a glass panel (sampling the blurred scene); otherwise it's
+    // a batch of flat / bordered / shadowed panels.
+    const isGlass = backdrop !== null;
+    const program = isGlass ? this._panelShaderGlass : this._panelShaderNone;
+    const locs    = isGlass ? this._panelLocsGlass   : this._panelLocsNone;
+
+    this._useProgram(program.Program);
+    gl.uniform2f(locs.resolution, canvasWidth, canvasHeight);
+    gl.uniform1i(locs.backdrop, 0);
+    gl.uniform1i(locs.clipTex, 1);
+    gl.uniform1f(locs.baseFrostLod, baseFrostLod);
+    gl.uniform2f(locs.specTilt, specTiltX, specTiltY);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, backdrop ? _unwrap(backdrop) : this._dummyTex);
@@ -653,17 +689,22 @@ export class WebGL2Renderer implements Renderer {
   // ── Shader Initialization ─────────────────────────────────────────────────
 
   private _initPanelShader = (gl: WebGL2RenderingContext): void => {
-    this._panelShader = ShaderCompiler.Compile(gl, panelVertSrc, panelFragSrc);
+    // Two compiled variants from one source. The `materialType` local in
+    // Jiv.Panel.frag is a compile-time constant when either define is set,
+    // so the GLSL dead-code-elimination strips every `if (materialType ==
+    // 1.0)` branch in whichever direction doesn't match the variant. Non-
+    // glass panels (~60% of screen pixels on Home) now run a shader with
+    // no backdrop sampling, no refraction, no rim, no specular — just
+    // fill + shadow + border.
+    this._panelShaderGlass = ShaderCompiler.Compile(gl, panelVertSrc, panelFragSrc, { MATERIAL_GLASS: true });
+    this._panelShaderNone  = ShaderCompiler.Compile(gl, panelVertSrc, panelFragSrc, { MATERIAL_NONE:  true });
+
+    this._panelLocsGlass = _extractPanelLocs(gl, this._panelShaderGlass.Program);
+    this._panelLocsNone  = _extractPanelLocs(gl, this._panelShaderNone.Program);
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jwift] Failed to create panel instance buffer');
     this._panelInstanceBuffer = buf;
-
-    this._panelResolutionLoc = gl.getUniformLocation(this._panelShader.Program, 'u_Resolution');
-    this._panelBackdropLoc = gl.getUniformLocation(this._panelShader.Program, 'u_Backdrop');
-    this._panelBaseFrostLodLoc = gl.getUniformLocation(this._panelShader.Program, 'u_BaseFrostLod');
-    this._panelSpecTiltLoc = gl.getUniformLocation(this._panelShader.Program, 'u_SpecularTilt');
-    this._panelClipTexLoc = gl.getUniformLocation(this._panelShader.Program, 'u_ClipTex');
 
     // Dedicated VAO for panel rendering (separate from text)
     this._panelVao = this._createInstancedVao(gl, this._panelInstanceBuffer, PANEL_ATTR_COUNT, PANEL_BYTES_PER_INSTANCE);

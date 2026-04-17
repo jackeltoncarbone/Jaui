@@ -4,3 +4,7 @@ dist/
 .vite/
 .claude/
 *.gen.ts
+
+# Playwright perf-probe artifacts (local-only)
+perf-probe-output/
+perf-probe.mjs

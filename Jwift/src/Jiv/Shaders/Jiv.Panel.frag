@@ -497,7 +497,21 @@ void main() {
     float borderEdgeAa = v_StyleParams.x;
     float smoothness = v_StyleParams.y;
     float opacity = v_StyleParams.z;
+    // materialType is a compile-time constant when built as a shader variant
+    // (see Shader.Compiler's defines mechanism). The `if (materialType == 1.0)`
+    // branches throughout this shader then become constant-folded by GLSL's
+    // dead-code elimination — the glass variant keeps the glass branches,
+    // the non-glass variant keeps the else branches. Instance data at
+    // v_StyleParams.w is still packed (avoids restructuring the instance
+    // buffer layout) but intentionally unread. Falls back to reading the
+    // instance attribute when neither variant is defined (e.g. test builds).
+    #if defined(MATERIAL_GLASS)
+    const float materialType = 1.0;
+    #elif defined(MATERIAL_NONE)
+    const float materialType = 0.0;
+    #else
     float materialType = v_StyleParams.w;
+    #endif
 
     float brightness = v_Grading.x;
     float saturation = v_Grading.y;
@@ -709,9 +723,20 @@ void main() {
     // dist=0, producing a hard "shape mask in shadow color" with no outward
     // bleed. Now: full opacity at -blur (deep inside silhouette), 0.5 at the
     // edge, 0 at +blur outside.
-    vec2 sp = p - shadowOffset;
-    float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
-    float shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
+    //
+    // Early-out when the author didn't set a shadow. ShadowColor.a is
+    // flat-interpolated per-instance, so the branch is uniform within a
+    // single panel draw — GPUs evaluate it for the whole quad at once,
+    // not per-fragment. Within a batched draw, the branch is coherent
+    // across the quads of any one panel instance (which is what matters
+    // for GPU divergence cost). Panels without shadows (most things
+    // except Cards on Home) skip an entire ShapeSDF call per fragment.
+    float shadowAlpha = 0.0;
+    if (v_ShadowColor.a > 1e-4) {
+        vec2 sp = p - shadowOffset;
+        float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
+        shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
+    }
 
     // ── Fill: interior is PURELY the refracted backdrop (LG) or the tint (SG/None).
     // No internal haze, no rim ambient, no specular overlay. All rim brightness

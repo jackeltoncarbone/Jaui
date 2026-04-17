@@ -346,6 +346,36 @@ export class Canvas {
       this._panelBuffer.Begin(); // reset count for the next batch
     };
 
+    // Pending text batch — same pattern as flushPanels. Text is emitted
+    // per-node via `_emitTextFor`, which pushes glyph instances into
+    // `_textBuffer`. Previously each node with text did its own draw call.
+    // Now we accumulate across sibling text nodes and drain together when
+    // we hit a category boundary (panel push, glass/pblur, image, or end
+    // of the walk).
+    //
+    // Z-order: panel and text buffers are mutually-exclusive in the sense
+    // that adding to one forces a flush of the other — so at any instant
+    // only ONE of them holds pending work, and flushing drains in tree
+    // order.
+    const flushText = (): void => {
+      if (this._textBuffer.Count === 0) return;
+      const atlas = this._textCache.Atlas;
+      if (!atlas) { this._textBuffer.Begin(); return; }
+      r.TextBeginBatch();
+      r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+      r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
+      r.TextDrawBatch(w, h, atlas);
+      this._counts.Text += 1; // one flushed batch = one draw call
+      this._textBuffer.Begin();
+    };
+
+    // Scratch buffer for single-instance image draws. Images borrow the
+    // text shader pipeline (both sample a texture quad) but logically they
+    // are NOT text — they pack their own 12 floats and use their own
+    // texture (the image) rather than the text atlas. Keeping a tiny
+    // dedicated array here means we don't clobber the text batch.
+    const imageScratch = new Float32Array(TEXT_FLOATS_PER_INSTANCE);
+
     // Order children by Layer (stable — tree order breaks ties). Fast-path
     // when every child has Layer 0 (the common case): return the original
     // array so we don't allocate or sort. Sort is only triggered when an
@@ -391,10 +421,12 @@ export class Canvas {
       const material = node.RenderStyle.Material;
 
       if (material === 'ProgressiveBlur') {
-        // Flush any pending non-glass panels: the pblur snapshots the scene
-        // and samples it — so the scene must contain everything drawn so
-        // far. Deferred panels in the buffer haven't hit the FBO yet.
+        // Flush both pending batches: the pblur snapshots the scene and
+        // samples it — so the scene must contain everything drawn so
+        // far. Deferred panels AND text in the buffers haven't hit the
+        // FBO yet.
         flushPanels();
+        flushText();
         // Progressive blur samples two textures: `u_Scene` (unblurred, the
         // ramp's clear end) and `u_Pyramid` (blurred, the ramp's heavy end).
         // `u_Scene` cannot be sceneFbo.Texture directly because the pblur
@@ -462,10 +494,11 @@ export class Canvas {
         this._counts.PBlur++;
 
       } else if (_isGlass(material)) {
-        // Flush pending panels: same reason as pblur — glass reads the
+        // Flush pending batches: same reason as pblur — glass reads the
         // scene (indirectly via its blur pyramid), so the scene must be
         // current.
         flushPanels();
+        flushText();
         // Glass samples only `u_Backdrop` (the blur pyramid), never the raw
         // scene — so there's no feedback loop and we can feed ComputeBlur
         // the scene FBO's texture directly, zero blits.
@@ -511,9 +544,14 @@ export class Canvas {
         this._panelBuffer.Begin();
 
       } else {
-        // Non-glass panel: DEFER. Push into the shared panel buffer; an
+        // Non-glass panel: DEFER. Flush any pending TEXT first so text
+        // drawn earlier in tree order sits behind this new panel (though
+        // in practice panels and text don't overlap spatially for
+        // correctly-laid-out UI — flushing here keeps the invariant
+        // regardless). Then push into the shared panel buffer; an
         // upcoming flushPanels() will drain it as one instanced draw call
         // along with every other pending non-glass panel in the tier.
+        flushText();
         this._panelBuffer.Push(node, this._dpr, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
       }
 
@@ -571,11 +609,14 @@ export class Canvas {
             drawY = (node.Y + offsetY) * d;
           }
 
-          // Flush pending panels before image so the image draws OVER
-          // any panel that should sit behind it (tree order).
+          // Image draws through the text pipeline (same shader, different
+          // texture). Flush both pending batches so this image draws in
+          // correct tree order between what came before and what comes
+          // after. Use `imageScratch` so the text buffer's accumulated
+          // glyphs aren't clobbered.
           flushPanels();
-          this._textBuffer.Begin();
-          const data = this._textBuffer.Data;
+          flushText();
+          const data = imageScratch;
           data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
           data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
           data[8] = node.RenderStyle ? node.RenderStyle.Opacity : 1;
@@ -588,21 +629,19 @@ export class Canvas {
         }
       }
 
-      // Render this node's text (directly after the panel, in z-order)
-      this._emitTextFor(node, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
-      if (this._textBuffer.Count > 0) {
-        const atlas = this._textCache.Atlas;
-        if (atlas) {
-          // Flush pending panels so text draws OVER its backing panels.
-          flushPanels();
-          r.TextBeginBatch();
-          r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
-          r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
-          r.TextDrawBatch(w, h, atlas);
-          this._counts.Text++;
-        }
+      // Emit this node's text into the shared text batch. We do NOT flush
+      // here — the buffer stays alive across siblings so contiguous text
+      // nodes coalesce into one draw call. A subsequent category change
+      // (panel push, glass, pblur, image, or end of walk) calls
+      // `flushText()` which drains whatever's accumulated.
+      //
+      // Z-order: before accumulating text, flush any pending panels so
+      // panels earlier in tree order end up BEHIND this text.
+      const anim = this._textAnimators.get(node);
+      if (anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
+        flushPanels();
+        this._emitTextFor(node, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
       }
-      this._textBuffer.Begin();
 
       // Walk children in Layer order (ties break by tree order)
       const boxClip = this._boxClip(node, offsetX, offsetY);
@@ -616,9 +655,11 @@ export class Canvas {
     this._clipBuffer.Begin();
     this._panelBuffer.Begin();
     renderNode(this.Root, 0, 0, EmptyClipStack);
-    // Trailing flush — catches any non-glass panels deferred since the last
-    // image/text/glass/pblur encountered during the walk.
+    // Trailing flushes — catch anything deferred since the last category
+    // boundary. Order: panels first (they were pushed earlier in tree
+    // order than the trailing text, if any).
     flushPanels();
+    flushText();
 
     // Final composite: the whole frame lives in sceneFbo. `PresentScene`
     // does a hardware `blitFramebuffer` from sceneFbo into the swap chain —

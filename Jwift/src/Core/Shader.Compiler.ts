@@ -6,9 +6,22 @@ export interface ShaderProgram {
 
 export class ShaderCompiler {
 
-  static Compile = (gl: WebGL2RenderingContext, vertSrc: string, fragSrc: string): ShaderProgram => {
-    const vert = ShaderCompiler._compileShader(gl, gl.VERTEX_SHADER, vertSrc);
-    const frag = ShaderCompiler._compileShader(gl, gl.FRAGMENT_SHADER, fragSrc);
+  /** Compile a vertex/fragment pair into a linked program. Optional
+   *  `defines` map injects `#define NAME value` (or bare `#define NAME`
+   *  when the value is `true`) after the GLSL `#version` directive — the
+   *  only legal place to put them. Callers use this to generate shader
+   *  variants (e.g. glass vs non-glass panel shader) from a single source
+   *  file; GLSL dead-code elimination then strips the unused branches. */
+  static Compile = (
+    gl: WebGL2RenderingContext,
+    vertSrc: string,
+    fragSrc: string,
+    defines?: Record<string, string | number | boolean>,
+  ): ShaderProgram => {
+    const injectedVert = ShaderCompiler._inject(vertSrc, defines);
+    const injectedFrag = ShaderCompiler._inject(fragSrc, defines);
+    const vert = ShaderCompiler._compileShader(gl, gl.VERTEX_SHADER, injectedVert);
+    const frag = ShaderCompiler._compileShader(gl, gl.FRAGMENT_SHADER, injectedFrag);
     const program = ShaderCompiler._linkProgram(gl, vert, frag);
 
     // Clean up individual shaders — they're baked into the program now
@@ -19,6 +32,27 @@ export class ShaderCompiler {
     const attributes = ShaderCompiler._extractAttributes(gl, program);
 
     return { Program: program, Uniforms: uniforms, Attributes: attributes };
+  };
+
+  /** Insert `#define` lines right after the `#version` directive (which
+   *  GLSL requires to be on the first non-blank line). Returns source
+   *  unchanged when there are no defines. */
+  private static _inject = (source: string, defines?: Record<string, string | number | boolean>): string => {
+    if (!defines) return source;
+    const lines: string[] = [];
+    for (const [k, v] of Object.entries(defines)) {
+      if (v === false) continue; // skip falsy flags entirely
+      if (v === true) lines.push(`#define ${k}`);
+      else lines.push(`#define ${k} ${v}`);
+    }
+    if (lines.length === 0) return source;
+    // Find the end of the first `#version` line (if present) and inject after.
+    const versionMatch = /^\s*#version[^\n]*\n/.exec(source);
+    if (versionMatch) {
+      const idx = versionMatch.index + versionMatch[0].length;
+      return source.slice(0, idx) + lines.join('\n') + '\n' + source.slice(idx);
+    }
+    return lines.join('\n') + '\n' + source;
   };
 
   private static _compileShader = (gl: WebGL2RenderingContext, type: number, source: string): WebGLShader => {

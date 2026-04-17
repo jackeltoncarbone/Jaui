@@ -65,7 +65,7 @@ ContentBlur {
   Height: 250pt
   Left: 0pt
   Bottom: 0pt
-  BackdropFrostBlur: 10pt
+  BackdropFrostBlur: 7pt
   Background: rgba(0, 0, 0, 0.5)
   Layer: 5
 }
