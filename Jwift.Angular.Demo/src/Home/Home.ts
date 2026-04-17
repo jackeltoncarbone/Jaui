@@ -109,7 +109,7 @@ export class Home {
 
   constructor() {
     afterNextRender(() => {
-      this._canvas.Canvas.Images.LoadSvg('ss-logo', LOGO_SVG, 120, 46);
+      this._canvas.Canvas.Images.LoadSvg('ss-logo', LOGO_SVG, 120, 46, this._canvas.Canvas.Dpr);
     });
   }
 

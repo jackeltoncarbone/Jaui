@@ -43,12 +43,14 @@ ToolbarRow {
   Direction: Row
   Justify: SpaceBetween
   Align: Center
+  Padding: 12pt
   Layer: 20
   PointerEvents: Auto
 }
 
 ToolbarLogo {
   Height: 40pt
+  FlexShrink: 0
 }
 
 Scroll {
@@ -75,10 +77,10 @@ ContentBlur {
   ProgressiveBlurDirection: ToBottom
   Position: Fixed
   Width: 100vw
-  Height: 150pt
+  Height: 250pt
   Left: 0pt
   Bottom: 0pt
-  BackdropFrostBlur: 5pt
+  BackdropFrostBlur: 10pt
   Background: rgba(0, 0, 0, 0.5)
   Layer: 5
 }
@@ -87,10 +89,10 @@ TopBlur {
   ProgressiveBlurDirection: ToTop
   Position: Fixed
   Width: 100vw
-  Height: 100pt
+  Height: 200pt
   Left: 0pt
   Top: 0pt
-  BackdropFrostBlur: 8pt
+  BackdropFrostBlur: 24pt
   Background: rgba(0, 0, 0, 0)
   Layer: 5
 }
@@ -289,7 +291,6 @@ ToolbarDropdown : LiquidGlass {
   Justify: Center
   Align: Center
   Padding: 4pt
-  Margin: 22pt 22pt 0pt 0pt
   Width: 48pt
   Height: 48pt
   BorderRadius: 66pt

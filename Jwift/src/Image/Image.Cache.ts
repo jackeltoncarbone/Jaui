@@ -17,10 +17,21 @@ export interface ImageEntry {
   Ready: boolean;      // false while loading async
 }
 
+/** Internal — tracks an SVG source so it can be re-rasterized at a new DPR
+ *  when the browser zoom / DPR changes. Without this the first rasterization
+ *  fixes the texture resolution forever and zoomed-in logos go blurry. */
+interface _SvgSource {
+  SvgString: string;
+  CssWidth: number;
+  CssHeight: number;
+}
+
 export class ImageCache {
   private _renderer: Renderer;
   private _cache = new Map<string, ImageEntry>();
   private _loading = new Set<string>();
+  private _svgSources = new Map<string, _SvgSource>();
+  private _lastSvgDpr = new Map<string, number>();
   private _rasterCanvas: HTMLCanvasElement | null = null;
   private _rasterCtx: CanvasRenderingContext2D | null = null;
 
@@ -64,16 +75,36 @@ export class ImageCache {
     img.src = url;
   };
 
-  /** Load an SVG from a string. Rasterizes at the given width/height
-   *  (in device pixels). Synchronous-ish — uses Image + data URL. */
+  /** Load an SVG from a string. Rasterizes at `width*dpr × height*dpr` so
+   *  retina / zoomed-in displays get a sharp texture. The SVG source is
+   *  kept so callers can re-rasterize at higher DPR later — see
+   *  `RerasterizeSvgs()`. */
   LoadSvg = (key: string, svgString: string, width: number, height: number, dpr: number = 1): void => {
     if (this._cache.has(key) || this._loading.has(key)) return;
+    this._svgSources.set(key, { SvgString: svgString, CssWidth: width, CssHeight: height });
+    this._rasterizeSvg(key, dpr);
+  };
+
+  /** Re-rasterize every cached SVG at the new DPR if it's higher than what
+   *  was used last time. Called by Jwift when `devicePixelRatio` changes
+   *  (e.g. the user Ctrl+Scrolls to zoom in the browser) so logos and other
+   *  SVG content stay sharp at the new scale. */
+  RerasterizeSvgs = (dpr: number): void => {
+    for (const key of this._svgSources.keys()) {
+      const last = this._lastSvgDpr.get(key) ?? 0;
+      if (dpr > last) this._rasterizeSvg(key, dpr);
+    }
+  };
+
+  private _rasterizeSvg = (key: string, dpr: number): void => {
+    const src = this._svgSources.get(key);
+    if (!src) return;
     this._loading.add(key);
 
-    const pxW = Math.ceil(width * dpr);
-    const pxH = Math.ceil(height * dpr);
+    const pxW = Math.max(1, Math.ceil(src.CssWidth * dpr));
+    const pxH = Math.max(1, Math.ceil(src.CssHeight * dpr));
 
-    const blob = new Blob([svgString], { type: 'image/svg+xml' });
+    const blob = new Blob([src.SvgString], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
 
     const img = new Image();
@@ -87,9 +118,15 @@ export class ImageCache {
       ctx.clearRect(0, 0, pxW, pxH);
       ctx.drawImage(img, 0, 0, pxW, pxH);
 
-      const tex = this._renderer.CreateTexture(pxW, pxH);
-      this._renderer.UploadSubTexture(tex, 0, 0, ctx.canvas);
-      this._cache.set(key, { Texture: tex, Width: pxW, Height: pxH, Ready: true });
+      const existing = this._cache.get(key);
+      const tex = existing?.Texture ?? this._renderer.CreateTexture(pxW, pxH);
+      // If the texture size changed we need a fresh texture — the renderer
+      // doesn't support resizing a GPU texture in place.
+      const sizeChanged = existing !== undefined && (existing.Width !== pxW || existing.Height !== pxH);
+      const finalTex = sizeChanged ? this._renderer.CreateTexture(pxW, pxH) : tex;
+      this._renderer.UploadSubTexture(finalTex, 0, 0, ctx.canvas);
+      this._cache.set(key, { Texture: finalTex, Width: pxW, Height: pxH, Ready: true });
+      this._lastSvgDpr.set(key, dpr);
       this._onLoad?.();
     };
     img.onerror = () => {
@@ -111,11 +148,15 @@ export class ImageCache {
   /** Remove a cached entry. */
   Remove = (key: string): void => {
     this._cache.delete(key);
+    this._svgSources.delete(key);
+    this._lastSvgDpr.delete(key);
   };
 
   /** Clear all cached entries. */
   Clear = (): void => {
     this._cache.clear();
+    this._svgSources.clear();
+    this._lastSvgDpr.clear();
   };
 
   private _getRasterCtx = (): CanvasRenderingContext2D => {

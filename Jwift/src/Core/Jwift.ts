@@ -704,6 +704,7 @@ export class Canvas {
     // without rebuilding. NaN/≤0 is ignored.
     const raw = window.devicePixelRatio || 1;
     const override = this._dprOverride;
+    const prevDpr = this._dpr;
     if (override !== null) {
       this._dpr = override;
     } else {
@@ -715,6 +716,11 @@ export class Canvas {
     this._height = this.Element.clientHeight;
     this.Element.width = Math.round(this._width * this._dpr);
     this.Element.height = Math.round(this._height * this._dpr);
+
+    // Re-rasterize cached SVGs if we just zoomed in — texture resolution is
+    // baked at rasterization time, so without this logos stay pixelated at
+    // the old DPR even after the browser hands us more device pixels.
+    if (this._dpr > prevDpr) this._imageCache.RerasterizeSvgs(this._dpr);
 
     // Mark root dirty so layout re-solves with new dimensions
     this.Root.Dirty |= DirtyFlag.Layout;
