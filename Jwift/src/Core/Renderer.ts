@@ -115,13 +115,21 @@ export interface Renderer {
 
   // ── Blur ──
 
-  /** Run the dual-filter blur pyramid. Returns handle to the blurred output. */
+  /** Run the dual-filter blur pyramid. Returns handle to the blurred output.
+   *
+   *  `scissor` (optional) restricts destination fills to a rect in input-
+   *  texture coordinates. Callers that sample only a small region of the
+   *  final pyramid (e.g. a glass panel far smaller than the canvas) pass
+   *  their sample region here to save 10–50× fragment fill on each blur
+   *  pass. Pblurs should omit it — they sample the pyramid across the
+   *  whole canvas at high LOD. */
   ComputeBlur(
     input: GpuTextureHandle,
     width: number,
     height: number,
     radius: number,
     minDepth?: number,
+    scissor?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle;
 
   /** Generate mipmaps on the blur output so glass + progressive blur can
@@ -176,6 +184,18 @@ export interface Renderer {
    *  to clear the bound target to that color before returning; omit to keep
    *  whatever was already there (e.g. content drawn earlier in the frame). */
   BindDefaultTarget(clear?: { R: number; G: number; B: number }): void;
+
+  /** Re-bind the scene FBO without clearing it. Used after a blur pass
+   *  temporarily took over the GL state — lets us return to scene rendering
+   *  without losing what's already been drawn. Paired with `BeginScenePass`
+   *  which does the initial bind+clear at frame start. */
+  RebindSceneTarget(): void;
+
+  /** Signal end-of-frame to the driver for tile-based GPUs: invalidate any
+   *  framebuffer attachments whose contents won't be read again. On mobile
+   *  (iPad, Android GPUs) this lets the tile memory skip writing back to
+   *  main memory — a meaningful bandwidth saving. No-op on desktop. */
+  InvalidateFrameTransients(): void;
 
   SetViewport(x: number, y: number, width: number, height: number): void;
 }

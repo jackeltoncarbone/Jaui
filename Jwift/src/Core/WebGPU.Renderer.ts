@@ -438,8 +438,11 @@ export class WebGPURenderer implements Renderer {
   ComputeBlur = (
     input: GpuTextureHandle, width: number, height: number,
     radius: number, minDepth?: number,
+    _scissor?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle => {
     if (!this._blur) throw new Error('[Jwift WebGPU] Not initialized');
+    // TODO: WebGPU BlurPass scissor support. Not used in the Angular demo
+    // today (WebGL2 is the active backend); ignoring scissor is safe.
     const result = this._blur.Blur(_unwrap(input), width, height, radius, minDepth);
     return _wrap(result);
   };
@@ -562,6 +565,21 @@ export class WebGPURenderer implements Renderer {
     // Same — blend state is per-pipeline in WebGPU. The blit pipeline has
     // no blending. Callers switch pipelines rather than toggling GL state.
   };
+
+  /** WebGPU-side rebind after a blur pass. We start a new render pass on
+   *  the scene texture with loadOp: 'load' so the existing contents stay.
+   *  WebGL2 just has to call gl.bindFramebuffer — WebGPU has to create a
+   *  render pass and the encoder mechanics differ, so this is a stub until
+   *  the WebGPU pipeline matches the WebGL2 one on Phase A1. */
+  RebindSceneTarget = (): void => {
+    // TODO: start a new scene render pass on _sceneView with loadOp: 'load'.
+    // Not used in the Angular demo today (WebGL2 is the backend there).
+  };
+
+  /** WebGPU equivalent of discard-after-use is `storeOp: 'discard'` on the
+   *  render pass color attachment. We handle that in pass descriptors rather
+   *  than via an explicit invalidate call — this is a no-op here. */
+  InvalidateFrameTransients = (): void => { /* no-op on WebGPU */ };
 
   BindDefaultTarget = (clear?: { R: number; G: number; B: number }): void => {
     // Begin a new render pass targeting the swap chain texture.

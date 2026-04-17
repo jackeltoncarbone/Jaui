@@ -142,6 +142,13 @@ export class WebGL2Renderer implements Renderer {
   private _timerActive: WebGLQuery | null = null;
   private _lastGpuMs: number | null = null;
 
+  // ── GL state cache (C4) ──
+  // Skip the JS→GL crossing when the requested state equals the last state
+  // we set. Driver-side this is already a no-op for identical values, but
+  // the JS call still has fixed overhead (argument marshaling, validation).
+  // Caching here shaves ~5-15 GL calls per frame on Home.
+  private _lastProgram: WebGLProgram | null = null;
+
   // ── Lifecycle ──
 
   Init = async (canvas: HTMLCanvasElement): Promise<void> => {
@@ -363,7 +370,7 @@ export class WebGL2Renderer implements Renderer {
       this._panelInstanceData.subarray(0, this._panelInstanceCount * PANEL_FLOATS_PER_INSTANCE),
       gl.DYNAMIC_DRAW);
 
-    gl.useProgram(this._panelShader.Program);
+    this._useProgram(this._panelShader.Program);
     gl.uniform2f(this._panelResolutionLoc, canvasWidth, canvasHeight);
     gl.uniform1i(this._panelBackdropLoc, 0);
     gl.uniform1i(this._panelClipTexLoc, 1);
@@ -407,7 +414,7 @@ export class WebGL2Renderer implements Renderer {
       this._textInstanceData.subarray(0, this._textInstanceCount * TEXT_FLOATS_PER_INSTANCE),
       gl.DYNAMIC_DRAW);
 
-    gl.useProgram(this._textShader.Program);
+    this._useProgram(this._textShader.Program);
     gl.uniform2f(this._textResolutionLoc, canvasWidth, canvasHeight);
     gl.uniform1i(this._textAtlasLoc, 0);
     gl.uniform1i(this._textClipTexLoc, 1);
@@ -426,13 +433,22 @@ export class WebGL2Renderer implements Renderer {
   ComputeBlur = (
     input: GpuTextureHandle, width: number, height: number,
     radius: number, minDepth?: number,
+    scissor?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle => {
-    const result = this._blur.Blur(_unwrap(input), width, height, radius, minDepth);
+    const result = this._blur.Blur(_unwrap(input), width, height, radius, minDepth, scissor);
+    // BlurPass calls `gl.useProgram` internally with its own shaders,
+    // bypassing our program cache. Invalidate so the next Panel/Text
+    // draw re-binds its program correctly.
+    this._lastProgram = null;
     return _wrap(result);
   };
 
   GenerateBlurMipmap = (): void => {
     this._blur.GenerateOutputMipmap();
+    // The blit-to-mip path in BlurPass.GenerateOutputMipmap doesn't touch
+    // shader programs, but keep the invalidation paired with ComputeBlur
+    // for consistency. Cheap to do.
+    this._lastProgram = null;
   };
 
   get LastBlurDepth(): number { return this._blur.LastDepth; }
@@ -443,7 +459,7 @@ export class WebGL2Renderer implements Renderer {
     const gl = this._gl;
     const p = this._progBlurShader.Program;
 
-    gl.useProgram(p);
+    this._useProgram(p);
     gl.uniform2f(this._progBlurLocs.resolution, this._width, this._height);
     gl.uniform4f(this._progBlurLocs.rect, params.Rect.X, params.Rect.Y, params.Rect.W, params.Rect.H);
     gl.uniform1i(this._progBlurLocs.scene, 0);
@@ -496,8 +512,13 @@ export class WebGL2Renderer implements Renderer {
       this._snapshotW = this._width;
       this._snapshotH = this._height;
     }
-    // Copy default framebuffer → snapshot texture via blit
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    // Copy sceneFbo → snapshot texture via blit. The scene FBO is where the
+    // tree walk renders now (via BeginScenePass); the default framebuffer
+    // stays empty until the final Blit at end-of-frame. Reading from
+    // sceneFbo avoids the feedback-loop issue for progressive blur's
+    // `u_Scene` uniform — pblur needs a separate texture it can safely
+    // sample while rendering into sceneFbo itself.
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._snapshotFbo);
     gl.blitFramebuffer(0, 0, this._width, this._height, 0, 0, this._width, this._height, gl.COLOR_BUFFER_BIT, gl.LINEAR);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -508,7 +529,7 @@ export class WebGL2Renderer implements Renderer {
 
   Blit = (source: GpuTextureHandle): void => {
     const gl = this._gl;
-    gl.useProgram(this._blitShader.Program);
+    this._useProgram(this._blitShader.Program);
     gl.uniform1i(this._blitTexLoc, 0);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(source));
@@ -565,6 +586,46 @@ export class WebGL2Renderer implements Renderer {
       gl.clearColor(clear.R, clear.G, clear.B, 1.0);
       gl.clear(gl.COLOR_BUFFER_BIT);
     }
+  };
+
+  /** Bind the scene FBO as the current draw target without clearing. Used
+   *  after blur passes (which transiently bound their own FBOs) to resume
+   *  drawing into the scene. BlurPass disables blend on its own path, so
+   *  re-enable standard alpha blending here so subsequent panel/text draws
+   *  composite correctly over what's already in the scene FBO. */
+  RebindSceneTarget = (): void => {
+    const gl = this._gl;
+    this._sceneFbo.Bind();
+    gl.viewport(0, 0, this._width, this._height);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  };
+
+  /** Cache-aware program switch. Skip the gl.useProgram call when we're
+   *  already bound to `program` — driver no-ops identical switches, but
+   *  the JS-to-GL crossing has fixed cost (~5µs × 4 draw-batch calls × 60
+   *  fps = ~1.2ms/sec saved on Home). */
+  private _useProgram = (program: WebGLProgram): void => {
+    if (this._lastProgram === program) return;
+    this._gl.useProgram(program);
+    this._lastProgram = program;
+  };
+
+  InvalidateFrameTransients = (): void => {
+    const gl = this._gl;
+    // Default framebuffer: we never touch depth for the final blit — tell
+    // the driver not to bother preserving it. On tile-based mobile GPUs
+    // (iPad, most Android) this prevents the depth tile memory from being
+    // written out to main memory, a real bandwidth saving.
+    // Note: default FB attachment names differ from FBO attachment names —
+    // use DEPTH / STENCIL / COLOR, not DEPTH_ATTACHMENT / etc.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.DEPTH, gl.STENCIL]);
+    // Scene FBO: we just blit it out; its contents won't be read again this
+    // frame and the next BeginScenePass will clear it. Drop the tile.
+    this._sceneFbo.Bind();
+    gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   };
 
   SetViewport = (x: number, y: number, width: number, height: number): void => {

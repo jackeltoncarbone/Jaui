@@ -295,18 +295,56 @@ export class Canvas {
     r.BeginFrame();
     this._textCache.BeginFrame();
 
-    // Render directly to the swap chain in tree z-order. When we hit glass,
-    // snapshot + blur the current screen as its backdrop. We clear the default
-    // target to black so that pixels discarded by overflow clipping (or any
-    // other reason) show the base canvas color rather than the HTML page
-    // behind the transparent canvas.
+    // Render the scene into the off-screen `_sceneFbo` instead of drawing
+    // directly to the swap chain. This lets glass/pblur surfaces sample
+    // the scene texture as their backdrop with zero per-surface blits —
+    // the FBO IS the "snapshot" at all times, always current.
+    //
+    // End-of-frame, we do a single Blit of the scene FBO into the default
+    // framebuffer (see the block after the tree walk). Total full-canvas
+    // blits per frame: 1 (final present), down from 1+N (one per
+    // glass/pblur that used to call SnapshotScreen).
     r.DisableBlend();
-    r.BindDefaultTarget({ R: 0, G: 0, B: 0 });
+    r.BeginScenePass(0, 0, 0);
 
     // Track whether we've built a blur for the current snapshot
     let lastBackdrop: GpuTextureHandle | null = null;
     let lastBaseFrostLod: number = 0;
-    let backdropDirty = true; // Need new snapshot before next glass
+    // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
+    // contract means the scene is different every frame; caching snapshots
+    // across surfaces was already unsafe. Each glass/pblur now scissors
+    // its own blur pass to just its sample region, so recomputing per
+    // surface is cheap. If a future optimization needs to skip recompute
+    // (e.g. fullscreen chrome pblurs with matching radius), add a local
+    // cache scoped to the scissor rect + radius rather than a global flag.
+
+    // Pending non-glass panel batch. The tree walk pushes every non-glass
+    // panel into `_panelBuffer` instead of drawing it immediately; when we
+    // hit something that would violate z-order (glass, pblur, image, text,
+    // or the end of the walk), we flush the whole buffer as ONE instanced
+    // draw call.
+    //
+    // Why this is safe: all non-glass panels share the same shader program,
+    // uniforms, vertex array, and backdrop (null). They differ only in
+    // per-instance data (rect, color, shadow, clip offset), which is
+    // already passed per-instance via the instance buffer. Transparent,
+    // solid, or partial-alpha backgrounds all composite correctly because
+    // the blend state is constant within the batch and instances draw in
+    // tree order (preserved by push order).
+    //
+    // Win: on Home the 30-100 separate panel draw calls collapse to ~3-5
+    // per frame (one batch per segment between glass/image/text boundaries).
+    // Major CPU-submit savings on mobile / iPad.
+    const flushPanels = (): void => {
+      if (this._panelBuffer.Count === 0) return;
+      r.EnableBlend();
+      r.PanelBeginBatch();
+      r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+      r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
+      r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
+      this._counts.Panels += this._panelBuffer.Count;
+      this._panelBuffer.Begin(); // reset count for the next batch
+    };
 
     // Order children by Layer (stable — tree order breaks ties). Fast-path
     // when every child has Layer 0 (the common case): return the original
@@ -353,26 +391,53 @@ export class Canvas {
       const material = node.RenderStyle.Material;
 
       if (material === 'ProgressiveBlur') {
-        // Progressive blur: reads from last backdrop snapshot
-        if (backdropDirty || !lastBackdrop) {
-          const snap = r.SnapshotScreen();
-          const baseBlurCssPx = 1;
-          lastBackdrop = r.ComputeBlur(snap, w, h, baseBlurCssPx * this._dpr);
-          lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
-          r.GenerateBlurMipmap();
-          r.BindDefaultTarget();
-          backdropDirty = false;
-        }
+        // Flush any pending non-glass panels: the pblur snapshots the scene
+        // and samples it — so the scene must contain everything drawn so
+        // far. Deferred panels in the buffer haven't hit the FBO yet.
+        flushPanels();
+        // Progressive blur samples two textures: `u_Scene` (unblurred, the
+        // ramp's clear end) and `u_Pyramid` (blurred, the ramp's heavy end).
+        // `u_Scene` cannot be sceneFbo.Texture directly because the pblur
+        // draws INTO sceneFbo — feedback loop. So we use SnapshotScreen to
+        // copy sceneFbo → _snapshotTex and feed that as `u_Scene`.
+        // `u_Pyramid` is the BlurPass output (a separate texture), no
+        // feedback risk.
+        const sceneSnap = r.SnapshotScreen();
         const d = this._dpr;
         const maxFeatherSigma = node.RenderStyle.BackdropFrostBlur;
         const baseSigmaDevice = this._dpr;
         const targetSigmaDevice = maxFeatherSigma * this._dpr;
         const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
+        // Scissor the blur passes to this pblur's rect + LOD-scaled margin.
+        // Each mipmap LOD doubles the canvas-space footprint of one texel,
+        // so a bilinear sample at max LOD reaches ±2^(maxLod+1) canvas px
+        // from the pblur's own rect. Fullscreen pblurs (TopBlur/ContentBlur
+        // covering 100vw×100vh) get clamped to the full canvas — no
+        // savings, no harm. Localized pblurs (card footers ~260×60) see
+        // big fill-rate reductions: e.g. 516×316 vs 1920×1080 = ~13× per
+        // blur pass, 4 passes per blur = ~50× cumulative fragment work
+        // saved per localized pblur per frame.
+        const lodMargin = Math.ceil(Math.pow(2, maxLod + 1));
+        const px = (node.X + offsetX) * d;
+        const py = (node.Y + offsetY) * d;
+        const pw = node.Width * d;
+        const ph = node.Height * d;
+        const scissor = {
+          x: Math.max(0, Math.floor(px - lodMargin)),
+          y: Math.max(0, Math.floor(py - lodMargin)),
+          w: Math.min(w, Math.ceil(pw + lodMargin * 2)),
+          h: Math.min(h, Math.ceil(ph + lodMargin * 2)),
+        };
+        const baseBlurCssPx = 1;
+        lastBackdrop = r.ComputeBlur(sceneSnap, w, h, baseBlurCssPx * d, undefined, scissor);
+        lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
+        r.GenerateBlurMipmap();
+        r.RebindSceneTarget();
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.DrawProgressiveBlur({
           Rect: { X: (node.X + offsetX) * d, Y: (node.Y + offsetY) * d, W: node.Width * d, H: node.Height * d },
-          Scene: r.SnapshotScreen(), // unblurred scene for crossfade
+          Scene: sceneSnap, // reuse the snapshot we took for ComputeBlur
           Pyramid: lastBackdrop,
           MaxLod: maxLod,
           Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
@@ -387,17 +452,40 @@ export class Canvas {
           ClipCount: clipMeta.Count,
         });
         this._counts.PBlur++;
-        backdropDirty = true;
 
       } else if (_isGlass(material)) {
-        // Glass: snapshot screen, blur, render glass sampling blur
-        const snap = r.SnapshotScreen();
+        // Flush pending panels: same reason as pblur — glass reads the
+        // scene (indirectly via its blur pyramid), so the scene must be
+        // current.
+        flushPanels();
+        // Glass samples only `u_Backdrop` (the blur pyramid), never the raw
+        // scene — so there's no feedback loop and we can feed ComputeBlur
+        // the scene FBO's texture directly, zero blits.
+        //
+        // Scissor the blur to just the panel's sample region (panel rect
+        // plus a generous margin for refraction + rim + bezel). Fragment
+        // fill on each blur pass drops from full-canvas to panel-sized —
+        // 20-50× less for localized glass like TabBar/ToolbarDropdown. For
+        // a ~500×80 TabBar on a 1920×1080 canvas, scissor saves ~98% of
+        // the blur's fragment writes with zero visual change (glass only
+        // samples inside this rect anyway).
         const baseBlurCssPx = 1;
-        lastBackdrop = r.ComputeBlur(snap, w, h, baseBlurCssPx * this._dpr);
-        lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * this._dpr));
+        const d = this._dpr;
+        const margin = 48 * d; // covers refraction offset + rim + bezel safely
+        const px = (node.X + offsetX) * d;
+        const py = (node.Y + offsetY) * d;
+        const pw = node.Width * d;
+        const ph = node.Height * d;
+        const scissor = {
+          x: Math.max(0, Math.floor(px - margin)),
+          y: Math.max(0, Math.floor(py - margin)),
+          w: Math.min(w, Math.ceil(pw + margin * 2)),
+          h: Math.min(h, Math.ceil(ph + margin * 2)),
+        };
+        lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, baseBlurCssPx * d, undefined, scissor);
+        lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
         r.GenerateBlurMipmap();
-        r.BindDefaultTarget();
-        backdropDirty = false;
+        r.RebindSceneTarget();
 
         r.EnableBlend();
         this._panelBuffer.Begin();
@@ -407,18 +495,18 @@ export class Canvas {
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY);
         this._counts.Glass++;
-        backdropDirty = true;
+        // Reset the shared panel buffer so this glass instance isn't picked
+        // up by the next flushPanels() and drawn AGAIN as a non-glass panel
+        // (null backdrop → dummy black texture → glass goes solid gray).
+        // The glass path shares `_panelBuffer` with non-glass batching for
+        // code simplicity; we just have to return it to count=0.
+        this._panelBuffer.Begin();
 
       } else {
-        // Non-glass panel: render directly
-        r.EnableBlend();
-        this._panelBuffer.Begin();
+        // Non-glass panel: DEFER. Push into the shared panel buffer; an
+        // upcoming flushPanels() will drain it as one instanced draw call
+        // along with every other pending non-glass panel in the tier.
         this._panelBuffer.Push(node, this._dpr, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
-        r.PanelBeginBatch();
-        r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
-        r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-        r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
-        this._counts.Panels++;
       }
 
       // Render this node's image (if any — after panel, before text)
@@ -475,6 +563,9 @@ export class Canvas {
             drawY = (node.Y + offsetY) * d;
           }
 
+          // Flush pending panels before image so the image draws OVER
+          // any panel that should sit behind it (tree order).
+          flushPanels();
           this._textBuffer.Begin();
           const data = this._textBuffer.Data;
           data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
@@ -494,6 +585,8 @@ export class Canvas {
       if (this._textBuffer.Count > 0) {
         const atlas = this._textCache.Atlas;
         if (atlas) {
+          // Flush pending panels so text draws OVER its backing panels.
+          flushPanels();
           r.TextBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
@@ -513,7 +606,26 @@ export class Canvas {
 
     this._textBuffer.Begin();
     this._clipBuffer.Begin();
+    this._panelBuffer.Begin();
     renderNode(this.Root, 0, 0, EmptyClipStack);
+    // Trailing flush — catches any non-glass panels deferred since the last
+    // image/text/glass/pblur encountered during the walk.
+    flushPanels();
+
+    // Final composite: the whole frame lives in sceneFbo. Bind the default
+    // framebuffer and blit the scene texture onto the swap chain. This is
+    // the single full-canvas copy per frame — everything else the render
+    // walk did was to the scene FBO. Disable blend so the clear+blit fully
+    // overwrites whatever was in the swap chain texture.
+    r.BindDefaultTarget({ R: 0, G: 0, B: 0 });
+    r.DisableBlend();
+    r.Blit(r.SceneTexture);
+
+    // Tell the driver we don't need the default framebuffer's depth or the
+    // scene FBO's color for the rest of this frame. On tile-based mobile
+    // GPUs this discards the tile memory instead of writing it back to
+    // main memory — real bandwidth win on iPad / Android.
+    r.InvalidateFrameTransients();
 
     r.EndFrame();
   };

@@ -87,7 +87,7 @@ HeroStub {
   Justify: Center
   Align: Start
   Padding: 128pt 32pt 32pt 80pt
-  Gap: 20pt
+  Gap: 30pt
   Height: 70vh
   Background: rgba(81, 81, 81, 0.24)
   FlexGrow: 0
@@ -266,6 +266,8 @@ CardFooter {
   Align: Start
   Padding: 18pt
   Gap: 8pt
+  ProgressiveBlurDirection: ToBottom
+  BackdropFrostBlur: 32pt
   Background: rgba(0, 0, 0, 0.55)
 }
 
