@@ -17,8 +17,10 @@ import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceB
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
 import type { Renderer, GpuTextureHandle } from './Renderer';
-import { WebGPURenderer } from './WebGPU.Renderer';
-import { WebGL2Renderer } from './WebGL2.Renderer';
+// Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
+// interface only. Concrete renderers (WebGL2, WebGPU) are built by
+// `Renderer.Factory.ts` and handed in. Canvas has no opinion about
+// which backend is running underneath it.
 import { ImageCache } from '../Image/Image.Cache';
 import type { MaterialType } from '../Jiv/Jiv.Types';
 
@@ -78,45 +80,29 @@ export class Canvas {
   private _hudCount: number = 0;
   private _hudLastWrite: number = 0;
 
-  /** Async factory — tries WebGPU first, falls back to WebGL2 automatically. */
-  static Create = async (canvas: HTMLCanvasElement): Promise<Canvas> => {
-    let renderer: Renderer;
+  // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
+  // N frames so the HUD reports a stable average rather than jittery samples.
+  // Only populated when the debug HUD is active so release builds pay
+  // nothing — `_debugHud` null-check gates all instrumentation writes.
+  private _phaseDirty:   Float32Array = new Float32Array(30);
+  private _phaseLayout:  Float32Array = new Float32Array(30);
+  private _phaseText:    Float32Array = new Float32Array(30);
+  private _phaseRender:  Float32Array = new Float32Array(30);
+  private _frameIdx:     number = 0;
+  private _frameCount:   number = 0;
+  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
+  private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
+  /** Rolling window of per-frame GPU ms from `Renderer.GetFrameGpuMs`. The
+   *  reading is null when the backend doesn't support timer queries or no
+   *  query has resolved yet. We skip nulls when averaging. */
+  private _phaseGpu: Float32Array = new Float32Array(30);
+  private _phaseGpuCount: number = 0;
 
-    // Try WebGPU first — better performance on capable hardware
-    if (typeof navigator !== 'undefined' && navigator.gpu) {
-      try {
-        const webgpu = new WebGPURenderer();
-        await webgpu.Init(canvas);
-        renderer = webgpu;
-        console.log('[Jwift] Using WebGPU renderer');
-      } catch (e) {
-        console.warn('[Jwift] WebGPU failed, falling back to WebGL2:', (e as Error).message);
-        const webgl2 = new WebGL2Renderer();
-        await webgl2.Init(canvas);
-        renderer = webgl2;
-        console.log('[Jwift] Using WebGL2 renderer');
-      }
-    } else {
-      const webgl2 = new WebGL2Renderer();
-      await webgl2.Init(canvas);
-      renderer = webgl2;
-      console.log('[Jwift] Using WebGL2 renderer (WebGPU not available)');
-    }
-
-    return new Canvas(canvas, renderer);
-  };
-
-  /** Synchronous constructor — always uses WebGL2. For WebGPU with automatic
-   *  fallback, use the async `Canvas.Create()` factory instead. */
-  constructor(canvas: HTMLCanvasElement, renderer?: Renderer) {
-    if (!renderer) {
-      const webgl2 = new WebGL2Renderer();
-      // WebGL2 init is synchronous internally — the Promise resolves immediately.
-      // We call it here and trust that it completes synchronously for WebGL2.
-      // This is safe because WebGL2.Renderer.Init only does synchronous GL calls.
-      void webgl2.Init(canvas);
-      renderer = webgl2;
-    }
+  /** Canvas takes a pre-initialized renderer. No backend selection happens
+   *  here — callers build a renderer via `Renderer.Factory` (or their own
+   *  path) and hand it in. Keeps this class free of concrete-backend
+   *  imports so new backends can land without touching Canvas. */
+  constructor(canvas: HTMLCanvasElement, renderer: Renderer) {
     this.Element = canvas;
     this.Root = new Jiv();
     this._renderer = renderer;
@@ -237,8 +223,17 @@ export class Canvas {
     const dt = this._lastTime === 0 ? 0.016 : Math.min((time - this._lastTime) / 1000, 0.033);
     this._lastTime = time;
 
+    // Phase timing — only active when the debug HUD is on. Gate reads at
+    // each boundary rather than branching inside hot loops; performance.now()
+    // is cheap but we skip it entirely in release.
+    const hud = this._debugHud !== null;
+    let t0 = 0, tDirtyEnd = 0, tLayoutEnd = 0, tTextEnd = 0;
+    if (hud) t0 = performance.now();
+
     // Check if layout needs re-solving
-    if (this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root)) {
+    const layoutDirty = this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root);
+    if (hud) tDirtyEnd = performance.now();
+    if (layoutDirty) {
       // Cascade PointScale first so _measureDirtyText can resolve FontSize
       // against each Jiv's ResolveCtx before layout sizes are known.
       CascadePointScale(this.Root, this._viewport(), this._jssVars);
@@ -247,12 +242,48 @@ export class Canvas {
       this._solveAndAnimate();
       this._clearDirty(this.Root);
     }
+    if (hud) tLayoutEnd = performance.now();
 
     // Wrap-change detection runs every frame — spring-animated width can cross
     // wrap thresholds continuously, and each crossing should cross-fade.
     this._processTextTransitions(this.Root);
+    if (hud) tTextEnd = performance.now();
+
+    // Reset per-frame counters; _render increments them as it walks.
+    if (hud) {
+      this._counts.Panels = 0;
+      this._counts.Glass = 0;
+      this._counts.Text = 0;
+      this._counts.Image = 0;
+      this._counts.PBlur = 0;
+    }
 
     this._render(dt);
+
+    if (hud) {
+      const tEnd = performance.now();
+      const i = this._frameIdx;
+      this._phaseDirty[i]  = tDirtyEnd  - t0;
+      this._phaseLayout[i] = tLayoutEnd - tDirtyEnd;
+      this._phaseText[i]   = tTextEnd   - tLayoutEnd;
+      this._phaseRender[i] = tEnd       - tTextEnd;
+      this._countsRolling.Panels = this._counts.Panels;
+      this._countsRolling.Glass  = this._counts.Glass;
+      this._countsRolling.Text   = this._counts.Text;
+      this._countsRolling.Image  = this._counts.Image;
+      this._countsRolling.PBlur  = this._counts.PBlur;
+      // Poll whatever GPU timer result is now available. The reading lags
+      // 2-3 frames behind what we just submitted — writing it into the same
+      // rolling window is still useful because we're averaging, not trying
+      // to align one frame's CPU and GPU numbers.
+      const gpuMs = this._renderer.GetFrameGpuMs();
+      if (gpuMs !== null) {
+        this._phaseGpu[this._phaseGpuCount % this._phaseGpu.length] = gpuMs;
+        this._phaseGpuCount++;
+      }
+      this._frameIdx = (i + 1) % this._phaseDirty.length;
+      if (this._frameCount < this._phaseDirty.length) this._frameCount++;
+    }
   };
 
   private _render = (_dt: number): void => {
@@ -355,6 +386,7 @@ export class Canvas {
           ClipOffset: clipMeta.Offset,
           ClipCount: clipMeta.Count,
         });
+        this._counts.PBlur++;
         backdropDirty = true;
 
       } else if (_isGlass(material)) {
@@ -374,6 +406,7 @@ export class Canvas {
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY);
+        this._counts.Glass++;
         backdropDirty = true;
 
       } else {
@@ -385,6 +418,7 @@ export class Canvas {
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
+        this._counts.Panels++;
       }
 
       // Render this node's image (if any — after panel, before text)
@@ -451,6 +485,7 @@ export class Canvas {
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(data, 0, TEXT_FLOATS_PER_INSTANCE);
           r.TextDrawBatch(w, h, imgEntry.Texture);
+          this._counts.Image++;
         }
       }
 
@@ -463,6 +498,7 @@ export class Canvas {
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
           r.TextDrawBatch(w, h, atlas);
+          this._counts.Text++;
         }
       }
       this._textBuffer.Begin();
@@ -1355,9 +1391,52 @@ export class Canvas {
     const fps = avg > 0 ? 1000 / avg : 0;
     const w = this._width;
     const h = this._height;
-    this._debugHud.textContent =
-      `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | WxH ${w}x${h} | WebGPU`;
+
+    const avgPhase = (arr: Float32Array): number => {
+      if (this._frameCount === 0) return 0;
+      let s = 0;
+      for (let i = 0; i < this._frameCount; i++) s += arr[i];
+      return s / this._frameCount;
+    };
+    const pDirty  = avgPhase(this._phaseDirty);
+    const pLayout = avgPhase(this._phaseLayout);
+    const pText   = avgPhase(this._phaseText);
+    const pRender = avgPhase(this._phaseRender);
+    const c = this._countsRolling;
+
+    // GPU time — averaged over whatever readings we have. Null when the
+    // backend doesn't implement it (WebGPU today) or the extension isn't
+    // available on this driver — show "—" so the HUD doesn't lie with 0.
+    let gpuDisplay = '—';
+    if (this._phaseGpuCount > 0) {
+      const n = Math.min(this._phaseGpuCount, this._phaseGpu.length);
+      let gs = 0;
+      for (let i = 0; i < n; i++) gs += this._phaseGpu[i];
+      gpuDisplay = (gs / n).toFixed(2);
+    }
+
+    const hudText =
+      `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | ${w}x${h}\n` +
+      `cpu: dirty ${pDirty.toFixed(2)}  layout ${pLayout.toFixed(2)}  text ${pText.toFixed(2)}  render ${pRender.toFixed(2)} | gpu ${gpuDisplay} ms\n` +
+      `draws — panels ${c.Panels}  glass ${c.Glass}  text ${c.Text}  img ${c.Image}  pblur ${c.PBlur}`;
+    this._debugHud.textContent = hudText;
+    this._debugLatest = hudText;
+
+    // Throttled console mirror — 1Hz, copy-pasteable. The DOM HUD is
+    // pointer-events:none (so it doesn't hijack canvas input) and can't be
+    // text-selected. `__jwift.canvas.DebugText` getter is a second escape
+    // hatch for on-demand reads.
+    if (time - this._debugLogLast > 1000) {
+      this._debugLogLast = time;
+      console.log('[Jwift perf]\n' + hudText);
+    }
   };
+
+  /** Current HUD text as a single string. Set when `?debug` is active and
+   *  the HUD updates (~10Hz). Safe to read anytime from the console. */
+  get DebugText(): string | null { return this._debugLatest; }
+  private _debugLatest: string | null = null;
+  private _debugLogLast: number = 0;
 }
 
 // ─── Re-exports by slice ───
@@ -1368,6 +1447,12 @@ export { Jiv } from '../Jiv/Jiv';
 // Core
 export type { Vec2, Vec4, Rect, Color, DeviceTier, DirtyFlags } from './Types';
 export { DirtyFlag } from './Types';
+export type { Renderer } from './Renderer';
+// Renderers are exported directly — callers pick the one they want and
+// hand it to `new Canvas(el, renderer)`. No auto-pick factory: the choice
+// between WebGL2 (sync) and WebGPU (async) is the caller's to make.
+export { WebGL2Renderer } from './WebGL2.Renderer';
+export { WebGPURenderer } from './WebGPU.Renderer';
 
 // Jiv
 export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';

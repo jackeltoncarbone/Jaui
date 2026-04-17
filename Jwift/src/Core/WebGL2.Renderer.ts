@@ -129,6 +129,19 @@ export class WebGL2Renderer implements Renderer {
   private _width: number = 0;
   private _height: number = 0;
 
+  // ── GPU timer-query state ──
+  // EXT_disjoint_timer_query_webgl2 surfaces per-draw/per-frame elapsed
+  // nanoseconds from the GPU itself. Results resolve async — typically
+  // 2-3 frames later — so we keep a ring of in-flight queries and pick
+  // the most recent resolved one. Null `_timerExt` means the extension
+  // isn't available (Safari, some ANGLE drivers) and GetFrameGpuMs()
+  // returns null forever on that device.
+  private _timerExt: { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number } | null = null;
+  private _timerQueries: (WebGLQuery | null)[] = [];
+  private _timerFrameIdx: number = 0;
+  private _timerActive: WebGLQuery | null = null;
+  private _lastGpuMs: number | null = null;
+
   // ── Lifecycle ──
 
   Init = async (canvas: HTMLCanvasElement): Promise<void> => {
@@ -145,6 +158,14 @@ export class WebGL2Renderer implements Renderer {
     this._quad = new QuadGeometry(gl);
     this._sceneFbo = new Framebuffer(gl);
     this._blur = new BlurPass(gl);
+
+    // Probe for GPU timer-query support. The extension object exposes the
+    // two enums we need; if it's missing, _timerExt stays null and
+    // GetFrameGpuMs permanently returns null on this device.
+    const timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    if (timerExt) {
+      this._timerExt = timerExt;
+    }
 
     this._initPanelShader(gl);
     this._initTextShader(gl);
@@ -223,8 +244,65 @@ export class WebGL2Renderer implements Renderer {
 
   BeginFrame = (): void => {
     this._clipLastFloatsUploaded = 0;
+    // Start a fresh GPU timer query for this frame. If the extension
+    // isn't available or query creation fails silently, _timerActive stays
+    // null and EndFrame / GetFrameGpuMs become no-ops.
+    const ext = this._timerExt;
+    if (ext) {
+      const gl = this._gl;
+      const q = gl.createQuery();
+      if (q) {
+        gl.beginQuery(ext.TIME_ELAPSED_EXT, q);
+        this._timerActive = q;
+      }
+    }
   };
-  EndFrame = (): void => { /* no-op */ };
+  EndFrame = (): void => {
+    const ext = this._timerExt;
+    const q = this._timerActive;
+    if (!ext || !q) return;
+    const gl = this._gl;
+    gl.endQuery(ext.TIME_ELAPSED_EXT);
+    // Park this query in a ring slot for GetFrameGpuMs to poll later.
+    // Delete any stale query still sitting in this slot (its result would
+    // now be 3+ frames old — discard rather than let it accumulate).
+    const slot = this._timerFrameIdx;
+    const prev = this._timerQueries[slot];
+    if (prev) gl.deleteQuery(prev);
+    this._timerQueries[slot] = q;
+    this._timerFrameIdx = (slot + 1) % 4; // 4 in-flight is plenty
+    this._timerActive = null;
+  };
+
+  GetFrameGpuMs = (): number | null => {
+    const ext = this._timerExt;
+    if (!ext) return null;
+    const gl = this._gl;
+    // Poll all parked queries. Harvest the most-recent resolved one as the
+    // "current" reading; delete resolved queries so the slot can be reused.
+    // A disjoint event (power-state change, GPU reset) invalidates every
+    // in-flight query — drop `_lastGpuMs` to null so the HUD shows "—".
+    const disjoint = gl.getParameter(ext.GPU_DISJOINT_EXT);
+    if (disjoint) {
+      for (let i = 0; i < this._timerQueries.length; i++) {
+        const q = this._timerQueries[i];
+        if (q) { gl.deleteQuery(q); this._timerQueries[i] = null; }
+      }
+      this._lastGpuMs = null;
+      return null;
+    }
+    for (let i = 0; i < this._timerQueries.length; i++) {
+      const q = this._timerQueries[i];
+      if (!q) continue;
+      if (gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) {
+        const ns = gl.getQueryParameter(q, gl.QUERY_RESULT) as number;
+        this._lastGpuMs = ns / 1_000_000;
+        gl.deleteQuery(q);
+        this._timerQueries[i] = null;
+      }
+    }
+    return this._lastGpuMs;
+  };
 
   // ── Render Targets ──
 

@@ -35,18 +35,47 @@ export class WebGPUDevice {
     });
   }
 
-  /** Async factory — adapter and device creation are both promises. */
+  /** Async factory — adapter and device creation are both promises.
+   *  Escalates adapter requests in order: high-performance → default →
+   *  forceFallbackAdapter. The software fallback (SwiftShader / Dawn Swift)
+   *  is slower than WebGL2 hardware but lets the WebGPU code path run end-
+   *  to-end on machines where Chrome reports "WebGPU: Software only" in
+   *  chrome://gpu. Useful for development/shader validation, not production
+   *  performance. */
   static Create = async (canvas: HTMLCanvasElement): Promise<WebGPUDevice> => {
     if (!navigator.gpu) {
       throw new Error('[Jwift] WebGPU not supported in this browser');
     }
 
-    const adapter = await navigator.gpu.requestAdapter({
-      powerPreference: 'high-performance',
-    });
+    let adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    let adapterKind = 'high-performance';
+
     if (!adapter) {
-      throw new Error('[Jwift] Failed to obtain WebGPU adapter');
+      // No high-perf adapter — try default (low-power / integrated) before
+      // giving up on hardware. Some Chrome + driver combos only expose the
+      // integrated GPU here even when a discrete one exists.
+      adapter = await navigator.gpu.requestAdapter();
+      adapterKind = 'default';
     }
+
+    if (!adapter) {
+      // Last resort: software fallback. Chrome reports these in chrome://gpu
+      // as "WebGPU: Software only, hardware acceleration unavailable." Opt
+      // in explicitly — the spec says hardware adapters are preferred and
+      // software is only returned when `forceFallbackAdapter: true`.
+      adapter = await navigator.gpu.requestAdapter({ forceFallbackAdapter: true });
+      adapterKind = 'software-fallback';
+    }
+
+    if (!adapter) {
+      throw new Error('[Jwift] Failed to obtain WebGPU adapter (hardware and software fallback both failed)');
+    }
+
+    // `isFallbackAdapter` is the canonical flag for "this is software" but
+    // isn't in every @webgpu/types version. Read via any-cast so we surface
+    // it in the log when Chrome provides it.
+    const isFallback = (adapter as unknown as { isFallbackAdapter?: boolean }).isFallbackAdapter;
+    console.log(`[Jwift] WebGPU adapter acquired: ${adapterKind}${isFallback ? ' (isFallbackAdapter=true)' : ''}`);
 
     const device = await adapter.requestDevice({
       // Request no optional features for now — compute shaders, storage

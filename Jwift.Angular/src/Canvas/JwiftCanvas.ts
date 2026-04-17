@@ -8,7 +8,7 @@ import {
   input,
   output,
 } from '@angular/core';
-import { Canvas, type ParsedJss, type Stylesheet } from 'jwift';
+import { Canvas, WebGL2Renderer, type ParsedJss, type Stylesheet } from 'jwift';
 import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
 
 /**
@@ -69,7 +69,13 @@ export class JwiftCanvas implements OnInit, OnDestroy {
     this._canvasEl.style.width = '100%';
     this._canvasEl.style.height = '100%';
     this._host.nativeElement.appendChild(this._canvasEl);
-    this.Canvas = new Canvas(this._canvasEl);
+    // WebGL2 explicitly: projected <jiv> children read `.Root` synchronously
+    // during their own ngOnInit, and WebGL2Renderer.Init is the only backend
+    // init that's actually sync-in-practice (pure GL state calls). The
+    // Promise return on Init is cosmetic; `void` fires and forgets.
+    const renderer = new WebGL2Renderer();
+    void renderer.Init(this._canvasEl);
+    this.Canvas = new Canvas(this._canvasEl, renderer);
     (window as any).__jwift = { canvas: this.Canvas };
 
     // Push the active registry's var table into the Canvas whenever the

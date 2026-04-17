@@ -7,7 +7,10 @@ What Jwift code looks like when you use it. These are the target API — impleme
 ```typescript
 import { Canvas, Panel, Text, HStack, Spring } from 'jwift';
 
-const canvas = new Canvas(document.getElementById('app')!);
+// Async factory: tries WebGPU first, falls back to WebGL2 on unsupported
+// hardware/drivers. The synchronous `Canvas.CreateSync` exists for callers
+// that literally cannot await (e.g. Angular content-projection parents).
+const canvas = await Canvas.Create(document.getElementById('app')!);
 
 const toolbar = new Panel({
   Style: {

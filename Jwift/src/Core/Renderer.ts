@@ -64,6 +64,15 @@ export interface Renderer {
   BeginFrame(): void;
   EndFrame(): void;
 
+  /** Last-available per-frame GPU elapsed time in milliseconds, or null
+   *  when unavailable (extension missing, query not yet resolved, or the
+   *  timer result was flagged disjoint by the driver). Backends implement
+   *  this with their native async timing primitives — for WebGL2 that's
+   *  `EXT_disjoint_timer_query_webgl2`; for WebGPU it's timestamp queries.
+   *  Callers MUST tolerate null and should average/smooth on their side;
+   *  the raw per-frame value lags 2-3 frames because of the async resolve. */
+  GetFrameGpuMs(): number | null;
+
   // ── Render Targets ──
 
   /** The scene FBO / texture that non-glass panels render into. */

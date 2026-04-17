@@ -253,6 +253,11 @@ export class WebGPURenderer implements Renderer {
     }
   };
 
+  /** WebGPU timestamp queries aren't wired yet — return null so the HUD
+   *  falls back to the "GPU: —" display. Proper implementation needs a
+   *  query set + resolveQuerySet pass in BeginFrame/EndFrame. */
+  GetFrameGpuMs = (): number | null => null;
+
   // ── Render Targets ──
 
   get SceneTexture(): GpuTextureHandle {
