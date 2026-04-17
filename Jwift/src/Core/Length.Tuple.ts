@@ -8,14 +8,18 @@ import { Parse as ParseLength, Resolve, type ResolveContext } from './Length';
  *   "10 20"             → [10, 20, 10, 20]          (T/B, L/R)
  *   "10 20 30"          → [10, 20, 30, 20]          (T, L/R, B)
  *   "10 20 30 40"       → [10, 20, 30, 40]          (T, R, B, L — clockwise)
- *   "1pt + 4 2pt"       → [20, 32, 20, 32]          (arithmetic per component)
+ *   "@A - @B"           → 1-tuple with the expression "@A - @B"
  *
- * Components are space-separated; arithmetic WITHIN a component uses
- * plus/minus/times/divide and must not contain spaces around operators
- * (otherwise the tokenizer would split mid-expression). In practice that
- * means parens around multi-term components:
+ * Components are space-separated, but whitespace that sits *between a value
+ * and a binary operator* (or vice-versa) is folded into the current
+ * expression. That means:
  *
- *   "(1pt + 4) 2pt"     → 4-tuple with first = parsed expression
+ *   "@A - @B"           → 1 component ("@A - @B")
+ *   "(@A - @B) @C"      → 2 components
+ *   "10 -5"             → 2 components (CSS-style negative value; unary `-`
+ *                         is distinguished from binary `-` by the absence of
+ *                         whitespace after the operator)
+ *   "10 - 5"            → 1 component — binary minus
  *
  * Two parsers live here:
  *   ParseLengthTuple4 — splits string into component tokens, caches the split
@@ -26,6 +30,12 @@ import { Parse as ParseLength, Resolve, type ResolveContext } from './Length';
 // Parens group their contents so "(1pt + 4) 2pt" is two tokens, not four.
 const _splitCache = new Map<string, string[]>();
 
+const _isOp = (c: string): boolean =>
+  c === '+' || c === '-' || c === '*' || c === '/';
+
+const _isWs = (c: string): boolean =>
+  c === ' ' || c === '\t' || c === '\n' || c === '\r';
+
 const _splitComponents = (raw: string): string[] => {
   const hit = _splitCache.get(raw);
   if (hit !== undefined) return hit;
@@ -33,15 +43,40 @@ const _splitComponents = (raw: string): string[] => {
   const out: string[] = [];
   let depth = 0;
   let current = '';
+  let lastNonWs = '';
   for (let i = 0; i < raw.length; i++) {
     const c = raw[i];
-    if (c === '(') { depth++; current += c; continue; }
-    if (c === ')') { depth--; current += c; continue; }
-    if (depth === 0 && (c === ' ' || c === '\t' || c === '\n' || c === '\r')) {
-      if (current.length > 0) { out.push(current); current = ''; }
+    if (c === '(') { depth++; current += c; lastNonWs = c; continue; }
+    if (c === ')') { depth--; current += c; lastNonWs = c; continue; }
+    if (depth === 0 && _isWs(c)) {
+      if (current.length === 0) continue;
+
+      // If the last non-ws char was a binary operator, we're mid-expression
+      // waiting for the RHS — fold the space into `current`.
+      if (_isOp(lastNonWs)) { current += ' '; continue; }
+
+      // Peek past this run of whitespace. If the next non-ws char is an
+      // operator AND it's followed by whitespace (or end-of-string), it's
+      // a binary op; fold. `*` / `/` are always binary. `+` / `-` with no
+      // space after are unary signs on the next token (CSS negative padding).
+      let j = i + 1;
+      while (j < raw.length && _isWs(raw[j])) j++;
+      if (j < raw.length && _isOp(raw[j])) {
+        const op = raw[j];
+        const after = j + 1 < raw.length ? raw[j + 1] : '';
+        const isBinary =
+          op === '*' || op === '/' ||
+          after === '' || _isWs(after);
+        if (isBinary) { current += ' '; continue; }
+      }
+
+      out.push(current);
+      current = '';
+      lastNonWs = '';
       continue;
     }
     current += c;
+    lastNonWs = c;
   }
   if (current.length > 0) out.push(current);
 

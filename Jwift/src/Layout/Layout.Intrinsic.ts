@@ -21,8 +21,12 @@ const DEFAULT_POINT_SCALE = 16;
 
 const DEFAULT_VIEWPORT: Viewport = { Width: 0, Height: 0 };
 
-export const ComputeIntrinsicSizes = (root: Element, viewport: Viewport = DEFAULT_VIEWPORT): void => {
-  CascadePointScale(root, viewport);
+export const ComputeIntrinsicSizes = (
+  root: Element,
+  viewport: Viewport = DEFAULT_VIEWPORT,
+  vars?: ReadonlyMap<string, string>,
+): void => {
+  CascadePointScale(root, viewport, vars);
   _compute(root);
 };
 
@@ -31,14 +35,19 @@ export const ComputeIntrinsicSizes = (root: Element, viewport: Viewport = DEFAUL
  *  viewport. Parent PointScale flows to child; child's PointScale expressed
  *  in `pt` resolves against parent's PointScale (ptRefersToParent=true).
  *  Idempotent — safe to call multiple times per frame. */
-export const CascadePointScale = (root: Element, viewport: Viewport = DEFAULT_VIEWPORT): void => {
-  _cascadePointScale(root, null, viewport);
+export const CascadePointScale = (
+  root: Element,
+  viewport: Viewport = DEFAULT_VIEWPORT,
+  vars?: ReadonlyMap<string, string>,
+): void => {
+  _cascadePointScale(root, null, viewport, vars);
 };
 
 const _cascadePointScale = (
   node: Element,
   parentPointScale: number | null,
   viewport: Viewport,
+  vars: ReadonlyMap<string, string> | undefined,
 ): void => {
   const parent = parentPointScale ?? DEFAULT_POINT_SCALE;
   const seed: ResolveContext = {
@@ -49,6 +58,7 @@ const _cascadePointScale = (
     RootPointScale: 0,          // patched below once root's is known
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
+    Vars: vars,
   };
   const pointScale = Resolve(node.PointScale, seed, 'W', true);
 
@@ -63,9 +73,10 @@ const _cascadePointScale = (
     RootPointScale: rootPointScale,
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
+    Vars: vars,
   };
 
-  for (const child of node.Children) _cascadePointScale(child, pointScale, viewport);
+  for (const child of node.Children) _cascadePointScale(child, pointScale, viewport, vars);
 };
 
 const _compute = (node: Element): void => {

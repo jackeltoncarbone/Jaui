@@ -47,6 +47,13 @@ export class Canvas {
   private _panelBuffer = new JivInstanceBuffer();
   private _textBuffer = new TextInstanceBuffer();
   private _clipBuffer = new ClipStackBuffer();
+  /** JSS `@Name: value` variables in scope. The Angular layer pushes the
+   *  active registry's var table in via `SetJssVars`; layout / intrinsic
+   *  passes thread it through `ResolveContext.Vars` so `Length.Resolve`
+   *  can substitute `@Name` references in authored expressions. Empty
+   *  map by default so non-Angular consumers that don't set it still
+   *  resolve correctly (missing vars warn + fall back to 0). */
+  private _jssVars: Map<string, string> = new Map();
   private _textCache!: TextCache;
   private _imageCache!: ImageCache;
 
@@ -162,6 +169,22 @@ export class Canvas {
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
   get Animations(): AnimationManager { return this._animationManager; }
 
+  /** Replace the active JSS var table. The Angular layer calls this when
+   *  the nearest `JssRegistry` picks up new declarations (e.g. a `<jyle>`
+   *  hot-edit). Layout + intrinsic passes read the fresh table on the
+   *  next tick; we mark the tree dirty here so stale resolved values get
+   *  recomputed even if no other state changed.
+   *
+   *  Accepts a plain Record<string, string> for convenience from non-Map
+   *  callers; internally stored as a Map. */
+  SetJssVars = (vars: Map<string, string> | Record<string, string>): void => {
+    this._jssVars = vars instanceof Map
+      ? new Map(vars)
+      : new Map(Object.entries(vars));
+    this.Root.MarkLayoutDirty();
+    this._animationManager.Kick();
+  };
+
   Start = (): void => {
     if (this._running) return;
     this._running = true;
@@ -238,9 +261,9 @@ export class Canvas {
     if (this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root)) {
       // Cascade PointScale first so _measureDirtyText can resolve FontSize
       // against each Jiv's ResolveCtx before layout sizes are known.
-      CascadePointScale(this.Root, this._viewport());
+      CascadePointScale(this.Root, this._viewport(), this._jssVars);
       this._measureDirtyText(this.Root);
-      ComputeIntrinsicSizes(this.Root, this._viewport());
+      ComputeIntrinsicSizes(this.Root, this._viewport(), this._jssVars);
       this._solveAndAnimate();
       this._clearDirty(this.Root);
     }
@@ -658,7 +681,7 @@ export class Canvas {
     this.Root.Width = this._width;
     this.Root.Height = this._height;
 
-    const results = SolveLayout(this.Root, this._viewport());
+    const results = SolveLayout(this.Root, this._viewport(), this._jssVars);
 
     for (const [node, result] of results) {
       // Skip the root — it doesn't animate to its own position
@@ -769,9 +792,9 @@ export class Canvas {
     // Re-render immediately so the buffer isn't blank between frames
     if (this._running) {
       if (this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root)) {
-        CascadePointScale(this.Root, this._viewport());
+        CascadePointScale(this.Root, this._viewport(), this._jssVars);
         this._measureDirtyText(this.Root);
-        ComputeIntrinsicSizes(this.Root, this._viewport());
+        ComputeIntrinsicSizes(this.Root, this._viewport(), this._jssVars);
         this._solveAndAnimate();
         this._clearDirty(this.Root);
       }
@@ -1409,5 +1432,5 @@ export type { AccessibilityConfig } from '../Accessibility/Accessibility.Types';
 
 // JSS
 export { ParseJss } from '../Jss/Jss.Parser';
-export type { Stylesheet, Ruleset } from '../Jss/Jss.Parser';
+export type { Stylesheet, Ruleset, ParsedJss, VarTable } from '../Jss/Jss.Parser';
 export { SlotFor, type Slot } from '../Jss/Jss.Routes';

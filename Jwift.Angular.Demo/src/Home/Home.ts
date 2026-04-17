@@ -2,24 +2,10 @@ import { ChangeDetectionStrategy, Component, HostListener, signal, computed, inj
 import { Jiv, Jext, Jyle, JwiftCanvas } from 'jwift-angular';
 import HomeJss from './Home.jss';
 
-/**
- * Show Studio home — Jwift Angular port. Matches Show Studio's mock data
- * exactly: same titles, companies, channels, and cover art URLs (Unsplash).
- * The card widget's cover fills the card via `FitMode: Cover`; title +
- * description sit in a dark-tinted footer bar for legibility.
- *
- * Canvas:
- *   • Dark full-bleed screen
- *   • Hero stub (solid color today, 3D reality view later)
- *   • Featured / Trending / Continue / Store carousel sections
- *   • Floating Liquid Glass toolbar (top) and tab bar (bottom)
- *   • ProgressiveBlur feathers above the tab bar and under the toolbar
- */
-
-// Mock content model — mirrors show-studio Content.Model shape
 type Company = { Id: string; Name: string };
 type Channel = { Id: string; Name: string };
 type ItemType = 'Show' | 'Song';
+
 interface Item {
   Id: string;
   Type: ItemType;
@@ -29,15 +15,26 @@ interface Item {
   Company?: Company;
   Channel?: Channel;
 }
+
+type Variant = {
+  Row: string;
+  Card: string;
+  Title: string;
+  ShowMeta: boolean;
+};
+
+const Hero:     Variant = { Row: 'RowHero',    Card: 'CardHero',    Title: 'CardTitle',        ShowMeta: true  };
+const Standard: Variant = { Row: 'Row',        Card: 'Card',        Title: 'CardTitle',        ShowMeta: true  };
+const Compact:  Variant = { Row: 'RowCompact', Card: 'CardCompact', Title: 'CardTitleCompact', ShowMeta: false };
+
 interface SectionData {
   Id: string;
   Title: string;
   Items: Item[];
-  Layout: 'hero' | 'standard' | 'compact';
+  Variant: Variant;
   ShowViewAll: boolean;
 }
 
-// Companies — same ids/names as show-studio Home.Mock.Service
 const Cavaliers = { Id: 'cav',     Name: 'The Cavaliers' };
 const BlueStars = { Id: 'blue',    Name: 'Blue Stars' };
 const Phantom   = { Id: 'phantom', Name: 'Phantom Regiment' };
@@ -58,14 +55,9 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
     <jyle [source]="JssSource" />
 
     <jiv class="Screen">
-
-      <!-- Progressive-blur feathers sit at Screen edges, under the chrome -->
       <jiv class="TopBlur" />
       <jiv class="ContentBlur" />
 
-      <!-- Chrome frame — one uniformly-padded container. Toolbar pinned to
-           its top, TabBar pinned to its bottom via Justify: SpaceBetween.
-           All gaps from Screen edges are the same → concentric radii work. -->
       <jiv class="ChromeFrame">
         <jiv class="ToolbarRow">
           <jiv class="ToolbarLogo" image="ss-logo" />
@@ -79,11 +71,11 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
         <jiv class="TabBarRow">
           <jiv class="TabBar">
             @for (t of Tabs(); track t.Label; let i = $index) {
-              <jiv [class]="i === Selected() ? 'TabItemActive' : 'TabItem'"
-                   (click)="Select(i)">
-                <jext [class]="i === Selected() ? 'TabIconActive' : 'TabIcon'"
-                      [text]="i === Selected() ? t.IconFill : t.Icon" />
-                <jext [class]="i === Selected() ? 'TabLabelActive' : 'TabLabel'"
+              @let active = i === Selected();
+              <jiv [class]="active ? 'TabItemActive' : 'TabItem'" (click)="Select(i)">
+                <jext [class]="active ? 'TabIconActive' : 'TabIcon'"
+                      [text]="active ? t.IconFill : t.Icon" />
+                <jext [class]="active ? 'TabLabelActive' : 'TabLabel'"
                       [text]="t.Label" />
               </jiv>
             }
@@ -92,8 +84,6 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
       </jiv>
 
       <jiv class="Scroll">
-
-        <!-- Hero stub — will become 3D reality view -->
         <jiv class="HeroStub">
           <jext class="HeroTitle" text="The greatest marching band software in the land" />
           <jiv class="HeroCta">
@@ -111,23 +101,21 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
                 </jiv>
               }
             </jiv>
-            <jiv [class]="RowClass(s.Layout)">
+            <jiv [class]="s.Variant.Row">
               @for (c of s.Items; track c.Id) {
-                <jiv [class]="CardClass(s.Layout)"
-                     [image]="c.CoverUrl">
+                <jiv [class]="s.Variant.Card" [image]="c.CoverUrl">
                   <jiv class="CardFooter">
                     <jiv class="CardBadge">
-                      <jext class="CardBadgeLabel" [text]="Upper(c.Type)" />
+                      <jext class="CardBadgeLabel" [text]="c.Type.toUpperCase()" />
                     </jiv>
-                    <jext [class]="s.Layout === 'compact' ? 'CardTitleCompact' : 'CardTitle'"
-                          [text]="c.Title" />
-                    @if (c.Company && s.Layout !== 'compact') {
+                    <jext [class]="s.Variant.Title" [text]="c.Title" />
+                    @if (s.Variant.ShowMeta && c.Company) {
                       <jiv class="CardMeta">
                         <jiv class="CardAvatar" />
                         <jext class="CardMetaLabel" [text]="c.Company.Name" />
                       </jiv>
                     }
-                    @if (c.Description && s.Layout !== 'compact') {
+                    @if (s.Variant.ShowMeta && c.Description) {
                       <jext class="CardDescription" [text]="c.Description" />
                     }
                   </jiv>
@@ -136,9 +124,7 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
             </jiv>
           </jiv>
         }
-
       </jiv>
-
     </jiv>
   `,
 })
@@ -242,12 +228,6 @@ export class Home {
     },
   ]);
 
-  /** Double-click anywhere toggles an extra card in the Featured row — a
-   *  visual probe for whether nodes entering/leaving the tree pick up any
-   *  @enter/@exit animation. Right now it's a hard pop; once those hooks
-   *  land it should spring/fade. Listens on document since Jiv's `<jiv>`
-   *  tag sits beside the canvas in the DOM, not inside it — canvas
-   *  dblclicks wouldn't otherwise reach Angular's template bindings. */
   readonly ExtraCard = signal(false);
   @HostListener('document:dblclick')
   ToggleExtra(): void { this.ExtraCard.update(v => !v); }
@@ -262,10 +242,10 @@ export class Home {
       });
     }
     return [
-      { Id: 'featured',  Title: 'Featured',                     Items: featured,             Layout: 'hero',     ShowViewAll: false },
-      { Id: 'trending',  Title: 'Trending',                     Items: this.Trending(),      Layout: 'standard', ShowViewAll: true  },
-      { Id: 'continue',  Title: 'Continue Where You Left Off',  Items: this.Continue(),      Layout: 'compact',  ShowViewAll: false },
-      { Id: 'store',     Title: 'New in the Store',             Items: this.Store(),         Layout: 'compact',  ShowViewAll: false },
+      { Id: 'featured', Title: 'Featured',                    Items: featured,        Variant: Hero,     ShowViewAll: false },
+      { Id: 'trending', Title: 'Trending',                    Items: this.Trending(), Variant: Standard, ShowViewAll: true  },
+      { Id: 'continue', Title: 'Continue Where You Left Off', Items: this.Continue(), Variant: Compact,  ShowViewAll: false },
+      { Id: 'store',    Title: 'New in the Store',            Items: this.Store(),    Variant: Compact,  ShowViewAll: false },
     ];
   });
 
@@ -277,21 +257,8 @@ export class Home {
     { Label: 'Search',  Icon: String.fromCodePoint(0xF558), IconFill: String.fromCodePoint(0xF558) },
   ]);
 
-  readonly AvatarIcon = String.fromCodePoint(0xF791); // person.fill — matches Show Studio
+  readonly AvatarIcon = String.fromCodePoint(0xF791);
 
   readonly Selected = signal(0);
   Select(i: number): void { this.Selected.set(i); }
-
-  Upper(s: string): string { return s.toUpperCase(); }
-
-  RowClass(layout: 'hero' | 'standard' | 'compact'): string {
-    if (layout === 'hero')    return 'RowHero';
-    if (layout === 'compact') return 'RowCompact';
-    return 'Row';
-  }
-  CardClass(layout: 'hero' | 'standard' | 'compact'): string {
-    if (layout === 'hero')    return 'CardHero';
-    if (layout === 'compact') return 'CardCompact';
-    return 'Card';
-  }
 }

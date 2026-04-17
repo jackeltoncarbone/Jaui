@@ -46,19 +46,41 @@ export interface Ruleset {
 
 export type Stylesheet = Record<string, Ruleset>;
 
+/** Author-declared variables. Values stay as unresolved strings (the
+ *  Length parser resolves `@Name` references at property-resolution time
+ *  against this table, so declaration order doesn't matter and chained
+ *  vars like `@B: @A * 2` work naturally). */
+export type VarTable = Record<string, string>;
+
+export interface ParsedJss {
+  Sheet: Stylesheet;
+  Vars: VarTable;
+}
+
+/** Reserved identifiers — engine-provided built-ins that can't be
+ *  redeclared as `@Name: …` vars. See `Presence.md`. */
+const _RESERVED_IDENTS = new Set(['Presence', 'Entering', 'Exiting']);
+
 // ─── Public API ─────────────────────────────────────────────────────────
 
-/** Parse a JSS source string into a typed stylesheet. */
-export const ParseJss = (source: string): Stylesheet => {
+/** Parse a JSS source string into a typed stylesheet + var table.
+ *  Top-level `@Name: value` declarations populate `Vars`; everything
+ *  else (`Name { ... }`) populates `Sheet`. */
+export const ParseJss = (source: string): ParsedJss => {
   const cleaned = _stripComments(source);
-  const out: Stylesheet = {};
+  const sheet: Stylesheet = {};
+  const vars: VarTable = {};
   const state: _ScanState = { src: cleaned, pos: 0 };
   _skipWs(state);
   while (state.pos < state.src.length) {
-    _parseRuleset(state, out);
+    if (state.src[state.pos] === '@') {
+      _parseTopLevelAt(state, vars);
+    } else {
+      _parseRuleset(state, sheet);
+    }
     _skipWs(state);
   }
-  return out;
+  return { Sheet: sheet, Vars: vars };
 };
 
 // ─── Scanner ────────────────────────────────────────────────────────────
@@ -106,6 +128,34 @@ const _expect = (s: _ScanState, char: string): void => {
     throw new Error(`[Jwift] Expected "${char}" at position ${s.pos} in JSS, got "${s.src[s.pos] ?? 'EOF'}"`);
   }
   s.pos++;
+};
+
+// ─── Top-level @ directives ─────────────────────────────────────────────
+
+/** Parse a top-level `@Name: value` var declaration. The `@var` keyword
+ *  was dropped — `@Name:` at top level is already unambiguous. Any other
+ *  `@Keyword` at top level (future `@Import`, `@Theme`, etc.) is a parse
+ *  error for now. */
+const _parseTopLevelAt = (s: _ScanState, vars: VarTable): void => {
+  _expect(s, '@');
+  const name = _readIdent(s);
+  _skipWs(s);
+
+  if (s.src[s.pos] !== ':') {
+    if (name === 'var') {
+      throw new Error(`[Jwift] "@var" is no longer a keyword — declare variables as "@Name: value" directly (drop the "@var" prefix)`);
+    }
+    throw new Error(`[Jwift] Unexpected "@${name}" at top level — only "@Name: value" var declarations are allowed here`);
+  }
+
+  if (_RESERVED_IDENTS.has(name)) {
+    throw new Error(`[Jwift] Cannot declare "@${name}: …" — "${name}" is a reserved built-in identifier provided by the engine per Jiv. Reference it without the "@" prefix in property values (e.g. "Opacity: ${name}").`);
+  }
+
+  s.pos++; // consume ':'
+  _skipWs(s);
+  const value = _readValue(s);
+  vars[name] = value;
 };
 
 // ─── Rulesets ───────────────────────────────────────────────────────────

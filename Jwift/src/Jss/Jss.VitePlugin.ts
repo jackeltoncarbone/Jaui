@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { ParseJss, type Stylesheet } from './Jss.Parser';
+import { ParseJss, type ParsedJss } from './Jss.Parser';
 
 /**
  * Vite plugin: import `.jss` files as typed style modules.
@@ -41,10 +41,10 @@ export const JssPlugin = (): VitePluginLike => ({
   },
 });
 
-/** Serialize a parsed stylesheet into a JS module string. */
-const _emit = (sheet: Stylesheet): string => {
+/** Serialize a parsed stylesheet (sheet + vars) into a JS module string. */
+const _emit = (parsed: ParsedJss): string => {
   // JSON.stringify is safe — every value is a string, enum literal, or plain
   // object of those. No functions, no dates, no cycles.
-  const body = JSON.stringify(sheet, null, 2);
+  const body = JSON.stringify(parsed, null, 2);
   return `export default ${body};\n`;
 };

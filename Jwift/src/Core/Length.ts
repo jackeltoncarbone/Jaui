@@ -47,6 +47,12 @@ export interface ResolveContext {
   RootPointScale: number;
   ViewportWidth: number;
   ViewportHeight: number;
+  /** Author-declared JSS variables (from top-level `@Name: value`). The
+   *  resolver substitutes `@Name` references in expressions against this
+   *  table. Optional so callers without a JSS stylesheet (seed context,
+   *  imperative code) can skip it; a missing table just produces warnings
+   *  when a `@Name` reference is encountered. */
+  Vars?: ReadonlyMap<string, string>;
 }
 
 // ─── Authoring helpers (PascalCase, return strings) ─────────────────────
@@ -74,14 +80,26 @@ export const Resolve = (
 ): number => {
   if (typeof length === 'number') return length;
   const parsed = _parseCached(length);
-  return _resolveParsed(parsed, ctx, axis, ptRefersToParent);
+  return _resolveParsed(parsed, ctx, axis, ptRefersToParent, null);
 };
+
+/** Missing-var warnings are deduped — one console message per var name
+ *  per page load, not one per property that references it. */
+const _warnedMissingVars = new Set<string>();
+const _warnedCycleVars = new Set<string>();
 
 // ─── Internal AST + parse cache ─────────────────────────────────────────
 
 interface _Relative { V: number; U: Unit; }
 interface _Expr { Op: '+' | '-' | '*' | '/'; L: _Parsed; R: _Parsed; }
-type _Parsed = number | _Relative | _Expr;
+interface _VarRef { Name: string; }
+type _Parsed = number | _Relative | _Expr | _VarRef;
+
+/** Built-in identifiers resolved per-Jiv by the renderer. In expression
+ *  contexts they parse as numeric tokens (not `@var` references), looked
+ *  up in `ResolveContext` at resolve time. V1 ships no lookups here yet —
+ *  Presence M3 wires them in. For now they parse to 0. */
+const _BUILTIN_IDENTS = new Set(['Presence', 'Entering', 'Exiting']);
 
 const _parseCache = new Map<string, _Parsed>();
 
@@ -103,16 +121,56 @@ const _resolveParsed = (
   ctx: ResolveContext,
   axis: 'W' | 'H',
   ptRefersToParent: boolean,
+  visiting: Set<string> | null,
 ): number => {
   if (typeof length === 'number') return length;
   if ('Op' in length) {
-    const l = _resolveParsed(length.L, ctx, axis, ptRefersToParent);
-    const r = _resolveParsed(length.R, ctx, axis, ptRefersToParent);
+    const l = _resolveParsed(length.L, ctx, axis, ptRefersToParent, visiting);
+    const r = _resolveParsed(length.R, ctx, axis, ptRefersToParent, visiting);
     switch (length.Op) {
       case '+': return l + r;
       case '-': return l - r;
       case '*': return l * r;
       case '/': return l / r;
+    }
+  }
+  if ('Name' in length) {
+    const name = length.Name;
+    // Built-in per-Jiv identifier (Presence, Entering, Exiting). V1 has
+    // no resolver hook for these yet — Presence M3 will wire current
+    // spring values into ctx. Until then, they fall through to 0 so the
+    // implicit Opacity * Presence multiplication in Jiv.InstanceBuffer
+    // stays the single source of truth for fade behavior.
+    if (_BUILTIN_IDENTS.has(name)) return 0;
+    if (!ctx.Vars) {
+      if (!_warnedMissingVars.has(name)) {
+        _warnedMissingVars.add(name);
+        console.warn(`[Jwift] "@${name}" referenced but no var table in context — falling back to 0`);
+      }
+      return 0;
+    }
+    const raw = ctx.Vars.get(name);
+    if (raw === undefined) {
+      if (!_warnedMissingVars.has(name)) {
+        _warnedMissingVars.add(name);
+        console.warn(`[Jwift] Undefined var "@${name}" — falling back to 0`);
+      }
+      return 0;
+    }
+    const v = visiting ?? new Set<string>();
+    if (v.has(name)) {
+      if (!_warnedCycleVars.has(name)) {
+        _warnedCycleVars.add(name);
+        console.warn(`[Jwift] Circular var reference at "@${name}" — falling back to 0`);
+      }
+      return 0;
+    }
+    v.add(name);
+    try {
+      const parsed = _parseCached(raw);
+      return _resolveParsed(parsed, ctx, axis, ptRefersToParent, v);
+    } finally {
+      v.delete(name);
     }
   }
   const { V, U } = length;
@@ -134,15 +192,21 @@ type _Token =
   | { T: 'num'; V: number }
   | { T: 'unit'; V: Unit }
   | { T: 'op'; V: '+' | '-' | '*' | '/' }
+  | { T: 'var'; Name: string }
+  | { T: 'ident'; Name: string }
   | { T: 'lp' }
   | { T: 'rp' };
 
 const _tokenize = (raw: string): _Token[] => {
-  // Unit matching is case-insensitive — lower-case the whole input once.
-  // Digits, operators, parens are unaffected.
-  const s = raw.toLowerCase();
+  // Preserve original casing for identifiers (`@ScreenR`, `Presence`) —
+  // lookup keys are case-sensitive. Numbers/ops/parens don't care, and
+  // the unit matcher lowercases its own window below.
+  const s = raw;
+  const lower = raw.toLowerCase();
   const tokens: _Token[] = [];
   let i = 0;
+  const isIdentStart = (c: string): boolean => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_';
+  const isIdentPart  = (c: string): boolean => isIdentStart(c) || (c >= '0' && c <= '9');
   while (i < s.length) {
     const c = s[i];
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
@@ -155,11 +219,34 @@ const _tokenize = (raw: string): _Token[] => {
       }
       tokens.push({ T: 'num', V: num });
       i = j;
-      const unit = _matchUnit(s, i);
+      const unit = _matchUnit(lower, i);
       if (unit) {
         tokens.push({ T: 'unit', V: unit });
         i += unit.length;
       }
+      continue;
+    }
+    if (c === '@') {
+      // Var reference — `@Name`. The `@` must be immediately followed by
+      // an identifier character; otherwise this isn't a valid token.
+      i++;
+      if (i >= s.length || !isIdentStart(s[i])) {
+        throw new Error(`[Jwift] "@" must be followed by an identifier in length expression: "${raw}"`);
+      }
+      let j = i;
+      while (j < s.length && isIdentPart(s[j])) j++;
+      tokens.push({ T: 'var', Name: s.slice(i, j) });
+      i = j;
+      continue;
+    }
+    if (isIdentStart(c)) {
+      // Bare identifier — reserved built-in or future keyword. Grabs the
+      // whole identifier (case-sensitive); the parser decides whether it
+      // resolves to a value or is an error.
+      let j = i;
+      while (j < s.length && isIdentPart(s[j])) j++;
+      tokens.push({ T: 'ident', Name: s.slice(i, j) });
+      i = j;
       continue;
     }
     if (c === '(') { tokens.push({ T: 'lp' }); i++; continue; }
@@ -259,6 +346,24 @@ const _parseFactor = (s: _ParseState): _Parsed => {
       return { V: t.V, U: next.V };
     }
     return t.V;
+  }
+
+  if (t.T === 'var') {
+    s.pos++;
+    return { Name: t.Name };
+  }
+
+  if (t.T === 'ident') {
+    s.pos++;
+    // Engine-provided built-ins (`Presence`, `Entering`, `Exiting`) use
+    // the same _VarRef node as author `@Name` references — the resolver
+    // routes builtins through `_BUILTIN_IDENTS` and skips the var-table
+    // lookup. Any other bare identifier in a length expression is a
+    // parse error; authors who meant to declare a var should prefix `@`.
+    if (!_BUILTIN_IDENTS.has(t.Name)) {
+      throw new Error(`[Jwift] Unknown identifier "${t.Name}" in length expression — declare it as "@${t.Name}: value" at top level and reference it as "@${t.Name}", or check spelling against the reserved built-ins.`);
+    }
+    return { Name: t.Name };
   }
 
   throw new Error(`[Jwift] Unexpected token in length expression at position ${s.pos}`);

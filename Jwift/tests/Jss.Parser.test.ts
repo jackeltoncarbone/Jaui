@@ -3,7 +3,7 @@ import { ParseJss } from '../src/Jss/Jss.Parser';
 
 describe('JSS — parser', () => {
   it('parses a simple single-class ruleset', () => {
-    const sheet = ParseJss(`
+    const { Sheet: sheet } = ParseJss(`
       Toolbar {
         Material: LiquidGlass
         BorderRadius: 1.5pt
@@ -17,7 +17,7 @@ describe('JSS — parser', () => {
   });
 
   it('routes each property to the correct slot', () => {
-    const sheet = ParseJss(`
+    const { Sheet: sheet } = ParseJss(`
       Button {
         Material: None
         BorderRadius: 8
@@ -39,7 +39,7 @@ describe('JSS — parser', () => {
   });
 
   it('accepts commas inside values (rgba, transforms)', () => {
-    const sheet = ParseJss(`
+    const { Sheet: sheet } = ParseJss(`
       Panel {
         Background: rgba(0, 0, 0, 0.5)
         Transform: translate(10, 20) scale(1.5)
@@ -50,7 +50,7 @@ describe('JSS — parser', () => {
   });
 
   it('accepts arithmetic in length values', () => {
-    const sheet = ParseJss(`
+    const { Sheet: sheet } = ParseJss(`
       Card {
         Padding: (1pt + 4)
         Width: 100vh - 32
@@ -61,7 +61,7 @@ describe('JSS — parser', () => {
   });
 
   it('handles block and line comments', () => {
-    const sheet = ParseJss(`
+    const { Sheet: sheet } = ParseJss(`
       /* header styles */
       Toolbar {
         // main color
@@ -74,14 +74,14 @@ describe('JSS — parser', () => {
   });
 
   it('accepts semicolon terminators as alternatives to newlines', () => {
-    const sheet = ParseJss(`Foo { Material: None; BorderRadius: 4; Width: 50; }`);
+    const { Sheet: sheet } = ParseJss(`Foo { Material: None; BorderRadius: 4; Width: 50; }`);
     expect(sheet.Foo.Style?.Material).toBe('None');
     expect(sheet.Foo.Style?.BorderRadius).toBe('4');
     expect(sheet.Foo.ChildLayout?.Width).toBe('50');
   });
 
   it('parses multiple rulesets', () => {
-    const sheet = ParseJss(`
+    const { Sheet: sheet } = ParseJss(`
       Toolbar {
         Material: LiquidGlass
       }
@@ -100,7 +100,7 @@ describe('JSS — parser', () => {
   });
 
   it('merges duplicate class definitions', () => {
-    const sheet = ParseJss(`
+    const { Sheet: sheet } = ParseJss(`
       Panel { BorderRadius: 4 }
       Panel { BorderRadius: 8; Padding: 6 }
     `);
@@ -114,7 +114,7 @@ describe('JSS — parser', () => {
   });
 
   it('tolerates whitespace and blank lines', () => {
-    const sheet = ParseJss(`
+    const { Sheet: sheet } = ParseJss(`
 
 
       Card  {

@@ -3,11 +3,12 @@ import {
   ElementRef,
   OnDestroy,
   OnInit,
+  effect,
   inject,
   input,
   output,
 } from '@angular/core';
-import { Canvas, type Stylesheet } from 'jwift';
+import { Canvas, type ParsedJss, type Stylesheet } from 'jwift';
 import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
 
 /**
@@ -39,7 +40,7 @@ import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
   ],
 })
 export class JwiftCanvas implements OnInit, OnDestroy {
-  readonly stylesheet = input<Stylesheet | undefined>(undefined);
+  readonly stylesheet = input<ParsedJss | Stylesheet | undefined>(undefined);
   readonly ready = output<Canvas>();
 
   /** The Jwift Canvas — created eagerly in the constructor so descendants
@@ -70,6 +71,16 @@ export class JwiftCanvas implements OnInit, OnDestroy {
     this._host.nativeElement.appendChild(this._canvasEl);
     this.Canvas = new Canvas(this._canvasEl);
     (window as any).__jwift = { canvas: this.Canvas };
+
+    // Push the active registry's var table into the Canvas whenever the
+    // registry version bumps (a <jyle> merge, hot-edit, etc.). Layout +
+    // intrinsic passes read it via ResolveContext.Vars to substitute
+    // `@Name` refs in authored expressions. Initial push catches any
+    // vars declared by the @Input() stylesheet before the first tick.
+    effect(() => {
+      this._registry.Version();
+      this.Canvas.SetJssVars(this._registry.Vars);
+    });
   }
 
   ngOnInit(): void {

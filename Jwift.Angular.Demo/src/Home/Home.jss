@@ -1,30 +1,16 @@
-/* Show Studio home — iOS 26 / Liquid Glass visual language.
- *
- * Layout:
- *   Screen        — full-viewport dark background
- *   Scroll        — vertical scroll container
- *   HeroStub      — large hero (70vh) with title + CTA
- *   Section       — carousel section (header + card row)
- *   Card          — cover art tile; opaque content, large rounded corners
- *   Toolbar       — floating top chrome (glass, pill, Position: Fixed)
- *   TabBar        — floating bottom nav (glass, pill)
- *
- * Spacing follows the 8pt grid. Corners are generous (iOS 26 convention).
- * Chrome is LiquidGlass; content surfaces stay solid. */
+@ScreenR:   80pt
+@ChromePad: 10pt
+@GlassPad:  4pt
 
 Screen {
   Direction: Column
   Background: rgb(0, 0, 0)
   FlexGrow: 1
-  BorderRadius: 80pt
+  BorderRadius: @ScreenR
   Overflow: Hidden
   PointScale: 1.25
 }
 
-/* Chrome frame — single uniformly-padded container the size of Screen.
- * Toolbar sits at its top, TabBar at its bottom, both inset exactly 24 from
- * every Screen edge. This uniform gap is what makes the concentric radius
- * derivation unambiguous: children's radii = Screen radius - 24 everywhere. */
 ChromeFrame {
   Position: Fixed
   Top: 0pt
@@ -34,7 +20,7 @@ ChromeFrame {
   Direction: Column
   Justify: SpaceBetween
   Align: Stretch
-  Padding: 10pt
+  Padding: @ChromePad
   Layer: 10
   PointerEvents: None
 }
@@ -49,9 +35,6 @@ ToolbarRow {
 }
 
 ToolbarLogo {
-  /* Aspect-preserving at image intrinsic 120:46 → 40pt × 104pt = same
-   * effective height as the Avatar (also 40pt) so the two sit at equal
-   * visible heights in the Toolbar row. */
   Height: 40pt
   Width: 104pt
   FlexShrink: 0
@@ -75,8 +58,6 @@ TabBarRow {
   PointerEvents: Auto
 }
 
-/* Progressive blur feathers — Layer 5 sits above scroll content (Layer 0)
- * and below the glass nav (Layer 10+). */
 ContentBlur {
   ProgressiveBlurDirection: ToBottom
   Position: Fixed
@@ -101,11 +82,6 @@ TopBlur {
   Layer: 5
 }
 
-/* Hero — matches Show Studio's HeroContent pattern:
- * vertically centered, left-aligned, generous left inset, title above CTA
- * with a small 20px gap. Top padding is tall (128) to clear the floating
- * Toolbar chrome; left inset (80) matches SS's min(7%, 12.5em) at desktop.
- * Eventually replaced by 3D reality view. */
 HeroStub {
   Direction: Column
   Justify: Center
@@ -135,9 +111,6 @@ HeroCta {
   Padding: 12pt 32pt
   BorderRadius: 999pt
   Background: rgba(255, 255, 255, 0.1)
-  /* Explicit width — MaxContent sizes the container but the child text
-   * still wraps at sub-container width (known intrinsic-sizing bug,
-   * tracked in NextUp). Pin to 180pt until that's fixed. */
   Width: 180pt
   FlexShrink: 0
 }
@@ -176,7 +149,6 @@ SectionTitle {
   LetterSpacing: -0.2pt
 }
 
-/* Shared LiquidGlass base for every glass surface. */
 LiquidGlass {
   Background: rgba(255, 255, 255, 0)
   BorderRadius: 32pt
@@ -233,10 +205,6 @@ SectionViewAllLabel {
   Color: rgba(255, 255, 255, 0.85)
 }
 
-/* Carousel row — fixed-size cards flow left-to-right and wrap to a new
- * line once they run out of horizontal room. Show Studio's horizontal
- * overflow-scroll is replaced by a multi-line wrap so everything the
- * user has is visible on page without a sideways scrub. */
 Row {
   Direction: Row
   Wrap: Wrap
@@ -259,14 +227,6 @@ RowHero : Row {
   RowGap: 16pt
 }
 
-/* Card — image cover fills the whole box (FitMode: Cover set from template).
- * No padding here; the CardFooter child owns its own breathing room and
- * supplies the dark tint that keeps title/description legible against
- * whatever image sits behind. Overflow: Hidden clips the image to the
- * rounded-rect corners. */
-/* Show Studio sizing: 20em × 4:3 (standard) = 320 × 240, 15em × 4:3
- * (compact) = 240 × 180. Fixed width + fixed height keeps aspect and
- * lets the Row wrap cleanly to new lines once the viewport fills up. */
 Card {
   Direction: Column
   Justify: End
@@ -291,8 +251,6 @@ CardCompact : Card {
   ShadowOffsetY: 8pt
 }
 
-/* Hero tier — the "grand" Featured cards. Show Studio: 38em × 4:3
- * ≈ 608 × 456. At PointScale 1.25 → 480pt × 360pt. */
 CardHero : Card {
   Width: 480pt
   Height: 360pt
@@ -302,9 +260,6 @@ CardHero : Card {
   ShadowOffsetY: 14pt
 }
 
-/* Tinted footer — a dark semi-transparent band over the bottom of the
- * cover image. Stand-in for the gradient overlay that Show Studio's
- * CSS uses; solid alpha is enough to keep white text legible. */
 CardFooter {
   Direction: Column
   Justify: Start
@@ -314,8 +269,6 @@ CardFooter {
   Background: rgba(0, 0, 0, 0.55)
 }
 
-/* Small pill badge showing item type ("SHOW" / "SONG"). Sits above
- * the title with the same visual weight as Show Studio's type-badge. */
 CardBadge {
   Direction: Row
   Justify: Center
@@ -342,16 +295,14 @@ CardTitle {
   LetterSpacing: -0.2pt
 }
 
-CardTitleCompact {
-  FontFamily: Inter
+CardTitleCompact : CardTitle {
   FontSize: 17pt
   FontWeight: 600
   LineHeight: 1.15
   Color: rgba(255, 255, 255, 0.97)
+  LetterSpacing: 0pt
 }
 
-/* Creator row — avatar placeholder + company name. Mirrors Show
- * Studio's .creator block in Content.Item.Widget. */
 CardMeta {
   Direction: Row
   Justify: Start
@@ -383,26 +334,23 @@ CardDescription {
   TextOverflow: Ellipsis
 }
 
-/* Glass dropdown — collapsed: single avatar pill. Expands on tap (TBD).
- * Concentric with Screen: 90 - 24 (ChromeFrame padding) = 66. */
 ToolbarDropdown : LiquidGlass {
   Direction: Row
   Justify: Center
   Align: Center
-  Padding: 4pt
+  Padding: @GlassPad
   Width: 48pt
   Height: 48pt
-  BorderRadius: 66pt
+  BorderRadius: @ScreenR - @ChromePad
 }
 
-/* Concentric with ToolbarDropdown: 66 - 4 (Dropdown padding) = 62. */
 ToolbarAvatar {
   Direction: Row
   Justify: Center
   Align: Center
   Width: 40pt
   Height: 40pt
-  BorderRadius: 62pt
+  BorderRadius: @ScreenR - @ChromePad - @GlassPad
   Background: rgba(255, 255, 255, 0.08)
 }
 
@@ -413,35 +361,29 @@ ToolbarAvatarGlyph {
   TextAlign: Center
 }
 
-/* Concentric with Screen: 90 - 24 (ChromeFrame padding) = 66. */
 TabBar : LiquidGlass {
   Direction: Row
   Justify: Start
   Align: Stretch
   Gap: 0pt
-  Padding: 4pt
+  Padding: @GlassPad
   Width: 400pt
   MaxWidth: 100%
   Height: 64pt
-  BorderRadius: 66pt
+  BorderRadius: @ScreenR - @ChromePad
 }
 
-/* Concentric with TabBar: 66 - 4 (TabBar padding) = 62. */
 TabItem {
   Direction: Column
   Justify: Center
   Align: Center
   Gap: 4pt
   Width: 20%
-  BorderRadius: 62pt
+  BorderRadius: @ScreenR - @ChromePad - @GlassPad
 }
 
-TabItemActive {
-  Direction: Column
-  Justify: Center
-  Align: Center
+TabItemActive : TabItem {
   Gap: 0pt
-  Width: 20%
   BorderRadius: 100pt
   Background: rgba(255, 255, 255, 0.15)
 }
@@ -454,12 +396,10 @@ TabIcon {
   TextAlign: Center
 }
 
-TabIconActive {
-  FontFamily: JwiftIcons
+TabIconActive : TabIcon {
   FontSize: 20pt
   FontWeight: 600
   Color: rgba(255, 255, 255, 0.95)
-  TextAlign: Center
 }
 
 TabLabel {
@@ -471,11 +411,7 @@ TabLabel {
   LetterSpacing: 0.1pt
 }
 
-TabLabelActive {
-  FontFamily: Inter
-  FontSize: 10pt
+TabLabelActive : TabLabel {
   FontWeight: 600
   Color: rgba(255, 255, 255, 0.95)
-  TextAlign: Center
-  LetterSpacing: 0.1pt
 }

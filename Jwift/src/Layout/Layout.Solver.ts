@@ -26,7 +26,11 @@ const DEFAULT_POINT_SCALE = 16;
 
 const DEFAULT_VIEWPORT: Viewport = { Width: 0, Height: 0 };
 
-export const SolveLayout = (root: Element, viewport: Viewport = DEFAULT_VIEWPORT): Map<Element, LayoutResult> => {
+export const SolveLayout = (
+  root: Element,
+  viewport: Viewport = DEFAULT_VIEWPORT,
+  vars?: ReadonlyMap<string, string>,
+): Map<Element, LayoutResult> => {
   const results = new Map<Element, LayoutResult>();
 
   // Root's ResolveCtx: no parent, so ParentWidth/Height = viewport,
@@ -40,6 +44,7 @@ export const SolveLayout = (root: Element, viewport: Viewport = DEFAULT_VIEWPORT
     RootPointScale: DEFAULT_POINT_SCALE,
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
+    Vars: vars,
   };
   const rootPointScale = Resolve(root.PointScale, rootSeedCtx, 'W', true);
 
@@ -51,11 +56,12 @@ export const SolveLayout = (root: Element, viewport: Viewport = DEFAULT_VIEWPORT
     RootPointScale: rootPointScale,
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
+    Vars: vars,
   };
   root.ResolveCtx = rootCtx;
 
-  _solveNode(root, root.Width, root.Height, 0, 0, results, rootCtx, viewport, rootPointScale);
-  _resolveAttachPass(root, results, viewport, rootPointScale);
+  _solveNode(root, root.Width, root.Height, 0, 0, results, rootCtx, viewport, rootPointScale, vars);
+  _resolveAttachPass(root, results, viewport, rootPointScale, vars);
   return results;
 };
 
@@ -68,6 +74,7 @@ const _buildChildCtx = (
   parentPointScale: number,
   rootPointScale: number,
   viewport: Viewport,
+  vars: ReadonlyMap<string, string> | undefined,
 ): ResolveContext => {
   const seed: ResolveContext = {
     ParentWidth: containerWidth,
@@ -77,6 +84,7 @@ const _buildChildCtx = (
     RootPointScale: rootPointScale,
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
+    Vars: vars,
   };
   const pointScale = Resolve(child.PointScale, seed, 'W', true);
   return { ...seed, PointScale: pointScale };
@@ -96,6 +104,7 @@ const _resolveAttachPass = (
   results: Map<Element, LayoutResult>,
   viewport: Viewport,
   rootPointScale: number,
+  vars: ReadonlyMap<string, string> | undefined,
 ): void => {
   const attached: Element[] = [];
   _collectAttached(root, attached);
@@ -122,9 +131,9 @@ const _resolveAttachPass = (
         const parentCtx = node.Parent?.ResolveCtx ?? node.ResolveCtx;
         const parentPointScale = parentCtx?.PointScale ?? rootPointScale;
         const ctx = _buildChildCtx(node, rect.Width, rect.Height,
-                                    parentPointScale, rootPointScale, viewport);
+                                    parentPointScale, rootPointScale, viewport, vars);
         node.ResolveCtx = ctx;
-        _solveSubtree(node, rect.Width, rect.Height, rect.X, rect.Y, results, ctx, viewport, rootPointScale);
+        _solveSubtree(node, rect.Width, rect.Height, rect.X, rect.Y, results, ctx, viewport, rootPointScale, vars);
         changed = true;
       }
     }
@@ -190,8 +199,9 @@ const _solveSubtree = (
   ctx: ResolveContext,
   viewport: Viewport,
   rootPointScale: number,
+  vars: ReadonlyMap<string, string> | undefined,
 ): void => {
-  _solveNode(node, width, height, x, y, results, ctx, viewport, rootPointScale);
+  _solveNode(node, width, height, x, y, results, ctx, viewport, rootPointScale, vars);
 };
 
 const _solveNode = (
@@ -204,6 +214,7 @@ const _solveNode = (
   ctx: ResolveContext,
   viewport: Viewport,
   rootPointScale: number,
+  vars: ReadonlyMap<string, string> | undefined,
 ): void => {
   results.set(node, { X: offsetX, Y: offsetY, Width: width, Height: height });
 
@@ -220,7 +231,7 @@ const _solveNode = (
   for (const child of node.Children) {
     const pos = child.ChildLayout.Position;
     if (pos === 'Placed' || pos === 'Fixed' || pos === 'Sticky') {
-      const childCtx = _buildChildCtx(child, width, height, ctx.PointScale, rootPointScale, viewport);
+      const childCtx = _buildChildCtx(child, width, height, ctx.PointScale, rootPointScale, viewport, vars);
       child.ResolveCtx = childCtx;
       const declW = _resolveSize(child.ChildLayout.Width, width, childCtx, 'W');
       const declH = _resolveSize(child.ChildLayout.Height, height, childCtx, 'H');
@@ -254,7 +265,7 @@ const _solveNode = (
         absX = offsetX + child.X;
         absY = offsetY + child.Y;
       }
-      _solveNode(child, w, h, absX, absY, results, childCtx, viewport, rootPointScale);
+      _solveNode(child, w, h, absX, absY, results, childCtx, viewport, rootPointScale, vars);
     }
   }
 
@@ -298,7 +309,7 @@ const _solveNode = (
       // against its own parent dims + PointScale. The ctx is re-set once
       // more below after flex solves, using the actual resolved size — but
       // PointScale and parent dims don't change, so we can just reuse.
-      const childCtx = _buildChildCtx(c, width, height, ctx.PointScale, rootPointScale, viewport);
+      const childCtx = _buildChildCtx(c, width, height, ctx.PointScale, rootPointScale, viewport, vars);
       c.ResolveCtx = childCtx;
 
       const resolvedW = _resolveSize(c.ChildLayout.Width, width, childCtx, 'W');
@@ -404,7 +415,7 @@ const _solveNode = (
       ry += _r(child.ChildLayout.OffsetY, childCtx, 'H');
     }
 
-    _solveNode(child, r.Width, r.Height, offsetX + rx, offsetY + ry, results, childCtx, viewport, rootPointScale);
+    _solveNode(child, r.Width, r.Height, offsetX + rx, offsetY + ry, results, childCtx, viewport, rootPointScale, vars);
   }
 };
 
