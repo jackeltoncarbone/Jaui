@@ -1105,22 +1105,34 @@ export class Canvas {
       return this._scrollManager.HitTopmost(clientX - rect.left, clientY - rect.top);
     };
 
+    // CSS-like Hover/Active: the flag propagates up the ancestor chain so
+    // hovering/pressing a child also counts as hovering/pressing the parent.
+    // Authors only define HoverStyle/ActiveStyle on the elements they want to
+    // visually react; ancestors with no override don't change appearance.
+    const setStateChain = (
+      newTopmost: Jiv | null,
+      oldTopmost: Jiv | null,
+      flag: 'Hover' | 'Active',
+    ): void => {
+      const newPath = new Set<Jiv>();
+      for (let n = newTopmost; n; n = n.Parent as Jiv | null) newPath.add(n);
+      for (let n = oldTopmost; n; n = n.Parent as Jiv | null) {
+        if (!newPath.has(n)) n[flag] = false;
+      }
+      newPath.forEach(n => { n[flag] = true; });
+    };
+
     this.Element.addEventListener('pointermove', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
       if (hit === this._hoveredJiv) return;
-
-      if (this._hoveredJiv) this._hoveredJiv.Hover = false;
+      setStateChain(hit, this._hoveredJiv, 'Hover');
       this._hoveredJiv = hit;
-      if (hit) hit.Hover = true;
-      // Kick the animation loop so style springs wake up and chase the new
-      // EffectiveStyle target. Without this, springs that had settled at the
-      // old state stay frozen — Jiv appears to "still be hovered."
       this._animationManager.Kick();
     });
 
     this.Element.addEventListener('pointerleave', () => {
       if (this._hoveredJiv) {
-        this._hoveredJiv.Hover = false;
+        setStateChain(null, this._hoveredJiv, 'Hover');
         this._hoveredJiv = null;
         this._animationManager.Kick();
       }
@@ -1129,14 +1141,14 @@ export class Canvas {
     this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
       if (!hit) return;
+      setStateChain(hit, this._activeJiv, 'Active');
       this._activeJiv = hit;
-      hit.Active = true;
       this._animationManager.Kick();
     });
 
     const clearActive = (): void => {
       if (this._activeJiv) {
-        this._activeJiv.Active = false;
+        setStateChain(null, this._activeJiv, 'Active');
         this._activeJiv = null;
         this._animationManager.Kick();
       }
