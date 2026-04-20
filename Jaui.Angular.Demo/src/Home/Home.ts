@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, HostListener, signal, computed, inject, afterNextRender } from '@angular/core';
-import { Jiv, Jext, Jyle, JauiCanvas } from 'jaui-angular';
+import { Jiv, Jext, Jyle, Jaui } from 'jaui-angular';
 import HomeJss from './Home.jss';
 
 type Company = { Id: string; Name: string };
@@ -136,7 +136,7 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
 })
 export class Home {
   readonly JssSource = HomeJss;
-  private _canvas = inject(JauiCanvas);
+  private _canvas = inject(Jaui);
 
   constructor() {
     afterNextRender(() => {

@@ -7,7 +7,6 @@
  */
 
 export * from './Jaui/Jaui';
-export * from './Canvas/JauiCanvas';
 export * from './Jiv/Jiv';
 export * from './Jext/Jext';
 export * from './Jyle/Jyle';

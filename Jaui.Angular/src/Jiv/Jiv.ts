@@ -15,18 +15,18 @@ import {
   type ChildLayout,
   type TextStyle,
 } from 'jaui';
-import { JauiCanvas } from '../Canvas/JauiCanvas';
+import { Jaui } from '../Jaui/Jaui';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
 
 /**
  * `<jiv>` — generic Jaui node. Creates a Jiv on construction, attaches
- * to the nearest ancestor `<jiv>` or `<jaui-canvas>` on init, removes
+ * to the nearest ancestor `<jiv>` or `<jaui>` on init, removes
  * itself on destroy.
  *
  * Parent resolution is pure Angular DI — `inject(ParentClass, { skipSelf,
  * optional })`. The closer ancestor wins; if nested under another `<jiv>`
  * that Jiv is the parent; otherwise we fall through to the enclosing
- * `<jaui-canvas>`'s Root. No custom InjectionToken ceremony.
+ * `<jaui>`'s Root. No custom InjectionToken ceremony.
  *
  * Inputs (signal-based, all optional):
  *   class       — space-separated class names; resolved against the local
@@ -62,12 +62,12 @@ export class Jiv implements OnInit, OnDestroy {
 
   // forwardRef because Jiv (this class) references itself via DI. The
   // parent Jiv — if any — is the nearest ancestor. If there's no parent
-  // Jiv, we're a top-level child of <jaui-canvas> and attach to its Root.
+  // Jiv, we're a top-level child of <jaui> and attach to its Root.
   private _parentJiv = inject<Jiv | null>(forwardRef(() => Jiv), {
     skipSelf: true,
     optional: true,
   });
-  private _canvas = inject(JauiCanvas, { optional: true });
+  private _canvas = inject(Jaui, { optional: true });
   private _registry = inject(JSS_REGISTRY, { optional: true });
 
   constructor() {
@@ -112,12 +112,12 @@ export class Jiv implements OnInit, OnDestroy {
   }
 
   /** Nearest ancestor Jiv or the canvas root. Always defined if this
-   *  `<jiv>` is used inside a `<jaui-canvas>` (which it must be — a
+   *  `<jiv>` is used inside a `<jaui>` (which it must be — a
    *  floating `<jiv>` with no canvas ancestor throws a clear error). */
   private _parent(): JivCore {
     if (this._parentJiv) return this._parentJiv.Node;
     if (this._canvas) return this._canvas.Root;
-    throw new Error('[Jaui.Angular] <jiv> must be inside a <jaui-canvas>');
+    throw new Error('[Jaui.Angular] <jiv> must be inside a <jaui>');
   }
 
   private _buildOptions(): {

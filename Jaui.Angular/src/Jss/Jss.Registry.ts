@@ -5,7 +5,7 @@ import { ParseJss, type ParsedJss, type Stylesheet, type Ruleset } from 'jaui';
  * Holds the JSS rulesets + var table in scope for a part of the component
  * tree.
  *
- * `<jaui-canvas>` provides one at the root. `<jyle>` blocks inside any
+ * `<jaui>` provides one at the root. `<jyle>` blocks inside any
  * subtree extend the registry with their parsed content, scoped to their
  * own descendants via DI hierarchy. `<jiv class="X">` walks up the DI tree,
  * finds the nearest registry, and resolves "X" against it.
