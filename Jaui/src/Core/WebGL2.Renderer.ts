@@ -67,19 +67,19 @@ const TEXT_ATTR_COUNT = 3; // locations 1..3 — clip_meta is packed into a_Opac
 const CLIP_TEX_MIN_WIDTH = 2048;  // 512 clips × 2 texels
 
 // ── Janvas clip-mask shader ─────────────────────────────────────────────────
-// Draws a rounded-rect mask used by the janvas pre-pass to write 1s into the
-// stencil buffer everywhere INSIDE the parent's clip shape, so the foreign
-// renderer's draws (clipped via gl.STENCIL_TEST EQUAL 1) don't bleed past
-// the rounded corners. Color writes are disabled by the caller; this only
-// touches stencil. Single uniform radius for now (Jaui authors typically use
-// one BorderRadius value); per-corner can come later.
+// Post-pass clip for a janvas. The unit quad is stretched to the full janvas
+// rect (u_DrawRect) — every pixel the foreign renderer could have written —
+// and the fragment uses a rounded-rect SDF against the parent's clip shape
+// (u_ClipRect + u_Radius) to discard pixels INSIDE the clip and paint
+// transparent pixels OUTSIDE. This clips both rounded corners AND any janvas
+// content that extends past the clipping ancestor's rect.
 const CLIP_MASK_VERT = `#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_Position;
-uniform vec4 u_Rect;          // x, y (top-left, device px), w, h
+uniform vec4 u_DrawRect;      // quad extent — the janvas rect, device px
 uniform vec2 u_Resolution;    // canvas size in device px
 void main() {
-    vec2 px = u_Rect.xy + a_Position * u_Rect.zw;
+    vec2 px = u_DrawRect.xy + a_Position * u_DrawRect.zw;
     vec2 clip = (px / u_Resolution) * 2.0 - 1.0;
     clip.y = -clip.y;
     gl_Position = vec4(clip, 0.0, 1.0);
@@ -88,30 +88,18 @@ void main() {
 
 const CLIP_MASK_FRAG = `#version 300 es
 precision highp float;
-uniform vec4 u_Rect;          // x, y (top-left, device px), w, h
+uniform vec4 u_ClipRect;      // clip shape — parent's rect, device px
 uniform float u_Radius;       // device px (uniform across corners)
 uniform vec2 u_Resolution;    // canvas size in device px
 out vec4 fragColor;
 void main() {
-    // Inverse mask — discards pixels INSIDE the rounded shape, paints
-    // pixels OUTSIDE black. Used as a post-pass after the foreign
-    // renderer (THREE) has filled the FBO at the janvas's rect, to
-    // clip the corners that extend past the parent's BorderRadius.
     vec2 p = vec2(gl_FragCoord.x, u_Resolution.y - gl_FragCoord.y);
-    vec2 mn = u_Rect.xy;
-    vec2 mx = mn + u_Rect.zw;
-    float r = u_Radius;
-    bool inCornerTL = p.x < mn.x + r && p.y < mn.y + r;
-    bool inCornerTR = p.x > mx.x - r && p.y < mn.y + r;
-    bool inCornerBR = p.x > mx.x - r && p.y > mx.y - r;
-    bool inCornerBL = p.x < mn.x + r && p.y > mx.y - r;
-    if (!inCornerTL && !inCornerTR && !inCornerBR && !inCornerBL) discard;
-    vec2 cc;
-    if (inCornerTL)      cc = mn + vec2(r);
-    else if (inCornerTR) cc = vec2(mx.x - r, mn.y + r);
-    else if (inCornerBR) cc = mx - vec2(r);
-    else                 cc = vec2(mn.x + r, mx.y - r);
-    if (length(p - cc) <= r) discard;
+    vec2 center = u_ClipRect.xy + 0.5 * u_ClipRect.zw;
+    vec2 half_  = 0.5 * u_ClipRect.zw;
+    float r = min(u_Radius, min(half_.x, half_.y));
+    vec2 q = abs(p - center) - half_ + vec2(r);
+    float sd = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+    if (sd <= 0.0) discard;
     fragColor = vec4(0.0, 0.0, 0.0, 0.0);
 }
 `;
@@ -839,26 +827,32 @@ export class WebGL2Renderer implements Renderer {
   };
 
   private _clipMaskShader!: ShaderProgram;
-  private _clipMaskRectLoc!: WebGLUniformLocation | null;
+  private _clipMaskDrawRectLoc!: WebGLUniformLocation | null;
+  private _clipMaskClipRectLoc!: WebGLUniformLocation | null;
   private _clipMaskRadiusLoc!: WebGLUniformLocation | null;
   private _clipMaskResLoc!: WebGLUniformLocation | null;
   private _initClipMaskShader = (gl: WebGL2RenderingContext): void => {
     this._clipMaskShader = ShaderCompiler.Compile(gl, CLIP_MASK_VERT, CLIP_MASK_FRAG);
     const p = this._clipMaskShader.Program;
-    this._clipMaskRectLoc = gl.getUniformLocation(p, 'u_Rect');
+    this._clipMaskDrawRectLoc = gl.getUniformLocation(p, 'u_DrawRect');
+    this._clipMaskClipRectLoc = gl.getUniformLocation(p, 'u_ClipRect');
     this._clipMaskRadiusLoc = gl.getUniformLocation(p, 'u_Radius');
     this._clipMaskResLoc = gl.getUniformLocation(p, 'u_Resolution');
   };
 
-  /** Janvas pre-pass clipper. Writes 1s into the stencil buffer everywhere
-   *  inside the given rounded-rect, leaves outside at 0. Caller is
-   *  responsible for stencil/colorMask state setup + later switching to
-   *  stencil TEST (EQUAL 1) for the foreign render. Rect+radius are in
-   *  device px, top-left origin (Y flipped to GL bottom-left in shader). */
-  DrawClipMask = (rectX: number, rectY: number, rectW: number, rectH: number, radius: number): void => {
+  /** Janvas post-pass clipper. Rasterises a quad covering the janvas's
+   *  screen rect (drawRect) and paints transparent pixels wherever the
+   *  fragment falls OUTSIDE the parent's rounded clip shape (clipRect +
+   *  radius). All rects in device px, top-left origin. */
+  DrawClipMask = (
+    drawX: number, drawY: number, drawW: number, drawH: number,
+    clipX: number, clipY: number, clipW: number, clipH: number,
+    radius: number,
+  ): void => {
     const gl = this._gl;
     this._useProgram(this._clipMaskShader.Program);
-    gl.uniform4f(this._clipMaskRectLoc, rectX, rectY, rectW, rectH);
+    gl.uniform4f(this._clipMaskDrawRectLoc, drawX, drawY, drawW, drawH);
+    gl.uniform4f(this._clipMaskClipRectLoc, clipX, clipY, clipW, clipH);
     gl.uniform1f(this._clipMaskRadiusLoc, radius);
     gl.uniform2f(this._clipMaskResLoc, this._width, this._height);
     gl.bindVertexArray(this._quad.Vao);

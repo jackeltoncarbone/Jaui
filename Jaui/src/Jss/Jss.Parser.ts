@@ -2,6 +2,7 @@ import { SlotFor } from './Jss.Routes';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
+import { type SpringConfig, TransitionToSpring } from '../Animation/Animation.Types';
 
 /**
  * JSS v1 parser — turns `Name { prop: value ... }` rulesets into a
@@ -49,6 +50,12 @@ export interface Ruleset {
   ActiveStyle?: Partial<JivStyle>;
   FocusStyle?: Partial<JivStyle>;
   DisabledStyle?: Partial<JivStyle>;
+  /** Per-property spring overrides authored via `@Spring Property { … }`
+   *  or `@Transition Property { … }` (which translates to a critically-
+   *  damped spring). The style animator reads this map when it builds
+   *  the Jiv's per-channel springs; missing properties fall back to the
+   *  global defaults. Inherited through `extends` (per-property merge). */
+  Springs?: Record<string, Partial<SpringConfig>>;
 }
 
 export type Stylesheet = Record<string, Ruleset>;
@@ -215,7 +222,11 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
     if (s.pos >= s.src.length) {
       throw new Error(`[Jaui] Unterminated ruleset "${className}${stateSlot ? `:${stateSlot}` : ''}" — missing "}"`);
     }
-    _parseDeclaration(s, own);
+    if (s.src[s.pos] === '@') {
+      _parseRulesetAt(s, own, className);
+    } else {
+      _parseDeclaration(s, own);
+    }
   }
 
   // Pseudo-state ruleset — declarations land in own.Style by default
@@ -253,6 +264,57 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
   } else {
     out[className] = ruleset;
   }
+};
+
+/** Inside-ruleset `@` directives. `@Spring Property { Stiffness: …, Damping: …, Mass: … }`
+ *  authors a spring directly. `@Transition Property { Duration: 150ms, Easing: EaseOut }`
+ *  is the CSS-flavoured shorthand — both end up as a SpringConfig in the
+ *  Springs map (transitions are translated to a critically-damped spring). */
+const _parseRulesetAt = (s: _ScanState, ruleset: Ruleset, className: string): void => {
+  s.pos++; // skip '@'
+  const directive = _readIdent(s);
+  if (directive !== 'Spring' && directive !== 'Transition') {
+    throw new Error(`[Jaui] "${className}" — unknown @${directive}; supported: @Spring, @Transition.`);
+  }
+  _skipWs(s);
+  const property = _readIdent(s);
+  _skipWs(s);
+  _expect(s, '{');
+  const raw: Record<string, string> = {};
+  while (true) {
+    _skipWs(s);
+    if (s.src[s.pos] === '}') { s.pos++; break; }
+    if (s.pos >= s.src.length) {
+      throw new Error(`[Jaui] Unterminated @${directive} ${property} in "${className}" — missing "}"`);
+    }
+    const k = _readIdent(s);
+    _skipWs(s);
+    _expect(s, ':');
+    _skipWs(s);
+    raw[k] = _readValue(s);
+  }
+  let spring: Partial<SpringConfig>;
+  if (directive === 'Spring') {
+    spring = {};
+    for (const k of ['Stiffness', 'Damping', 'Mass'] as const) {
+      const rv = raw[k];
+      if (rv !== undefined) {
+        const n = parseFloat(rv);
+        if (Number.isNaN(n)) throw new Error(`[Jaui] @Spring ${property}.${k} must be a number, got "${rv}"`);
+        spring[k] = n;
+      }
+    }
+  } else {
+    // @Transition — strip optional `ms` suffix, translate to a critically
+    // damped spring with matching settle time.
+    const dStr = raw['Duration'] ?? '';
+    const dNum = parseFloat(dStr.replace(/ms$/, ''));
+    if (Number.isNaN(dNum)) throw new Error(`[Jaui] @Transition ${property}.Duration must be a number (optionally ms-suffixed), got "${dStr}"`);
+    const easing = raw['Easing'] as 'Linear' | 'EaseOut' | 'EaseInOut' | 'Spring' | undefined;
+    spring = TransitionToSpring({ Duration: dNum, Easing: easing ?? 'EaseOut', Spring: null });
+  }
+  ruleset.Springs ??= {};
+  ruleset.Springs[property] = { ...ruleset.Springs[property], ...spring };
 };
 
 const _parseDeclaration = (s: _ScanState, ruleset: Ruleset): void => {
@@ -304,6 +366,7 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
   ActiveStyle:   { ...a.ActiveStyle,   ...b.ActiveStyle },
   FocusStyle:    { ...a.FocusStyle,    ...b.FocusStyle },
   DisabledStyle: { ...a.DisabledStyle, ...b.DisabledStyle },
+  Springs:       { ...a.Springs,       ...b.Springs },
 });
 
 /** Reserved pseudo-state names following the `:` in `Foo:State`. Maps to

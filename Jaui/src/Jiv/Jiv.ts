@@ -3,6 +3,7 @@ import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { DefaultJivStyle } from './Jiv.Defaults';
 import type { LayoutConfig, ChildLayout, Overflow } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
+import type { SpringConfig } from '../Animation/Animation.Types';
 import { Element, type CursorStyle } from '../Element/Element';
 
 /**
@@ -40,6 +41,12 @@ export class Jiv extends Element {
   /** Optional style override for text selection highlights. */
   TextSelectionStyle: Partial<JivStyle> | null = null;
 
+  /** Per-property spring overrides. Author via `@Spring Property { ... }`
+   *  or `@Transition Property { ... }` in JSS. The style animator looks
+   *  up by property name when building per-channel springs; missing
+   *  properties use the global default. */
+  Springs: Record<string, Partial<SpringConfig>> | null = null;
+
   constructor(options?: {
     X?: number;
     Y?: number;
@@ -51,6 +58,7 @@ export class Jiv extends Element {
     FocusStyle?: Partial<JivStyle>;
     DisabledStyle?: Partial<JivStyle>;
     TextSelectionStyle?: Partial<JivStyle>;
+    Springs?: Record<string, Partial<SpringConfig>>;
     SnapLayout?: boolean;
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
@@ -92,6 +100,7 @@ export class Jiv extends Element {
     this.FocusStyle = options?.FocusStyle ?? null;
     this.DisabledStyle = options?.DisabledStyle ?? null;
     this.TextSelectionStyle = options?.TextSelectionStyle ?? null;
+    this.Springs = options?.Springs ?? null;
   }
 
   /** Final render-time style: base + state overrides in priority order.

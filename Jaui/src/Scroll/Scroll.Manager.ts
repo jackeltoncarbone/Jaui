@@ -241,7 +241,7 @@ export class ScrollManager implements Animatable {
   };
 
   private _hitTopmost = (node: Jiv, x: number, y: number, offX: number, offY: number): Jiv | null => {
-    if (!node.Visible || node.PointerEvents === 'None') return null;
+    if (!node.Visible) return null;
 
     const ox = node.X + offX;
     const oy = node.Y + offY;
@@ -257,7 +257,11 @@ export class ScrollManager implements Animatable {
       const hit = this._hitTopmost(node.Children[i] as Jiv, x, y, dx, dy);
       if (hit) return hit;
     }
-    return node;
+    // Descend through PointerEvents:None parents (they're transparent to
+    // hit-test) but never return them as a hit themselves — matches CSS,
+    // where a child with Auto can still receive events through a None
+    // ancestor.
+    return node.PointerEvents === 'None' ? null : node;
   };
 }
 

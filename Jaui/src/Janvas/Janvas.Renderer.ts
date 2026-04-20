@@ -25,9 +25,14 @@
  * disturbing Jaui's pipeline.
  */
 export interface JanvasRect {
-  /** Screen-space rect in device pixels. (X, Y) is the top-left of the
-   *  janvas region; (Width, Height) are its size. The foreign renderer
-   *  should use these to set its viewport and update camera aspect. */
+  /** Janvas region in device pixels, GL viewport conventions:
+   *   - X, Y: bottom-left-origin offset into the scene FBO (Y is
+   *           `canvasHeight - topLeftY - Height`, ready for
+   *           `gl.viewport` / THREE `renderTarget.viewport`).
+   *   - Width, Height: size.
+   *  The foreign renderer must pass all four to its viewport — passing
+   *  `(0, 0, Width, Height)` makes content land at the canvas bottom-left
+   *  regardless of where the janvas actually is. */
   X: number;
   Y: number;
   Width: number;

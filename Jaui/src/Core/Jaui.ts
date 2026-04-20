@@ -1715,8 +1715,10 @@ export class Canvas {
         renderer.Render(gl, fbo, { X: px, Y: yFromBottom, Width: pw, Height: ph }, dt);
         node.ClearDirty();
 
-        // Post-pass corner mask — clip the foreign renderer's output to
-        // the nearest Overflow:Hidden ancestor's rounded shape.
+        // Post-pass mask — clear every janvas pixel that falls outside the
+        // nearest Overflow:Hidden ancestor's rounded rect. Covers the full
+        // janvas rect (not just the clip rect's corners) so foreign content
+        // that extends past the parent is clipped too.
         if (clip) {
           r.RebindSceneTarget();
           gl.viewport(0, 0, canvasW, canvasH);
@@ -1727,7 +1729,7 @@ export class Canvas {
           gl.colorMask(true, true, true, true);
           gl.depthMask(false);
           gl.disable(gl.BLEND);
-          r.DrawClipMask(clip.x, clip.y, clip.w, clip.h, clip.radius);
+          r.DrawClipMask(px, py, pw, ph, clip.x, clip.y, clip.w, clip.h, clip.radius);
           r.InvalidateStateCache();
         }
       }
@@ -1737,14 +1739,14 @@ export class Canvas {
     let childClip = clip;
     if (node instanceof Jiv) {
       const overflow = node.Overflow;
-      const radii = node.RenderStyle?.BorderRadius;
-      const r0 = radii ? radii[0] : 0;
-      if ((overflow === 'Hidden' || overflow === 'Scroll') && node.Width > 0 && node.Height > 0 && r0 > 0) {
+      if ((overflow === 'Hidden' || overflow === 'Scroll') && node.Width > 0 && node.Height > 0) {
         const d = this._dpr;
         const px = Math.round((node.X + offsetX) * d);
         const py = Math.round((node.Y + offsetY) * d);
         const pw = Math.round(node.Width * d);
         const ph = Math.round(node.Height * d);
+        const radii = node.RenderStyle?.BorderRadius;
+        const r0 = radii ? radii[0] : 0;
         childClip = { x: px, y: py, w: pw, h: ph, radius: r0 * d };
       }
     }

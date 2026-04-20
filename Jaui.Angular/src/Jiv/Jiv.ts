@@ -14,6 +14,7 @@ import {
   type LayoutConfig,
   type ChildLayout,
   type TextStyle,
+  type SpringConfig,
 } from 'jaui';
 import { Jaui } from '../Jaui/Jaui';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
@@ -129,6 +130,7 @@ export class Jiv implements OnInit, OnDestroy {
     ActiveStyle?: Partial<JivStyle>;
     FocusStyle?: Partial<JivStyle>;
     DisabledStyle?: Partial<JivStyle>;
+    Springs?: Record<string, Partial<SpringConfig>>;
     Text?: string;
   } {
     const fromClass = this._registry?.Resolve(this.className()) ?? null;
@@ -142,6 +144,7 @@ export class Jiv implements OnInit, OnDestroy {
       ActiveStyle:   fromClass?.ActiveStyle,
       FocusStyle:    fromClass?.FocusStyle,
       DisabledStyle: fromClass?.DisabledStyle,
+      Springs:       fromClass?.Springs,
       ...(text != null ? { Text: text } : {}),
     };
   }
@@ -201,6 +204,10 @@ export class Jiv implements OnInit, OnDestroy {
     if (opts.ActiveStyle !== undefined)   this.Node.ActiveStyle   = opts.ActiveStyle   ?? null;
     if (opts.FocusStyle !== undefined)    this.Node.FocusStyle    = opts.FocusStyle    ?? null;
     if (opts.DisabledStyle !== undefined) this.Node.DisabledStyle = opts.DisabledStyle ?? null;
+    // Note: Springs only honoured at JivCore construction (StyleAnimator
+    // builds the per-channel spring set once); changing them after mount
+    // doesn't re-tune existing springs. Late-bound state changes still
+    // work — they just chase targets at the configured stiffness.
     // Route text + textStyle through SetText: it diffs before dirtying, so
     // calling every effect run is cheap when nothing changed and still marks
     // DirtyFlag.Text when font metrics (FontSize, FontFamily, LetterSpacing…)

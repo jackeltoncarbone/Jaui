@@ -86,6 +86,7 @@ export class JssRegistry {
       if (r.ActiveStyle)   out.ActiveStyle   = { ...out.ActiveStyle,   ...r.ActiveStyle };
       if (r.FocusStyle)    out.FocusStyle    = { ...out.FocusStyle,    ...r.FocusStyle };
       if (r.DisabledStyle) out.DisabledStyle = { ...out.DisabledStyle, ...r.DisabledStyle };
+      if (r.Springs)       out.Springs       = { ...out.Springs,       ...r.Springs };
     }
     return matched ? out : null;
   };
