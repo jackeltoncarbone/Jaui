@@ -125,15 +125,23 @@ export class Jiv implements OnInit, OnDestroy {
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
     TextStyle?: Partial<TextStyle>;
+    HoverStyle?: Partial<JivStyle>;
+    ActiveStyle?: Partial<JivStyle>;
+    FocusStyle?: Partial<JivStyle>;
+    DisabledStyle?: Partial<JivStyle>;
     Text?: string;
   } {
     const fromClass = this._registry?.Resolve(this.className()) ?? null;
     const text = this.text();
     return {
-      Style:       { ...fromClass?.Style,       ...this.style() },
-      Layout:      { ...fromClass?.Layout,      ...this.layout() },
-      ChildLayout: { ...fromClass?.ChildLayout, ...this.childLayout() },
-      TextStyle:   { ...fromClass?.TextStyle,   ...this.textStyle() },
+      Style:         { ...fromClass?.Style,         ...this.style() },
+      Layout:        { ...fromClass?.Layout,        ...this.layout() },
+      ChildLayout:   { ...fromClass?.ChildLayout,   ...this.childLayout() },
+      TextStyle:     { ...fromClass?.TextStyle,     ...this.textStyle() },
+      HoverStyle:    fromClass?.HoverStyle,
+      ActiveStyle:   fromClass?.ActiveStyle,
+      FocusStyle:    fromClass?.FocusStyle,
+      DisabledStyle: fromClass?.DisabledStyle,
       ...(text != null ? { Text: text } : {}),
     };
   }
@@ -186,6 +194,13 @@ export class Jiv implements OnInit, OnDestroy {
     }
     if (opts.Layout) Object.assign(this.Node.Layout, opts.Layout);
     if (opts.ChildLayout) Object.assign(this.Node.ChildLayout, opts.ChildLayout);
+    // State styles (Hover/Active/Focus/Disabled) — assigning the whole
+    // bag is safe since EffectiveStyle merges Style + the active state on
+    // every read; spring animator picks up deltas.
+    if (opts.HoverStyle !== undefined)    this.Node.HoverStyle    = opts.HoverStyle    ?? null;
+    if (opts.ActiveStyle !== undefined)   this.Node.ActiveStyle   = opts.ActiveStyle   ?? null;
+    if (opts.FocusStyle !== undefined)    this.Node.FocusStyle    = opts.FocusStyle    ?? null;
+    if (opts.DisabledStyle !== undefined) this.Node.DisabledStyle = opts.DisabledStyle ?? null;
     // Route text + textStyle through SetText: it diffs before dirtying, so
     // calling every effect run is cheap when nothing changed and still marks
     // DirtyFlag.Text when font metrics (FontSize, FontFamily, LetterSpacing…)

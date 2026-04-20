@@ -42,6 +42,13 @@ export interface Ruleset {
   Layout?: Partial<LayoutConfig>;
   ChildLayout?: Partial<ChildLayout>;
   TextStyle?: Partial<TextStyle>;
+  /** Authored via `Name:Hover { ... }`. Merged on top of base Style when
+   *  the Jiv's `Hover` flag is set (pointer hit-test, focus, disabled).
+   *  Inherited by subclasses through the same extends chain as Style. */
+  HoverStyle?: Partial<JivStyle>;
+  ActiveStyle?: Partial<JivStyle>;
+  FocusStyle?: Partial<JivStyle>;
+  DisabledStyle?: Partial<JivStyle>;
 }
 
 export type Stylesheet = Record<string, Ruleset>;
@@ -164,11 +171,30 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
   // Selector — bare class name, no leading `.`, no ids, no tags, no
   // combinators. JSS uses class-only selectors by design.
   const className = _readIdent(s);
+
+  // Tight `:State` pseudo (no whitespace). `Foo:Hover { ... }` writes into
+  // the existing Foo's HoverStyle slot. Must come before the extends check
+  // so `Foo:Hover` isn't misread as `Foo extends Hover`.
+  let stateSlot: 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle' | null = null;
+  if (s.src[s.pos] === ':') {
+    const next = s.src[s.pos + 1];
+    if (next && next !== ' ' && next !== '\t' && next !== '\n') {
+      // Tight colon — pseudo-state form.
+      s.pos++;
+      const stateName = _readIdent(s);
+      const slot = _STATE_TO_SLOT[stateName];
+      if (!slot) {
+        throw new Error(`[Jaui] "${className}:${stateName}" — unknown state. Use Hover, Active, Focus, or Disabled.`);
+      }
+      stateSlot = slot;
+    }
+  }
+
   _skipWs(s);
 
-  // Optional `: Base1, Base2` extends list.
+  // Optional `: Base1, Base2` extends list (only valid on the base form).
   const bases: string[] = [];
-  if (s.src[s.pos] === ':') {
+  if (!stateSlot && s.src[s.pos] === ':') {
     s.pos++;
     while (true) {
       _skipWs(s);
@@ -187,15 +213,25 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
     _skipWs(s);
     if (s.src[s.pos] === '}') { s.pos++; break; }
     if (s.pos >= s.src.length) {
-      throw new Error(`[Jaui] Unterminated ruleset "${className}" — missing "}"`);
+      throw new Error(`[Jaui] Unterminated ruleset "${className}${stateSlot ? `:${stateSlot}` : ''}" — missing "}"`);
     }
     _parseDeclaration(s, own);
   }
 
+  // Pseudo-state ruleset — declarations land in own.Style by default
+  // (SlotFor routes everything visual into Style); copy them into the
+  // target state slot on the existing class.
+  if (stateSlot) {
+    const target = out[className];
+    if (!target) {
+      throw new Error(`[Jaui] "${className}:${stateSlot}" declared before base "${className}" — declare the base ruleset first.`);
+    }
+    target[stateSlot] = { ...target[stateSlot], ...own.Style };
+    return;
+  }
+
   // Flatten extends: start from empty, merge each base in declared order,
-  // then overlay own declarations. Later always wins. When there are no
-  // bases, skip the merge entirely so the emitted ruleset only carries the
-  // slots that were actually declared (same shape as before extends existed).
+  // then overlay own declarations. Later always wins.
   let ruleset: Ruleset = own;
   if (bases.length > 0) {
     ruleset = {};
@@ -260,8 +296,21 @@ const _assignToSlot = (ruleset: Ruleset, prop: string, value: string): void => {
 };
 
 const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
-  Style:       { ...a.Style,       ...b.Style },
-  Layout:      { ...a.Layout,      ...b.Layout },
-  ChildLayout: { ...a.ChildLayout, ...b.ChildLayout },
-  TextStyle:   { ...a.TextStyle,   ...b.TextStyle },
+  Style:         { ...a.Style,         ...b.Style },
+  Layout:        { ...a.Layout,        ...b.Layout },
+  ChildLayout:   { ...a.ChildLayout,   ...b.ChildLayout },
+  TextStyle:     { ...a.TextStyle,     ...b.TextStyle },
+  HoverStyle:    { ...a.HoverStyle,    ...b.HoverStyle },
+  ActiveStyle:   { ...a.ActiveStyle,   ...b.ActiveStyle },
+  FocusStyle:    { ...a.FocusStyle,    ...b.FocusStyle },
+  DisabledStyle: { ...a.DisabledStyle, ...b.DisabledStyle },
 });
+
+/** Reserved pseudo-state names following the `:` in `Foo:State`. Maps to
+ *  the matching slot on Ruleset. PascalCase to match Jaui authoring style. */
+const _STATE_TO_SLOT: Record<string, 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle'> = {
+  Hover: 'HoverStyle',
+  Active: 'ActiveStyle',
+  Focus: 'FocusStyle',
+  Disabled: 'DisabledStyle',
+};

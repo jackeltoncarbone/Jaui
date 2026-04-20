@@ -78,10 +78,14 @@ export class JssRegistry {
       const r = this._rules.get(name);
       if (!r) continue;
       matched = true;
-      if (r.Style)       out.Style       = { ...out.Style,       ...r.Style };
-      if (r.Layout)      out.Layout      = { ...out.Layout,      ...r.Layout };
-      if (r.ChildLayout) out.ChildLayout = { ...out.ChildLayout, ...r.ChildLayout };
-      if (r.TextStyle)   out.TextStyle   = { ...out.TextStyle,   ...r.TextStyle };
+      if (r.Style)         out.Style         = { ...out.Style,         ...r.Style };
+      if (r.Layout)        out.Layout        = { ...out.Layout,        ...r.Layout };
+      if (r.ChildLayout)   out.ChildLayout   = { ...out.ChildLayout,   ...r.ChildLayout };
+      if (r.TextStyle)     out.TextStyle     = { ...out.TextStyle,     ...r.TextStyle };
+      if (r.HoverStyle)    out.HoverStyle    = { ...out.HoverStyle,    ...r.HoverStyle };
+      if (r.ActiveStyle)   out.ActiveStyle   = { ...out.ActiveStyle,   ...r.ActiveStyle };
+      if (r.FocusStyle)    out.FocusStyle    = { ...out.FocusStyle,    ...r.FocusStyle };
+      if (r.DisabledStyle) out.DisabledStyle = { ...out.DisabledStyle, ...r.DisabledStyle };
     }
     return matched ? out : null;
   };
