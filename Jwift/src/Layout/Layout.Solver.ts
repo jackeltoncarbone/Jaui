@@ -5,6 +5,8 @@ import { Resolve } from '../Core/Length';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { ResolveBound } from '../Core/Style.Resolver';
 import { SolveFlex, type FlexContainer, type FlexChild } from './Layout.Flex';
+import { MeasureText } from '../Text/Text.Measure';
+import { ResolveTextStyle } from '../Text/Text.Types';
 
 /**
  * Solve layout for the entire tree rooted at `root`.
@@ -374,6 +376,37 @@ const _solveNode = (
         const allocatedMain = Math.max(0, contentCross - ml - mr);
         const wrapH = _simulateWrapHeight(c, allocatedMain, childCtx);
         finalH = wrapH;
+      }
+
+      // Text wrap-aware sizing — text's intrinsic is measured unbounded (single
+      // line) because pre-solve we don't know the allocated width. Once we know
+      // the parent can only give this child `crossBudget` of cross-axis, re-
+      // measure at that width so the text's main-axis size reflects the wrapped
+      // line count. Without this, the solver sizes the text box at 1-line height
+      // and `_processTextTransitions` later wraps for rendering at the resolved
+      // width — text renders taller than its layout box and overlaps siblings.
+      // Local use only: don't persist to c.TextMeasurement / c.IntrinsicHeight
+      // (those stay at the unbounded measurement so `ComputeIntrinsicSizes`
+      // still reports max-content sizing, and the answer doesn't drift across
+      // frames when container width animates past the wrap threshold).
+      // Column-direction parents only for now — Row-parent wrap needs post-flex
+      // shrink resolution which isn't available pre-solve.
+      if (!horiz && c.Text !== null && c.TextMeasurement !== null) {
+        const parentPad = container.Padding;
+        const contentCross = Math.max(0, width - parentPad[1] - parentPad[3]);
+        const crossBudget = Math.max(0, contentCross - ml - mr);
+        const [tpt, tpr, tpb, tpl] = ResolveLengthTuple4(c.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);
+        const unboundedCross = c.TextMeasurement.Width + tpl + tpr;
+        if (unboundedCross > crossBudget && crossBudget > 0) {
+          const textMaxWidth = Math.max(0, crossBudget - tpl - tpr);
+          if (textMaxWidth > 0) {
+            const resolvedStyle = ResolveTextStyle(c.TextStyle, childCtx);
+            const wrapped = MeasureText(c.Text, resolvedStyle, textMaxWidth);
+            const wrappedMain = wrapped.Height + tpt + tpb;
+            if (isKeyword(resolvedH)) finalH = wrappedMain;
+            if (isKeyword(resolvedW) && !crossStretches) finalW = crossBudget;
+          }
+        }
       }
 
       const flexBasis: number | 'Auto' = c.ChildLayout.FlexBasis === 'Auto'
