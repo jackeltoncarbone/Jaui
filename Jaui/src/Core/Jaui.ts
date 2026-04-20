@@ -34,6 +34,7 @@ import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
+import { WebGL2Renderer } from './WebGL2.Renderer';
 
 export class Canvas {
   readonly Element: HTMLCanvasElement;
@@ -1596,6 +1597,45 @@ export class Canvas {
   get DebugText(): string | null { return this._debugLatest; }
   private _debugLatest: string | null = null;
   private _debugLogLast: number = 0;
+}
+
+/**
+ * Jaui — top-level app instance. Thin facade over `Canvas` that owns the
+ * renderer creation and exposes the user-facing surface as a single
+ * cohesive thing: `new Jaui(el)` instead of `new Canvas(el, new WebGL2Renderer())`.
+ *
+ * Use this for app-level concerns (start/stop, JSS vars, image loads).
+ * For low-level primitives (instance buffers, scroll manager, dirty flags)
+ * reach the underlying `Canvas` via `.Canvas`.
+ */
+export class Jaui {
+  /** The underlying canvas — exposed for low-level access. */
+  readonly Canvas: Canvas;
+
+  /** Shortcut for `Canvas.Root` — what `<jiv>` uses as a fallback parent. */
+  get Root(): Jiv { return this.Canvas.Root; }
+
+  /** Image cache — load images/SVGs here, reference them from Jivs. */
+  get Images(): ImageCache { return this.Canvas.Images; }
+
+  /**
+   * @param canvasEl  HTMLCanvasElement to render into.
+   * @param opts.renderer  Optional renderer override; defaults to a fresh
+   *                       WebGL2Renderer (sync init, safe for descendants
+   *                       that read `Root` in their own ngOnInit).
+   */
+  constructor(canvasEl: HTMLCanvasElement, opts?: { renderer?: Renderer }) {
+    const r = opts?.renderer ?? new WebGL2Renderer();
+    void r.Init(canvasEl);
+    this.Canvas = new Canvas(canvasEl, r);
+  }
+
+  /** Start the render loop (rAF). */
+  Start(): void { this.Canvas.Start(); }
+
+  /** Push the active JSS var table into the canvas — called by the Angular
+   *  layer whenever the JssRegistry version bumps. */
+  SetJssVars(vars: Map<string, string>): void { this.Canvas.SetJssVars(vars); }
 }
 
 // ─── Re-exports by slice ───
