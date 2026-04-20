@@ -99,6 +99,19 @@ export class WebGL2Renderer implements Renderer {
    *  implement it. */
   GetGL = (): WebGL2RenderingContext | null => this._gl ?? null;
 
+  /** Raw scene FBO handle — exposed so <janvas> can hand it to a foreign
+   *  renderer that needs to draw into Jaui's offscreen target (e.g. THREE
+   *  via WebGLRenderTarget with __webglFramebuffer override). */
+  GetSceneFramebuffer = (): WebGLFramebuffer | null => this._sceneFbo?.Framebuffer ?? null;
+
+  /** Drop the cached GL state Jaui tracks to skip redundant calls
+   *  (`_lastProgram` etc.). Called after a foreign renderer (Janvas) ran
+   *  in our context — its `useProgram`/etc. invalidated our cache so the
+   *  next Jaui draw must re-issue every state set. */
+  InvalidateStateCache = (): void => {
+    this._lastProgram = null;
+  };
+
   // Geometry
   private _quad!: QuadGeometry;
 
@@ -199,7 +212,9 @@ export class WebGL2Renderer implements Renderer {
     this._gl = gl;
 
     this._quad = new QuadGeometry(gl);
-    this._sceneFbo = new Framebuffer(gl);
+    // depth: true so foreign 3D renderers (THREE) can z-test against it
+    // when they draw into Jaui's scene FBO via <janvas>.
+    this._sceneFbo = new Framebuffer(gl, { depth: true });
     this._blur = new BlurPass(gl);
 
     // Probe for GPU timer-query support. The extension object exposes the

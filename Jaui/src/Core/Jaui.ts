@@ -319,12 +319,53 @@ export class Canvas {
       const gl = this._renderer.GetGL();
       if (gl) {
         this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt);
-        // Restore the state Jaui's panel pass expects: scene FBO bound,
-        // canvas-sized viewport, scissor off. Foreign code may have stomped
-        // any of these.
+        // Restore the state Jaui's panel pass expects after the foreign
+        // renderer ran. Jaui's draws assume: scene FBO bound, canvas-sized
+        // viewport, no scissor, no depth/cull/stencil, no bound program /
+        // VAO / array buffers, texture unit 0 active. THREE in particular
+        // leaves all of these in arbitrary states. ALSO drop our own state
+        // cache (`_lastProgram` etc.) so the next Jaui draw doesn't trust
+        // stale caches against THREE's bindings.
+        // Full reset of every GL state THREE may have touched. THREE
+        // mutates 30+ pieces of state during a render and Jaui's draws
+        // assume specific defaults; partial reset = subtle bugs (inverted
+        // text from leftover blend equation, missing text from leftover
+        // depth/colour mask, etc.).
         this._renderer.RebindSceneTarget();
         gl.viewport(0, 0, w, h);
         gl.disable(gl.SCISSOR_TEST);
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.STENCIL_TEST);
+        gl.disable(gl.POLYGON_OFFSET_FILL);
+        gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);
+        gl.disable(gl.RASTERIZER_DISCARD);
+        gl.depthMask(true);
+        gl.colorMask(true, true, true, true);
+        gl.stencilMask(0xFF);
+        gl.frontFace(gl.CCW);
+        gl.cullFace(gl.BACK);
+        gl.enable(gl.BLEND);
+        gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        gl.blendColor(0, 0, 0, 0);
+        gl.useProgram(null);
+        gl.bindVertexArray(null);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+        for (let unit = 0; unit < 8; unit++) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, null);
+          gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
+          gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
+          gl.bindTexture(gl.TEXTURE_3D, null);
+        }
+        gl.activeTexture(gl.TEXTURE0);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+        gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+        this._renderer.InvalidateStateCache();
       }
     }
 
@@ -1642,7 +1683,11 @@ export class Canvas {
           renderer.Init(gl, node.MarkDirty);
           node.MarkInited();
         }
-        if (node.IsDirty() && node.Width > 0 && node.Height > 0 && node.Visible) {
+        // Always render — BeginScenePass clears the FBO each frame, so a
+        // dirty-gated skip leaves the janvas region black until the next
+        // dirty cycle (visible as a flash on resize). Phase 2 fix: keep
+        // janvas content in a separate FBO that survives BeginScenePass.
+        if (node.Width > 0 && node.Height > 0 && node.Visible) {
           const d = this._dpr;
           const px = Math.round((node.X + offsetX) * d);
           const py = Math.round((node.Y + offsetY) * d);
@@ -1652,7 +1697,8 @@ export class Canvas {
           gl.viewport(px, yFromBottom, pw, ph);
           gl.enable(gl.SCISSOR_TEST);
           gl.scissor(px, yFromBottom, pw, ph);
-          renderer.Render(gl, pw, ph, dt);
+          const fbo = (this._renderer as WebGL2Renderer).GetSceneFramebuffer();
+          renderer.Render(gl, fbo, { X: px, Y: yFromBottom, Width: pw, Height: ph }, dt);
           node.ClearDirty();
         }
       }
@@ -1705,7 +1751,7 @@ export class Jaui {
 // ─── Re-exports by slice ───
 
 export { Janvas } from '../Janvas/Janvas';
-export type { JanvasRenderer } from '../Janvas/Janvas.Renderer';
+export type { JanvasRenderer, JanvasRect } from '../Janvas/Janvas.Renderer';
 
 export { Jath } from './Jath';
 export { Jiv } from '../Jiv/Jiv';

@@ -8,12 +8,17 @@
 export class Framebuffer {
   readonly Framebuffer: WebGLFramebuffer;
   readonly Texture: WebGLTexture;
+  /** Optional depth+stencil renderbuffer — created when `depth: true`.
+   *  Required when foreign 3D renderers (THREE) draw into this FBO. */
+  readonly DepthStencil: WebGLRenderbuffer | null;
   private _gl: WebGL2RenderingContext;
   private _width: number = 0;
   private _height: number = 0;
+  private _hasDepth: boolean;
 
-  constructor(gl: WebGL2RenderingContext) {
+  constructor(gl: WebGL2RenderingContext, opts?: { depth?: boolean }) {
     this._gl = gl;
+    this._hasDepth = opts?.depth ?? false;
 
     const fb = gl.createFramebuffer();
     if (!fb) throw new Error('[Jaui] Failed to create framebuffer');
@@ -22,6 +27,14 @@ export class Framebuffer {
     const tex = gl.createTexture();
     if (!tex) throw new Error('[Jaui] Failed to create FBO texture');
     this.Texture = tex;
+
+    if (this._hasDepth) {
+      const rb = gl.createRenderbuffer();
+      if (!rb) throw new Error('[Jaui] Failed to create depth renderbuffer');
+      this.DepthStencil = rb;
+    } else {
+      this.DepthStencil = null;
+    }
   }
 
   get Width(): number { return this._width; }
@@ -44,6 +57,13 @@ export class Framebuffer {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.Framebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.Texture, 0);
+
+    if (this.DepthStencil) {
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.DepthStencil);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, this._width, this._height);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, this.DepthStencil);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    }
 
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
     if (status !== gl.FRAMEBUFFER_COMPLETE) {
@@ -72,5 +92,6 @@ export class Framebuffer {
   Dispose = (): void => {
     this._gl.deleteTexture(this.Texture);
     this._gl.deleteFramebuffer(this.Framebuffer);
+    if (this.DepthStencil) this._gl.deleteRenderbuffer(this.DepthStencil);
   };
 }

@@ -24,8 +24,22 @@
  * `Render`. The renderer is free to mutate ANY other GL state without
  * disturbing Jaui's pipeline.
  */
+export interface JanvasRect {
+  /** Screen-space rect in device pixels. (X, Y) is the top-left of the
+   *  janvas region; (Width, Height) are its size. The foreign renderer
+   *  should use these to set its viewport and update camera aspect. */
+  X: number;
+  Y: number;
+  Width: number;
+  Height: number;
+}
+
 export interface JanvasRenderer {
   Init(gl: WebGL2RenderingContext, markDirty: () => void): void;
-  Render(gl: WebGL2RenderingContext, width: number, height: number, dt: number): void;
+  /** @param fbo The framebuffer Jaui wants the renderer to draw into. May
+   *             be null = default framebuffer. THREE consumers wrap it via
+   *             `WebGLRenderTarget` + `__webglFramebuffer` override.
+   *  @param rect Screen rect in device pixels for the janvas region. */
+  Render(gl: WebGL2RenderingContext, fbo: WebGLFramebuffer | null, rect: JanvasRect, dt: number): void;
   Dispose?(): void;
 }
