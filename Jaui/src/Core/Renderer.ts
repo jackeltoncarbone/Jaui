@@ -93,7 +93,11 @@ export interface Renderer {
   /** Append raw instance data. `data` is a Float32Array; `offset` and `count`
    *  are in floats. The renderer copies the slice internally. */
   PanelAddInstance(data: Float32Array, offset: number, count: number): void;
-  /** Issue the instanced draw. `backdrop` is null for Pass 1 (non-glass). */
+  /** Issue the instanced draw. `backdrop` is null for flat-panel batches
+   *  without backdrop sampling. When `useGlassShader` is false but a
+   *  backdrop is still provided, the caller is drawing a flat panel with
+   *  a backdrop filter — the shader variant is the non-glass one but the
+   *  pyramid is bound for the `hasBackdropFilter` branch to sample. */
   PanelDrawBatch(
     canvasWidth: number,
     canvasHeight: number,
@@ -101,6 +105,7 @@ export interface Renderer {
     baseFrostLod: number,
     specTiltX: number,
     specTiltY: number,
+    useGlassShader?: boolean,
   ): void;
 
   // ── Text Rendering (instanced) ──

@@ -450,6 +450,7 @@ export class WebGL2Renderer implements Renderer {
     canvasWidth: number, canvasHeight: number,
     backdrop: GpuTextureHandle | null, baseFrostLod: number,
     specTiltX: number, specTiltY: number,
+    useGlassShader: boolean = backdrop !== null,
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
@@ -460,10 +461,13 @@ export class WebGL2Renderer implements Renderer {
       this._panelInstanceData.subarray(0, this._panelInstanceCount * PANEL_FLOATS_PER_INSTANCE),
       gl.DYNAMIC_DRAW);
 
-    // Pick the shader variant. `backdrop != null` means the caller is
-    // drawing a glass panel (sampling the blurred scene); otherwise it's
-    // a batch of flat / bordered / shadowed panels.
-    const isGlass = backdrop !== null;
+    // Pick the shader variant. Glass panels constant-fold materialType=1.
+    // Flat panels — batched OR drawn standalone with a backdrop filter
+    // (BackdropBrightness/Saturation/Contrast/FrostBlur) — both use the
+    // MATERIAL_NONE variant. Its shader still includes the `hasBackdropFilter`
+    // branch, which samples the bound pyramid when any filter is active and
+    // falls through to plain tint-fill otherwise.
+    const isGlass = useGlassShader;
     const program = isGlass ? this._panelShaderGlass : this._panelShaderNone;
     const locs    = isGlass ? this._panelLocsGlass   : this._panelLocsNone;
 

@@ -316,6 +316,7 @@ export class WebGPURenderer implements Renderer {
     canvasWidth: number, canvasHeight: number,
     backdrop: GpuTextureHandle | null, baseFrostLod: number,
     specTiltX: number, specTiltY: number,
+    _useGlassShader?: boolean,
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const device = this._gpu!.Device;

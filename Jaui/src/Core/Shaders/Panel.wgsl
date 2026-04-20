@@ -457,6 +457,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   var base_uv = in.pixel_pos / uniforms.resolution;
   base_uv.y = 1.0 - base_uv.y;
 
+  // Backdrop filter is universal — any jiv with non-default brightness/saturation/
+  // contrast/frostLod samples the backdrop, regardless of material. Glass layers
+  // refraction + CA + bezel effects on top; flat panels get a clean filtered sample.
+  let has_backdrop_filter = abs(brightness - 1.0) > 0.001
+    || abs(saturation - 1.0) > 0.001
+    || abs(contrast - 1.0) > 0.001
+    || frost_lod > uniforms.base_frost_lod + 0.001;
+
   if (material_type == 1.0) {
     let tangent = vec2f(-normal.y, normal.x);
     let rotated_normal = normal * 0.985 + tangent * 0.174;
@@ -490,6 +498,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let s_b = sample_backdrop(vec2f(uv_b.x, 1.0 - uv_b.y), lod_boost, frost_lod);
     backdrop_rgb = vec3f(s_r.r, s_g.g, s_b.b);
     backdrop_rgb = apply_grading(backdrop_rgb, brightness, saturation, contrast);
+  } else if (has_backdrop_filter) {
+    let s = sample_backdrop(base_uv, 0.0, frost_lod);
+    backdrop_rgb = apply_grading(s, brightness, saturation, contrast);
   }
 
   // Beer-Lambert tint
@@ -534,6 +545,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   var fill_a: f32;
   if (material_type == 1.0) {
     fill_rgb = backdrop_rgb;
+    fill_a = fill_alpha;
+  } else if (has_backdrop_filter) {
+    // Flat panel with backdrop filter — tint paints OVER the filtered backdrop.
+    // Fill is fully opaque in shape so the filter replaces what was behind (CSS
+    // backdrop-filter semantics), then the tint composites over it.
+    let t_a = inst.tint.a;
+    fill_rgb = inst.tint.rgb * t_a + backdrop_rgb * (1.0 - t_a);
     fill_a = fill_alpha;
   } else {
     fill_rgb = inst.tint.rgb;

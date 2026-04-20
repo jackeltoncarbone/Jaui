@@ -588,6 +588,14 @@ void main() {
     vec2 baseUv = v_PixelPos / u_Resolution;
     baseUv.y = 1.0 - baseUv.y;
 
+    // Backdrop filter is universal — any jiv with non-default brightness/saturation/
+    // contrast/frostLod samples the backdrop, regardless of material. Glass layers
+    // refraction + CA + bezel on top; flat panels get a clean filtered sample.
+    bool hasBackdropFilter = abs(brightness - 1.0) > 0.001
+        || abs(saturation - 1.0) > 0.001
+        || abs(contrast - 1.0) > 0.001
+        || frostLod > u_BaseFrostLod + 0.001;
+
     if (materialType == 1.0) {
         // Edge refraction: rotate the outward normal ~10° along the tangent,
         // then negate to sample INWARD (Show Studio's `-refract * edgeIntensity`).
@@ -649,6 +657,10 @@ void main() {
         backdrop = vec3(sR.r, sG.g, sB.b);
 
         backdrop = applyGrading(backdrop, brightness, saturation, contrast);
+    } else if (hasBackdropFilter) {
+        // Flat panel backdrop sampling — no refraction, no CA, no rim boost.
+        vec3 s = sampleBackdrop(baseUv, 0.0, frostLod);
+        backdrop = applyGrading(s, brightness, saturation, contrast);
     }
 
     // ── Beer-Lambert tint (multiplicative absorption) ──
@@ -745,6 +757,13 @@ void main() {
     float fillA;
     if (materialType == 1.0) {
         fillRgb = backdrop;
+        fillA = fillAlpha;
+    } else if (hasBackdropFilter) {
+        // Flat panel with backdrop filter — tint paints OVER the filtered backdrop.
+        // Fill is fully opaque in shape so the filter replaces what was behind
+        // (CSS backdrop-filter semantics); tint composites over it by its alpha.
+        float tA = v_Tint.a;
+        fillRgb = v_Tint.rgb * tA + backdrop * (1.0 - tA);
         fillA = fillAlpha;
     } else {
         fillRgb = v_Tint.rgb;

@@ -28,6 +28,19 @@ import type { MaterialType } from '../Jiv/Jiv.Types';
  *  materials like ProgressiveBlur are compositing overlays — they don't have
  *  a backdrop sample, border, or specular, and they render in their own pass. */
 const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
+
+/** True when a non-glass panel has any non-default backdrop filter set
+ *  (BackdropBrightness / Saturation / Contrast ≠ 1, BackdropFrostBlur > 0).
+ *  These flat panels need the blur pyramid bound and the scene flushed just
+ *  like glass does, so the shader's backdrop sample reflects everything
+ *  drawn behind the panel. */
+const _hasBackdropFilter = (node: Jiv): boolean => {
+  const s = node.RenderStyle;
+  return Math.abs(s.BackdropBrightness - 1) > 0.001
+    || Math.abs(s.BackdropSaturation - 1) > 0.001
+    || Math.abs(s.BackdropContrast - 1) > 0.001
+    || s.BackdropFrostBlur > 0.001;
+};
 import { DirtyFlag } from './Types';
 import { Element as JauiElement } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
@@ -555,10 +568,14 @@ export class Canvas {
         });
         this._counts.PBlur++;
 
-      } else if (_isGlass(material)) {
-        // Flush pending batches: same reason as pblur — glass reads the
-        // scene (indirectly via its blur pyramid), so the scene must be
-        // current.
+      } else if (_isGlass(material) || _hasBackdropFilter(node)) {
+        // Flush pending batches: same reason as pblur — backdrop-filter
+        // panels (glass or flat) read the scene (indirectly via the blur
+        // pyramid), so the scene must be current. Flat panels with
+        // non-default BackdropBrightness/Saturation/Contrast/FrostBlur go
+        // through this same path — the shader branches on materialType
+        // to skip refraction/CA/bezel for them, but they still need the
+        // pyramid bound to sample.
         flushPanels();
         flushText();
         // Glass samples only `u_Backdrop` (the blur pyramid), never the raw
@@ -596,8 +613,12 @@ export class Canvas {
         r.PanelBeginBatch();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY);
-        this._counts.Glass++;
+        // Glass uses the MATERIAL_GLASS shader variant; flat-with-filter uses
+        // MATERIAL_NONE (which still samples the pyramid inside its
+        // hasBackdropFilter branch).
+        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material));
+        if (_isGlass(material)) this._counts.Glass++;
+        else this._counts.Panels++;
         // Reset the shared panel buffer so this glass instance isn't picked
         // up by the next flushPanels() and drawn AGAIN as a non-glass panel
         // (null backdrop → dummy black texture → glass goes solid gray).
@@ -809,8 +830,9 @@ export class Canvas {
    *  Reads from RenderStyle (resolved px), not Style (authorable string) so the
    *  blur pass picks the actually-rendered value. */
   private _scanFrostBlur = (node: Jiv): void => {
+    // Any panel with BackdropFrostBlur needs the blur pyramid sized for it —
+    // flat panels now sample backdrop too, so their frost blur counts here.
     if (node.Width > 0 && node.Height > 0 && node.Visible
-        && node.RenderStyle.Material === 'LiquidGlass'
         && node.RenderStyle.BackdropFrostBlur > this._maxFrostBlur) {
       this._maxFrostBlur = node.RenderStyle.BackdropFrostBlur;
     }
