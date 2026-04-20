@@ -1,4 +1,4 @@
-# Optimization Plan — Jwift Render Loop
+# Optimization Plan — Jaui Render Loop
 
 Written 2026-04-17. Constraint: **zero visual change** — no quality
 tradeoffs, no different z-order, no perceptible rendering difference.
@@ -108,7 +108,7 @@ The only risk is missing a trigger (a change that doesn't set the
 flag), causing a stuck frame. Mitigate: always render for N frames
 after any input event, then check idle.
 
-**Files:** `Jwift/src/Core/Jwift.ts` (`_tick`, `_render`,
+**Files:** `Jaui/src/Core/Jaui.ts` (`_tick`, `_render`,
 `RequestFrame`).
 
 ### Fix 2: Batch non-glass panel draw calls (P2)
@@ -142,7 +142,7 @@ are clipped inside parents, siblings are laid out by flex). So this
 is safe for non-overlapping trees. For safety, only batch siblings
 at the same parent.
 
-**Files:** `Jwift/src/Core/Jwift.ts` (`renderNode`).
+**Files:** `Jaui/src/Core/Jaui.ts` (`renderNode`).
 
 ### Fix 3: Batch text draw calls (P3)
 Same strategy as Fix 2: accumulate text instances, flush before
@@ -154,7 +154,7 @@ text separately from panels, we need a two-pass approach: first all
 panels in a run, then all text in that run. This preserves
 panel-under-text ordering.
 
-**Files:** `Jwift/src/Core/Jwift.ts` (`_emitTextFor`, `renderNode`).
+**Files:** `Jaui/src/Core/Jaui.ts` (`_emitTextFor`, `renderNode`).
 
 ### Fix 4: Share glass backdrop within a layer (P4)
 When multiple glass panels appear without intervening non-glass
@@ -177,7 +177,7 @@ page, no glass panels overlap, so safe. For correctness, gate on
 AABB overlap: if next glass panel overlaps any prior glass panel's
 rect, re-snapshot; otherwise reuse.
 
-**Files:** `Jwift/src/Core/Jwift.ts` (`renderNode` glass branch).
+**Files:** `Jaui/src/Core/Jaui.ts` (`renderNode` glass branch).
 
 ### Fix 5: Canvas-level dirty flag (P5)
 Replace the O(N) `_hasDirtyLayout` tree walk with a single boolean
@@ -185,7 +185,7 @@ on Canvas. `Element.MarkLayoutDirty()` sets `Canvas._layoutDirty =
 true` (needs a back-pointer from Element to Canvas, or a global
 flag). Clear after layout solve.
 
-**Files:** `Jwift/src/Element/Element.ts`, `Jwift/src/Core/Jwift.ts`.
+**Files:** `Jaui/src/Element/Element.ts`, `Jaui/src/Core/Jaui.ts`.
 
 ### Fix 6: Cache sorted children (P6)
 Cache `orderedChildren` result on the Jiv. Invalidate when:
@@ -195,15 +195,15 @@ Cache `orderedChildren` result on the Jiv. Invalidate when:
 Store as a `_sortedChildren: Jiv[] | null` field on Element. Return
 `Children` directly when null (no sort needed).
 
-**Files:** `Jwift/src/Element/Element.ts` or `Jwift/src/Jiv/Jiv.ts`,
-`Jwift/src/Core/Jwift.ts`.
+**Files:** `Jaui/src/Element/Element.ts` or `Jaui/src/Jiv/Jiv.ts`,
+`Jaui/src/Core/Jaui.ts`.
 
 ### Fix 7: Gate text transition walk (P7)
 Only walk `_processTextTransitions` when at least one TextAnimator
 has an active spring. Track via a counter incremented when a text
 spring kicks and decremented when it settles.
 
-**Files:** `Jwift/src/Core/Jwift.ts`, `Jwift/src/Text/Text.Animator.ts`.
+**Files:** `Jaui/src/Core/Jaui.ts`, `Jaui/src/Text/Text.Animator.ts`.
 
 ---
 

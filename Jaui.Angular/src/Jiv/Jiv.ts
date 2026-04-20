@@ -1,0 +1,202 @@
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnDestroy,
+  OnInit,
+  effect,
+  forwardRef,
+  inject,
+  input,
+} from '@angular/core';
+import {
+  Jiv as JivCore,
+  type JivStyle,
+  type LayoutConfig,
+  type ChildLayout,
+  type TextStyle,
+} from 'jaui';
+import { JauiCanvas } from '../Canvas/JauiCanvas';
+import { JSS_REGISTRY } from '../Jss/Jss.Registry';
+
+/**
+ * `<jiv>` — generic Jaui node. Creates a Jiv on construction, attaches
+ * to the nearest ancestor `<jiv>` or `<jaui-canvas>` on init, removes
+ * itself on destroy.
+ *
+ * Parent resolution is pure Angular DI — `inject(ParentClass, { skipSelf,
+ * optional })`. The closer ancestor wins; if nested under another `<jiv>`
+ * that Jiv is the parent; otherwise we fall through to the enclosing
+ * `<jaui-canvas>`'s Root. No custom InjectionToken ceremony.
+ *
+ * Inputs (signal-based, all optional):
+ *   class       — space-separated class names; resolved against the local
+ *                 JssRegistry (Style/Layout/ChildLayout/TextStyle)
+ *   style       — Partial<JivStyle> applied AFTER class resolution (wins)
+ *   layout      — Partial<LayoutConfig>
+ *   childLayout — Partial<ChildLayout>
+ *   text        — string; sets jiv.Text
+ *   textStyle   — Partial<TextStyle>
+ *
+ * Native DOM events (`click`, `pointerdown`, …) bubble through the host
+ * `<jiv>` element — Angular's standard event binding works without any
+ * special wiring on our side.
+ */
+@Component({
+  selector: 'jiv',
+  standalone: true,
+  template: '<ng-content></ng-content>',
+  styles: [':host { display: contents; }'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class Jiv implements OnInit, OnDestroy {
+  readonly className = input<string | undefined>(undefined, { alias: 'class' });
+  readonly style = input<Partial<JivStyle> | undefined>(undefined);
+  readonly layout = input<Partial<LayoutConfig> | undefined>(undefined);
+  readonly childLayout = input<Partial<ChildLayout> | undefined>(undefined);
+  readonly text = input<string | null | undefined>(undefined);
+  readonly textStyle = input<Partial<TextStyle> | undefined>(undefined);
+  readonly imageSrc = input<string | null | undefined>(undefined, { alias: 'image' });
+
+  /** The underlying Jiv instance, created in the constructor. */
+  readonly Node: JivCore;
+
+  // forwardRef because Jiv (this class) references itself via DI. The
+  // parent Jiv — if any — is the nearest ancestor. If there's no parent
+  // Jiv, we're a top-level child of <jaui-canvas> and attach to its Root.
+  private _parentJiv = inject<Jiv | null>(forwardRef(() => Jiv), {
+    skipSelf: true,
+    optional: true,
+  });
+  private _canvas = inject(JauiCanvas, { optional: true });
+  private _registry = inject(JSS_REGISTRY, { optional: true });
+
+  constructor() {
+    const opts = this._buildOptions();
+    // Extract Element-level properties from Style before constructing
+    const style = (opts.Style ?? {}) as Record<string, unknown>;
+    const elementProps: Record<string, unknown> = {};
+    for (const key of ['Overflow', 'Visible', 'Interactive', 'PointerEvents', 'Cursor', 'UserSelect', 'PointScale', 'FitMode']) {
+      if (key in style) {
+        elementProps[key] = style[key];
+        delete style[key];
+      }
+    }
+    this.Node = new JivCore({ ...opts, ...elementProps });
+    // Reactively re-apply on input changes — spring animator handles the
+    // smooth transition; we don't recreate the Jiv. Tracking the registry
+    // version signal here is what makes live `.jss` hot-edits propagate:
+    // when a `<jyle>` re-parses, the registry version bumps, every Jiv
+    // that reads it via this effect re-resolves its class rules.
+    effect(() => {
+      // Subscribe to registry changes — even for class-less jivs, this is
+      // cheap and keeps behavior uniform.
+      this._registry?.Version();
+      this._apply();
+    });
+  }
+
+  ngOnInit(): void {
+    this._parent().AddChild(this.Node);
+    // Kick the animation loop so the new Jiv's Presence spring (0 → 1)
+    // starts animating on the next RAF. Idempotent when already running.
+    this._canvas?.Canvas.Animations.Kick();
+  }
+
+  ngOnDestroy(): void {
+    // Defer the actual tree removal to the engine: RequestLeave flips the
+    // Presence spring's target to 0, and the PresenceManager hard-removes
+    // the node once the spring settles. Gives the Jiv a fade-out instead
+    // of a hard pop when the Angular component goes away.
+    this.Node.RequestLeave();
+    this._canvas?.Canvas.Animations.Kick();
+  }
+
+  /** Nearest ancestor Jiv or the canvas root. Always defined if this
+   *  `<jiv>` is used inside a `<jaui-canvas>` (which it must be — a
+   *  floating `<jiv>` with no canvas ancestor throws a clear error). */
+  private _parent(): JivCore {
+    if (this._parentJiv) return this._parentJiv.Node;
+    if (this._canvas) return this._canvas.Root;
+    throw new Error('[Jaui.Angular] <jiv> must be inside a <jaui-canvas>');
+  }
+
+  private _buildOptions(): {
+    Style?: Partial<JivStyle>;
+    Layout?: Partial<LayoutConfig>;
+    ChildLayout?: Partial<ChildLayout>;
+    TextStyle?: Partial<TextStyle>;
+    Text?: string;
+  } {
+    const fromClass = this._registry?.Resolve(this.className()) ?? null;
+    const text = this.text();
+    return {
+      Style:       { ...fromClass?.Style,       ...this.style() },
+      Layout:      { ...fromClass?.Layout,      ...this.layout() },
+      ChildLayout: { ...fromClass?.ChildLayout, ...this.childLayout() },
+      TextStyle:   { ...fromClass?.TextStyle,   ...this.textStyle() },
+      ...(text != null ? { Text: text } : {}),
+    };
+  }
+
+  /** Re-apply merged options to the live Node on input change. Spring
+   *  animator picks up field deltas automatically — no manual transitions. */
+  private _apply(): void {
+    const opts = this._buildOptions();
+    if (opts.Style) {
+      // Extract Element-level properties that JSS may have placed in the
+      // Style bucket (they moved from JivStyle to Element).
+      const style = opts.Style as Record<string, unknown>;
+      if ('Overflow' in style) {
+        this.Node.Overflow = style['Overflow'] as 'Visible' | 'Hidden' | 'Scroll';
+        delete style['Overflow'];
+      }
+      if ('Visible' in style) {
+        this.Node.Visible = style['Visible'] as boolean;
+        delete style['Visible'];
+      }
+      if ('Interactive' in style) {
+        this.Node.Interactive = style['Interactive'] as boolean;
+        delete style['Interactive'];
+      }
+      if ('PointerEvents' in style) {
+        this.Node.PointerEvents = style['PointerEvents'] as 'Auto' | 'None';
+        delete style['PointerEvents'];
+      }
+      if ('Cursor' in style) {
+        this.Node.Cursor = style['Cursor'] as 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
+        delete style['Cursor'];
+      }
+      if ('UserSelect' in style) {
+        this.Node.UserSelect = style['UserSelect'] as 'Auto' | 'None';
+        delete style['UserSelect'];
+      }
+      if ('PointScale' in style) {
+        const next = String(style['PointScale']);
+        if (this.Node.PointScale !== next) {
+          this.Node.PointScale = next;
+          this.Node.MarkLayoutDirty();
+        }
+        delete style['PointScale'];
+      }
+      if ('FitMode' in style) {
+        this.Node.FitMode = style['FitMode'] as 'Contain' | 'Cover';
+        delete style['FitMode'];
+      }
+      Object.assign(this.Node.Style, style);
+    }
+    if (opts.Layout) Object.assign(this.Node.Layout, opts.Layout);
+    if (opts.ChildLayout) Object.assign(this.Node.ChildLayout, opts.ChildLayout);
+    // Route text + textStyle through SetText: it diffs before dirtying, so
+    // calling every effect run is cheap when nothing changed and still marks
+    // DirtyFlag.Text when font metrics (FontSize, FontFamily, LetterSpacing…)
+    // change — which Object.assign on TextStyle silently missed.
+    if ('Text' in opts || opts.TextStyle) {
+      const nextText = 'Text' in opts ? (opts.Text ?? null) : this.Node.Text;
+      this.Node.SetText(nextText, opts.TextStyle);
+    }
+    const img = this.imageSrc();
+    if (img !== undefined) this.Node.ImageSrc = img;
+    this.Node.MarkLayoutDirty();
+  }
+}
+

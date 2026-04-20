@@ -1,16 +1,16 @@
 {
-  "name": "jwift-workspace",
+  "name": "jaui-workspace",
   "private": true,
-  "description": "Jwift monorepo — core library + demos + Angular bindings",
+  "description": "Jaui monorepo — core library + demos + Angular bindings",
   "workspaces": [
-    "Jwift",
-    "Jwift.Demo",
-    "Jwift.Angular",
-    "Jwift.Angular.Demo"
+    "Jaui",
+    "Jaui.Demo",
+    "Jaui.Angular",
+    "Jaui.Angular.Demo"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace=Jwift.Demo",
-    "test": "npm test --workspace=Jwift",
-    "build": "npm run build --workspace=Jwift"
+    "dev": "npm run dev --workspace=Jaui.Demo",
+    "test": "npm test --workspace=Jaui",
+    "build": "npm run build --workspace=Jaui"
   }
 }

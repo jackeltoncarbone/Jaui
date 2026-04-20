@@ -1,4 +1,4 @@
-# GPU Optimization Plan — Jwift Rendering
+# GPU Optimization Plan — Jaui Rendering
 
 Written 2026-04-17. Constraint: **quality must equal or exceed current**.
 No downsampling, no feature cuts. Every change is perf+quality or perf-neutral+quality, never perf+quality-loss.
@@ -45,7 +45,7 @@ Blit(sceneFbo → defaultFramebuffer)         // single final present
 
 **Eliminates per-surface `SnapshotScreen` blits entirely.** Savings scale linearly with glass + pblur count. This is the single highest-ROI change in the plan.
 
-Files: `Jwift.ts:_render`, `WebGL2.Renderer.ts` (already has `BeginScenePass`, `SceneTexture`, `Blit`).
+Files: `Jaui.ts:_render`, `WebGL2.Renderer.ts` (already has `BeginScenePass`, `SceneTexture`, `Blit`).
 
 ### Phase B — Shader quality + perf wins
 
@@ -68,11 +68,11 @@ Files: `Jwift.ts:_render`, `WebGL2.Renderer.ts` (already has `BeginScenePass`, `
 ### Phase C — Draw calls + GPU state
 
 **C1. Batch non-glass panels between glass boundaries.** 30-100 individual `PanelBeginBatch/AddInstance/DrawBatch` cycles today. The instance buffer already supports multiple instances — just accumulate panels between glass-boundary flushes.
-- File: `Jwift.ts:_render` (non-glass branch)
+- File: `Jaui.ts:_render` (non-glass branch)
 - 10-20× fewer draw calls per frame
 
 **C2. `invalidateFramebuffer(depth, stencil)` at end of scene pass.** On iPad and other TBDRs, tells the tile memory manager to skip storing the depth/stencil back to main memory. Big bandwidth win on tile GPUs, zero cost on desktop.
-- File: `Jwift.ts:_render`, `WebGL2.Renderer.ts`
+- File: `Jaui.ts:_render`, `WebGL2.Renderer.ts`
 
 **C3. `texStorage2D` for scene FBO allocation.** Driver pre-allocates vs. per-call texImage2D limbo.
 - File: `Framebuffer.ts:Resize`
@@ -87,7 +87,7 @@ Files: `Jwift.ts:_render`, `WebGL2.Renderer.ts` (already has `BeginScenePass`, `
 - Quality win; perf-neutral
 
 **D2. Deeper dual-filter pyramid for progressive blur.** Current `baseBlurCssPx = 1` → depth = 1, only one mip level of dual-filter quality. Progressive blur samples LOD 5-6 → rest is box-filter `generateMipmap`. Pass `minDepth = ceil(maxLod)` when calling `ComputeBlur` from the pblur path. Adds 1-2 extra blur passes per pblur, eliminates box-filter tail → smoother heavy blur.
-- File: `Jwift.ts` (pblur branch), `BlurPass.ts`
+- File: `Jaui.ts` (pblur branch), `BlurPass.ts`
 - Quality win; mild perf cost offset by Phase A savings
 
 ## Implementation order

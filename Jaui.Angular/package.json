@@ -1,0 +1,47 @@
+{
+  "name": "jaui-angular",
+  "version": "0.1.0",
+  "description": "Angular bindings for Jaui — thin wrappers over the canvas-based UI engine",
+  "private": true,
+  "type": "module",
+  "module": "./dist/jaui-angular/fesm2022/jaui-angular.mjs",
+  "typings": "./dist/jaui-angular/types/jaui-angular.d.ts",
+  "exports": {
+    "./package.json": { "default": "./package.json" },
+    ".": {
+      "types": "./dist/jaui-angular/types/jaui-angular.d.ts",
+      "default": "./dist/jaui-angular/fesm2022/jaui-angular.mjs"
+    }
+  },
+  "scripts": {
+    "ng": "ng",
+    "build": "ng build",
+    "watch": "ng build --watch --configuration development",
+    "test": "ng test"
+  },
+  "peerDependencies": {
+    "@angular/common": "^21.2.0",
+    "@angular/core": "^21.2.0",
+    "jaui": "*"
+  },
+  "dependencies": {
+    "tslib": "^2.3.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^21.2.7",
+    "@angular/cli": "^21.2.7",
+    "@angular/common": "^21.2.0",
+    "@angular/compiler": "^21.2.0",
+    "@angular/compiler-cli": "^21.2.0",
+    "@angular/core": "^21.2.0",
+    "@angular/platform-browser": "^21.2.0",
+    "jsdom": "^28.0.0",
+    "jaui": "*",
+    "ng-packagr": "^21.2.0",
+    "prettier": "^3.8.1",
+    "rxjs": "~7.8.0",
+    "typescript": "~5.9.2",
+    "vitest": "^4.0.8"
+  },
+  "sideEffects": false
+}

@@ -59,7 +59,7 @@ All in the WebGL2 render path. Full details in `PLAN.gpu-optimize.md`.
 - **`useProgram` state cache** — skip redundant JS→GL program binds. Invalidated after BlurPass (which uses raw gl.useProgram).
 - **Custom Gaussian mipmap** (`BlurPass.GenerateOutputMipmap`) — replaces driver's `generateMipmap` box filter with iterated dual-filter DOWN passes. Blurred output pyramid has Gaussian-quality mip levels through LOD 8 — no blocky artifacts at any LOD. `MAX_LEVELS = 9`.
 
-**HUD metrics for verification:** demo URL with `?debug` shows an overlay + console logs `[Jwift perf]` each frame with per-phase CPU time + draw counts. CPU render on HD dropped from ~2ms baseline to ~0.7ms over the arc (headless readings; real machine will vary with 30/60/120Hz display).
+**HUD metrics for verification:** demo URL with `?debug` shows an overlay + console logs `[Jaui perf]` each frame with per-phase CPU time + draw counts. CPU render on HD dropped from ~2ms baseline to ~0.7ms over the arc (headless readings; real machine will vary with 30/60/120Hz display).
 
 ---
 
@@ -82,7 +82,7 @@ Current text atlas rasterizes whole words via Canvas 2D `fillText` into RGBA til
 **Cheap alternative if MSDF is too big to ship this pass:** supersample + mipmap the existing Canvas-2D rasterization. Render words at 1.5-2× supersample, add mipmap to text atlas (currently `MIN_FILTER: LINEAR` with no mipmap), trilinear sample. Not SDF's "sharp at any scale" but solid improvement at fixed render sizes — which is Home's use case. ~30 min of work.
 
 ### 2. Verify perf on real hardware (iPad / Macbook)
-Session probe ran in headless Chromium which caps FPS at ~1 regardless. Real perf across all the GPU-perf changes needs validation on the target devices. Use Safari Web Inspector via USB for iPad, or DevTools on Macbook, to read `[Jwift perf]` console output. User previously reported "laggy as f" on iPad — should be dramatically better now. HD desktop user reported 30fps cap which turned out to be display-level / Chrome-setting (not Jwift's doing; see PLAN.gpu-optimize.md sources).
+Session probe ran in headless Chromium which caps FPS at ~1 regardless. Real perf across all the GPU-perf changes needs validation on the target devices. Use Safari Web Inspector via USB for iPad, or DevTools on Macbook, to read `[Jaui perf]` console output. User previously reported "laggy as f" on iPad — should be dramatically better now. HD desktop user reported 30fps cap which turned out to be display-level / Chrome-setting (not Jaui's doing; see PLAN.gpu-optimize.md sources).
 
 ### 3. `when(cond, a, b)` expression in Length resolver
 Branching expression for JSS: `OffsetX: when(Exiting, 40 * (1 - Presence), 0)`.
@@ -123,7 +123,7 @@ Canvas Compositing" feature in `Features.md`. Not yet implemented.
 
 ## Suggested: set up Playwright perf probe for verification
 
-The session used a local Playwright script (gitignored at `perf-probe.mjs`) that launched the dev server, captured `[Jwift perf]` console logs across three viewport sizes (small / medium / HD), and screenshot each for visual regression verification. **Strongly recommended** for any future perf/visual work — catches regressions instantly.
+The session used a local Playwright script (gitignored at `perf-probe.mjs`) that launched the dev server, captured `[Jaui perf]` console logs across three viewport sizes (small / medium / HD), and screenshot each for visual regression verification. **Strongly recommended** for any future perf/visual work — catches regressions instantly.
 
 Minimal setup:
 ```bash
@@ -173,7 +173,7 @@ Canvas Compositing" feature in `Features.md`. Not yet implemented.
 
 ## Where things live
 
-**Specs:** `Jwift/src/Shared/Documents/Specifications/`
+**Specs:** `Jaui/src/Shared/Documents/Specifications/`
 - `Specification.md` — architecture, pipeline, milestones M1–M7
 - `Features.md` — every visual/interaction feature
 - `Styling.md` — JSS language
@@ -183,39 +183,39 @@ Canvas Compositing" feature in `Features.md`. Not yet implemented.
 - `Examples.md` — target API
 - `Var.md` — `@var` spec
 
-**Engine core:** `Jwift/src/Core/`
-- `Jwift.ts` — Canvas class, render loop, clip-stack walker
+**Engine core:** `Jaui/src/Core/`
+- `Jaui.ts` — Canvas class, render loop, clip-stack walker
 - `Clip.Stack.ts` — ClipShape type + per-frame accumulator
 - `WebGPU.Renderer.ts`, `WebGL2.Renderer.ts` — GPU backends
 - `Style.Resolver.ts` — JivStyle → JivRenderStyle
 - `Length.ts` — expression parser (arithmetic, `@Name` vars, built-ins)
 
-**Animation:** `Jwift/src/Animation/`
+**Animation:** `Jaui/src/Animation/`
 - `Animation.Manager.ts` — RAF loop, settle detection
 - `Spring.ts` — spring physics
 - `Presence.Manager.ts` — Presence springs + settle-then-remove
 
-**JSS parser:** `Jwift/src/Jss/`
+**JSS parser:** `Jaui/src/Jss/`
 - `Jss.Parser.ts` — rulesets, extends, `@var`, `@spring`
 - `Jss.Routes.ts` — prop-name → slot routing
 
 **Shaders** (edit source, regen via `npm run build:shaders`):
-- `Jwift/src/Core/Shaders/` — WebGPU WGSL
-- `Jwift/src/Jiv/Shaders/`, `Jwift/src/Text/Shaders/`,
-  `Jwift/src/ProgressiveBlur/ProgressiveBlur.Shader.ts` — WebGL2 GLSL
+- `Jaui/src/Core/Shaders/` — WebGPU WGSL
+- `Jaui/src/Jiv/Shaders/`, `Jaui/src/Text/Shaders/`,
+  `Jaui/src/ProgressiveBlur/ProgressiveBlur.Shader.ts` — WebGL2 GLSL
 
-**Demo:** `Jwift.Angular.Demo/src/Home/Home.jss` + `Home.ts`
+**Demo:** `Jaui.Angular.Demo/src/Home/Home.jss` + `Home.ts`
 Dev server: `npm run dev` (port 6777).
 
 **Show Studio reference:**
-`../show-studio/ShowStudio.Web/src/Libraries/Jwift/` — DOM-based Jiv.
+`../show-studio/ShowStudio.Web/src/Libraries/Jaui/` — DOM-based Jiv.
 `../show-studio/ShowStudio.Web/src/App/Home/` — the home page being ported.
 
 ---
 
 ## Key context
 
-1. **Jwift is an engine, Show Studio is the test customer.** Everything
+1. **Jaui is an engine, Show Studio is the test customer.** Everything
    must serve the Home page port.
 2. **Concentric is non-negotiable** — every radius = parent - gap.
 3. **Instant compute + spring motion** — discrete calculation, temporal

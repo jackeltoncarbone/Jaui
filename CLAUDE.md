@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Jwift is a canvas-based UI rendering engine for the web. It renders all UI to a WebGPU canvas — no DOM compositing, no browser CSS layout. The goal is pixel-identical rendering across all browsers by owning the entire rendering pipeline.
+Jaui is a canvas-based UI rendering engine for the web. It renders all UI to a WebGPU canvas — no DOM compositing, no browser CSS layout. The goal is pixel-identical rendering across all browsers by owning the entire rendering pipeline.
 
 This repo currently contains **specification documents only** — no source code has been written yet. The specs define the target architecture, API, conventions, and style system. Implementation will follow the milestone plan in Specification.md.
 
@@ -18,13 +18,13 @@ This repo currently contains **specification documents only** — no source code
 
 ## Three Components
 
-1. **Jwift Core** — TypeScript + WebGPU rendering engine (layout, painting, hit testing, text, animation, materials, input)
-2. **Jwift.Angular** — Angular bindings (components/directives that describe Jwift UI in Angular templates)
-3. **Jwift Materials** — GPU shader system (glass, blur, refraction, shadows, borders)
+1. **Jaui Core** — TypeScript + WebGPU rendering engine (layout, painting, hit testing, text, animation, materials, input)
+2. **Jaui.Angular** — Angular bindings (components/directives that describe Jaui UI in Angular templates)
+3. **Jaui Materials** — GPU shader system (glass, blur, refraction, shadows, borders)
 
 ## Reference Implementation
 
-Show Studio's DOM-based Jiv library (`show-studio/ShowStudio.Web/src/Libraries/Jwift/Jiv/`) is the reference. Jwift reimplements Jiv's visual effects as GPU shaders instead of CSS `backdrop-filter`/`clip-path`/SVG filters.
+Show Studio's DOM-based Jiv library (`show-studio/ShowStudio.Web/src/Libraries/Jaui/Jiv/`) is the reference. Jaui reimplements Jiv's visual effects as GPU shaders instead of CSS `backdrop-filter`/`clip-path`/SVG filters.
 
 ## Conventions (C#-Style TypeScript)
 
@@ -34,7 +34,7 @@ Show Studio's DOM-based Jiv library (`show-studio/ShowStudio.Web/src/Libraries/J
 - **Files**: `PascalCase.Purpose.ts` (e.g., `Glass.Material.ts`, `Spring.Animation.Manager.ts`)
 - **Arrow function class members** preferred for callback-safe `this` binding
 - **Regular methods** only for overridable/inherited behavior
-- **Component selectors**: bare names (`panel`, `toolbar`), not prefixed (`jwift-panel`)
+- **Component selectors**: bare names (`panel`, `toolbar`), not prefixed (`jaui-panel`)
 
 ## Architecture Rules
 
@@ -52,7 +52,7 @@ Show Studio's DOM-based Jiv library (`show-studio/ShowStudio.Web/src/Libraries/J
 
 ## JSS (Jack's Style Sheets)
 
-Custom style language (`.jss` files) parsed by Jwift, not the browser. Key features:
+Custom style language (`.jss` files) parsed by Jaui, not the browser. Key features:
 - No semicolons, one property per line, typed values
 - `@style Name { ... }` — reusable mixins with multi-inheritance via `: Base1, Base2`
 - `@spring Property { Stiffness, Damping }` — declarative spring animation

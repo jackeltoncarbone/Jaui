@@ -1,0 +1,19 @@
+{
+  "name": "jaui-demo",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Jaui playground / visual testbed",
+  "private": true,
+  "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "build": "vite build --config vite.config.ts"
+  },
+  "dependencies": {
+    "jaui": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vite": "^7.0.0",
+    "vite-plugin-glsl": "^1.4.0"
+  }
+}
