@@ -318,7 +318,7 @@ export class Canvas {
     if (this._renderer instanceof WebGL2Renderer) {
       const gl = this._renderer.GetGL();
       if (gl) {
-        this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt);
+        this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt, null);
         // Restore the state Jaui's panel pass expects after the foreign
         // renderer ran. Jaui's draws assume: scene FBO bound, canvas-sized
         // viewport, no scissor, no depth/cull/stencil, no bound program /
@@ -1675,36 +1675,70 @@ export class Canvas {
     canvasW: number,
     canvasH: number,
     dt: number,
+    /** Active rounded clip (device px, top-left). When set, the foreign
+     *  renderer's writes are stencil-clipped to this shape — letting the
+     *  janvas honour its ancestor's `Overflow:Hidden` + `BorderRadius`,
+     *  same as Jaui's own panel pass already does for jivs. */
+    clip: { x: number; y: number; w: number; h: number; radius: number } | null,
   ): void {
     if (node instanceof Janvas) {
       const renderer = node.Renderer;
-      if (renderer) {
+      if (renderer && node.Width > 0 && node.Height > 0 && node.Visible) {
         if (!node.IsInited()) {
           renderer.Init(gl, node.MarkDirty);
           node.MarkInited();
         }
-        // Always render — BeginScenePass clears the FBO each frame, so a
-        // dirty-gated skip leaves the janvas region black until the next
-        // dirty cycle (visible as a flash on resize). Phase 2 fix: keep
-        // janvas content in a separate FBO that survives BeginScenePass.
-        if (node.Width > 0 && node.Height > 0 && node.Visible) {
-          const d = this._dpr;
-          const px = Math.round((node.X + offsetX) * d);
-          const py = Math.round((node.Y + offsetY) * d);
-          const pw = Math.round(node.Width * d);
-          const ph = Math.round(node.Height * d);
-          const yFromBottom = canvasH - py - ph;
-          gl.viewport(px, yFromBottom, pw, ph);
-          gl.enable(gl.SCISSOR_TEST);
-          gl.scissor(px, yFromBottom, pw, ph);
-          const fbo = (this._renderer as WebGL2Renderer).GetSceneFramebuffer();
-          renderer.Render(gl, fbo, { X: px, Y: yFromBottom, Width: pw, Height: ph }, dt);
-          node.ClearDirty();
+        const d = this._dpr;
+        const px = Math.round((node.X + offsetX) * d);
+        const py = Math.round((node.Y + offsetY) * d);
+        const pw = Math.round(node.Width * d);
+        const ph = Math.round(node.Height * d);
+        const yFromBottom = canvasH - py - ph;
+        gl.viewport(px, yFromBottom, pw, ph);
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(px, yFromBottom, pw, ph);
+
+        const r = this._renderer as WebGL2Renderer;
+        const fbo = r.GetSceneFramebuffer();
+        renderer.Render(gl, fbo, { X: px, Y: yFromBottom, Width: pw, Height: ph }, dt);
+        node.ClearDirty();
+
+        // Post-pass corner mask — clip the foreign renderer's output to
+        // the nearest Overflow:Hidden ancestor's rounded shape.
+        if (clip) {
+          r.RebindSceneTarget();
+          gl.viewport(0, 0, canvasW, canvasH);
+          gl.disable(gl.SCISSOR_TEST);
+          gl.disable(gl.DEPTH_TEST);
+          gl.disable(gl.CULL_FACE);
+          gl.disable(gl.STENCIL_TEST);
+          gl.colorMask(true, true, true, true);
+          gl.depthMask(false);
+          gl.disable(gl.BLEND);
+          r.DrawClipMask(clip.x, clip.y, clip.w, clip.h, clip.radius);
+          r.InvalidateStateCache();
         }
       }
     }
+
+    // Update active clip for descendants if this node is a clipping container.
+    let childClip = clip;
+    if (node instanceof Jiv) {
+      const overflow = node.Overflow;
+      const radii = node.RenderStyle?.BorderRadius;
+      const r0 = radii ? radii[0] : 0;
+      if ((overflow === 'Hidden' || overflow === 'Scroll') && node.Width > 0 && node.Height > 0 && r0 > 0) {
+        const d = this._dpr;
+        const px = Math.round((node.X + offsetX) * d);
+        const py = Math.round((node.Y + offsetY) * d);
+        const pw = Math.round(node.Width * d);
+        const ph = Math.round(node.Height * d);
+        childClip = { x: px, y: py, w: pw, h: ph, radius: r0 * d };
+      }
+    }
+
     for (const child of node.Children) {
-      this._renderJanvases(gl, child, node.X + offsetX, node.Y + offsetY, canvasW, canvasH, dt);
+      this._renderJanvases(gl, child, node.X + offsetX, node.Y + offsetY, canvasW, canvasH, dt, childClip);
     }
   }
 }

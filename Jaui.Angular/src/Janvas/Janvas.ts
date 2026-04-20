@@ -80,7 +80,8 @@ export class Janvas implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    if (this.Node.Renderer?.Dispose) this.Node.Renderer.Dispose();
+    this.Node.Renderer?.Dispose?.();
+    this.Node.Renderer = null;
     const parent = this.Node.Parent;
     if (parent) parent.RemoveChild(this.Node);
   }
