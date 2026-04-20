@@ -92,6 +92,13 @@ void main() {
 export class WebGL2Renderer implements Renderer {
   private _gl!: WebGL2RenderingContext;
 
+  /** Raw WebGL2 context — exposed so foreign renderers (e.g., a Janvas-backed
+   *  THREE.js scene) can share Jaui's GL device. Returns null until Init has
+   *  resolved a context. WebGL2-only escape hatch; the abstract `Renderer`
+   *  interface intentionally hides this so non-WebGL backends don't have to
+   *  implement it. */
+  GetGL = (): WebGL2RenderingContext | null => this._gl ?? null;
+
   // Geometry
   private _quad!: QuadGeometry;
 

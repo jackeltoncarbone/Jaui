@@ -35,6 +35,7 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer } from './WebGL2.Renderer';
+import { Janvas } from '../Janvas/Janvas';
 
 export class Canvas {
   readonly Element: HTMLCanvasElement;
@@ -307,6 +308,25 @@ export class Canvas {
     // glass/pblur that used to call SnapshotScreen).
     r.DisableBlend();
     r.BeginScenePass(0, 0, 0);
+
+    // ── Janvas pre-pass ──
+    // Foreign WebGL2 renderers (a THREE.js scene, a custom shader app, etc.)
+    // attached to <janvas> elements draw into the just-bound scene FBO at
+    // their layout rect. Subsequent panels render over the top; glass
+    // surfaces sample the result as their backdrop. Only WebGL2 backends
+    // expose a raw GL handle — on WebGPU this loop is a no-op.
+    if (this._renderer instanceof WebGL2Renderer) {
+      const gl = this._renderer.GetGL();
+      if (gl) {
+        this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt);
+        // Restore the state Jaui's panel pass expects: scene FBO bound,
+        // canvas-sized viewport, scissor off. Foreign code may have stomped
+        // any of these.
+        this._renderer.RebindSceneTarget();
+        gl.viewport(0, 0, w, h);
+        gl.disable(gl.SCISSOR_TEST);
+      }
+    }
 
     // Track whether we've built a blur for the current snapshot
     let lastBackdrop: GpuTextureHandle | null = null;
@@ -1597,6 +1617,50 @@ export class Canvas {
   get DebugText(): string | null { return this._debugLatest; }
   private _debugLatest: string | null = null;
   private _debugLogLast: number = 0;
+
+  /** Walks the tree, runs each Janvas's foreign renderer at its layout rect.
+   *  Called once per frame, between BeginScenePass and the panel pass, so
+   *  foreign content lands in the scene FBO and gets composited under any
+   *  panels Jaui draws on top.
+   *
+   *  WebGL viewport coordinates are bottom-left origin; Element coords are
+   *  top-left. We flip Y here so the foreign renderer can think in normal
+   *  screen-space without learning Jaui's quirks. */
+  private _renderJanvases(
+    gl: WebGL2RenderingContext,
+    node: JauiElement,
+    offsetX: number,
+    offsetY: number,
+    canvasW: number,
+    canvasH: number,
+    dt: number,
+  ): void {
+    if (node instanceof Janvas) {
+      const renderer = node.Renderer;
+      if (renderer) {
+        if (!node.IsInited()) {
+          renderer.Init(gl, node.MarkDirty);
+          node.MarkInited();
+        }
+        if (node.IsDirty() && node.Width > 0 && node.Height > 0 && node.Visible) {
+          const d = this._dpr;
+          const px = Math.round((node.X + offsetX) * d);
+          const py = Math.round((node.Y + offsetY) * d);
+          const pw = Math.round(node.Width * d);
+          const ph = Math.round(node.Height * d);
+          const yFromBottom = canvasH - py - ph;
+          gl.viewport(px, yFromBottom, pw, ph);
+          gl.enable(gl.SCISSOR_TEST);
+          gl.scissor(px, yFromBottom, pw, ph);
+          renderer.Render(gl, pw, ph, dt);
+          node.ClearDirty();
+        }
+      }
+    }
+    for (const child of node.Children) {
+      this._renderJanvases(gl, child, node.X + offsetX, node.Y + offsetY, canvasW, canvasH, dt);
+    }
+  }
 }
 
 /**
@@ -1639,6 +1703,9 @@ export class Jaui {
 }
 
 // ─── Re-exports by slice ───
+
+export { Janvas } from '../Janvas/Janvas';
+export type { JanvasRenderer } from '../Janvas/Janvas.Renderer';
 
 export { Jath } from './Jath';
 export { Jiv } from '../Jiv/Jiv';
