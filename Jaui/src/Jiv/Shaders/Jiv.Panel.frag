@@ -24,6 +24,10 @@ flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lod
 // plus rim-boost LODs. Single textureLod sample per fragment = one real Gaussian,
 // no disparate-tier mixing and no ghosting at intermediate values.
 uniform sampler2D u_Backdrop;
+// Raw scene snapshot — sampled when effective LOD is 0 (no-frost,
+// no-refraction) so panels with just BackdropBrightness/Saturation/
+// Contrast don't inherit the pyramid's baked-in 1px base blur.
+uniform sampler2D u_Scene;
 uniform float u_BaseFrostLod;
 uniform vec2 u_Resolution;
 
@@ -417,12 +421,18 @@ vec3 applyGrading(vec3 color, float brightness, float saturation, float contrast
     return color;
 }
 
-// Sample the backdrop pyramid at per-Jiv blur strength. `frostLod` is this Jiv's
-// log2(BackdropFrostBlur * DPR); `extraLod` adds mipmap LOD on top (rim-boost /
-// inner-blur). Clamped to 0 — Jivs asking for less than the pyramid base still
-// sample mip 0 (cheapest blur available). One textureLod call = one Gaussian.
+// Sample the backdrop at per-Jiv blur strength. When the effective LOD is
+// zero — i.e. the Jiv asked for no frost and isn't at a rim-boosted glass
+// edge — sample the raw scene snapshot (u_Scene), NOT the pyramid. The
+// pyramid's LOD 0 has a ~1px Gaussian baked in (baseBlurCssPx = 1 inside
+// ComputeBlur) so defaulting to it made flat panels with just
+// BackdropBrightness look subtly blurred. `frostLod` is this Jiv's
+// log2(BackdropFrostBlur * DPR); `extraLod` is glass rim-boost /
+// inner-blur additions. One textureLod call = one Gaussian; one texture
+// call = no filter.
 vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
     float lod = max(0.0, frostLod - u_BaseFrostLod) + extraLod;
+    if (lod < 0.01) return texture(u_Scene, uv).rgb;
     return textureLod(u_Backdrop, uv, lod).rgb;
 }
 

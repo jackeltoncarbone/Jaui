@@ -27,6 +27,13 @@ export interface AnimatedWord {
   SpringX: Spring;
   SpringY: Spring;
   Opacity: Spring;         // fade in/out
+  /** Render-time scale around each word's center. Springs to 1.0. When a
+   *  FontSize-only style change happens, rasterization snaps to the new
+   *  size but Scale.Value is set to oldSize/newSize, so the glyph visually
+   *  matches the old size on frame 0 and smoothly grows/shrinks to the
+   *  new size. Keeps word-reconciliation out of the hot path for pure
+   *  size changes — we don't fade old words out and new ones in. */
+  Scale: Spring;
   Dying: boolean;          // true when opacity target is 0 (being removed)
 }
 
@@ -56,11 +63,22 @@ export class TextAnimator implements Animatable {
   Update = (content: string, style: ResolvedTextStyle, maxWidth: number | null): boolean => {
     const contentChanged = content !== this._content;
     const styleChanged = _stylesDiffer(style, this._style);
+    const fontSizeOnlyChanged = !contentChanged
+      && styleChanged
+      && _onlyFontSizeDiffers(this._style, style);
     const wrapChanged = maxWidth !== this._maxWidth;
 
     let needsKick = false;
 
-    if (contentChanged || styleChanged) {
+    if (fontSizeOnlyChanged) {
+      // Pure size change — skip the fade-out/in reconcile. Keep the same
+      // words, retarget their Scale spring so the NEW-size raster visually
+      // matches the OLD size on frame 0 and springs to 1.0. Re-measure
+      // widths/positions with the new style so layout settles.
+      needsKick = this._retargetFontSize(content, style, maxWidth) || needsKick;
+      this._style = _cloneStyle(style);
+      this._maxWidth = maxWidth;
+    } else if (contentChanged || styleChanged) {
       needsKick = this._reconcileContent(content, style, maxWidth) || needsKick;
       this._content = content;
       this._style = _cloneStyle(style);
@@ -87,11 +105,51 @@ export class TextAnimator implements Animatable {
       if (w.SpringX.Step(dt)) active = true;
       if (w.SpringY.Step(dt)) active = true;
       if (w.Opacity.Step(dt)) active = true;
+      if (w.Scale.Step(dt)) active = true;
     }
     return active;
   };
 
   // ─── Internal ───
+
+  /** Retarget existing words for a pure FontSize change. Raster snaps to
+   *  the new size (via Style update), but each word's Scale spring is
+   *  yanked to `oldSize/newSize` so the visible glyph matches the old
+   *  size on frame 0 and smoothly springs back to 1.0 at the new size.
+   *  Positions are re-measured against the new style so layout settles
+   *  at the new width; SpringX/Y smoothly chase the new positions. */
+  private _retargetFontSize = (
+    newContent: string,
+    newStyle: ResolvedTextStyle,
+    maxWidth: number | null,
+  ): boolean => {
+    const ratio = this._style.FontSize > 0 ? this._style.FontSize / newStyle.FontSize : 1;
+    const positions = LayoutWords(newContent, newStyle, maxWidth);
+    const living = this.Words.filter((w) => !w.Dying);
+
+    let needsKick = false;
+    for (let i = 0; i < living.length && i < positions.length; i++) {
+      const w = living[i];
+      const p = positions[i];
+      w.Style = _cloneStyle(newStyle);
+      w.Width = p.Width;
+      w.Height = p.Height;
+      if (w.TargetX !== p.X) {
+        if (w.SpringX.Set(p.X)) needsKick = true;
+        w.TargetX = p.X;
+      }
+      if (w.TargetY !== p.Y) {
+        if (w.SpringY.Set(p.Y)) needsKick = true;
+        w.TargetY = p.Y;
+      }
+      // Snap the scale spring to the old/new ratio so visuals match the
+      // pre-change size, then target 1.0 so it springs to real size.
+      w.Scale.Value = ratio;
+      w.Scale.Velocity = 0;
+      if (w.Scale.Set(1)) needsKick = true;
+    }
+    return needsKick;
+  };
 
   private _reflow = (maxWidth: number | null): boolean => {
     // Content + style unchanged — just reposition living words to new targets.
@@ -175,6 +233,7 @@ export class TextAnimator implements Animatable {
           SpringX: new Spring(p.X, this._stiffness, this._damping, 1),
           SpringY: new Spring(p.Y, this._stiffness, this._damping, 1),
           Opacity: new Spring(0, this._stiffness, this._damping, 1),
+          Scale: new Spring(1, this._stiffness, this._damping, 1),
           Dying: false,
         };
         word.Opacity.Set(1);
@@ -196,6 +255,21 @@ export class TextAnimator implements Animatable {
 }
 
 // ─── Helpers ───
+
+/** True if ONLY FontSize changed between a and b (everything else equal). */
+const _onlyFontSizeDiffers = (a: ResolvedTextStyle, b: ResolvedTextStyle): boolean => {
+  if (a.FontSize === b.FontSize) return false;
+  return a.FontFamily === b.FontFamily
+    && a.FontWeight === b.FontWeight
+    && a.FontStyle === b.FontStyle
+    && a.LineHeight === b.LineHeight
+    && a.LetterSpacing === b.LetterSpacing
+    && a.TextAlign === b.TextAlign
+    && a.TextOverflow === b.TextOverflow
+    && a.MaxLines === b.MaxLines
+    && a.Color.R === b.Color.R && a.Color.G === b.Color.G
+    && a.Color.B === b.Color.B && a.Color.A === b.Color.A;
+};
 
 const _stylesDiffer = (a: ResolvedTextStyle, b: ResolvedTextStyle): boolean => {
   return a.FontFamily !== b.FontFamily

@@ -1,6 +1,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
   OnDestroy,
   OnInit,
   effect,
@@ -70,6 +71,7 @@ export class Jiv implements OnInit, OnDestroy {
   });
   private _canvas = inject(Jaui, { optional: true });
   private _registry = inject(JSS_REGISTRY, { optional: true });
+  private _host = inject(ElementRef<HTMLElement>);
 
   constructor() {
     const opts = this._buildOptions();
@@ -83,6 +85,13 @@ export class Jiv implements OnInit, OnDestroy {
       }
     }
     this.Node = new JivCore({ ...opts, ...elementProps });
+    // Bridge Jaui's canvas-level click gesture to a DOM click on this
+    // component's host element so standard Angular `(click)` bindings
+    // work. Synthesizes a MouseEvent that bubbles so parent handlers /
+    // Angular change detection pick it up naturally.
+    this.Node.OnClick = () => {
+      this._host.nativeElement.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    };
     // Reactively re-apply on input changes — spring animator handles the
     // smooth transition; we don't recreate the Jiv. Tracking the registry
     // version signal here is what makes live `.jss` hot-edits propagate:

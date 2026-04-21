@@ -19,7 +19,14 @@ export const ApplyTextStyle = (ctx: CanvasRenderingContext2D, style: ResolvedTex
   const italic = style.FontStyle === 'Italic' ? 'italic ' : '';
   const size = style.FontSize * dpr;
   ctx.font = `${italic}${style.FontWeight} ${size}px ${style.FontFamily}`;
-  ctx.textBaseline = 'top';
+  // 'middle' centers the glyph on the draw y-coordinate using the font's
+  // em-square middle (midpoint of ascender + descender). Callers pass
+  // `y = lineIndex * lineHeight + lineHeight / 2` so each line's visual
+  // center lines up with the center of its line-height box — which is
+  // what flex cross-axis centering expects. 'top' produced ascender-biased
+  // rasters where Latin glyphs sat high in the box, leaving descent space
+  // empty below and making flex-centered text look baseline-aligned.
+  ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   // letterSpacing — Chrome 94+, Safari 16.4+; fallback: ignored
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

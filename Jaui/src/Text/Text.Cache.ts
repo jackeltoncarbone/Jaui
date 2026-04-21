@@ -168,7 +168,9 @@ export class TextCache {
         if (style.TextAlign === 'Center') x = (pxW - lineWidth) / 2;
         else if (style.TextAlign === 'Right') x = pxW - lineWidth;
       }
-      ctx.fillText(line, x, i * lineHeightPx);
+      // textBaseline='middle' — draw y = line top + half line height so the
+      // glyph centers on the midline of each line-height box.
+      ctx.fillText(line, x, i * lineHeightPx + lineHeightPx / 2);
     }
 
     // Upload to atlas via Renderer

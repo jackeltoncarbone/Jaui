@@ -27,6 +27,7 @@ import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
 interface _PanelLocs {
   resolution:   WebGLUniformLocation | null;
   backdrop:     WebGLUniformLocation | null;
+  scene:        WebGLUniformLocation | null;
   baseFrostLod: WebGLUniformLocation | null;
   specTilt:     WebGLUniformLocation | null;
   clipTex:      WebGLUniformLocation | null;
@@ -35,6 +36,7 @@ interface _PanelLocs {
 const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelLocs => ({
   resolution:   gl.getUniformLocation(p, 'u_Resolution'),
   backdrop:     gl.getUniformLocation(p, 'u_Backdrop'),
+  scene:        gl.getUniformLocation(p, 'u_Scene'),
   baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
   specTilt:     gl.getUniformLocation(p, 'u_SpecularTilt'),
   clipTex:      gl.getUniformLocation(p, 'u_ClipTex'),
@@ -452,6 +454,7 @@ export class WebGL2Renderer implements Renderer {
     backdrop: GpuTextureHandle | null, baseFrostLod: number,
     specTiltX: number, specTiltY: number,
     useGlassShader: boolean = backdrop !== null,
+    scene: GpuTextureHandle | null = null,
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
@@ -476,6 +479,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform2f(locs.resolution, canvasWidth, canvasHeight);
     gl.uniform1i(locs.backdrop, 0);
     gl.uniform1i(locs.clipTex, 1);
+    gl.uniform1i(locs.scene, 2);
     gl.uniform1f(locs.baseFrostLod, baseFrostLod);
     gl.uniform2f(locs.specTilt, specTiltX, specTiltY);
 
@@ -483,6 +487,11 @@ export class WebGL2Renderer implements Renderer {
     gl.bindTexture(gl.TEXTURE_2D, backdrop ? _unwrap(backdrop) : this._dummyTex);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
+    gl.activeTexture(gl.TEXTURE2);
+    // Raw scene snapshot — used by the shader's sampleBackdrop() when the
+    // effective LOD is 0 (no-frost, no rim boost), so we don't pick up the
+    // pyramid's baked-in 1px base Gaussian on plain-brightness filters.
+    gl.bindTexture(gl.TEXTURE_2D, scene ? _unwrap(scene) : this._dummyTex);
 
     gl.bindVertexArray(this._panelVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);

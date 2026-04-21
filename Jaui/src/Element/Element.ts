@@ -119,6 +119,13 @@ export class Element {
   Visible: boolean = true;
   Overflow: Overflow = 'Visible';
   Interactive: boolean = false;
+
+  /** Click handler — fired on pointerup when the release hits the same
+   *  Jiv that pointerdown hit (standard click semantics). null = no
+   *  handler (the common case). Angular binding bridges this to a DOM
+   *  click event on the component's host element so `(click)` bindings
+   *  in templates Just Work. */
+  OnClick: (() => void) | null = null;
   PointerEvents: 'Auto' | 'None' = 'Auto';
   Cursor: CursorStyle = 'Default';
   UserSelect: 'Auto' | 'None' = 'Auto';

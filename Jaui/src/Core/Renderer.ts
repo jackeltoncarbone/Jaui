@@ -101,7 +101,12 @@ export interface Renderer {
    *  without backdrop sampling. When `useGlassShader` is false but a
    *  backdrop is still provided, the caller is drawing a flat panel with
    *  a backdrop filter — the shader variant is the non-glass one but the
-   *  pyramid is bound for the `hasBackdropFilter` branch to sample. */
+   *  pyramid is bound for the `hasBackdropFilter` branch to sample.
+   *  `scene` is the raw (unblurred) scene snapshot the shader falls back
+   *  to when the effective LOD resolves to 0 — keeps plain-brightness
+   *  filters sharp instead of picking up the pyramid's baked-in ~1px
+   *  base Gaussian. Pass null for batched flat panels that don't sample
+   *  the backdrop at all. */
   PanelDrawBatch(
     canvasWidth: number,
     canvasHeight: number,
@@ -110,6 +115,7 @@ export interface Renderer {
     specTiltX: number,
     specTiltY: number,
     useGlassShader?: boolean,
+    scene?: GpuTextureHandle | null,
   ): void;
 
   // ── Text Rendering (instanced) ──

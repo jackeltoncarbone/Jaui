@@ -275,6 +275,10 @@ export class Canvas {
 
     this._render(dt);
 
+    // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
+    // `?debug-layout`; no cost when disabled.
+    if (this._debugLayout) this._drawDebugLayout();
+
     if (hud) {
       const tEnd = performance.now();
       const i = this._frameIdx;
@@ -619,6 +623,13 @@ export class Canvas {
           w: Math.min(w, Math.ceil(pw + margin * 2)),
           h: Math.min(h, Math.ceil(ph + margin * 2)),
         };
+        // Snapshot the raw scene BEFORE the pyramid overwrites anything.
+        // The shader's sampleBackdrop falls back to this raw texture when
+        // the effective LOD is 0 (no-frost flat panel, or the center of
+        // a glass panel with frost=0) — avoids picking up the pyramid's
+        // baked-in 1px base Gaussian. SnapshotScreen reuses an internal
+        // texture so there's no per-frame allocation.
+        const sceneSnap = r.SnapshotScreen();
         lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, baseBlurCssPx * d, undefined, scissor);
         lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
         r.GenerateBlurMipmap();
@@ -632,8 +643,9 @@ export class Canvas {
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         // Glass uses the MATERIAL_GLASS shader variant; flat-with-filter uses
         // MATERIAL_NONE (which still samples the pyramid inside its
-        // hasBackdropFilter branch).
-        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material));
+        // hasBackdropFilter branch). Both receive the raw scene snapshot
+        // for the LOD-0 sampling path.
+        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap);
         if (_isGlass(material)) this._counts.Glass++;
         else this._counts.Panels++;
         // Reset the shared panel buffer so this glass instance isn't picked
@@ -883,11 +895,19 @@ export class Canvas {
       const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
       const wx = contentX + w.SpringX.Value;
       const wy = contentY + yOffset + w.SpringY.Value;
+      // Word-level Scale — used during a FontSize-only transition to make
+      // the NEW-size raster look OLD-sized on frame 0 and spring to 1.0.
+      // Scale around each word's center to keep layout anchored.
+      const scale = w.Scale.Value;
+      const drawW = entry.Width * scale;
+      const drawH = entry.Height * scale;
+      const dxCenter = (entry.Width - drawW) / 2 / this._dpr;
+      const dyCenter = (entry.Height - drawH) / 2 / this._dpr;
       this._textBuffer.Push({
-        X: wx * this._dpr,
-        Y: wy * this._dpr,
-        Width: entry.Width,
-        Height: entry.Height,
+        X: (wx + dxCenter) * this._dpr,
+        Y: (wy + dyCenter) * this._dpr,
+        Width: drawW,
+        Height: drawH,
         Uv: entry.Uv,
         Opacity: opacity,
         ClipOffset: clipOffset,
@@ -967,7 +987,11 @@ export class Canvas {
       if (!animator) {
         // First layout — create layout animator, snap to targets (no entry
         // animation). JivAnimator works with any Element (X/Y/W/H springs).
-        animator = new JivAnimator(node);
+        // Pass through the Jiv's JSS Springs map so @Transition X/Width/etc.
+        // actually reach the layout animator (without this, authored
+        // durations only affect JivStyleAnimator).
+        const springs = node instanceof Jiv ? node.Springs : null;
+        animator = new JivAnimator(node, springs);
         animator.SetTargets({
           X: result.X, Y: result.Y, Width: result.Width, Height: result.Height,
         });
@@ -1177,8 +1201,14 @@ export class Canvas {
       }
     });
 
+    // Click gesture — remember the down-hit Jiv and fire OnClick on
+    // pointerup only when the release lands on the SAME Jiv (or a
+    // descendant in the same tap target). Matches DOM click semantics.
+    let _clickDownJiv: Jiv | null = null;
+
     this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
+      _clickDownJiv = hit;
       if (!hit) return;
       setStateChain(hit, this._activeJiv, 'Active');
       this._activeJiv = hit;
@@ -1192,8 +1222,18 @@ export class Canvas {
         this._animationManager.Kick();
       }
     };
-    this.Element.addEventListener('pointerup', clearActive);
-    this.Element.addEventListener('pointercancel', clearActive);
+    this.Element.addEventListener('pointerup', (e: PointerEvent) => {
+      const upHit = topmostAt(e.clientX, e.clientY);
+      if (upHit && _clickDownJiv === upHit && upHit.OnClick) {
+        upHit.OnClick();
+      }
+      _clickDownJiv = null;
+      clearActive();
+    });
+    this.Element.addEventListener('pointercancel', () => {
+      _clickDownJiv = null;
+      clearActive();
+    });
   };
 
   /** Mouse-driven text selection. Match web behavior:
@@ -1600,6 +1640,90 @@ export class Canvas {
     }
 
     if (debug) this._enableDebugHud();
+    if (params.has('debug-layout') || hash.includes('debug-layout')) this._enableDebugLayout();
+  };
+
+  // ── Debug Layout Overlay ───────────────────────────────────────────────────
+  // `?debug-layout` draws a 1px rainbow stroke around every Jiv each frame.
+  // Useful for eyeballing layout issues (wrong size, missing padding, etc).
+  // Rendered into a 2D canvas layered on top of Jaui's canvas — lets the
+  // main render path stay untouched.
+
+  private _debugLayout: boolean = false;
+  private _debugLayoutCanvas: HTMLCanvasElement | null = null;
+  private _debugLayoutCtx: CanvasRenderingContext2D | null = null;
+
+  private _enableDebugLayout = (): void => {
+    if (this._debugLayout || typeof document === 'undefined') return;
+    this._debugLayout = true;
+    const overlay = document.createElement('canvas');
+    overlay.style.cssText = [
+      'position:absolute',
+      'top:0', 'left:0',
+      'width:100%', 'height:100%',
+      'pointer-events:none',
+      'z-index:2147483646',
+    ].join(';');
+    const host = this.Element.parentElement;
+    if (host) {
+      const cs = getComputedStyle(host);
+      if (cs.position === 'static') host.style.position = 'relative';
+      host.appendChild(overlay);
+    }
+    this._debugLayoutCanvas = overlay;
+    this._debugLayoutCtx = overlay.getContext('2d');
+  };
+
+  private _drawDebugLayout = (): void => {
+    const canvas = this._debugLayoutCanvas;
+    const ctx = this._debugLayoutCtx;
+    if (!canvas || !ctx) return;
+    const dpr = this._dpr;
+    const rect = this.Element.getBoundingClientRect();
+    const pw = Math.max(1, Math.round(rect.width * dpr));
+    const ph = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== pw || canvas.height !== ph) {
+      canvas.width = pw;
+      canvas.height = ph;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.lineWidth = 1;
+
+    // Collect every Jiv + absolute position in a single tree walk.
+    const hits: Array<{ x: number; y: number; w: number; h: number }> = [];
+    // node.X / node.Y are ABSOLUTE post-layout (JivAnimator writes result.X/Y
+    // directly). Only thing accumulated down the tree is scroll-offset
+    // corrections from ancestors with Overflow: Scroll — matches the
+    // render walk's `offsetX` semantics.
+    const walk = (node: Jiv, sx: number, sy: number): void => {
+      if (!node.Visible) return;
+      const vx = node.X + sx;
+      const vy = node.Y + sy;
+      hits.push({ x: vx, y: vy, w: node.Width, h: node.Height });
+      const childSx = node.Overflow === 'Scroll' ? sx - node.ScrollX : sx;
+      const childSy = node.Overflow === 'Scroll' ? sy - node.ScrollY : sy;
+      for (const c of node.Children) walk(c as Jiv, childSx, childSy);
+    };
+    walk(this.Root, 0, 0);
+
+    const total = Math.max(1, hits.length);
+    for (let i = 0; i < hits.length; i++) {
+      const { x, y, w, h } = hits[i];
+      const hue = Math.round((i * 360) / total);
+      ctx.strokeStyle = `hsl(${hue}, 100%, 60%)`;
+      // Zero-sized nodes (text jivs before their first measurement, or
+      // collapsed containers) still draw a tiny crosshair so you can see
+      // they exist in the tree.
+      if (w < 1 || h < 1) {
+        ctx.beginPath();
+        ctx.moveTo(x - 3, y); ctx.lineTo(x + 3, y);
+        ctx.moveTo(x, y - 3); ctx.lineTo(x, y + 3);
+        ctx.stroke();
+      } else {
+        ctx.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+      }
+    }
   };
 
   // GL call counting removed — WebGPU uses timestamp queries for profiling.
@@ -1855,6 +1979,7 @@ export { WebGPURenderer } from './WebGPU.Renderer';
 
 // Jiv
 export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
+export { DefaultJivStyle } from '../Jiv/Jiv.Defaults';
 
 // Glass presets
 export { LiquidGlass, ClearGlass } from '../Glass/Glass.Presets';
@@ -1866,6 +1991,7 @@ export type {
   GridConfig, GridTrack,
 } from '../Layout/Layout.Types';
 export { SolveFlex, type FlexContainer, type FlexChild } from '../Layout/Layout.Flex';
+export { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 export { SolveLayout } from '../Layout/Layout.Solver';
 export { ComputeIntrinsicSizes } from '../Layout/Layout.Intrinsic';
 

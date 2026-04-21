@@ -1,13 +1,36 @@
 import { Spring } from '../Animation/Spring';
 import type { Animatable } from '../Animation/Animation.Manager';
 import type { Element } from '../Element/Element';
+import type { SpringConfig } from '../Animation/Animation.Types';
 
 /**
  * Layout animator — springs an Element's X / Y / Width / Height toward targets
  * set by the layout solver. Every other animatable property (colors, border,
  * shadow, material, transform, opacity) is owned by JivStyleAnimator, which
  * chases jiv.EffectiveStyle() into jiv.RenderStyle.
+ *
+ * The caller may pass a Springs map (same shape as `Jiv.Springs`, produced
+ * by JSS `@Transition X/Y/Width/Height` or `@Spring X/Y/Width/Height`
+ * directives) to override the per-axis config. Unspecified axes fall back
+ * to the shared defaults below. Without this hookup, layout animations
+ * would ignore the author's @Transition durations and always settle at
+ * the default speed regardless of JSS intent.
  */
+
+const DEFAULT_STIFFNESS = 170;
+const DEFAULT_DAMPING = 26;
+const DEFAULT_MASS = 1;
+
+const _mkSpring = (
+  value: number,
+  override: Partial<SpringConfig> | undefined,
+): Spring => new Spring(
+  value,
+  override?.Stiffness ?? DEFAULT_STIFFNESS,
+  override?.Damping  ?? DEFAULT_DAMPING,
+  override?.Mass     ?? DEFAULT_MASS,
+);
+
 export class JivAnimator implements Animatable {
   readonly Springs: {
     X: Spring;
@@ -18,15 +41,13 @@ export class JivAnimator implements Animatable {
 
   constructor(
     private _element: Element,
-    stiffness: number = 170,
-    damping: number = 26,
-    mass: number = 1,
+    springs?: Record<string, Partial<SpringConfig>> | null,
   ) {
     this.Springs = {
-      X: new Spring(_element.X, stiffness, damping, mass),
-      Y: new Spring(_element.Y, stiffness, damping, mass),
-      Width: new Spring(_element.Width, stiffness, damping, mass),
-      Height: new Spring(_element.Height, stiffness, damping, mass),
+      X:      _mkSpring(_element.X,      springs?.['X']),
+      Y:      _mkSpring(_element.Y,      springs?.['Y']),
+      Width:  _mkSpring(_element.Width,  springs?.['Width']),
+      Height: _mkSpring(_element.Height, springs?.['Height']),
     };
   }
 
