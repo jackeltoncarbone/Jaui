@@ -985,11 +985,6 @@ export class Canvas {
 
       let animator = this._animators.get(node);
       if (!animator) {
-        // First layout — create layout animator, snap to targets (no entry
-        // animation). JivAnimator works with any Element (X/Y/W/H springs).
-        // Pass through the Jiv's JSS Springs map so @Transition X/Width/etc.
-        // actually reach the layout animator (without this, authored
-        // durations only affect JivStyleAnimator).
         const springs = node instanceof Jiv ? node.Springs : null;
         animator = new JivAnimator(node, springs);
         animator.SetTargets({

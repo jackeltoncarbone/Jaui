@@ -193,19 +193,8 @@ export class JivStyleAnimator implements Animatable {
       set(render, s.Value);
     }
 
-    // Material is gated by Thickness > 0 in Style.Resolver._inferMaterial,
-    // which reads the TARGET (author) thickness. That flips to 0 the
-    // instant a press releases, so _copyNonAnimated snaps render.Material
-    // to 'None' on frame 1 — and the glass pipeline stops running.
-    // Refraction / Bezel / Specular / ChromaticAberration all disappear
-    // before the Thickness spring has a chance to decay, looking like an
-    // instant reset even though the spring is still physically animating.
-    // Re-infer from MAX(render, target) so the glass shader keeps rendering
-    // until the spring settles, and kicks in immediately on press-down.
-    // Gate on target.Material, not render.ProgressiveBlurDirection — the
-    // latter falls back to 'ToTop' in the resolver even when no pblur is
-    // active, so checking == null never matched (the whole override was
-    // silently dead code).
+    // Keep glass pipeline running while the Thickness spring decays past
+    // author target=0 (otherwise refraction/bezel/specular snap off).
     if (target.Material !== 'ProgressiveBlur') {
       const t = Math.max(render.Thickness, target.Thickness);
       render.Material = t > 0.01 ? 'LiquidGlass' : 'None';

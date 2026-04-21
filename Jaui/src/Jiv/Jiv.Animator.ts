@@ -3,19 +3,8 @@ import type { Animatable } from '../Animation/Animation.Manager';
 import type { Element } from '../Element/Element';
 import type { SpringConfig } from '../Animation/Animation.Types';
 
-/**
- * Layout animator — springs an Element's X / Y / Width / Height toward targets
- * set by the layout solver. Every other animatable property (colors, border,
- * shadow, material, transform, opacity) is owned by JivStyleAnimator, which
- * chases jiv.EffectiveStyle() into jiv.RenderStyle.
- *
- * The caller may pass a Springs map (same shape as `Jiv.Springs`, produced
- * by JSS `@Transition X/Y/Width/Height` or `@Spring X/Y/Width/Height`
- * directives) to override the per-axis config. Unspecified axes fall back
- * to the shared defaults below. Without this hookup, layout animations
- * would ignore the author's @Transition durations and always settle at
- * the default speed regardless of JSS intent.
- */
+/** Springs an Element's X / Y / Width / Height. Per-axis Springs overrides
+ *  come from JSS @Transition X/Y/Width/Height (via Jiv.Springs). */
 
 const DEFAULT_STIFFNESS = 170;
 const DEFAULT_DAMPING = 26;
