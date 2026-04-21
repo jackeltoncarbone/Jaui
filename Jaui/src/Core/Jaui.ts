@@ -2016,6 +2016,7 @@ export type { ScrollConfig } from '../Scroll/Scroll.Types';
 export type { SpringConfig, TransitionConfig } from '../Animation/Animation.Types';
 export { AnimationManager } from '../Animation/Animation.Manager';
 export { JivAnimator } from '../Jiv/Jiv.Animator';
+export { Spring } from '../Animation/Spring';
 
 // Accessibility
 export type { AccessibilityConfig } from '../Accessibility/Accessibility.Types';

@@ -202,7 +202,11 @@ export class JivStyleAnimator implements Animatable {
     // instant reset even though the spring is still physically animating.
     // Re-infer from MAX(render, target) so the glass shader keeps rendering
     // until the spring settles, and kicks in immediately on press-down.
-    if (render.ProgressiveBlurDirection === null) {
+    // Gate on target.Material, not render.ProgressiveBlurDirection — the
+    // latter falls back to 'ToTop' in the resolver even when no pblur is
+    // active, so checking == null never matched (the whole override was
+    // silently dead code).
+    if (target.Material !== 'ProgressiveBlur') {
       const t = Math.max(render.Thickness, target.Thickness);
       render.Material = t > 0.01 ? 'LiquidGlass' : 'None';
     }
