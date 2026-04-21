@@ -13,7 +13,7 @@ struct ProgressiveBlurUniforms {
   max_lod: f32,
   direction: i32,           // 0=ToTop, 1=ToBottom, 2=ToLeft, 3=ToRight
   opacity: f32,
-  _pad0: f32,
+  feather: f32,             // ramp length in device px; 0 = full-element ramp
   background: vec4f,        // RGBA tint mixed in along the ramp
   grading: vec3f,           // brightness, saturation, contrast (1 = identity)
   _pad1: f32,
@@ -119,6 +119,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   else if (uniforms.direction == 1) { t = in.local.y; }         // ToBottom
   else if (uniforms.direction == 2) { t = 1.0 - in.local.x; }  // ToLeft
   else                              { t = in.local.x; }         // ToRight
+
+  if (uniforms.feather > 0.0) {
+    let axis_len = select(uniforms.rect.z, uniforms.rect.w, uniforms.direction == 0 || uniforms.direction == 1);
+    t = clamp(t * axis_len / uniforms.feather, 0.0, 1.0);
+  }
+
+  // Early-out: past the feather AND opaque background, skip pyramid sampling.
+  // Clip fragments already discarded above; alpha is just u_Opacity.
+  if (t >= 1.0 && uniforms.background.a >= 0.999) {
+    return vec4f(uniforms.background.rgb, uniforms.opacity);
+  }
 
   let ramp = smoothstep(0.0, 1.0, t);
 

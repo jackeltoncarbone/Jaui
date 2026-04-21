@@ -529,11 +529,27 @@ export class Canvas {
         const py = (node.Y + offsetY) * d;
         const pw = node.Width * d;
         const ph = node.Height * d;
+        // When a feather is set AND the background is fully opaque, the
+        // solid post-feather region collapses to just u_Background — no
+        // pyramid samples read past the feather zone (the shader early-outs
+        // there). Tighten the blur scissor to only the feather strip + LOD
+        // margin — for a tall content-area pblur with a 120pt feather,
+        // that's ~15× less blur fill per frame.
+        const feather = node.RenderStyle.ProgressiveBlurFeather * d;
+        const bgOpaque = node.RenderStyle.Background.A >= 0.999;
+        const dir = node.RenderStyle.ProgressiveBlurDirection;
+        let fx = px, fy = py, fw = pw, fh = ph;
+        if (feather > 0 && bgOpaque) {
+          if (dir === 'ToBottom')      { fh = feather; }
+          else if (dir === 'ToTop')    { fy = py + ph - feather; fh = feather; }
+          else if (dir === 'ToRight')  { fw = feather; }
+          else if (dir === 'ToLeft')   { fx = px + pw - feather; fw = feather; }
+        }
         const scissor = {
-          x: Math.max(0, Math.floor(px - lodMargin)),
-          y: Math.max(0, Math.floor(py - lodMargin)),
-          w: Math.min(w, Math.ceil(pw + lodMargin * 2)),
-          h: Math.min(h, Math.ceil(ph + lodMargin * 2)),
+          x: Math.max(0, Math.floor(fx - lodMargin)),
+          y: Math.max(0, Math.floor(fy - lodMargin)),
+          w: Math.min(w, Math.ceil(fw + lodMargin * 2)),
+          h: Math.min(h, Math.ceil(fh + lodMargin * 2)),
         };
         const baseBlurCssPx = 1;
         // Don't force deeper pyramid here: forcing depth > natural radius
@@ -556,6 +572,7 @@ export class Canvas {
           Pyramid: lastBackdrop,
           MaxLod: maxLod,
           Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
+          Feather: node.RenderStyle.ProgressiveBlurFeather * d,
           Opacity: node.RenderStyle.Opacity,
           Background: node.RenderStyle.Background,
           Grading: {

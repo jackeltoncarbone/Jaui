@@ -40,6 +40,12 @@ export interface JivStyle {
    *  edge that ramps to fully blurred. `null` means "not a feather". */
   ProgressiveBlurDirection: ProgressiveBlurDirection | null;
 
+  /** Length of the feather ramp (CSS px / pt). Measured from the clear edge
+   *  toward the blurred edge — everything past this distance is fully
+   *  blurred + fully tinted. `"0"` means "ramp spans the entire element"
+   *  (the default, matches pre-feature behaviour). */
+  ProgressiveBlurFeather: string;
+
   /** Cascading base unit. `1pt` anywhere in this Jiv's subtree resolves to
    *  `N × PointScale`. When resolving PointScale itself, `pt` refers to
    *  PARENT's PointScale. Default `"1pt"` — inherit parent. */
@@ -141,6 +147,8 @@ export interface JivStyle {
 export interface JivRenderStyle {
   Material: MaterialType;
   ProgressiveBlurDirection: ProgressiveBlurDirection;
+  /** Feather ramp length in device pixels. 0 = ramp spans whole element. */
+  ProgressiveBlurFeather: number;
   PointScale: number;
 
   BorderRadius: [number, number, number, number];          // tl, tr, br, bl

@@ -470,7 +470,7 @@ export class WebGPURenderer implements Renderer {
       params.MaxLod,                          // max_lod
       params.Direction,                       // direction (as f32, cast to i32 in shader)
       params.Opacity,                         // opacity
-      0,                                      // _pad0
+      params.Feather,                         // feather (device px; 0 = full-element ramp)
       params.Background.R, params.Background.G, params.Background.B, params.Background.A, // background
       params.Grading.Brightness, params.Grading.Saturation, params.Grading.Contrast, 0, // grading + pad
       params.ClipOffset, params.ClipCount, 0, 0, // clip_meta + pad

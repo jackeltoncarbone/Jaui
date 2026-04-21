@@ -38,6 +38,10 @@ export interface ProgressiveBlurParams {
   MaxLod: number;
   /** 0=ToTop, 1=ToBottom, 2=ToLeft, 3=ToRight. */
   Direction: number;
+  /** Feather ramp length in device pixels. 0 = ramp spans whole element
+   *  (original behaviour). Anything else remaps the ramp so only the first
+   *  `Feather` pixels from the clear edge transition; the rest is solid. */
+  Feather: number;
   Opacity: number;
   Background: { R: number; G: number; B: number; A: number };
   Grading: { Brightness: number; Saturation: number; Contrast: number };

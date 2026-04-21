@@ -55,10 +55,12 @@ in vec2 v_SampleUv;
 in vec2 v_PixelPos;
 
 uniform vec2 u_Resolution;                  // canvas w/h, device px
+uniform vec4 u_Rect;                        // x, y, w, h of this pblur element (device px)
 uniform sampler2D u_Scene;                  // unblurred scene (level -1)
 uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = base blur, higher = more)
 uniform float u_MaxLod;                     // max mipmap LOD to sample (maps to ramp = 1.0)
 uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 ToRight
+uniform float u_Feather;                    // ramp length in device px (0 = span whole element)
 uniform float u_Opacity;
 uniform vec4 u_Background;                  // tint mixed IN along the ramp (fades clear → authored alpha)
 uniform vec3 u_Grading;                     // (Brightness, Saturation, Contrast) — all 1 = identity
@@ -138,6 +140,26 @@ void main() {
     else if (u_Direction == 1)  t = v_Local.y;          // ToBottom
     else if (u_Direction == 2)  t = 1.0 - v_Local.x;    // ToLeft
     else                        t = v_Local.x;          // ToRight
+
+    // u_Feather lets authors cap the ramp distance — past it, stay fully
+    // blurred + fully tinted. Rescale t so the ramp hits 1 at exactly
+    // u_Feather device px from the clear edge. 0 = original behaviour
+    // (ramp spans the whole element on the gradient axis).
+    if (u_Feather > 0.0) {
+        float axisLen = (u_Direction == 0 || u_Direction == 1) ? u_Rect.w : u_Rect.z;
+        t = clamp(t * axisLen / u_Feather, 0.0, 1.0);
+    }
+
+    // Early-out: past the feather AND the background is fully opaque, the
+    // fragment's final color is just u_Background regardless of what's
+    // behind. Skip the pyramid sample + grading + mix entirely — saves a
+    // textureLod + a texture + an apply_grading chain on every solid-zone
+    // fragment. The caller should ALSO scissor the blur pyramid build to
+    // the feather zone in this case (no pyramid content is read here).
+    if (t >= 1.0 && u_Background.a >= 0.999) {
+        fragColor = vec4(u_Background.rgb, u_Opacity * clipAlpha);
+        return;
+    }
 
     // Smoothstep the ramp — linear feels like a hard diagonal line over
     // uniform content; smoothstep is what the eye reads as "feathered".
