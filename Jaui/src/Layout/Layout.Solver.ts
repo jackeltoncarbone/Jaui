@@ -250,13 +250,14 @@ const _solveNode = (
       const w = resolveKeyword(declW, child.IntrinsicWidth, child.IntrinsicMinWidth, child.Width);
       const h = resolveKeyword(declH, child.IntrinsicHeight, child.IntrinsicMinHeight, child.Height);
 
-      // Fixed: CSS-style viewport anchors via Top/Bottom/Left/Right beat
-      // the imperative child.X / child.Y. Left wins over Right if both set
-      // (same for Top/Bottom). Placed/Sticky still use child.X/Y for now.
+      // Fixed: cl.Left/Top are viewport-absolute. Placed/Sticky: relative
+      // to the parent's box. Falling back to child.X/Y would feed the
+      // animator's post-spring (absolute) value back into the solver and
+      // double-add the parent offset each tick.
+      const cl = child.ChildLayout;
       let absX: number;
       let absY: number;
       if (pos === 'Fixed') {
-        const cl = child.ChildLayout;
         if (cl.Left !== null)        absX = _r(cl.Left, childCtx, 'W');
         else if (cl.Right !== null)  absX = viewport.Width - w - _r(cl.Right, childCtx, 'W');
         else                         absX = child.X;
@@ -264,8 +265,8 @@ const _solveNode = (
         else if (cl.Bottom !== null) absY = viewport.Height - h - _r(cl.Bottom, childCtx, 'H');
         else                         absY = child.Y;
       } else {
-        absX = offsetX + child.X;
-        absY = offsetY + child.Y;
+        absX = offsetX + (cl.Left !== null ? _r(cl.Left, childCtx, 'W') : 0);
+        absY = offsetY + (cl.Top  !== null ? _r(cl.Top,  childCtx, 'H') : 0);
       }
       _solveNode(child, w, h, absX, absY, results, childCtx, viewport, rootPointScale, vars);
     }

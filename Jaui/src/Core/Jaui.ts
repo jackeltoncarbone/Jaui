@@ -1015,20 +1015,23 @@ export class Canvas {
     }
 
     // Clean up animators for removed nodes
+    // Gate on actual tree removal, not layout-results membership —
+    // LeaveRequested nodes are skipped by the solver but still need
+    // their style animator running so Opacity tracks Presence to 0.
     for (const [node, animator] of this._animators) {
-      if (!results.has(node)) {
+      if (node.Parent === null) {
         this._animationManager.Unregister(animator);
         this._animators.delete(node);
       }
     }
     for (const [node, sAnim] of this._styleAnimators) {
-      if (!results.has(node)) {
+      if (node.Parent === null) {
         this._animationManager.Unregister(sAnim);
         this._styleAnimators.delete(node);
       }
     }
     for (const [node, tAnim] of this._textAnimators) {
-      if (!results.has(node)) {
+      if (node.Parent === null) {
         this._animationManager.Unregister(tAnim);
         this._textAnimators.delete(node);
       }
