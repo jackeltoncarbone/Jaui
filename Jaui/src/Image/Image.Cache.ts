@@ -59,24 +59,52 @@ export class ImageCache {
    *  becomes Ready when the image finishes loading. Failed loads are
    *  remembered so a subsequent call for the same URL is a no-op. */
   LoadUrl = (url: string, _dpr: number = 1): void => {
-    if (this._cache.has(url) || this._loading.has(url) || this._failed.has(url)) return;
+    const isAvatar = url.startsWith('data:');
+    if (this._cache.has(url)) {
+      if (isAvatar) console.log('[loadurl] short-circuit (cached)');
+      return;
+    }
+    if (this._loading.has(url)) {
+      if (isAvatar) console.log('[loadurl] short-circuit (loading)');
+      return;
+    }
+    if (this._failed.has(url)) {
+      if (isAvatar) console.log('[loadurl] short-circuit (failed)');
+      return;
+    }
+    if (isAvatar) console.log('[loadurl] starting avatar load');
     this._loading.add(url);
 
     const img = new Image();
-    img.crossOrigin = 'anonymous';
+    if (!isAvatar) img.crossOrigin = 'anonymous';
     img.onload = () => {
       this._loading.delete(url);
       const w = img.naturalWidth;
       const h = img.naturalHeight;
+      if (isAvatar) console.log('[loadurl] avatar onload', w, 'x', h);
+      const ctx = this._getRasterCtx();
+      ctx.canvas.width = w;
+      ctx.canvas.height = h;
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, w, h);
+      if (isAvatar) {
+        const d = imageData.data;
+        const cx = Math.floor(w / 2), cy = Math.floor(h / 2);
+        const i = (cy * w + cx) * 4;
+        console.log('[loadurl] avatar center px=', [d[i], d[i+1], d[i+2], d[i+3]], 'data.len=', d.length);
+      }
       const tex = this._renderer.CreateTexture(w, h);
-      this._renderer.UploadSubTexture(tex, 0, 0, img as unknown as ImageBitmap);
+      this._renderer.UploadSubTexture(tex, 0, 0, imageData);
       this._cache.set(url, { Texture: tex, Width: w, Height: h, Ready: true });
+      if (isAvatar) console.log('[loadurl] avatar cached, texture=', tex);
       this._onLoad?.();
     };
-    img.onerror = () => {
+    img.onerror = (e) => {
       this._loading.delete(url);
       this._failed.add(url);
-      console.warn(`[Jaui] Failed to load image: ${url}`);
+      if (isAvatar) console.error('[loadurl] avatar onerror', e);
+      console.warn(`[Jaui] Failed to load image: ${url.slice(0, 80)}`);
     };
     img.src = url;
   };

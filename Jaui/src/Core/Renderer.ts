@@ -172,12 +172,12 @@ export interface Renderer {
   /** Create a 2D texture (e.g. for the text atlas). */
   CreateTexture(width: number, height: number): GpuTextureHandle;
 
-  /** Upload a sub-region of a texture from a canvas or ImageBitmap. */
+  /** Upload a sub-region of a texture from a canvas, ImageBitmap, or ImageData. */
   UploadSubTexture(
     texture: GpuTextureHandle,
     x: number,
     y: number,
-    source: HTMLCanvasElement | ImageBitmap,
+    source: HTMLCanvasElement | ImageBitmap | ImageData,
   ): void;
 
   // ── Clip Stack ──

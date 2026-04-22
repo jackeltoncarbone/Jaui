@@ -120,6 +120,13 @@ export class Element {
   Overflow: Overflow = 'Visible';
   Interactive: boolean = false;
 
+  /** Render-time cascaded opacity: ancestors' product × own RenderStyle.Opacity.
+   *  Computed once per frame before draw; all render paths (panel/text/image)
+   *  read this instead of RenderStyle.Opacity so child opacity inherits parent
+   *  dimming CSS-style. Stored here (not in RenderStyle) so the authored
+   *  opacity isn't clobbered by the cascade between frames. */
+  EffectiveOpacity: number = 1;
+
   /** Click handler — fired on pointerup when the release hits the same
    *  Jiv that pointerdown hit (standard click semantics). null = no
    *  handler (the common case). Angular binding bridges this to a DOM

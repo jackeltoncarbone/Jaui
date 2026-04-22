@@ -249,7 +249,11 @@ export class ScrollManager implements Animatable {
       ? true
       : x >= ox && x < ox + node.Width && y >= oy && y < oy + node.Height;
 
-    if (!inside) return null;
+    // Overflow: Visible lets children extend past our rect (Placed/Fixed
+    // or plain flow overflow). Only Hidden/Scroll clip children to us, so
+    // we short-circuit the walk only when the pointer is outside a
+    // clipping node. Otherwise descend and let a child pick the hit.
+    if (!inside && node.Overflow !== 'Visible') return null;
 
     const dx = node.Overflow === 'Scroll' ? offX - node.ScrollX : offX;
     const dy = node.Overflow === 'Scroll' ? offY - node.ScrollY : offY;
@@ -257,10 +261,9 @@ export class ScrollManager implements Animatable {
       const hit = this._hitTopmost(node.Children[i] as Jiv, x, y, dx, dy);
       if (hit) return hit;
     }
+    if (!inside) return null;
     // Descend through PointerEvents:None parents (they're transparent to
-    // hit-test) but never return them as a hit themselves — matches CSS,
-    // where a child with Auto can still receive events through a None
-    // ancestor.
+    // hit-test) but never return them as a hit themselves.
     return node.PointerEvents === 'None' ? null : node;
   };
 }

@@ -265,8 +265,16 @@ const _solveNode = (
         else if (cl.Bottom !== null) absY = viewport.Height - h - _r(cl.Bottom, childCtx, 'H');
         else                         absY = child.Y;
       } else {
-        absX = offsetX + (cl.Left !== null ? _r(cl.Left, childCtx, 'W') : 0);
-        absY = offsetY + (cl.Top  !== null ? _r(cl.Top,  childCtx, 'H') : 0);
+        absX = offsetX + (
+          cl.Left  !== null ? _r(cl.Left,  childCtx, 'W') :
+          cl.Right !== null ? (width  - w - _r(cl.Right, childCtx, 'W')) :
+          0
+        );
+        absY = offsetY + (
+          cl.Top    !== null ? _r(cl.Top,    childCtx, 'H') :
+          cl.Bottom !== null ? (height - h - _r(cl.Bottom, childCtx, 'H')) :
+          0
+        );
       }
       _solveNode(child, w, h, absX, absY, results, childCtx, viewport, rootPointScale, vars);
     }
@@ -298,25 +306,22 @@ const _solveNode = (
   const flowIndices: number[] = [];
   const flexChildren: FlexChild[] = [];
 
+  // Children resolve `%` against the parent's content box, not padding box —
+  // matches CSS and means a `Width: 100%` child shrinks by padding*2.
+  const [cpt, cpr, cpb, cpl] = container.Padding;
+  const contentWidth = Math.max(0, width - cpl - cpr);
+  const contentHeight = Math.max(0, height - cpt - cpb);
+
   for (let i = 0; i < node.Children.length; i++) {
     const c = node.Children[i];
     const pos = c.ChildLayout.Position;
-    // Leaving children drop out of the flex flow immediately — layout is
-    // the instant truth, so siblings spring into the vacated slot while
-    // the leaving node fades in place via its own X/Y animator. This
-    // overrides Presence.md's "keep layout space until settle" default
-    // in favor of the engine's "instant compute, spring motion" posture.
     if (c.LeaveRequested) continue;
     if (pos === 'Flow' || pos === 'Offset') {
-      // Give each flow child a ctx now so intrinsic fields/margins resolve
-      // against its own parent dims + PointScale. The ctx is re-set once
-      // more below after flex solves, using the actual resolved size — but
-      // PointScale and parent dims don't change, so we can just reuse.
-      const childCtx = _buildChildCtx(c, width, height, ctx.PointScale, rootPointScale, viewport, vars);
+      const childCtx = _buildChildCtx(c, contentWidth, contentHeight, ctx.PointScale, rootPointScale, viewport, vars);
       c.ResolveCtx = childCtx;
 
-      const resolvedW = _resolveSize(c.ChildLayout.Width, width, childCtx, 'W');
-      const resolvedH = _resolveSize(c.ChildLayout.Height, height, childCtx, 'H');
+      const resolvedW = _resolveSize(c.ChildLayout.Width, contentWidth, childCtx, 'W');
+      const resolvedH = _resolveSize(c.ChildLayout.Height, contentHeight, childCtx, 'H');
 
       const effectiveAlign = c.ChildLayout.AlignSelf === 'Auto'
         ? node.Layout.Align

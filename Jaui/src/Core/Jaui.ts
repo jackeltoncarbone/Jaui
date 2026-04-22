@@ -310,6 +310,12 @@ export class Canvas {
     const w = Math.round(this._width * this._dpr);
     const h = Math.round(this._height * this._dpr);
 
+    // Cascade opacity: multiply each Jiv's RenderStyle.Opacity by its
+    // ancestors' so children inherit parent dimming (CSS-like). The style
+    // animator rewrites Opacity each frame from its spring, so this
+    // multiplied value only lives for the current render pass.
+    this._cascadeOpacity(this.Root, 1);
+
     r.Resize(w, h, this._dpr);
     r.BeginFrame();
     this._textCache.BeginFrame();
@@ -577,7 +583,7 @@ export class Canvas {
           MaxLod: maxLod,
           Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
           Feather: node.RenderStyle.ProgressiveBlurFeather * d,
-          Opacity: node.RenderStyle.Opacity,
+          Opacity: node.EffectiveOpacity,
           Background: node.RenderStyle.Background,
           Grading: {
             Brightness: node.RenderStyle.BackdropBrightness,
@@ -731,12 +737,22 @@ export class Canvas {
           const data = imageScratch;
           data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
           data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
-          data[8] = node.RenderStyle ? node.RenderStyle.Opacity : 1;
+          data[8] = node.EffectiveOpacity;
+          const _dbgAvatar = (node.ImageSrc ?? '').startsWith('data:');
+          if (_dbgAvatar) console.log('[avatar-draw] bound-tex handle:', imgEntry.Texture, 'rect=', drawX, drawY, drawW, drawH);
           data[9] = imgClipMeta.Offset; data[10] = imgClipMeta.Count; data[11] = 0;
           r.TextBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(data, 0, TEXT_FLOATS_PER_INSTANCE);
           r.TextDrawBatch(w, h, imgEntry.Texture);
+          if (_dbgAvatar && (r as unknown as { _gl?: WebGL2RenderingContext })._gl) {
+            const gl2 = (r as unknown as { _gl: WebGL2RenderingContext })._gl;
+            const pxBuf = new Uint8Array(4);
+            const cx = Math.floor(drawX + drawW / 2);
+            const cy = h - Math.floor(drawY + drawH / 2);
+            gl2.readPixels(cx, cy, 1, 1, gl2.RGBA, gl2.UNSIGNED_BYTE, pxBuf);
+            console.log('[avatar-fb-readback] at', cx, cy, '=', Array.from(pxBuf));
+          }
           this._counts.Image++;
         }
       }
@@ -787,6 +803,16 @@ export class Canvas {
     r.InvalidateFrameTransients();
 
     r.EndFrame();
+  };
+
+  private _cascadeOpacity = (node: Jiv, parentOp: number): void => {
+    // Root is a framework-managed container — its RenderStyle resolves
+    // Opacity: 'Presence' to 0 (no Presence in seed context, never
+    // spring-animated). Treat it as fully opaque so descendants aren't
+    // multiplied by 0.
+    const eff = node === this.Root ? 1 : parentOp * node.RenderStyle.Opacity;
+    node.EffectiveOpacity = eff;
+    for (const child of node.Children) this._cascadeOpacity(child as Jiv, eff);
   };
 
   /** Compute the offset descendants see when descending past a scroll container. */
@@ -890,7 +916,7 @@ export class Canvas {
     const yOffset = (contentH - totalTextHeight) / 2;
 
     for (const w of anim.Words) {
-      const opacity = node.RenderStyle.Opacity * w.Opacity.Value;
+      const opacity = node.EffectiveOpacity * w.Opacity.Value;
       if (opacity <= 0.001) continue;
       const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
       const wx = contentX + w.SpringX.Value;

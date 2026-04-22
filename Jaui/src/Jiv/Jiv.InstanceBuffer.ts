@@ -111,7 +111,7 @@ export class JivInstanceBuffer {
     // (Jiv.Defaults) — RenderStyle.Opacity already carries the current
     // spring value. Authors override via `Opacity: 1` for no fade or
     // `Opacity: <expr>` for a custom curve.
-    data[offset + 30] = style.Opacity;
+    data[offset + 30] = jiv.EffectiveOpacity;
     data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : 0;
 
     data[offset + 32] = style.BackdropBrightness;

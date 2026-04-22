@@ -667,11 +667,24 @@ export class WebGL2Renderer implements Renderer {
 
   UploadSubTexture = (
     texture: GpuTextureHandle, x: number, y: number,
-    source: HTMLCanvasElement | ImageBitmap,
+    source: HTMLCanvasElement | ImageBitmap | ImageData,
   ): void => {
     const gl = this._gl;
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(texture));
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    if ('data' in source && ArrayBuffer.isView(source.data)) {
+      // Convert to Uint8Array (same buffer, no copy) — WebGL2 doesn't
+      // accept Uint8ClampedArray for RGBA/UNSIGNED_BYTE on all browsers.
+      const d = source.data;
+      const bytes = new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
+      console.log('[upload-imagedata]', source.width + 'x' + source.height,
+        'bytes.len=', bytes.length, 'first4=', Array.from(bytes.subarray(0, 4)));
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, source.width, source.height,
+        gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, source as TexImageSource);
+    }
+    const err = gl.getError();
+    if (err !== gl.NO_ERROR) console.warn('[gl] texSubImage2D error:', err);
     gl.bindTexture(gl.TEXTURE_2D, null);
   };
 
