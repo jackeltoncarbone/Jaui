@@ -183,7 +183,14 @@ const _compute = (node: Element): void => {
   if (node.Layout.Wrap === 'Wrap' || node.Layout.Wrap === 'WrapReverse') {
     const crossGapSpec = Resolve(horiz ? node.Layout.RowGap : node.Layout.ColumnGap, ctx, horiz ? 'H' : 'W');
     const crossGap = crossGapSpec || Resolve(node.Layout.Gap, ctx, horiz ? 'H' : 'W');
-    const mainBudget = Math.max(0, ctx.ViewportWidth - mainPadding);
+    // Walk the perpendicular-direction ancestor chain to subtract their
+    // main-axis paddings from the budget. Without this, a Row inside a
+    // Section with `Padding: 0pt 24pt` simulates against the full
+    // viewport — predicting fewer wrap lines than the solver will
+    // actually produce — and Section's intrinsic-driven allocation comes
+    // up short, so wrapped cards overflow into the next Section.
+    const ancestorPad = _ancestorMainPadding(node, horiz, ctx);
+    const mainBudget = Math.max(0, ctx.ViewportWidth - mainPadding - ancestorPad);
     const wrapCross = _simulateWrapCrossSize(node, horiz, gap, crossGap, mainBudget);
     if (horiz) crossMax = wrapCross + crossPadding;
     else crossMax = wrapCross + crossPadding;
@@ -243,6 +250,42 @@ const _simulateWrapCrossSize = (
     lineCount++;
   }
   return total + Math.max(0, lineCount - 1) * crossGap;
+};
+
+/** Sum of horizontal-padding contributions from perpendicular-direction
+ *  ancestors that constrain this node's main-axis budget. For a Row (horiz),
+ *  we walk up Column-direction ancestors and add their left+right padding.
+ *  Stops at the first ancestor with an explicit non-percent main-axis size
+ *  (then we know the budget already; ancestors beyond don't shrink it
+ *  further) or at the root. Conservative — only Column-direction ancestors
+ *  contribute on a horizontal axis (Row-direction ancestors fan out via the
+ *  flex solver, can't be bottom-up estimated reliably). */
+const _ancestorMainPadding = (
+  node: Element,
+  horiz: boolean,
+  _ctx: ResolveContext,
+): number => {
+  let total = 0;
+  let cur: Element | null = node.Parent ?? null;
+  while (cur) {
+    const ancestorHoriz = cur.Layout.Direction === 'Row' || cur.Layout.Direction === 'RowReverse';
+    // Only perpendicular-direction ancestors meaningfully constrain main:
+    // a Column ancestor's width applies fully to a Row child.
+    if (ancestorHoriz === horiz) break;
+    const childCtx = cur.ResolveCtx ?? _ctx;
+    const [_pt, pr, _pb, pl] = ResolveLengthTuple4(cur.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);
+    total += horiz ? (pl + pr) : (_pt + _pb);
+    // If this ancestor has an explicit non-percent main-axis size set on
+    // its own ChildLayout, the budget is now bounded — don't keep walking.
+    const ownMain = horiz ? cur.ChildLayout.Width : cur.ChildLayout.Height;
+    if (ownMain !== 'Auto' && ownMain !== 'MinContent' && ownMain !== 'MaxContent'
+        && typeof ownMain === 'string' && !ownMain.includes('%')) {
+      break;
+    }
+    if (typeof ownMain === 'number') break;
+    cur = cur.Parent ?? null;
+  }
+  return total;
 };
 
 /** Return a pixel value if the dimension is "known" without parent dims.
