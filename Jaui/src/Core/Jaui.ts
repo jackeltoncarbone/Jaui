@@ -850,15 +850,20 @@ export class Canvas {
     node: Jiv, offsetX: number, offsetY: number,
   ): ClipShape => {
     const radii = node.RenderStyle.BorderRadius;
+    // Clamp to half-dimension (CSS border-radius rule). Without this, a
+    // pill-style `BorderRadius: 999pt` on a small box produces an SDF whose
+    // "inside" region is empty — the clip rejects everything including the
+    // center, so the node's image/content draws are fully clipped away.
+    const maxR = Math.min(node.Width, node.Height) / 2;
     return {
       X: node.X + offsetX,
       Y: node.Y + offsetY,
       W: node.Width,
       H: node.Height,
-      RTL: radii[0],
-      RTR: radii[1],
-      RBR: radii[2],
-      RBL: radii[3],
+      RTL: Math.min(radii[0], maxR),
+      RTR: Math.min(radii[1], maxR),
+      RBR: Math.min(radii[2], maxR),
+      RBL: Math.min(radii[3], maxR),
       Smoothness: node.RenderStyle.BorderRadiusSmoothness,
     };
   };
