@@ -606,6 +606,14 @@ void main() {
         || abs(contrast - 1.0) > 0.001
         || frostLod > u_BaseFrostLod + 0.001;
 
+    // Continuous glass intensity. Drives every rim/inner effect that would
+    // otherwise pop on/off when Thickness flips between 0 and >0 (since the
+    // shader-variant choice flips with it). Multiplying lodBoost, the inner
+    // dark line, and the rim-spec highlight by this makes MATERIAL_GLASS at
+    // Thickness=0 produce the same output as MATERIAL_NONE — every glass
+    // effect fades smoothly with its physical driver, no discontinuity.
+    float glassiness = smoothstep(0.0, 1.0, thickness);
+
     if (materialType == 1.0) {
         // Edge refraction: rotate the outward normal ~10° along the tangent,
         // then negate to sample INWARD (Show Studio's `-refract * edgeIntensity`).
@@ -660,7 +668,9 @@ void main() {
         // (x * (2 - x)) gives a gentler inward dropoff than pure smoothstep.
         float rimT = clamp(edgeDist / (bezelWidth * 2.5), 0.0, 1.0);
         float rimBoost = (1.0 - rimT) * (1.0 - rimT);
-        lodBoost = rimBoost * 1.5 + innerBlur * 1.0;
+        // Scale by glassiness so rim blur fades with Thickness rather than
+        // disappearing the instant the shader variant flips to MATERIAL_NONE.
+        lodBoost = (rimBoost * 1.5 + innerBlur * 1.0) * glassiness;
         vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
         vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
         vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
@@ -827,7 +837,11 @@ void main() {
         // and matches Apple's "soft 1 CSS px, 3–6% α, subtle" spec.
         float innerD = (dist + innerPos) / innerW;
         float innerDarkBand = exp(-innerD * innerD);
-        float innerDarkAlpha = innerDarkBand * 0.04;
+        // Scale alpha by glassiness so the dark line fades with Thickness
+        // (the floored 1.2px width keeps the band visible at Thickness=0
+        // otherwise — which would pop the moment the indicator's Thickness
+        // springs to 0).
+        float innerDarkAlpha = innerDarkBand * 0.04 * glassiness;
 
         // ── Blinn-Phong specular catchlight on the bevel ──
         // The bevel has a 3D normal: 2D outward normal (when on the bevel)
@@ -873,7 +887,9 @@ void main() {
         // Width is PHYSICAL — proportional to perceived glass thickness. A
         // thicker slab shows a wider rim edge-on. Floor at 0.75 px so the
         // highlight never disappears on thin glass.
-        float rimSpecW = max(thickness * 0.18, 0.75);
+        // Floor scales with glassiness so the highlight band collapses to 0
+        // as Thickness fades, preventing a hard pop at the variant flip.
+        float rimSpecW = max(thickness * 0.18, 0.75 * glassiness);
         // Thin band between the outline (dist=0) and rimSpecW inside (dist=-rimSpecW).
         // Previous subtraction formulation left the second term at 0 deep inside
         // while the first stayed at 1, so the "thin line" was actually a 55%

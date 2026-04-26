@@ -92,15 +92,27 @@ const CLIP_MASK_FRAG = `#version 300 es
 precision highp float;
 uniform vec4 u_ClipRect;      // clip shape — parent's rect, device px
 uniform float u_Radius;       // device px (uniform across corners)
+uniform float u_Smoothness;   // 0 = circle corners, 1 = sharp squircle
 uniform vec2 u_Resolution;    // canvas size in device px
 out vec4 fragColor;
 void main() {
     vec2 p = vec2(gl_FragCoord.x, u_Resolution.y - gl_FragCoord.y);
     vec2 center = u_ClipRect.xy + 0.5 * u_ClipRect.zw;
-    vec2 half_  = 0.5 * u_ClipRect.zw;
-    float r = min(u_Radius, min(half_.x, half_.y));
-    vec2 q = abs(p - center) - half_ + vec2(r);
-    float sd = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+    vec2 halfSize = 0.5 * u_ClipRect.zw;
+    float r = min(u_Radius, min(halfSize.x, halfSize.y));
+    vec2 qAbs = abs(p - center);
+    vec2 cornerP = qAbs - (halfSize - vec2(r));
+    float sd;
+    // Superellipse-corner SDF — mirrors clipShapeDistance in Jiv.Panel.frag
+    // so the visual mask matches the in-shader clip stack (Apple-style
+    // squircle when smoothness > 0, pure circle at smoothness 0).
+    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) {
+        sd = max(qAbs.x - halfSize.x, qAbs.y - halfSize.y);
+    } else {
+        float n = 2.0 + 6.0 * clamp(u_Smoothness, 0.0, 1.0);
+        float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
+        sd = r * (pow(max(L, 0.0), 1.0 / n) - 1.0);
+    }
     if (sd <= 0.0) discard;
     fragColor = vec4(0.0, 0.0, 0.0, 0.0);
 }
@@ -676,8 +688,6 @@ export class WebGL2Renderer implements Renderer {
       // accept Uint8ClampedArray for RGBA/UNSIGNED_BYTE on all browsers.
       const d = source.data;
       const bytes = new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
-      console.log('[upload-imagedata]', source.width + 'x' + source.height,
-        'bytes.len=', bytes.length, 'first4=', Array.from(bytes.subarray(0, 4)));
       gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, source.width, source.height,
         gl.RGBA, gl.UNSIGNED_BYTE, bytes);
     } else {
@@ -858,6 +868,7 @@ export class WebGL2Renderer implements Renderer {
   private _clipMaskDrawRectLoc!: WebGLUniformLocation | null;
   private _clipMaskClipRectLoc!: WebGLUniformLocation | null;
   private _clipMaskRadiusLoc!: WebGLUniformLocation | null;
+  private _clipMaskSmoothnessLoc!: WebGLUniformLocation | null;
   private _clipMaskResLoc!: WebGLUniformLocation | null;
   private _initClipMaskShader = (gl: WebGL2RenderingContext): void => {
     this._clipMaskShader = ShaderCompiler.Compile(gl, CLIP_MASK_VERT, CLIP_MASK_FRAG);
@@ -865,23 +876,27 @@ export class WebGL2Renderer implements Renderer {
     this._clipMaskDrawRectLoc = gl.getUniformLocation(p, 'u_DrawRect');
     this._clipMaskClipRectLoc = gl.getUniformLocation(p, 'u_ClipRect');
     this._clipMaskRadiusLoc = gl.getUniformLocation(p, 'u_Radius');
+    this._clipMaskSmoothnessLoc = gl.getUniformLocation(p, 'u_Smoothness');
     this._clipMaskResLoc = gl.getUniformLocation(p, 'u_Resolution');
   };
 
   /** Janvas post-pass clipper. Rasterises a quad covering the janvas's
    *  screen rect (drawRect) and paints transparent pixels wherever the
    *  fragment falls OUTSIDE the parent's rounded clip shape (clipRect +
-   *  radius). All rects in device px, top-left origin. */
+   *  radius + smoothness). All rects in device px, top-left origin.
+   *  Smoothness 0 = pure circle corners; >0 = squircle (Apple-style). */
   DrawClipMask = (
     drawX: number, drawY: number, drawW: number, drawH: number,
     clipX: number, clipY: number, clipW: number, clipH: number,
     radius: number,
+    smoothness: number,
   ): void => {
     const gl = this._gl;
     this._useProgram(this._clipMaskShader.Program);
     gl.uniform4f(this._clipMaskDrawRectLoc, drawX, drawY, drawW, drawH);
     gl.uniform4f(this._clipMaskClipRectLoc, clipX, clipY, clipW, clipH);
     gl.uniform1f(this._clipMaskRadiusLoc, radius);
+    gl.uniform1f(this._clipMaskSmoothnessLoc, smoothness);
     gl.uniform2f(this._clipMaskResLoc, this._width, this._height);
     gl.bindVertexArray(this._quad.Vao);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);

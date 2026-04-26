@@ -59,51 +59,32 @@ export class ImageCache {
    *  becomes Ready when the image finishes loading. Failed loads are
    *  remembered so a subsequent call for the same URL is a no-op. */
   LoadUrl = (url: string, _dpr: number = 1): void => {
-    const isAvatar = url.startsWith('data:');
-    if (this._cache.has(url)) {
-      if (isAvatar) console.log('[loadurl] short-circuit (cached)');
-      return;
-    }
-    if (this._loading.has(url)) {
-      if (isAvatar) console.log('[loadurl] short-circuit (loading)');
-      return;
-    }
-    if (this._failed.has(url)) {
-      if (isAvatar) console.log('[loadurl] short-circuit (failed)');
-      return;
-    }
-    if (isAvatar) console.log('[loadurl] starting avatar load');
+    const isDataUrl = url.startsWith('data:');
+    if (this._cache.has(url)) return;
+    if (this._loading.has(url)) return;
+    if (this._failed.has(url)) return;
     this._loading.add(url);
 
     const img = new Image();
-    if (!isAvatar) img.crossOrigin = 'anonymous';
+    if (!isDataUrl) img.crossOrigin = 'anonymous';
     img.onload = () => {
       this._loading.delete(url);
       const w = img.naturalWidth;
       const h = img.naturalHeight;
-      if (isAvatar) console.log('[loadurl] avatar onload', w, 'x', h);
       const ctx = this._getRasterCtx();
       ctx.canvas.width = w;
       ctx.canvas.height = h;
       ctx.clearRect(0, 0, w, h);
       ctx.drawImage(img, 0, 0, w, h);
       const imageData = ctx.getImageData(0, 0, w, h);
-      if (isAvatar) {
-        const d = imageData.data;
-        const cx = Math.floor(w / 2), cy = Math.floor(h / 2);
-        const i = (cy * w + cx) * 4;
-        console.log('[loadurl] avatar center px=', [d[i], d[i+1], d[i+2], d[i+3]], 'data.len=', d.length);
-      }
       const tex = this._renderer.CreateTexture(w, h);
       this._renderer.UploadSubTexture(tex, 0, 0, imageData);
       this._cache.set(url, { Texture: tex, Width: w, Height: h, Ready: true });
-      if (isAvatar) console.log('[loadurl] avatar cached, texture=', tex);
       this._onLoad?.();
     };
-    img.onerror = (e) => {
+    img.onerror = () => {
       this._loading.delete(url);
       this._failed.add(url);
-      if (isAvatar) console.error('[loadurl] avatar onerror', e);
       console.warn(`[Jaui] Failed to load image: ${url.slice(0, 80)}`);
     };
     img.src = url;
@@ -198,7 +179,11 @@ export class ImageCache {
   private _getRasterCtx = (): CanvasRenderingContext2D => {
     if (this._rasterCtx) return this._rasterCtx;
     this._rasterCanvas = document.createElement('canvas');
-    const ctx = this._rasterCanvas.getContext('2d');
+    // willReadFrequently signals the browser to back this canvas with a
+    // CPU-side buffer instead of the GPU. Avatar / image rasterization
+    // calls getImageData on every load — without this hint Chrome warns
+    // and the GPU readback path is significantly slower.
+    const ctx = this._rasterCanvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) throw new Error('[Jaui] Failed to get 2D context for image rasterization');
     this._rasterCtx = ctx;
     return ctx;

@@ -107,6 +107,17 @@ export class Canvas {
   private _frameCount:   number = 0;
   private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
+  /** Deferred janvas clip-mask draws — populated during the janvas pre-pass,
+   *  applied AFTER the panel pass (just before final present). Wiping the
+   *  scene FBO immediately after the foreign render destroys data that
+   *  in-tree consumers (pblur snapshots, glass blur pyramids) need to read.
+   *  Deferring means the visual clip still applies to the presented frame
+   *  while pblur/glass see the unclipped scene during their samples. */
+  private _pendingJanvasMasks: Array<{
+    drawX: number; drawY: number; drawW: number; drawH: number;
+    clipX: number; clipY: number; clipW: number; clipH: number;
+    radius: number; smoothness: number;
+  }> = [];
   /** Rolling window of per-frame GPU ms from `Renderer.GetFrameGpuMs`. The
    *  reading is null when the backend doesn't support timer queries or no
    *  query has resolved yet. We skip nulls when averaging. */
@@ -341,6 +352,7 @@ export class Canvas {
     if (this._renderer instanceof WebGL2Renderer) {
       const gl = this._renderer.GetGL();
       if (gl) {
+        this._pendingJanvasMasks.length = 0;
         this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt, null);
         // Restore the state Jaui's panel pass expects after the foreign
         // renderer ran. Jaui's draws assume: scene FBO bound, canvas-sized
@@ -647,11 +659,19 @@ export class Canvas {
         r.PanelBeginBatch();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-        // Glass uses the MATERIAL_GLASS shader variant; flat-with-filter uses
-        // MATERIAL_NONE (which still samples the pyramid inside its
-        // hasBackdropFilter branch). Both receive the raw scene snapshot
-        // for the LOD-0 sampling path.
-        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap);
+        // Always use the MATERIAL_GLASS variant for any standalone panel
+        // that needs the pyramid path. Material is *inferred* from Thickness
+        // (Thickness > 0 → 'LiquidGlass', else 'None'), so during a press →
+        // resting transition the inferred Material flips the moment Thickness
+        // crosses zero — and every effect gated by `materialType == 1.0`
+        // (rim glow, hemispherical light, catchlight, rim spec) vanishes in
+        // one frame. Using GLASS unconditionally keeps the variant fixed
+        // across the transition; the rim/inner effects fade smoothly via
+        // their own physical drivers (FresnelStrength, EdgeLight*, glassiness
+        // = smoothstep(thickness)) so MATERIAL_GLASS at Thickness=0 produces
+        // the same output MATERIAL_NONE would have. The cost of this on
+        // flat-with-filter panels is one extra cheap branch in the shader.
+        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, true, sceneSnap);
         if (_isGlass(material)) this._counts.Glass++;
         else this._counts.Panels++;
         // Reset the shared panel buffer so this glass instance isn't picked
@@ -738,21 +758,11 @@ export class Canvas {
           data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
           data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
           data[8] = node.EffectiveOpacity;
-          const _dbgAvatar = (node.ImageSrc ?? '').startsWith('data:');
-          if (_dbgAvatar) console.log('[avatar-draw] bound-tex handle:', imgEntry.Texture, 'rect=', drawX, drawY, drawW, drawH);
           data[9] = imgClipMeta.Offset; data[10] = imgClipMeta.Count; data[11] = 0;
           r.TextBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(data, 0, TEXT_FLOATS_PER_INSTANCE);
           r.TextDrawBatch(w, h, imgEntry.Texture);
-          if (_dbgAvatar && (r as unknown as { _gl?: WebGL2RenderingContext })._gl) {
-            const gl2 = (r as unknown as { _gl: WebGL2RenderingContext })._gl;
-            const pxBuf = new Uint8Array(4);
-            const cx = Math.floor(drawX + drawW / 2);
-            const cy = h - Math.floor(drawY + drawH / 2);
-            gl2.readPixels(cx, cy, 1, 1, gl2.RGBA, gl2.UNSIGNED_BYTE, pxBuf);
-            console.log('[avatar-fb-readback] at', cx, cy, '=', Array.from(pxBuf));
-          }
           this._counts.Image++;
         }
       }
@@ -788,6 +798,31 @@ export class Canvas {
     // order than the trailing text, if any).
     flushPanels();
     flushText();
+
+    // Apply deferred janvas clip masks. Wiping scene FBO pixels outside the
+    // nearest Overflow:Hidden ancestor's rounded rect — done now, after
+    // every in-tree consumer has read the scene, so pblur/glass blur
+    // pyramids see foreign content (not zeroed corners) while the
+    // presented frame still respects the visual clip.
+    if (this._pendingJanvasMasks.length > 0 && this._renderer instanceof WebGL2Renderer) {
+      const gl = this._renderer.GetGL();
+      if (gl) {
+        const gl2r = this._renderer;
+        gl2r.RebindSceneTarget();
+        gl.viewport(0, 0, w, h);
+        gl.disable(gl.SCISSOR_TEST);
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.STENCIL_TEST);
+        gl.colorMask(true, true, true, true);
+        gl.depthMask(false);
+        gl.disable(gl.BLEND);
+        for (const m of this._pendingJanvasMasks) {
+          gl2r.DrawClipMask(m.drawX, m.drawY, m.drawW, m.drawH, m.clipX, m.clipY, m.clipW, m.clipH, m.radius, m.smoothness);
+        }
+        gl2r.InvalidateStateCache();
+      }
+    }
 
     // Final composite: the whole frame lives in sceneFbo. `PresentScene`
     // does a hardware `blitFramebuffer` from sceneFbo into the swap chain —
@@ -855,16 +890,27 @@ export class Canvas {
     // "inside" region is empty — the clip rejects everything including the
     // center, so the node's image/content draws are fully clipped away.
     const maxR = Math.min(node.Width, node.Height) / 2;
+    const rtl = Math.min(radii[0], maxR);
+    const rtr = Math.min(radii[1], maxR);
+    const rbr = Math.min(radii[2], maxR);
+    const rbl = Math.min(radii[3], maxR);
+    // If every corner is fully rounded (radii saturate at half-dim), the
+    // shape is a circle/pill. Force smoothness=0 so the clip's superellipse
+    // collapses to n=2 — otherwise the default 0.3 paints a squircle that
+    // bulges into the diagonals, clipping a rounded square instead of a
+    // circle. Mirrors ShapeMode's circle-mode classification in the panel
+    // shader, which the clip path doesn't run.
+    const fullyRounded = rtl >= maxR && rtr >= maxR && rbr >= maxR && rbl >= maxR;
     return {
       X: node.X + offsetX,
       Y: node.Y + offsetY,
       W: node.Width,
       H: node.Height,
-      RTL: Math.min(radii[0], maxR),
-      RTR: Math.min(radii[1], maxR),
-      RBR: Math.min(radii[2], maxR),
-      RBL: Math.min(radii[3], maxR),
-      Smoothness: node.RenderStyle.BorderRadiusSmoothness,
+      RTL: rtl,
+      RTR: rtr,
+      RBR: rbr,
+      RBL: rbl,
+      Smoothness: fullyRounded ? 0 : node.RenderStyle.BorderRadiusSmoothness,
     };
   };
 
@@ -1883,7 +1929,7 @@ export class Canvas {
      *  renderer's writes are stencil-clipped to this shape — letting the
      *  janvas honour its ancestor's `Overflow:Hidden` + `BorderRadius`,
      *  same as Jaui's own panel pass already does for jivs. */
-    clip: { x: number; y: number; w: number; h: number; radius: number } | null,
+    clip: { x: number; y: number; w: number; h: number; radius: number; smoothness: number } | null,
   ): void {
     if (node instanceof Janvas) {
       const renderer = node.Renderer;
@@ -1907,22 +1953,20 @@ export class Canvas {
         renderer.Render(gl, fbo, { X: px, Y: yFromBottom, Width: pw, Height: ph }, dt);
         node.ClearDirty();
 
-        // Post-pass mask — clear every janvas pixel that falls outside the
-        // nearest Overflow:Hidden ancestor's rounded rect. Covers the full
-        // janvas rect (not just the clip rect's corners) so foreign content
-        // that extends past the parent is clipped too.
+        // Defer the visual clip mask to the end of the frame. Wiping scene
+        // FBO pixels here destroys data that in-tree consumers need: a
+        // descendant pblur (e.g. HeroLeftBlur over a fullscreen Reality
+        // janvas) snapshots the scene to build its blur pyramid; if the
+        // wipe ran first, the rounded-corner regions sample as transparent
+        // black, smearing darkness into the blur. We queue (drawRect,
+        // clipRect, radius) and apply them after the panel pass — visual
+        // clipping for the presented frame, intact source for sampling.
         if (clip) {
-          r.RebindSceneTarget();
-          gl.viewport(0, 0, canvasW, canvasH);
-          gl.disable(gl.SCISSOR_TEST);
-          gl.disable(gl.DEPTH_TEST);
-          gl.disable(gl.CULL_FACE);
-          gl.disable(gl.STENCIL_TEST);
-          gl.colorMask(true, true, true, true);
-          gl.depthMask(false);
-          gl.disable(gl.BLEND);
-          r.DrawClipMask(px, py, pw, ph, clip.x, clip.y, clip.w, clip.h, clip.radius);
-          r.InvalidateStateCache();
+          this._pendingJanvasMasks.push({
+            drawX: px, drawY: py, drawW: pw, drawH: ph,
+            clipX: clip.x, clipY: clip.y, clipW: clip.w, clipH: clip.h,
+            radius: clip.radius, smoothness: clip.smoothness,
+          });
         }
       }
     }
@@ -1939,7 +1983,8 @@ export class Canvas {
         const ph = Math.round(node.Height * d);
         const radii = node.RenderStyle?.BorderRadius;
         const r0 = radii ? radii[0] : 0;
-        childClip = { x: px, y: py, w: pw, h: ph, radius: r0 * d };
+        const smoothness = node.RenderStyle?.BorderRadiusSmoothness ?? 0;
+        childClip = { x: px, y: py, w: pw, h: ph, radius: r0 * d, smoothness };
       }
     }
 

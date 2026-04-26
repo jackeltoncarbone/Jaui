@@ -5,21 +5,16 @@ import type { Color } from './Types';
  * channel in [0, 1] — what the renderer consumes.
  *
  * Supported forms:
- *   "#rgb"              → expand to #rrggbb, A=1
- *   "#rgba"             → expand to #rrggbbaa
- *   "#rrggbb"           → A=1
- *   "#rrggbbaa"
- *   "rgb(255, 128, 0)"       → channels in 0-255, A=1
- *   "rgb(255 128 0)"         → CSS4 space-separated form
- *   "rgba(255, 128, 0, 0.5)" → 4th arg is 0-1 alpha
- *   "hsl(200, 50%, 40%)"     → H in 0-360, S/L in 0-100%
- *   "hsla(200, 50%, 40%, 0.5)"
- *   "transparent"        → {0, 0, 0, 0}
+ *   "#rgb" / "#rgba" / "#rrggbb" / "#rrggbbaa"
+ *   "rgb(...)" / "rgba(...)"           — comma OR space separators (CSS4)
+ *   "hsl(...)" / "hsla(...)"
+ *   "transparent"
+ *   Named CSS colors ("red", "rebeccapurple", …)
+ *   Anything else CSS recognizes (oklch, lab, color(), …) via the
+ *   browser's own parser — a hidden Canvas2D `fillStyle` round-trip
+ *   canonicalizes whatever the spec accepts to `#rrggbb` or `rgba(...)`.
  *
  * Parsed results are cached — same string parsed once per process.
- *
- * Named colors deliberately not in v1 — they add a 140-entry lookup table
- * for marginal convenience. Add when a concrete case demands them.
  */
 
 const _cache = new Map<string, Color>();
@@ -43,7 +38,40 @@ const _parse = (s: string): Color => {
   if (s.startsWith('#')) return _parseHex(s);
   if (s.startsWith('rgba(') || s.startsWith('rgb(')) return _parseRgb(s);
   if (s.startsWith('hsla(') || s.startsWith('hsl(')) return _parseHsl(s);
+  // Fall back to the browser's own parser for everything else: named
+  // colors, oklch, lab, color(...), etc. Setting fillStyle to a value the
+  // browser doesn't accept is a no-op, so we set a sentinel first and
+  // detect rejection by checking it didn't change.
+  const viaBrowser = _parseViaBrowser(s);
+  if (viaBrowser) return viaBrowser;
   throw new Error(`[Jaui] Unrecognized color: "${s}"`);
+};
+
+let _probeCtx: CanvasRenderingContext2D | null | undefined;
+const _getProbeCtx = (): CanvasRenderingContext2D | null => {
+  if (_probeCtx !== undefined) return _probeCtx;
+  if (typeof document === 'undefined') { _probeCtx = null; return null; }
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  _probeCtx = canvas.getContext('2d');
+  return _probeCtx;
+};
+
+const _parseViaBrowser = (s: string): Color | null => {
+  const ctx = _getProbeCtx();
+  if (!ctx) return null;
+  // Prime with a sentinel the input string can't equal; if assigning the
+  // input doesn't change fillStyle off that sentinel, the browser
+  // rejected it.
+  ctx.fillStyle = '#000000';
+  ctx.fillStyle = s;
+  const canonical = ctx.fillStyle;
+  if (typeof canonical !== 'string') return null;
+  // Browser returns either "#rrggbb" (opaque) or "rgba(r, g, b, a)".
+  if (canonical.startsWith('#')) return _parseHex(canonical);
+  if (canonical.startsWith('rgb')) return _parseRgb(canonical);
+  return null;
 };
 
 const _parseHex = (s: string): Color => {
