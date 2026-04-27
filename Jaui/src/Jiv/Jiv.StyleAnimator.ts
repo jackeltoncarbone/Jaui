@@ -71,7 +71,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BorderFresnelBrightness',s => s.BorderFresnelBrightness,      (s, v) => { s.BorderFresnelBrightness = v; }],
   ['InnerBlur',              s => s.InnerBlur,                    (s, v) => { s.InnerBlur = v; }],
 
-  // Transform — per-channel
+  // Transform — per-channel (legacy compound; superseded by Visual*).
   ['Transform',              s => s.Transform.TranslateX,         (s, v) => { s.Transform.TranslateX = v; }],
   ['Transform',              s => s.Transform.TranslateY,         (s, v) => { s.Transform.TranslateY = v; }],
   ['Transform',              s => s.Transform.ScaleX,             (s, v) => { s.Transform.ScaleX = v; }],
@@ -81,6 +81,18 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['Transform',              s => s.Transform.SkewY,              (s, v) => { s.Transform.SkewY = v; }],
   ['Transform',              s => s.Transform.OriginX,            (s, v) => { s.Transform.OriginX = v; }],
   ['Transform',              s => s.Transform.OriginY,            (s, v) => { s.Transform.OriginY = v; }],
+
+  // Visual* — render-time scale/translate around an origin. Each axis
+  // springs independently. Author groups via the JSS shorthand:
+  // `@Transition VisualScale { Duration: 160ms }` springs both X and Y
+  // with the same config; finer-grained tuning per axis isn't supported
+  // (all four channels share the 'Visual*' bucket).
+  ['VisualScale',            s => s.VisualScaleX,                 (s, v) => { s.VisualScaleX = v; }],
+  ['VisualScale',            s => s.VisualScaleY,                 (s, v) => { s.VisualScaleY = v; }],
+  ['VisualTranslate',        s => s.VisualTranslateX,             (s, v) => { s.VisualTranslateX = v; }],
+  ['VisualTranslate',        s => s.VisualTranslateY,             (s, v) => { s.VisualTranslateY = v; }],
+  ['VisualOrigin',           s => s.VisualOriginX,                (s, v) => { s.VisualOriginX = v; }],
+  ['VisualOrigin',           s => s.VisualOriginY,                (s, v) => { s.VisualOriginY = v; }],
 
   // Border — color + geometry
   ['BorderColor',            s => s.BorderColor.R,                (s, v) => { s.BorderColor.R = v; }],

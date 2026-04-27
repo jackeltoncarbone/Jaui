@@ -45,6 +45,27 @@ const _parseCornerShape = (raw: string): [CornerShape, CornerShape, CornerShape,
   }
 };
 
+/** Parse a Visual* shorthand string into [X, Y] numbers.
+ *  - `'v'`     → [v, v]   (uniform)
+ *  - `'x y'`   → [x, y]   (per-axis)
+ *  - empty/whitespace → [fallback, fallback]
+ *  Each token is resolved as a Length under `ctx` so authors can use
+ *  `pt`, `%`, `vw`, etc. — e.g. `VisualTranslate: '0pt 4pt'` lifts the
+ *  Jiv 4pt vertically at render time. */
+const _parseVisualPair = (
+  raw: string,
+  ctx: ResolveContext,
+  fallback: number,
+): [number, number] => {
+  const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0);
+  if (parts.length === 0) return [fallback, fallback];
+  if (parts.length === 1) {
+    const v = Resolve(parts[0], ctx, 'W');
+    return [v, v];
+  }
+  return [Resolve(parts[0], ctx, 'W'), Resolve(parts[1], ctx, 'H')];
+};
+
 /** Resolve `MaxWidth`/`MaxHeight` with CSS-style "none" → Infinity. */
 const _resolveBound = (raw: string, ctx: ResolveContext, axis: 'W' | 'H'): number => {
   if (raw === 'none') return Infinity;
@@ -108,6 +129,20 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     InnerBlur: Resolve(s.InnerBlur, ctx, 'W'),
 
     Transform: ResolveTransform(s.Transform, ctx),
+
+    // Visual* — render-time scale/translate around an origin, applied
+    // per-Jiv only (no descendant cascade). Each shorthand string is
+    // split into [X, Y]; uniform values populate both axes.
+    ...(() => {
+      const [vsx, vsy] = _parseVisualPair(s.VisualScale, ctx, 1);
+      const [vtx, vty] = _parseVisualPair(s.VisualTranslate, ctx, 0);
+      const [vox, voy] = _parseVisualPair(s.VisualOrigin, ctx, 0.5);
+      return {
+        VisualScaleX: vsx, VisualScaleY: vsy,
+        VisualTranslateX: vtx, VisualTranslateY: vty,
+        VisualOriginX: vox, VisualOriginY: voy,
+      };
+    })(),
 
     BorderColor: ParseColor(s.BorderColor),
     BorderWidth: Resolve(s.BorderWidth, ctx, 'W'),

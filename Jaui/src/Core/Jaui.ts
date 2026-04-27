@@ -487,9 +487,35 @@ export class Canvas {
       return [...children].sort((a, b) => a.RenderStyle.Layer - b.RenderStyle.Layer);
     };
 
-    // Single tree walk — renders everything in z-order
-    const renderNode = (node: Jiv, offsetX: number, offsetY: number, stack: ClipStack): void => {
-      if (!this._isInsideClipStack(node, offsetX, offsetY, stack)) return;
+    // Single tree walk — renders everything in z-order. The (cx, cy,
+    // ox, oy) tuple is the affine map from this Jiv's natural
+    // (post-layout, pre-Visual-transform) coords to canvas px:
+    //   canvasX = ox + cx * jiv.X
+    //   canvasW = cx * jiv.Width
+    // Identity (cx=cy=1, ox=oy=0) at the root is the no-transform path.
+    // VisualScale on an ancestor composes into the effective tuple so
+    // descendants ride along, just like CSS transform on a parent.
+    const renderNode = (node: Jiv, cx: number, cy: number, ox: number, oy: number, stack: ClipStack): void => {
+      // Compose own's Visual transform onto the inherited transform.
+      // Pivot in NATURAL coords (jiv.X / jiv.Y are in the same space
+      // as our cx/cy/ox/oy expect — i.e. what the layout solver
+      // assigned). Order: scale around pivot, then translate.
+      const sx = node.RenderStyle.VisualScaleX;
+      const sy = node.RenderStyle.VisualScaleY;
+      const tx = node.RenderStyle.VisualTranslateX;
+      const ty = node.RenderStyle.VisualTranslateY;
+      const vox = node.RenderStyle.VisualOriginX;
+      const voy = node.RenderStyle.VisualOriginY;
+      let effCx = cx, effCy = cy, effOx = ox, effOy = oy;
+      if (sx !== 1 || sy !== 1 || tx !== 0 || ty !== 0) {
+        const pivotX = node.X + node.Width * vox;
+        const pivotY = node.Y + node.Height * voy;
+        effCx = cx * sx;
+        effCy = cy * sy;
+        effOx = ox + cx * (pivotX * (1 - sx) + tx);
+        effOy = oy + cy * (pivotY * (1 - sy) + ty);
+      }
+      if (!this._isInsideClipStack(node, effCx, effCy, effOx, effOy, stack)) return;
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
       // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
       // the loaded image. Without this, the node stays at 0 height forever.
@@ -503,10 +529,10 @@ export class Canvas {
       }
 
       if (node.Width <= 0 || node.Height <= 0 || !node.Visible) {
-        const boxClip = this._boxClip(node, offsetX, offsetY);
-        const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+        const boxClip = this._boxClip(node, effCx, effCy, effOx, effOy);
+        const [chOx, chOy] = this._descendOffset(node, effOx, effOy, effCx, effCy);
         for (const child of orderedChildren(node)) {
-          renderNode(child, dx, dy, this._childClip(node, stack, boxClip, child));
+          renderNode(child, effCx, effCy, chOx, chOy, this._childClip(node, stack, boxClip, child));
         }
         return;
       }
@@ -547,10 +573,10 @@ export class Canvas {
         // blur pass, 4 passes per blur = ~50× cumulative fragment work
         // saved per localized pblur per frame.
         const lodMargin = Math.ceil(Math.pow(2, maxLod + 1));
-        const px = (node.X + offsetX) * d;
-        const py = (node.Y + offsetY) * d;
-        const pw = node.Width * d;
-        const ph = node.Height * d;
+        const px = (effOx + effCx * node.X) * d;
+        const py = (effOy + effCy * node.Y) * d;
+        const pw = effCx * node.Width * d;
+        const ph = effCy * node.Height * d;
         // When a feather is set AND the background is fully opaque, the
         // solid post-feather region collapses to just u_Background — no
         // pyramid samples read past the feather zone (the shader early-outs
@@ -589,7 +615,7 @@ export class Canvas {
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.DrawProgressiveBlur({
-          Rect: { X: (node.X + offsetX) * d, Y: (node.Y + offsetY) * d, W: node.Width * d, H: node.Height * d },
+          Rect: { X: (effOx + effCx * node.X) * d, Y: (effOy + effCy * node.Y) * d, W: effCx * node.Width * d, H: effCy * node.Height * d },
           Scene: sceneSnap, // reuse the snapshot we took for ComputeBlur
           Pyramid: lastBackdrop,
           MaxLod: maxLod,
@@ -631,10 +657,10 @@ export class Canvas {
         const baseBlurCssPx = 1;
         const d = this._dpr;
         const margin = 48 * d; // covers refraction offset + rim + bezel safely
-        const px = (node.X + offsetX) * d;
-        const py = (node.Y + offsetY) * d;
-        const pw = node.Width * d;
-        const ph = node.Height * d;
+        const px = (effOx + effCx * node.X) * d;
+        const py = (effOy + effCy * node.Y) * d;
+        const pw = effCx * node.Width * d;
+        const ph = effCy * node.Height * d;
         const scissor = {
           x: Math.max(0, Math.floor(px - margin)),
           y: Math.max(0, Math.floor(py - margin)),
@@ -655,7 +681,7 @@ export class Canvas {
 
         r.EnableBlend();
         this._panelBuffer.Begin();
-        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
+        this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
         r.PanelBeginBatch();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
@@ -690,7 +716,7 @@ export class Canvas {
         // upcoming flushPanels() will drain it as one instanced draw call
         // along with every other pending non-glass panel in the tier.
         flushText();
-        this._panelBuffer.Push(node, this._dpr, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
+        this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
       }
 
       // Render this node's image (if any — after panel, before text)
@@ -711,7 +737,7 @@ export class Canvas {
         // Cover-fit image overflows the node's rounded corners. Mirror
         // the panel's self-clip by encoding stack+boxClip for this draw.
         const imgStack = node.Overflow !== 'Visible'
-          ? [...stack, this._boxClip(node, offsetX, offsetY)]
+          ? [...stack, this._boxClip(node, effCx, effCy, effOx, effOy)]
           : stack;
         const imgClipMeta = imgStack === stack ? clipMeta : this._clipBuffer.Encode(imgStack, this._dpr);
         if (imgEntry && imgEntry.Ready) {
@@ -723,8 +749,8 @@ export class Canvas {
           }
 
           const d = this._dpr;
-          const elemW = node.Width * d;
-          const elemH = node.Height * d;
+          const elemW = effCx * node.Width * d;
+          const elemH = effCy * node.Height * d;
           const imgAspect = imgEntry.Width / imgEntry.Height;
           const elemAspect = elemW / elemH;
           // Cover inverts Contain's branch: pick the dim whose scale fills the
@@ -737,14 +763,14 @@ export class Canvas {
             // Scale so image width = element width; height follows aspect.
             drawW = elemW;
             drawH = elemW / imgAspect;
-            drawX = (node.X + offsetX) * d;
-            drawY = (node.Y + offsetY) * d + (elemH - drawH) / 2;
+            drawX = (effOx + effCx * node.X) * d;
+            drawY = (effOy + effCy * node.Y) * d + (elemH - drawH) / 2;
           } else {
             // Scale so image height = element height; width follows aspect.
             drawH = elemH;
             drawW = elemH * imgAspect;
-            drawX = (node.X + offsetX) * d + (elemW - drawW) / 2;
-            drawY = (node.Y + offsetY) * d;
+            drawX = (effOx + effCx * node.X) * d + (elemW - drawW) / 2;
+            drawY = (effOy + effCy * node.Y) * d;
           }
 
           // Image draws through the text pipeline (same shader, different
@@ -778,21 +804,21 @@ export class Canvas {
       const anim = this._textAnimators.get(node);
       if (anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
-        this._emitTextFor(node, offsetX, offsetY, clipMeta.Offset, clipMeta.Count);
+        this._emitTextFor(node, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
       }
 
       // Walk children in Layer order (ties break by tree order)
-      const boxClip = this._boxClip(node, offsetX, offsetY);
-      const [dx, dy] = this._descendOffset(node, offsetX, offsetY);
+      const boxClip = this._boxClip(node, effCx, effCy, effOx, effOy);
+      const [chOx, chOy] = this._descendOffset(node, effOx, effOy, effCx, effCy);
       for (const child of orderedChildren(node)) {
-        renderNode(child, dx, dy, this._childClip(node, stack, boxClip, child));
+        renderNode(child, effCx, effCy, chOx, chOy, this._childClip(node, stack, boxClip, child));
       }
     };
 
     this._textBuffer.Begin();
     this._clipBuffer.Begin();
     this._panelBuffer.Begin();
-    renderNode(this.Root, 0, 0, EmptyClipStack);
+    renderNode(this.Root, 1, 1, 0, 0, EmptyClipStack);
     // Trailing flushes — catch anything deferred since the last category
     // boundary. Order: panels first (they were pushed earlier in tree
     // order than the trailing text, if any).
@@ -851,25 +877,32 @@ export class Canvas {
   };
 
   /** Compute the offset descendants see when descending past a scroll container. */
-  private _descendOffset = (node: Jiv, offsetX: number, offsetY: number): [number, number] => {
+  /** Returns the (Ox, Oy) for descendants. ScrollX/Y is in this node's
+   *  natural coords, so its contribution to the children's effective
+   *  offset is `Cx * ScrollX` (subtracted) — the scroll moves content
+   *  in the cascade-scaled space. Cx/Cy are unchanged on descent;
+   *  this jiv's own VisualScale is composed in renderNode before this. */
+  private _descendOffset = (node: Jiv, ox: number, oy: number, cx: number, cy: number): [number, number] => {
     if (node.Overflow === 'Scroll') {
-      return [offsetX - node.ScrollX, offsetY - node.ScrollY];
+      return [ox - cx * node.ScrollX, oy - cy * node.ScrollY];
     }
-    return [offsetX, offsetY];
+    return [ox, oy];
   };
 
   /** AABB cull against the inherited clip stack. Returns true if the node's
    *  bounding box intersects every clip in the stack — false (skip) only if
    *  the node lies completely outside any single clip. Per-pixel rounded-rect
-   *  clipping happens in the shader; this is just the cheap CPU-side cull. */
+   *  clipping happens in the shader; this is just the cheap CPU-side cull.
+   *  Uses the cascade-scaled rect so a transformed Jiv's clip cull respects
+   *  its actually-rendered bbox. */
   private _isInsideClipStack = (
-    node: Jiv, offsetX: number, offsetY: number, stack: ClipStack,
+    node: Jiv, cx: number, cy: number, ox: number, oy: number, stack: ClipStack,
   ): boolean => {
     if (stack.length === 0) return true;
-    const nx = node.X + offsetX;
-    const ny = node.Y + offsetY;
-    const nx2 = nx + node.Width;
-    const ny2 = ny + node.Height;
+    const nx = ox + cx * node.X;
+    const ny = oy + cy * node.Y;
+    const nx2 = nx + cx * node.Width;
+    const ny2 = ny + cy * node.Height;
     for (const c of stack) {
       if (nx2 <= c.X || nx >= c.X + c.W) return false;
       if (ny2 <= c.Y || ny >= c.Y + c.H) return false;
@@ -882,18 +915,21 @@ export class Canvas {
    *  (Overflow: Hidden|Scroll) and when a child opts in (ParentOverflow:
    *  Hidden). All values stay in CSS px; the buffer multiplies by dpr. */
   private _boxClip = (
-    node: Jiv, offsetX: number, offsetY: number,
+    node: Jiv, cx: number, cy: number, ox: number, oy: number,
   ): ClipShape => {
     const radii = node.RenderStyle.BorderRadius;
     // Clamp to half-dimension (CSS border-radius rule). Without this, a
     // pill-style `BorderRadius: 999pt` on a small box produces an SDF whose
     // "inside" region is empty — the clip rejects everything including the
     // center, so the node's image/content draws are fully clipped away.
-    const maxR = Math.min(node.Width, node.Height) / 2;
-    const rtl = Math.min(radii[0], maxR);
-    const rtr = Math.min(radii[1], maxR);
-    const rbr = Math.min(radii[2], maxR);
-    const rbl = Math.min(radii[3], maxR);
+    const w = cx * node.Width;
+    const h = cy * node.Height;
+    const avgScale = (Math.abs(cx) + Math.abs(cy)) * 0.5;
+    const maxR = Math.min(w, h) / 2;
+    const rtl = Math.min(radii[0] * avgScale, maxR);
+    const rtr = Math.min(radii[1] * avgScale, maxR);
+    const rbr = Math.min(radii[2] * avgScale, maxR);
+    const rbl = Math.min(radii[3] * avgScale, maxR);
     // If every corner is fully rounded (radii saturate at half-dim), the
     // shape is a circle/pill. Force smoothness=0 so the clip's superellipse
     // collapses to n=2 — otherwise the default 0.3 paints a squircle that
@@ -902,10 +938,10 @@ export class Canvas {
     // shader, which the clip path doesn't run.
     const fullyRounded = rtl >= maxR && rtr >= maxR && rbr >= maxR && rbl >= maxR;
     return {
-      X: node.X + offsetX,
-      Y: node.Y + offsetY,
-      W: node.Width,
-      H: node.Height,
+      X: ox + cx * node.X,
+      Y: oy + cy * node.Y,
+      W: w,
+      H: h,
       RTL: rtl,
       RTR: rtr,
       RBR: rbr,
@@ -945,7 +981,7 @@ export class Canvas {
     for (const child of node.Children as Jiv[]) this._scanFrostBlur(child);
   };
 
-  private _emitTextFor = (node: Jiv, offsetX: number, offsetY: number, clipOffset: number, clipCount: number): void => {
+  private _emitTextFor = (node: Jiv, cx: number, cy: number, ox: number, oy: number, clipOffset: number, clipCount: number): void => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return;
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
@@ -955,31 +991,35 @@ export class Canvas {
     // root's ctx if something went sideways to avoid NaN in the render.
     const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
     const [padT, , padB, padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
-    const contentX = node.X + offsetX + padL;
-    const contentY = node.Y + offsetY + padT;
-    const contentH = node.Height - padT - padB;
+    // Cascade the visual transform onto text content too — content
+    // origin (after padding) and total height live in the cascaded
+    // coord space so the glyph rasters scale with the parent.
+    const contentX = ox + cx * (node.X + padL);
+    const contentY = oy + cy * (node.Y + padT);
+    const contentH = cy * (node.Height - padT - padB);
 
     let totalTextHeight = 0;
     for (const w of anim.Words) {
       const bottom = w.TargetY + w.Height;
       if (bottom > totalTextHeight) totalTextHeight = bottom;
     }
-    const yOffset = (contentH - totalTextHeight) / 2;
+    const yOffset = (contentH - cy * totalTextHeight) / 2;
 
     for (const w of anim.Words) {
       const opacity = node.EffectiveOpacity * w.Opacity.Value;
       if (opacity <= 0.001) continue;
       const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
-      const wx = contentX + w.SpringX.Value;
-      const wy = contentY + yOffset + w.SpringY.Value;
+      const wx = contentX + cx * w.SpringX.Value;
+      const wy = contentY + yOffset + cy * w.SpringY.Value;
       // Word-level Scale — used during a FontSize-only transition to make
       // the NEW-size raster look OLD-sized on frame 0 and spring to 1.0.
       // Scale around each word's center to keep layout anchored.
-      const scale = w.Scale.Value;
-      const drawW = entry.Width * scale;
-      const drawH = entry.Height * scale;
-      const dxCenter = (entry.Width - drawW) / 2 / this._dpr;
-      const dyCenter = (entry.Height - drawH) / 2 / this._dpr;
+      const wordScale = w.Scale.Value;
+      // Cascade the visual scale into the rendered glyph dimensions.
+      const drawW = entry.Width * wordScale * cx;
+      const drawH = entry.Height * wordScale * cy;
+      const dxCenter = (entry.Width * cx - drawW) / 2 / this._dpr;
+      const dyCenter = (entry.Height * cy - drawH) / 2 / this._dpr;
       this._textBuffer.Push({
         X: (wx + dxCenter) * this._dpr,
         Y: (wy + dyCenter) * this._dpr,
@@ -1265,6 +1305,7 @@ export class Canvas {
       if (hit === this._hoveredJiv) return;
       setStateChain(hit, this._hoveredJiv, 'Hover');
       this._hoveredJiv = hit;
+      this.Element.style.cursor = _resolveCursor(hit);
       this._animationManager.Kick();
     });
 
@@ -1272,6 +1313,7 @@ export class Canvas {
       if (this._hoveredJiv) {
         setStateChain(null, this._hoveredJiv, 'Hover');
         this._hoveredJiv = null;
+        this.Element.style.cursor = '';
         this._animationManager.Kick();
       }
     });
@@ -2032,6 +2074,26 @@ export class Jaui {
    *  layer whenever the JssRegistry version bumps. */
   SetJssVars(vars: Map<string, string>): void { this.Canvas.SetJssVars(vars); }
 }
+
+// Walks the hit ancestor chain. Disabled stops the walk and forces default
+// (so a disabled button kills its own pointer cursor); otherwise the first
+// non-Default Cursor wins, mimicking CSS cursor inheritance so children of
+// a button automatically pick up the button's pointer.
+const _resolveCursor = (hit: Jiv | null): string => {
+  for (let n: Jiv | null = hit; n; n = n.Parent as Jiv | null) {
+    if (n.Disabled) return '';
+    if (n.Cursor !== 'Default') return _CURSOR_CSS[n.Cursor];
+  }
+  return '';
+};
+
+const _CURSOR_CSS: Record<'Default' | 'Pointer' | 'Text' | 'Move' | 'None', string> = {
+  Default: '',
+  Pointer: 'pointer',
+  Text: 'text',
+  Move: 'move',
+  None: 'none',
+};
 
 // ─── Re-exports by slice ───
 

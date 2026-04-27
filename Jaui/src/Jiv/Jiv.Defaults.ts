@@ -36,6 +36,12 @@ export const DefaultJivStyle: JivStyle = {
   BorderFresnelBrightness: '0',
   InnerBlur: '0',
   Transform: '',                         // empty = identity
+  // Visual* — render-time, per-element. `VisualScale: '1'` is identity;
+  // `VisualTranslate: '0'` is no offset; `VisualOrigin: '0.5'` is center.
+  // Shorthand: single value = uniform; two values (`x y`) = per-axis.
+  VisualScale: '1',
+  VisualTranslate: '0',
+  VisualOrigin: '0.5',
   BorderColor: 'rgba(0, 0, 0, 0)',
   BorderWidth: '0',
   BorderBlur: '0.5',

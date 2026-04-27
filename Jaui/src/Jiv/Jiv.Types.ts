@@ -98,8 +98,25 @@ export interface JivStyle {
   BorderFresnelBrightness: string;
   InnerBlur: string;
 
-  // Transform — function-syntax string composing translate/scale/rotate/skew/origin
+  // Transform — function-syntax string composing translate/scale/rotate/skew/origin.
+  // Internal/legacy. Author-facing visual transform lives on the
+  // dedicated Visual* props below — independent, animatable per axis,
+  // no compound parsing.
   Transform: string;
+
+  // Visual transform — pure render-time, applied per-element only (no
+  // descendant cascade), no layout/hit-test impact. Shorthand syntax:
+  // single value (`0.92`) is uniform; two values (`0.92 1.06`) are X Y.
+  // Pure visual feedback — for press shrink, hover lift, etc.
+  // Cascading layout-affecting scale belongs on PointScale instead.
+  /** Scale around `VisualOrigin`. Default `'1'`. */
+  VisualScale: string;
+  /** Translation in CSS px (or any Length unit). Applied AFTER scale,
+   *  in this Jiv's local space. Default `'0'`. */
+  VisualTranslate: string;
+  /** Origin for VisualScale, in [0, 1] of the Jiv's box.
+   *  `0.5` = center. Default `'0.5'`. */
+  VisualOrigin: string;
 
   // Border
   BorderColor: string;
@@ -186,6 +203,14 @@ export interface JivRenderStyle {
   InnerBlur: number;
 
   Transform: Transform;
+
+  // Visual transform — resolved per-axis. Applied at render time only.
+  VisualScaleX: number;
+  VisualScaleY: number;
+  VisualTranslateX: number;
+  VisualTranslateY: number;
+  VisualOriginX: number;
+  VisualOriginY: number;
 
   BorderColor: Color;
   BorderWidth: number;

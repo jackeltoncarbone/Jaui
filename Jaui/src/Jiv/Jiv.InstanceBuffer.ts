@@ -44,7 +44,23 @@ export class JivInstanceBuffer {
 
   Begin = (): void => { this._count = 0; };
 
-  Push = (jiv: Jiv, dpr: number, offsetX: number = 0, offsetY: number = 0,
+  /**
+   * The (cx, ox, cy, oy) tuple is the affine map from this Jiv's
+   * natural (post-layout, pre-Visual-transform) coords to canvas
+   * pixels:
+   *
+   *   worldX = (ox + cx * naturalX) * dpr
+   *   worldY = (oy + cy * naturalY) * dpr
+   *
+   * The render walk composes parent's effective transform with own's
+   * VisualScale around own's pivot before calling Push, so the values
+   * passed in already reflect the *cascaded* transform — the tree
+   * walker is the source of truth, and Push just consumes. Identity
+   * (cx=cy=1, ox=oy=0) reduces to the legacy `node.X` placement.
+   */
+  Push = (jiv: Jiv, dpr: number,
+          cx: number = 1, cy: number = 1,
+          ox: number = 0, oy: number = 0,
           clipOffset: number = 0, clipCount: number = 0): void => {
     if (this._count >= this._capacity) this._grow();
 
@@ -52,15 +68,20 @@ export class JivInstanceBuffer {
     const d = dpr;
     const offset = this._count * JIV_FLOATS_PER_INSTANCE;
 
-    const x = (jiv.X + offsetX) * d;
-    const y = (jiv.Y + offsetY) * d;
-    const w = jiv.Width * d;
-    const h = jiv.Height * d;
-    const borderWidth = style.BorderWidth * d;
-    const borderEdgeAa = style.BorderBlur * d;
-    const shadowBlur = style.ShadowBlur * d;
-    const shadowOffX = style.ShadowOffsetX * d;
-    const shadowOffY = style.ShadowOffsetY * d;
+    const x = (ox + cx * jiv.X) * d;
+    const y = (oy + cy * jiv.Y) * d;
+    const w = cx * jiv.Width * d;
+    const h = cy * jiv.Height * d;
+    // Border / shadow widths scale with the rendered geometry so they
+    // stay visually proportional under a Visual* cascade — matches CSS
+    // where transform on an ancestor scales its painted output.
+    // Average the axes so non-uniform scale doesn't pinch shadows.
+    const avgScale = (Math.abs(cx) + Math.abs(cy)) * 0.5;
+    const borderWidth = style.BorderWidth * avgScale * d;
+    const borderEdgeAa = style.BorderBlur * avgScale * d;
+    const shadowBlur = style.ShadowBlur * avgScale * d;
+    const shadowOffX = style.ShadowOffsetX * avgScale * d;
+    const shadowOffY = style.ShadowOffsetY * avgScale * d;
 
     const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
     const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
@@ -80,10 +101,10 @@ export class JivInstanceBuffer {
     data[offset + 6] = w / 2;
     data[offset + 7] = h / 2;
 
-    data[offset + 8] = style.BorderRadius[0] * d;
-    data[offset + 9] = style.BorderRadius[1] * d;
-    data[offset + 10] = style.BorderRadius[2] * d;
-    data[offset + 11] = style.BorderRadius[3] * d;
+    data[offset + 8] = style.BorderRadius[0] * avgScale * d;
+    data[offset + 9] = style.BorderRadius[1] * avgScale * d;
+    data[offset + 10] = style.BorderRadius[2] * avgScale * d;
+    data[offset + 11] = style.BorderRadius[3] * avgScale * d;
 
     data[offset + 12] = style.Background.R;
     data[offset + 13] = style.Background.G;
@@ -120,8 +141,8 @@ export class JivInstanceBuffer {
     const blurPx = Math.max(0.5, style.BackdropFrostBlur * d);
     data[offset + 35] = Math.max(0, Math.min(10, Math.log2(blurPx)));
 
-    data[offset + 36] = style.Thickness * d;
-    data[offset + 37] = style.BezelWidth * d;
+    data[offset + 36] = style.Thickness * avgScale * d;
+    data[offset + 37] = style.BezelWidth * avgScale * d;
     data[offset + 38] = style.Refraction;
     data[offset + 39] = style.BezelScale;
 
