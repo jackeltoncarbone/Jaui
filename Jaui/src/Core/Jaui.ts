@@ -2064,6 +2064,7 @@ export type {
   PositionMode, Overflow, LayoutConfig, ChildLayout, LayoutResult,
   GridConfig, GridTrack,
 } from '../Layout/Layout.Types';
+export { DefaultLayoutConfig, DefaultChildLayout } from '../Layout/Layout.Types';
 export { SolveFlex, type FlexContainer, type FlexChild } from '../Layout/Layout.Flex';
 export { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 export { SolveLayout } from '../Layout/Layout.Solver';
