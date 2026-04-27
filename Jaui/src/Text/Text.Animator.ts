@@ -34,6 +34,15 @@ export interface AnimatedWord {
    *  new size. Keeps word-reconciliation out of the hot path for pure
    *  size changes — we don't fade old words out and new ones in. */
   Scale: Spring;
+  /** Per-channel RGBA tint multiplier applied by the text shader. Settles
+   *  at (1,1,1,1) for stable text. On a Color change, raster snaps to the
+   *  new color but each channel spring is yanked to (oldChannel/newChannel)
+   *  and targets 1.0, so the visible color matches the old color at frame 0
+   *  and lerps to the new color as the springs settle. */
+  TintR: Spring;
+  TintG: Spring;
+  TintB: Spring;
+  TintA: Spring;
   Dying: boolean;          // true when opacity target is 0 (being removed)
 }
 
@@ -63,18 +72,20 @@ export class TextAnimator implements Animatable {
   Update = (content: string, style: ResolvedTextStyle, maxWidth: number | null): boolean => {
     const contentChanged = content !== this._content;
     const styleChanged = _stylesDiffer(style, this._style);
-    const fontSizeOnlyChanged = !contentChanged
+    // Content-unchanged style change with a FontSize delta: take the smooth
+    // size-morph path even when Color / FontWeight / etc. also change. The
+    // Scale spring drives the visual size from old/new ratio → 1.0; the new
+    // raster (with whatever new color or weight) snaps in on frame 0. Color
+    // and weight still hard-cut today — animating those needs a shader-side
+    // tint pass, which the glyph atlas pipeline doesn't have yet.
+    const sizeMorphPath = !contentChanged
       && styleChanged
-      && _onlyFontSizeDiffers(this._style, style);
+      && this._style.FontSize !== style.FontSize;
     const wrapChanged = maxWidth !== this._maxWidth;
 
     let needsKick = false;
 
-    if (fontSizeOnlyChanged) {
-      // Pure size change — skip the fade-out/in reconcile. Keep the same
-      // words, retarget their Scale spring so the NEW-size raster visually
-      // matches the OLD size on frame 0 and springs to 1.0. Re-measure
-      // widths/positions with the new style so layout settles.
+    if (sizeMorphPath) {
       needsKick = this._retargetFontSize(content, style, maxWidth) || needsKick;
       this._style = _cloneStyle(style);
       this._maxWidth = maxWidth;
@@ -106,16 +117,24 @@ export class TextAnimator implements Animatable {
       if (w.SpringY.Step(dt)) active = true;
       if (w.Opacity.Step(dt)) active = true;
       if (w.Scale.Step(dt)) active = true;
+      if (w.TintR.Step(dt)) active = true;
+      if (w.TintG.Step(dt)) active = true;
+      if (w.TintB.Step(dt)) active = true;
+      if (w.TintA.Step(dt)) active = true;
     }
     return active;
   };
 
   // ─── Internal ───
 
-  /** Retarget existing words for a pure FontSize change. Raster snaps to
-   *  the new size (via Style update), but each word's Scale spring is
-   *  yanked to `oldSize/newSize` so the visible glyph matches the old
-   *  size on frame 0 and smoothly springs back to 1.0 at the new size.
+  /** Retarget existing words for a content-unchanged style change that
+   *  includes a FontSize delta. Raster snaps to the new style; each word's
+   *  Scale spring is yanked to `oldSize/newSize` so the visible glyph
+   *  matches the old size on frame 0 and smoothly springs to 1.0 at the
+   *  new size. If Color also changed, each word's Tint{R,G,B,A} spring is
+   *  yanked to `oldColor/newColor` per channel and targets 1.0 — the new
+   *  raster has the new baked color, the tint multiplies it back to the
+   *  old visible color at frame 0, then lerps to passthrough.
    *  Positions are re-measured against the new style so layout settles
    *  at the new width; SpringX/Y smoothly chase the new positions. */
   private _retargetFontSize = (
@@ -131,6 +150,7 @@ export class TextAnimator implements Animatable {
     for (let i = 0; i < living.length && i < positions.length; i++) {
       const w = living[i];
       const p = positions[i];
+      const oldStyle = w.Style;
       w.Style = _cloneStyle(newStyle);
       w.Width = p.Width;
       w.Height = p.Height;
@@ -147,6 +167,7 @@ export class TextAnimator implements Animatable {
       w.Scale.Value = ratio;
       w.Scale.Velocity = 0;
       if (w.Scale.Set(1)) needsKick = true;
+      if (_setTintForColorChange(w, oldStyle.Color, newStyle.Color)) needsKick = true;
     }
     return needsKick;
   };
@@ -208,6 +229,7 @@ export class TextAnimator implements Animatable {
       const existing = matched[i];
       const p = newPositions[i];
       if (existing) {
+        const oldStyle = existing.Style;
         existing.Style = _cloneStyle(newStyle);
         existing.Width = p.Width;
         existing.Height = p.Height;
@@ -221,6 +243,7 @@ export class TextAnimator implements Animatable {
         }
         // Ensure fully visible in case it was fading
         if (existing.Opacity.Set(1)) needsKick = true;
+        if (_setTintForColorChange(existing, oldStyle.Color, newStyle.Color)) needsKick = true;
       } else {
         // New word — fade in at target position
         const word: AnimatedWord = {
@@ -234,6 +257,10 @@ export class TextAnimator implements Animatable {
           SpringY: new Spring(p.Y, this._stiffness, this._damping, 1),
           Opacity: new Spring(0, this._stiffness, this._damping, 1),
           Scale: new Spring(1, this._stiffness, this._damping, 1),
+          TintR: new Spring(1, this._stiffness, this._damping, 1),
+          TintG: new Spring(1, this._stiffness, this._damping, 1),
+          TintB: new Spring(1, this._stiffness, this._damping, 1),
+          TintA: new Spring(1, this._stiffness, this._damping, 1),
           Dying: false,
         };
         word.Opacity.Set(1);
@@ -256,19 +283,30 @@ export class TextAnimator implements Animatable {
 
 // ─── Helpers ───
 
-/** True if ONLY FontSize changed between a and b (everything else equal). */
-const _onlyFontSizeDiffers = (a: ResolvedTextStyle, b: ResolvedTextStyle): boolean => {
-  if (a.FontSize === b.FontSize) return false;
-  return a.FontFamily === b.FontFamily
-    && a.FontWeight === b.FontWeight
-    && a.FontStyle === b.FontStyle
-    && a.LineHeight === b.LineHeight
-    && a.LetterSpacing === b.LetterSpacing
-    && a.TextAlign === b.TextAlign
-    && a.TextOverflow === b.TextOverflow
-    && a.MaxLines === b.MaxLines
-    && a.Color.R === b.Color.R && a.Color.G === b.Color.G
-    && a.Color.B === b.Color.B && a.Color.A === b.Color.A;
+/** When a word's color is changing, snap each Tint{R,G,B,A} spring to the
+ *  oldChannel/newChannel ratio (so the tinted new-color raster looks like
+ *  the old color on frame 0) and target 1.0 so it lerps to passthrough.
+ *  Channels where the new value is 0 fall back to ratio=1 — multiplying by
+ *  0 is already 0 regardless of tint, and the after-settle visual is the
+ *  intended new color. Returns true if anything changed. */
+const _setTintForColorChange = (
+  word: AnimatedWord,
+  oldColor: import('../Core/Types').Color,
+  newColor: import('../Core/Types').Color,
+): boolean => {
+  if (oldColor.R === newColor.R && oldColor.G === newColor.G
+      && oldColor.B === newColor.B && oldColor.A === newColor.A) {
+    return false;
+  }
+  const r = newColor.R > 0 ? oldColor.R / newColor.R : 1;
+  const g = newColor.G > 0 ? oldColor.G / newColor.G : 1;
+  const b = newColor.B > 0 ? oldColor.B / newColor.B : 1;
+  const a = newColor.A > 0 ? oldColor.A / newColor.A : 1;
+  word.TintR.Value = r; word.TintR.Velocity = 0; word.TintR.Set(1);
+  word.TintG.Value = g; word.TintG.Velocity = 0; word.TintG.Set(1);
+  word.TintB.Value = b; word.TintB.Velocity = 0; word.TintB.Set(1);
+  word.TintA.Value = a; word.TintA.Velocity = 0; word.TintA.Set(1);
+  return true;
 };
 
 const _stylesDiffer = (a: ResolvedTextStyle, b: ResolvedTextStyle): boolean => {

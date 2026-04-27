@@ -60,9 +60,9 @@ const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
 const PANEL_ATTR_COUNT = 15; // locations 1..15 — clip_meta is packed into a_Outline.zw
 const BYTES_PER_VEC4 = 16;
 
-const TEXT_FLOATS_PER_INSTANCE = 12;
+const TEXT_FLOATS_PER_INSTANCE = 16;
 const TEXT_BYTES_PER_INSTANCE = TEXT_FLOATS_PER_INSTANCE * 4;
-const TEXT_ATTR_COUNT = 3; // locations 1..3 — clip_meta is packed into a_OpacityClip.yz
+const TEXT_ATTR_COUNT = 4; // locations 1..4 — Rect / UvRect / OpacityClip / Tint
 
 /** Clip-stack texture: RGBA32F, one row. Each clip = 2 texels
  *  (rect.xyzw, radii.xyzw). Sized so at least 1024 clips fit initially. */

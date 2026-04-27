@@ -11,11 +11,12 @@ struct TextUniforms {
   _pad: vec2f,
 }
 
-// Per-instance data: 3 x vec4f = 12 floats (matches TEXT_FLOATS_PER_INSTANCE)
+// Per-instance data: 4 x vec4f = 16 floats (matches TEXT_FLOATS_PER_INSTANCE)
 struct TextInstance {
   rect: vec4f,         // screen x, y, w, h (device px)
   uv_rect: vec4f,      // atlas u, v, uW, uH
   opacity_clip: vec4f, // opacity, clipOffset, clipCount, _pad
+  tint: vec4f,         // RGBA multiplier (1,1,1,1 = passthrough)
 }
 
 @group(0) @binding(0) var<uniform> uniforms: TextUniforms;
@@ -33,6 +34,7 @@ struct VertexOutput {
   @location(2) pixel_pos: vec2f,
   @location(3) @interpolate(flat) clip_offset: u32,
   @location(4) @interpolate(flat) clip_count: u32,
+  @location(5) tint: vec4f,
 }
 
 // Vertex shader — unit quad [0,1] expanded to instance screen rect
@@ -57,6 +59,7 @@ fn vs_main(
   out.pixel_pos = pos;
   out.clip_offset = u32(inst.opacity_clip.y);
   out.clip_count = u32(inst.opacity_clip.z);
+  out.tint = inst.tint;
   return out;
 }
 
@@ -98,5 +101,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     discard;
   }
   let texel = textureSample(atlas, atlas_sampler, in.tex_coord);
-  return texel * in.opacity;
+  return texel * in.tint * in.opacity;
 }

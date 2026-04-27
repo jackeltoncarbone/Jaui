@@ -5,14 +5,14 @@ layout(location = 0) in vec2 a_Position;    // unit quad [0,1]
 layout(location = 1) in vec4 a_Rect;        // per-instance: screen x,y,w,h
 layout(location = 2) in vec4 a_UvRect;      // per-instance: atlas u,v,uW,uH
 layout(location = 3) in vec4 a_OpacityClip; // per-instance: opacity, clipOffset, clipCount, _pad
-// location 4 is padding (reserved for vec4 alignment with the WebGPU buffer
-// layout). The VAO still binds it but the shader never reads from it.
+layout(location = 4) in vec4 a_Tint;        // per-instance: RGBA multiplier (1,1,1,1 = passthrough)
 
 uniform vec2 u_Resolution;
 
 out vec2 v_TexCoord;
 out float v_Opacity;
 out vec2 v_PixelPos;
+out vec4 v_Tint;
 flat out int v_ClipOffset;
 flat out int v_ClipCount;
 
@@ -21,6 +21,7 @@ void main() {
     v_TexCoord = a_UvRect.xy + a_Position * a_UvRect.zw;
     v_Opacity = a_OpacityClip.x;
     v_PixelPos = pos;
+    v_Tint = a_Tint;
     v_ClipOffset = int(a_OpacityClip.y);
     v_ClipCount = int(a_OpacityClip.z);
 

@@ -468,7 +468,7 @@ export class Canvas {
 
     // Scratch buffer for single-instance image draws. Images borrow the
     // text shader pipeline (both sample a texture quad) but logically they
-    // are NOT text — they pack their own 12 floats and use their own
+    // are NOT text — they pack their own 16 floats and use their own
     // texture (the image) rather than the text atlas. Keeping a tiny
     // dedicated array here means we don't clobber the text batch.
     const imageScratch = new Float32Array(TEXT_FLOATS_PER_INSTANCE);
@@ -785,6 +785,8 @@ export class Canvas {
           data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
           data[8] = node.EffectiveOpacity;
           data[9] = imgClipMeta.Offset; data[10] = imgClipMeta.Count; data[11] = 0;
+          // Tint passthrough — images don't want a color multiplier.
+          data[12] = 1; data[13] = 1; data[14] = 1; data[15] = 1;
           r.TextBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.TextAddInstance(data, 0, TEXT_FLOATS_PER_INSTANCE);
@@ -1029,6 +1031,10 @@ export class Canvas {
         Opacity: opacity,
         ClipOffset: clipOffset,
         ClipCount: clipCount,
+        TintR: w.TintR.Value,
+        TintG: w.TintG.Value,
+        TintB: w.TintB.Value,
+        TintA: w.TintA.Value,
       });
     }
   };

@@ -1,14 +1,18 @@
 import type { AtlasUv } from './Text.Cache';
 
 /** Per-instance data for instanced text rendering.
- *  3 × vec4 = 12 floats per instance:
+ *  4 × vec4 = 16 floats per instance:
  *    a_Rect        (x, y, w, h)                           — device pixels [loc 1]
  *    a_UvRect      (u, v, uW, uH)                         — atlas UV     [loc 2]
  *    a_OpacityClip (opacity, clipOffset, clipCount, _pad) — clip meta     [loc 3]
+ *    a_Tint        (R, G, B, A)                           — RGBA multiplier [loc 4]
  *  clipOffset/clipCount index into the per-frame clip-stack buffer.
  *  count=0 means no clipping — shader short-circuits.
+ *  tint=(1,1,1,1) is passthrough — used for static text and image quads.
+ *  Animated color uses tint = oldColor/newColor at frame 0 → (1,1,1,1) over time
+ *  while the glyph atlas raster snaps to the new color (see Text.Animator).
  */
-export const TEXT_FLOATS_PER_INSTANCE = 12;
+export const TEXT_FLOATS_PER_INSTANCE = 16;
 
 export interface TextDrawCommand {
   X: number;         // device pixels
@@ -19,6 +23,11 @@ export interface TextDrawCommand {
   Opacity: number;
   ClipOffset: number;
   ClipCount: number;
+  /** RGBA tint multiplier. (1,1,1,1) = passthrough. */
+  TintR: number;
+  TintG: number;
+  TintB: number;
+  TintA: number;
 }
 
 /**
@@ -60,6 +69,11 @@ export class TextInstanceBuffer {
     data[offset + 9] = cmd.ClipOffset;
     data[offset + 10] = cmd.ClipCount;
     data[offset + 11] = 0;
+
+    data[offset + 12] = cmd.TintR;
+    data[offset + 13] = cmd.TintG;
+    data[offset + 14] = cmd.TintB;
+    data[offset + 15] = cmd.TintA;
 
     this._count++;
   };

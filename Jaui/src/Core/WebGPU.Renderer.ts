@@ -35,7 +35,7 @@ const QUAD_INDICES = new Uint16Array([0, 1, 2, 0, 2, 3]);
 // ─── Instance buffer constants ──────────────────────────────────────────────
 
 const PANEL_FLOATS_PER_INSTANCE = 60;  // 15 × vec4 — clip_meta packed into outline.zw
-const TEXT_FLOATS_PER_INSTANCE = 12;   // 3 × vec4 — clip_meta packed into opacity_clip.yz
+const TEXT_FLOATS_PER_INSTANCE = 16;   // 4 × vec4 — Rect / UvRect / OpacityClip / Tint
 const MIN_CLIP_BUFFER_BYTES = 256;     // placeholder when no clips this frame
 
 // ─── WebGPU Renderer ────────────────────────────────────────────────────────
