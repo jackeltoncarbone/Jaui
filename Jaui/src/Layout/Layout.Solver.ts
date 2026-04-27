@@ -386,11 +386,12 @@ const _solveNode = (
 
       // Text wrap-aware sizing — text's intrinsic is measured unbounded (single
       // line) because pre-solve we don't know the allocated width. Once we know
-      // the parent can only give this child `crossBudget` of cross-axis, re-
-      // measure at that width so the text's main-axis size reflects the wrapped
-      // line count. Without this, the solver sizes the text box at 1-line height
-      // and `_processTextTransitions` later wraps for rendering at the resolved
-      // width — text renders taller than its layout box and overlaps siblings.
+      // the effective cross-axis width (the smaller of: the child's explicit
+      // Width, or the parent's allocated budget), re-measure at that width so
+      // the text's main-axis size reflects the wrapped line count. Without this,
+      // the solver sizes the text box at 1-line height and `_processTextTransitions`
+      // later wraps for rendering at the resolved width — text renders taller
+      // than its layout box and overlaps siblings.
       // Local use only: don't persist to c.TextMeasurement / c.IntrinsicHeight
       // (those stay at the unbounded measurement so `ComputeIntrinsicSizes`
       // still reports max-content sizing, and the answer doesn't drift across
@@ -401,16 +402,21 @@ const _solveNode = (
         const parentPad = container.Padding;
         const contentCross = Math.max(0, width - parentPad[1] - parentPad[3]);
         const crossBudget = Math.max(0, contentCross - ml - mr);
+        // Effective wrap width: child's explicit Width caps the parent's
+        // budget. A `Width: 500pt` title in a 1200pt-wide parent wraps at
+        // 500pt, not 1200pt — match what the renderer actually does.
+        const explicitW = typeof finalW === 'number' ? finalW : Infinity;
+        const effectiveCross = Math.max(0, Math.min(explicitW, crossBudget));
         const [tpt, tpr, tpb, tpl] = ResolveLengthTuple4(c.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);
         const unboundedCross = c.TextMeasurement.Width + tpl + tpr;
-        if (unboundedCross > crossBudget && crossBudget > 0) {
-          const textMaxWidth = Math.max(0, crossBudget - tpl - tpr);
+        if (unboundedCross > effectiveCross && effectiveCross > 0) {
+          const textMaxWidth = Math.max(0, effectiveCross - tpl - tpr);
           if (textMaxWidth > 0) {
             const resolvedStyle = ResolveTextStyle(c.TextStyle, childCtx);
             const wrapped = MeasureText(c.Text, resolvedStyle, textMaxWidth);
             const wrappedMain = wrapped.Height + tpt + tpb;
             if (isKeyword(resolvedH)) finalH = wrappedMain;
-            if (isKeyword(resolvedW) && !crossStretches) finalW = crossBudget;
+            if (isKeyword(resolvedW) && !crossStretches) finalW = effectiveCross;
           }
         }
       }
