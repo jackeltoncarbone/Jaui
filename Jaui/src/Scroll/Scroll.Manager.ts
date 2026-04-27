@@ -257,9 +257,35 @@ export class ScrollManager implements Animatable {
 
     const dx = node.Overflow === 'Scroll' ? offX - node.ScrollX : offX;
     const dy = node.Overflow === 'Scroll' ? offY - node.ScrollY : offY;
-    for (let i = node.Children.length - 1; i >= 0; i--) {
-      const hit = this._hitTopmost(node.Children[i] as Jiv, x, y, dx, dy);
-      if (hit) return hit;
+    // Hit-test must walk children in the SAME z-order as paint: highest
+    // Layer first. Paint uses `orderedChildren` (Layer asc, paint late =
+    // on top); hit-test wants the inverse. For same-Layer ties, walk
+    // INSERTION ORDER REVERSED — matches the no-layer behavior so a
+    // late-mounted sibling (e.g. PageChrome's children attached after
+    // the page's Scroll) takes precedence the way insertion-order reverse
+    // already did. Without the tie-break reversal, a janvas (Layer 0)
+    // mounted before a Scroll (Layer 0) wins over the Scroll for middle-
+    // screen pointers, breaking scroll-target resolution.
+    const children = node.Children as Jiv[];
+    let needsSort = false;
+    for (let i = 0; i < children.length; i++) {
+      if (children[i].RenderStyle.Layer !== 0) { needsSort = true; break; }
+    }
+    if (needsSort) {
+      const decorated = children.map((c, i) => ({ c, i }));
+      decorated.sort((a, b) => {
+        const dl = b.c.RenderStyle.Layer - a.c.RenderStyle.Layer;
+        return dl !== 0 ? dl : b.i - a.i;
+      });
+      for (let i = 0; i < decorated.length; i++) {
+        const hit = this._hitTopmost(decorated[i].c, x, y, dx, dy);
+        if (hit) return hit;
+      }
+    } else {
+      for (let i = children.length - 1; i >= 0; i--) {
+        const hit = this._hitTopmost(children[i], x, y, dx, dy);
+        if (hit) return hit;
+      }
     }
     if (!inside) return null;
     // Descend through PointerEvents:None parents (they're transparent to
