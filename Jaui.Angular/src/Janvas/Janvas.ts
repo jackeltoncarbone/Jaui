@@ -61,7 +61,17 @@ export class Janvas implements OnInit, OnDestroy {
     // layout + renderer resolution happens in ngOnInit, after Angular has
     // populated the input signals (the constructor runs BEFORE input
     // bindings flush for non-static template values).
-    this.Node = new JanvasCore({});
+    //
+    // Default Layer -1 so the foreign renderer always sits behind sibling
+    // UI in both paint AND hit-test order. Without this, a deferred-mount
+    // janvas (App.ts schedules Reality via requestIdleCallback so Three.js
+    // doesn't bloat first paint) is appended to its parent's Children
+    // AFTER the page's Scroll jiv has already mounted — and the hit-test
+    // tie-break on Layer-0 prefers the latest insertion, so janvas would
+    // win middle-of-screen pointers and ResolveScrollTarget would return
+    // null, leaving the page unscrollable until a navigation rebuilds the
+    // tree with janvas already present.
+    this.Node = new JanvasCore({ Style: { Layer: '-1' } });
   }
 
   ngOnInit(): void {

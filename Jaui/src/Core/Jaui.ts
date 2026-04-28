@@ -1159,6 +1159,7 @@ export class Canvas {
         this._textAnimators.delete(node);
       }
     }
+
   };
 
   private _hasDirtyLayout = (node: Jiv): boolean => {
