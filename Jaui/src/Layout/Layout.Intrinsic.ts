@@ -2,6 +2,8 @@ import type { Element } from '../Element/Element';
 import { Resolve, type ResolveContext } from '../Core/Length';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import type { Viewport } from './Layout.Solver';
+import { MeasureText } from '../Text/Text.Measure';
+import { ResolveTextStyle } from '../Text/Text.Types';
 
 /**
  * Compute IntrinsicWidth / IntrinsicHeight for container Elements based on their children.
@@ -86,10 +88,33 @@ const _compute = (node: Element): void => {
   const [pt, pr, pb, pl] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
 
   if (node.Text !== null && node.TextMeasurement !== null) {
+    // Default: unbounded measurement (single-line) drives intrinsic.
+    let mainHeight = node.TextMeasurement.Height + pt + pb;
+    // If the text node has an explicit Width (e.g. a hero title with
+    // `Width: 500pt`) OR the ancestor chain's effective budget is narrower
+    // than the unbounded text, re-measure at that bound. Without this, the
+    // parent column's intrinsic height comes up short — flex-shrink kicks
+    // in at solve time and crushes the title back to single-line height.
+    const explicitW = _intrinsicOf(node.ChildLayout.Width, ctx, 'W');
+    const ancestorPad = _ancestorMainPadding(node, true, ctx);
+    const viewportBudget = Math.max(0, ctx.ViewportWidth - ancestorPad);
+    const wrapBudget = Math.min(
+      explicitW !== null ? explicitW : Infinity,
+      viewportBudget,
+    );
+    const unboundedW = node.TextMeasurement.Width + pl + pr;
+    if (wrapBudget > 0 && wrapBudget < unboundedW) {
+      const textMaxWidth = Math.max(0, wrapBudget - pl - pr);
+      if (textMaxWidth > 0) {
+        const resolvedStyle = ResolveTextStyle(node.TextStyle, ctx);
+        const wrapped = MeasureText(node.Text, resolvedStyle, textMaxWidth);
+        mainHeight = wrapped.Height + pt + pb;
+      }
+    }
     node.IntrinsicWidth = node.TextMeasurement.Width + pl + pr;
-    node.IntrinsicHeight = node.TextMeasurement.Height + pt + pb;
+    node.IntrinsicHeight = mainHeight;
     node.IntrinsicMinWidth = node.TextMeasurement.MinWidth + pl + pr;
-    node.IntrinsicMinHeight = node.TextMeasurement.Height + pt + pb;
+    node.IntrinsicMinHeight = mainHeight;
     return;
   }
 
