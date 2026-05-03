@@ -32,6 +32,13 @@ import { JSS_REGISTRY } from '../Jss/Jss.Registry';
  *
  *    The `[source]` input form is much nicer; prefer it.
  *
+ * **`global` flag** — `<jyle [source]="JwiftGlassJss" global />` registers
+ * the sheet in the registry's globals tier instead of the scoped tier.
+ * Globals can be extended by any later sheet via `MyThing : Base {...}`,
+ * even though the base lives in a different sheet. Use this for design-
+ * system base classes (`JwiftGlass`, typography presets, color tokens) at
+ * app boot. Default `false` — preserves the current scoped behavior.
+ *
  * The element renders nothing visible (`display: none`).
  */
 @Component({
@@ -46,6 +53,11 @@ export class Jyle implements AfterContentInit {
    *  text content (path 2 in the docs above) is ignored. */
   readonly source = input<string | undefined>(undefined);
 
+  /** Register into the registry's globals tier instead of the scoped
+   *  tier. Globals are usable as `: Base` extension targets from any
+   *  sheet that loads after them. */
+  readonly global = input<boolean | string>(false);
+
   private _el = inject(ElementRef<HTMLElement>);
   private _registry = inject(JSS_REGISTRY);
 
@@ -54,7 +66,9 @@ export class Jyle implements AfterContentInit {
     // updates work too.
     effect(() => {
       const src = this.source();
-      if (src) this._registry.MergeSource(src);
+      if (!src) return;
+      if (_truthy(this.global())) this._registry.RegisterGlobal(src);
+      else                         this._registry.MergeSource(src);
     });
   }
 
@@ -62,7 +76,15 @@ export class Jyle implements AfterContentInit {
     // Fall back to projected content if no [source] was bound.
     if (!this.source()) {
       const projected = this._el.nativeElement.textContent ?? '';
-      this._registry.MergeSource(projected);
+      if (_truthy(this.global())) this._registry.RegisterGlobal(projected);
+      else                         this._registry.MergeSource(projected);
     }
   }
 }
+
+// `<jyle global />` (no value) flows in as the empty string, which is
+// falsy in JS but author-intent is clearly truthy. Coerce attribute-style
+// presence to boolean here so both `[global]="true"` and bare `global`
+// work the same way.
+const _truthy = (v: boolean | string): boolean =>
+  v === true || v === '' || (typeof v === 'string' && v.toLowerCase() !== 'false');

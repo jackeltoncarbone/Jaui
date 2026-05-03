@@ -10,6 +10,16 @@ import { ParseJss, type ParsedJss, type Stylesheet, type Ruleset } from 'jaui';
  * own descendants via DI hierarchy. `<jiv class="X">` walks up the DI tree,
  * finds the nearest registry, and resolves "X" against it.
  *
+ * Two tiers:
+ *   • Globals — registered once at app boot via RegisterGlobal(). These
+ *     are the design-system base classes (JwiftGlass, typography presets,
+ *     color tokens) that ANY scoped sheet can extend via `MyThing : Base`.
+ *     Held separately so the parser can fall through to them when a base
+ *     isn't declared in the local sheet.
+ *   • Scoped — registered via MergeSource() from a `<jyle>` projection.
+ *     Per-component / per-page rules. These can extend each other (same
+ *     sheet, current behavior) AND can extend any global.
+ *
  * Registries are mutable bags — a `<jyle>` parses its text content once on
  * mount and merges into the local registry. Re-rendering a `<jyle>` with
  * new content replaces the rules under its own keys (last-wins). Top-level
@@ -26,6 +36,11 @@ import { ParseJss, type ParsedJss, type Stylesheet, type Ruleset } from 'jaui';
 export class JssRegistry {
   /** Class name → routed Ruleset. Lookup is O(1). */
   private _rules = new Map<string, Ruleset>();
+
+  /** Globals tier — base classes the parser can fall through to when a
+   *  scoped sheet's `: Base` lookup misses in the local sheet. Stored as
+   *  a Stylesheet (not a Map) so it can be passed straight to ParseJss. */
+  private _globals: Stylesheet = {};
 
   /** Var name → unresolved value string. The Length resolver substitutes
    *  `@Name` references against this table at property-resolution time. */
@@ -61,10 +76,31 @@ export class JssRegistry {
     this._version.update((v) => v + 1);
   };
 
-  /** Add raw JSS source — convenience for `<jyle>` projections. */
+  /** Add raw JSS source — convenience for `<jyle>` projections. The
+   *  globals tier is passed through to the parser so any `: Base`
+   *  reference in the source can resolve to a registered global when
+   *  it isn't declared in the same sheet. */
   MergeSource = (source: string): void => {
     if (!source.trim()) return;
-    this.Merge(ParseJss(source));
+    this.Merge(ParseJss(source, this._globals));
+  };
+
+  /** Register a sheet of design-system base classes that ANY later
+   *  MergeSource (scoped sheet) can extend via `MyThing : Base`. Call
+   *  once per global sheet at app bootstrap (or wherever the design
+   *  system gets initialized). Globals are also added to the lookup
+   *  map so consumers can use them as direct classes too — e.g.
+   *  `class="JwiftGlass MyThing"`. Idempotent on identical content,
+   *  but re-registration replaces same-named rules (last-wins). */
+  RegisterGlobal = (source: string): void => {
+    if (!source.trim()) return;
+    // Parse against the existing globals so a global sheet can extend
+    // earlier globals (e.g. JwiftSolidGlass : JwiftGlass {...}).
+    const parsed = ParseJss(source, this._globals);
+    for (const [name, ruleset] of Object.entries(parsed.Sheet)) {
+      this._globals[name] = ruleset;
+    }
+    this.Merge(parsed);
   };
 
   /** Resolve one or more space-separated class names to a merged Ruleset.

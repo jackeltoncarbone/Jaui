@@ -26,8 +26,12 @@ import { type SpringConfig, TransitionToSpring } from '../Animation/Animation.Ty
  * fields from `LiquidGlass` first, then overlays Toolbar's own declarations.
  * Multiple bases merge left-to-right (later wins). Extends is NOT runtime
  * stacking — it's a build-time flatten, so the consumer sees one ruleset.
- * Bases must be declared earlier in the same sheet (forward references are
- * a future nicety; error out for now).
+ *
+ * Base lookup order: same-sheet first (fast path, what most consumers
+ * want), then the optional `globals` argument (design-system base classes
+ * registered via JssRegistry.RegisterGlobal). Forward references within a
+ * sheet are still an error — declare bases above the consumer, or hoist
+ * them into the globals tier.
  *
  * Output per class: `{ Style?, Layout?, ChildLayout?, TextStyle? }` where
  * each property lands in its correct slot according to Jss.Routes. The
@@ -87,8 +91,14 @@ const _RESERVED_IDENTS = new Set(['Presence', 'Entering', 'Exiting']);
 
 /** Parse a JSS source string into a typed stylesheet + var table.
  *  Top-level `@Name: value` declarations populate `Vars`; everything
- *  else (`Name { ... }`) populates `Sheet`. */
-export const ParseJss = (source: string): ParsedJss => {
+ *  else (`Name { ... }`) populates `Sheet`.
+ *
+ *  Optional `globals` map: any base class referenced via `Name : Base`
+ *  that isn't declared in this sheet falls back to a lookup here.
+ *  JssRegistry passes its globals tier through on every MergeSource so
+ *  consumer sheets can extend design-system bases (JwiftGlass, etc.)
+ *  without inlining them. */
+export const ParseJss = (source: string, globals?: Stylesheet): ParsedJss => {
   const cleaned = _stripComments(source);
   const sheet: Stylesheet = {};
   const vars: VarTable = {};
@@ -98,7 +108,7 @@ export const ParseJss = (source: string): ParsedJss => {
     if (state.src[state.pos] === '@') {
       _parseTopLevelAt(state, vars);
     } else {
-      _parseRuleset(state, sheet);
+      _parseRuleset(state, sheet, globals);
     }
     _skipWs(state);
   }
@@ -182,7 +192,7 @@ const _parseTopLevelAt = (s: _ScanState, vars: VarTable): void => {
 
 // ─── Rulesets ───────────────────────────────────────────────────────────
 
-const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
+const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): void => {
   // Selector — bare class name, no leading `.`, no ids, no tags, no
   // combinators. JSS uses class-only selectors by design.
   const className = _readIdent(s);
@@ -255,14 +265,19 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
   }
 
   // Flatten extends: start from empty, merge each base in declared order,
-  // then overlay own declarations. Later always wins.
+  // then overlay own declarations. Later always wins. Base lookup tries
+  // the local sheet first (fast path, what most consumers want), then
+  // falls back to the globals tier for design-system bases registered
+  // via JssRegistry.RegisterGlobal.
   let ruleset: Ruleset = own;
   if (bases.length > 0) {
     ruleset = {};
     for (const base of bases) {
-      const baseRuleset = out[base];
+      const baseRuleset = out[base] ?? globals?.[base];
       if (!baseRuleset) {
-        throw new Error(`[Jaui] "${className}" extends unknown class "${base}" — bases must be declared earlier in the same sheet`);
+        throw new Error(
+          `[Jaui] "${className}" extends unknown class "${base}" — declare it earlier in this sheet, or register it as a global with JssRegistry.RegisterGlobal()`,
+        );
       }
       ruleset = _mergeRulesets(ruleset, baseRuleset);
     }
