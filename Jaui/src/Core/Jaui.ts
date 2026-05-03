@@ -621,6 +621,7 @@ export class Canvas {
           MaxLod: maxLod,
           Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
           Feather: node.RenderStyle.ProgressiveBlurFeather * d,
+          Easing: Math.max(0.001, node.RenderStyle.ProgressiveBlurEasing),
           Opacity: node.EffectiveOpacity,
           Background: node.RenderStyle.Background,
           Grading: {
@@ -1052,7 +1053,7 @@ export class Canvas {
     const targetWidth = widthAnim?.Springs.Width.Target ?? node.Width;
     const contentW = targetWidth - padL - padR;
     const maxWidth = contentW > 0 ? contentW : null;
-    const resolvedStyle = ResolveTextStyle(node.TextStyle, ctx);
+    const resolvedStyle = ResolveTextStyle(node.EffectiveTextStyle(), ctx);
 
     if (node.Text !== null) {
       let anim = this._textAnimators.get(node);
@@ -1088,7 +1089,7 @@ export class Canvas {
       // Unbounded measurement — intrinsic sizing with padding is handled by ComputeIntrinsicSizes.
       // TextStyle holds Length fields (FontSize, LetterSpacing) — resolve against this Jiv's ctx.
       const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
-      const resolved = ResolveTextStyle(node.TextStyle, ctx);
+      const resolved = ResolveTextStyle(node.EffectiveTextStyle(), ctx);
       node.TextMeasurement = MeasureText(node.Text, resolved, null);
     } else if (node.Text === null) {
       node.TextMeasurement = null;
@@ -1317,11 +1318,13 @@ export class Canvas {
 
     this.Element.addEventListener('pointermove', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
-      if (hit === this._hoveredJiv) return;
-      setStateChain(hit, this._hoveredJiv, 'Hover');
-      this._hoveredJiv = hit;
-      this.Element.style.cursor = _resolveCursor(hit);
-      this._animationManager.Kick();
+      if (hit !== this._hoveredJiv) {
+        setStateChain(hit, this._hoveredJiv, 'Hover');
+        this._hoveredJiv = hit;
+        this.Element.style.cursor = _resolveCursor(hit);
+        this._animationManager.Kick();
+      }
+      if (hit?.OnPointerMove) hit.OnPointerMove(e);
     });
 
     this.Element.addEventListener('pointerleave', () => {
@@ -1345,6 +1348,7 @@ export class Canvas {
       setStateChain(hit, this._activeJiv, 'Active');
       this._activeJiv = hit;
       this._animationManager.Kick();
+      if (hit.OnPointerDown) hit.OnPointerDown(e);
     });
 
     const clearActive = (): void => {
@@ -1359,6 +1363,7 @@ export class Canvas {
       if (upHit && _clickDownJiv === upHit && upHit.OnClick) {
         upHit.OnClick();
       }
+      if (upHit?.OnPointerUp) upHit.OnPointerUp(e);
       _clickDownJiv = null;
       clearActive();
     });

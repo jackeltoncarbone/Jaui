@@ -50,6 +50,14 @@ export interface Ruleset {
   ActiveStyle?: Partial<JivStyle>;
   FocusStyle?: Partial<JivStyle>;
   DisabledStyle?: Partial<JivStyle>;
+  /** TextStyle declarations from a `:State` block — `Name:Hover { Color: red }`
+   *  routes Color (a TextStyle prop per Jss.Routes) into HoverTextStyle so
+   *  the runtime can layer it on top of the base TextStyle when the matching
+   *  state is active. Plumbed through Jaui core Jiv. */
+  HoverTextStyle?: Partial<TextStyle>;
+  ActiveTextStyle?: Partial<TextStyle>;
+  FocusTextStyle?: Partial<TextStyle>;
+  DisabledTextStyle?: Partial<TextStyle>;
   /** Per-property spring overrides authored via `@Spring Property { … }`
    *  or `@Transition Property { … }` (which translates to a critically-
    *  damped spring). The style animator reads this map when it builds
@@ -183,6 +191,7 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
   // the existing Foo's HoverStyle slot. Must come before the extends check
   // so `Foo:Hover` isn't misread as `Foo extends Hover`.
   let stateSlot: 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle' | null = null;
+  let stateTextSlot: 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle' | null = null;
   if (s.src[s.pos] === ':') {
     const next = s.src[s.pos + 1];
     if (next && next !== ' ' && next !== '\t' && next !== '\n') {
@@ -194,6 +203,7 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
         throw new Error(`[Jaui] "${className}:${stateName}" — unknown state. Use Hover, Active, Focus, or Disabled.`);
       }
       stateSlot = slot;
+      stateTextSlot = _STATE_TO_TEXT_SLOT[stateName];
     }
   }
 
@@ -229,15 +239,18 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet): void => {
     }
   }
 
-  // Pseudo-state ruleset — declarations land in own.Style by default
-  // (SlotFor routes everything visual into Style); copy them into the
-  // target state slot on the existing class.
-  if (stateSlot) {
+  // Pseudo-state ruleset — copy own.Style into the matching state slot AND
+  // own.TextStyle into the matching state-text slot (e.g. `Foo:Hover {
+  // Color: red }` routes Color via Jss.Routes to TextStyle, which we
+  // then layer onto HoverTextStyle so the runtime can apply text-level
+  // hover/active/focus/disabled overrides — not just visual JivStyle.
+  if (stateSlot && stateTextSlot) {
     const target = out[className];
     if (!target) {
       throw new Error(`[Jaui] "${className}:${stateSlot}" declared before base "${className}" — declare the base ruleset first.`);
     }
-    target[stateSlot] = { ...target[stateSlot], ...own.Style };
+    if (own.Style)     target[stateSlot]     = { ...target[stateSlot],     ...own.Style };
+    if (own.TextStyle) target[stateTextSlot] = { ...target[stateTextSlot], ...own.TextStyle };
     return;
   }
 
@@ -358,15 +371,19 @@ const _assignToSlot = (ruleset: Ruleset, prop: string, value: string): void => {
 };
 
 const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
-  Style:         { ...a.Style,         ...b.Style },
-  Layout:        { ...a.Layout,        ...b.Layout },
-  ChildLayout:   { ...a.ChildLayout,   ...b.ChildLayout },
-  TextStyle:     { ...a.TextStyle,     ...b.TextStyle },
-  HoverStyle:    { ...a.HoverStyle,    ...b.HoverStyle },
-  ActiveStyle:   { ...a.ActiveStyle,   ...b.ActiveStyle },
-  FocusStyle:    { ...a.FocusStyle,    ...b.FocusStyle },
-  DisabledStyle: { ...a.DisabledStyle, ...b.DisabledStyle },
-  Springs:       { ...a.Springs,       ...b.Springs },
+  Style:             { ...a.Style,             ...b.Style },
+  Layout:            { ...a.Layout,            ...b.Layout },
+  ChildLayout:       { ...a.ChildLayout,       ...b.ChildLayout },
+  TextStyle:         { ...a.TextStyle,         ...b.TextStyle },
+  HoverStyle:        { ...a.HoverStyle,        ...b.HoverStyle },
+  ActiveStyle:       { ...a.ActiveStyle,       ...b.ActiveStyle },
+  FocusStyle:        { ...a.FocusStyle,        ...b.FocusStyle },
+  DisabledStyle:     { ...a.DisabledStyle,     ...b.DisabledStyle },
+  HoverTextStyle:    { ...a.HoverTextStyle,    ...b.HoverTextStyle },
+  ActiveTextStyle:   { ...a.ActiveTextStyle,   ...b.ActiveTextStyle },
+  FocusTextStyle:    { ...a.FocusTextStyle,    ...b.FocusTextStyle },
+  DisabledTextStyle: { ...a.DisabledTextStyle, ...b.DisabledTextStyle },
+  Springs:           { ...a.Springs,           ...b.Springs },
 });
 
 /** Reserved pseudo-state names following the `:` in `Foo:State`. Maps to
@@ -376,4 +393,13 @@ const _STATE_TO_SLOT: Record<string, 'HoverStyle' | 'ActiveStyle' | 'FocusStyle'
   Active: 'ActiveStyle',
   Focus: 'FocusStyle',
   Disabled: 'DisabledStyle',
+};
+
+/** TextStyle counterpart to _STATE_TO_SLOT — TextStyle props in `:State`
+ *  blocks land here so the runtime can layer them on top of base TextStyle. */
+const _STATE_TO_TEXT_SLOT: Record<string, 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle'> = {
+  Hover: 'HoverTextStyle',
+  Active: 'ActiveTextStyle',
+  Focus: 'FocusTextStyle',
+  Disabled: 'DisabledTextStyle',
 };

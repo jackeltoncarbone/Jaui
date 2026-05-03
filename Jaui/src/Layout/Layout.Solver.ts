@@ -412,7 +412,7 @@ const _solveNode = (
         if (unboundedCross > effectiveCross && effectiveCross > 0) {
           const textMaxWidth = Math.max(0, effectiveCross - tpl - tpr);
           if (textMaxWidth > 0) {
-            const resolvedStyle = ResolveTextStyle(c.TextStyle, childCtx);
+            const resolvedStyle = ResolveTextStyle(c.EffectiveTextStyle(), childCtx);
             const wrapped = MeasureText(c.Text, resolvedStyle, textMaxWidth);
             const wrappedMain = wrapped.Height + tpt + tpb;
             if (isKeyword(resolvedH)) finalH = wrappedMain;

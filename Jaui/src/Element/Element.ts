@@ -133,6 +133,25 @@ export class Element {
    *  click event on the component's host element so `(click)` bindings
    *  in templates Just Work. */
   OnClick: (() => void) | null = null;
+
+  /** Pointer-down handler — fired on the topmost-hit Jiv when a pointer
+   *  press lands on it. Move/up after a press route to `document` (the
+   *  browser keeps firing pointermove/up even when the pointer leaves
+   *  the canvas), so consumers wire those listeners themselves inside
+   *  this callback. Angular binding bridges this to a DOM `pointerdown`
+   *  event on the host element. */
+  OnPointerDown: ((e: PointerEvent) => void) | null = null;
+
+  /** Pointer-move handler — fires while a pointer is over this Jiv,
+   *  whether or not a button is pressed. For drag interactions, prefer
+   *  attaching a `document`-level move listener inside `OnPointerDown`
+   *  so the drag continues even when the pointer leaves the Jiv. */
+  OnPointerMove: ((e: PointerEvent) => void) | null = null;
+
+  /** Pointer-up handler — fires on the topmost-hit Jiv at release. Note
+   *  the up-Jiv may differ from the down-Jiv if the pointer moved during
+   *  the press; for the standard click semantics use OnClick instead. */
+  OnPointerUp: ((e: PointerEvent) => void) | null = null;
   PointerEvents: 'Auto' | 'None' = 'Auto';
   Cursor: CursorStyle = 'Default';
   UserSelect: 'Auto' | 'None' = 'Auto';
@@ -249,6 +268,13 @@ export class Element {
     this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
     if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
   };
+
+  /** Hook for subclasses (Jiv) to layer state-dependent text overrides on
+   *  top of the base TextStyle. The default returns the base unchanged.
+   *  Layout / render code calls this — never reads `.TextStyle` directly —
+   *  so `:Hover { Color: ... }` JSS rules apply uniformly across the
+   *  pipeline without each call site needing to do its own merge. */
+  EffectiveTextStyle = (): TextStyle => this.TextStyle;
 
   /** Force text re-measurement on next tick. Call after something outside
    *  the node changes (e.g. fonts finished loading) that could invalidate

@@ -85,12 +85,23 @@ export class Jiv implements OnInit, OnDestroy {
       }
     }
     this.Node = new JivCore({ ...opts, ...elementProps });
-    // Bridge Jaui's canvas-level click gesture to a DOM click on this
-    // component's host element so standard Angular `(click)` bindings
-    // work. Synthesizes a MouseEvent that bubbles so parent handlers /
-    // Angular change detection pick it up naturally.
+    // Bridge Jaui's canvas-level pointer + click gestures to DOM events
+    // on this component's host element so standard Angular `(click)`
+    // and `(pointerdown/move/up)` bindings work. Synthesized events
+    // bubble so parent handlers / Angular change detection pick them
+    // up naturally. Pointer events carry through clientX/Y/pointerId/
+    // pointerType/button so handlers reading drag positions still work.
     this.Node.OnClick = () => {
       this._host.nativeElement.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    };
+    this.Node.OnPointerDown = (e) => {
+      this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerdown', e));
+    };
+    this.Node.OnPointerMove = (e) => {
+      this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointermove', e));
+    };
+    this.Node.OnPointerUp = (e) => {
+      this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerup', e));
     };
     // Reactively re-apply on input changes — spring animator handles the
     // smooth transition; we don't recreate the Jiv. Tracking the registry
@@ -139,6 +150,10 @@ export class Jiv implements OnInit, OnDestroy {
     ActiveStyle?: Partial<JivStyle>;
     FocusStyle?: Partial<JivStyle>;
     DisabledStyle?: Partial<JivStyle>;
+    HoverTextStyle?: Partial<TextStyle>;
+    ActiveTextStyle?: Partial<TextStyle>;
+    FocusTextStyle?: Partial<TextStyle>;
+    DisabledTextStyle?: Partial<TextStyle>;
     Springs?: Record<string, Partial<SpringConfig>>;
     Text?: string;
   } {
@@ -149,11 +164,15 @@ export class Jiv implements OnInit, OnDestroy {
       Layout:        { ...fromClass?.Layout,        ...this.layout() },
       ChildLayout:   { ...fromClass?.ChildLayout,   ...this.childLayout() },
       TextStyle:     { ...fromClass?.TextStyle,     ...this.textStyle() },
-      HoverStyle:    fromClass?.HoverStyle,
-      ActiveStyle:   fromClass?.ActiveStyle,
-      FocusStyle:    fromClass?.FocusStyle,
-      DisabledStyle: fromClass?.DisabledStyle,
-      Springs:       fromClass?.Springs,
+      HoverStyle:        fromClass?.HoverStyle,
+      ActiveStyle:       fromClass?.ActiveStyle,
+      FocusStyle:        fromClass?.FocusStyle,
+      DisabledStyle:     fromClass?.DisabledStyle,
+      HoverTextStyle:    fromClass?.HoverTextStyle,
+      ActiveTextStyle:   fromClass?.ActiveTextStyle,
+      FocusTextStyle:    fromClass?.FocusTextStyle,
+      DisabledTextStyle: fromClass?.DisabledTextStyle,
+      Springs:           fromClass?.Springs,
       ...(text != null ? { Text: text } : {}),
     };
   }
@@ -209,10 +228,14 @@ export class Jiv implements OnInit, OnDestroy {
     // State styles (Hover/Active/Focus/Disabled) — assigning the whole
     // bag is safe since EffectiveStyle merges Style + the active state on
     // every read; spring animator picks up deltas.
-    if (opts.HoverStyle !== undefined)    this.Node.HoverStyle    = opts.HoverStyle    ?? null;
-    if (opts.ActiveStyle !== undefined)   this.Node.ActiveStyle   = opts.ActiveStyle   ?? null;
-    if (opts.FocusStyle !== undefined)    this.Node.FocusStyle    = opts.FocusStyle    ?? null;
-    if (opts.DisabledStyle !== undefined) this.Node.DisabledStyle = opts.DisabledStyle ?? null;
+    if (opts.HoverStyle !== undefined)        this.Node.HoverStyle        = opts.HoverStyle        ?? null;
+    if (opts.ActiveStyle !== undefined)       this.Node.ActiveStyle       = opts.ActiveStyle       ?? null;
+    if (opts.FocusStyle !== undefined)        this.Node.FocusStyle        = opts.FocusStyle        ?? null;
+    if (opts.DisabledStyle !== undefined)     this.Node.DisabledStyle     = opts.DisabledStyle     ?? null;
+    if (opts.HoverTextStyle !== undefined)    this.Node.HoverTextStyle    = opts.HoverTextStyle    ?? null;
+    if (opts.ActiveTextStyle !== undefined)   this.Node.ActiveTextStyle   = opts.ActiveTextStyle   ?? null;
+    if (opts.FocusTextStyle !== undefined)    this.Node.FocusTextStyle    = opts.FocusTextStyle    ?? null;
+    if (opts.DisabledTextStyle !== undefined) this.Node.DisabledTextStyle = opts.DisabledTextStyle ?? null;
     // Note: Springs only honoured at JivCore construction (StyleAnimator
     // builds the per-channel spring set once); changing them after mount
     // doesn't re-tune existing springs. Late-bound state changes still
@@ -229,5 +252,24 @@ export class Jiv implements OnInit, OnDestroy {
     if (img !== undefined) this.Node.ImageSrc = img;
     this.Node.MarkLayoutDirty();
   }
+}
+
+function _clonePointerEvent(type: string, src: PointerEvent): PointerEvent {
+  const evt = new PointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX: src.clientX,
+    clientY: src.clientY,
+    pointerId: src.pointerId,
+    pointerType: src.pointerType,
+    button: src.button,
+    buttons: src.buttons,
+  });
+  // Marker so DOM listeners on ancestor elements (e.g. page-root field
+  // gesture handlers) can distinguish bridge-synthesized events — fired
+  // because Jaui hit-tested a Jiv-painted child — from native pointer
+  // events on the canvas, which target real field area.
+  (evt as PointerEvent & { __jauiBridged?: boolean }).__jauiBridged = true;
+  return evt;
 }
 

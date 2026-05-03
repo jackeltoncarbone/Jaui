@@ -82,11 +82,15 @@ export class JssRegistry {
       if (r.Layout)        out.Layout        = { ...out.Layout,        ...r.Layout };
       if (r.ChildLayout)   out.ChildLayout   = { ...out.ChildLayout,   ...r.ChildLayout };
       if (r.TextStyle)     out.TextStyle     = { ...out.TextStyle,     ...r.TextStyle };
-      if (r.HoverStyle)    out.HoverStyle    = { ...out.HoverStyle,    ...r.HoverStyle };
-      if (r.ActiveStyle)   out.ActiveStyle   = { ...out.ActiveStyle,   ...r.ActiveStyle };
-      if (r.FocusStyle)    out.FocusStyle    = { ...out.FocusStyle,    ...r.FocusStyle };
-      if (r.DisabledStyle) out.DisabledStyle = { ...out.DisabledStyle, ...r.DisabledStyle };
-      if (r.Springs)       out.Springs       = { ...out.Springs,       ...r.Springs };
+      if (r.HoverStyle)        out.HoverStyle        = { ...out.HoverStyle,        ...r.HoverStyle };
+      if (r.ActiveStyle)       out.ActiveStyle       = { ...out.ActiveStyle,       ...r.ActiveStyle };
+      if (r.FocusStyle)        out.FocusStyle        = { ...out.FocusStyle,        ...r.FocusStyle };
+      if (r.DisabledStyle)     out.DisabledStyle     = { ...out.DisabledStyle,     ...r.DisabledStyle };
+      if (r.HoverTextStyle)    out.HoverTextStyle    = { ...out.HoverTextStyle,    ...r.HoverTextStyle };
+      if (r.ActiveTextStyle)   out.ActiveTextStyle   = { ...out.ActiveTextStyle,   ...r.ActiveTextStyle };
+      if (r.FocusTextStyle)    out.FocusTextStyle    = { ...out.FocusTextStyle,    ...r.FocusTextStyle };
+      if (r.DisabledTextStyle) out.DisabledTextStyle = { ...out.DisabledTextStyle, ...r.DisabledTextStyle };
+      if (r.Springs)           out.Springs           = { ...out.Springs,           ...r.Springs };
     }
     return matched ? out : null;
   };

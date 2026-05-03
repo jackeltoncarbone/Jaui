@@ -110,7 +110,7 @@ const _compute = (node: Element): void => {
     if (wrapBudget > 0 && wrapBudget < unboundedW) {
       const textMaxWidth = Math.max(0, wrapBudget - pl - pr);
       if (textMaxWidth > 0) {
-        const resolvedStyle = ResolveTextStyle(node.TextStyle, ctx);
+        const resolvedStyle = ResolveTextStyle(node.EffectiveTextStyle(), ctx);
         const wrapped = MeasureText(node.Text, resolvedStyle, textMaxWidth);
         mainHeight = wrapped.Height + pt + pb;
         // Persist the wrapped measurement on the node so downstream code

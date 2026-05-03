@@ -5,6 +5,7 @@ import type { LayoutConfig, ChildLayout, Overflow } from '../Layout/Layout.Types
 import type { TextStyle } from '../Text/Text.Types';
 import type { SpringConfig } from '../Animation/Animation.Types';
 import { Element, type CursorStyle } from '../Element/Element';
+import { DirtyFlag } from '../Core/Types';
 
 /**
  * Jiv — a visual panel element. Extends Element with material, style,
@@ -29,14 +30,62 @@ export class Jiv extends Element {
 
   // ── Interaction states ──
 
-  Hover: boolean = false;
-  Active: boolean = false;
-  Focus: boolean = false;
-  Disabled: boolean = false;
+  // Backing fields for state flags — public Hover/Active/Focus/Disabled are
+  // accessor properties below so the engine can mark text dirty when a state
+  // toggles AND that state has a *TextStyle override (otherwise the
+  // renderer would never re-measure / re-paint the text in its hover style).
+  private _hover: boolean = false;
+  private _active: boolean = false;
+  private _focus: boolean = false;
+  private _disabled: boolean = false;
+
   HoverStyle: Partial<JivStyle> | null = null;
   ActiveStyle: Partial<JivStyle> | null = null;
   FocusStyle: Partial<JivStyle> | null = null;
   DisabledStyle: Partial<JivStyle> | null = null;
+  /** Text-level state overrides — `Foo:Hover { Color: red }` lands here.
+   *  Layered on top of the base TextStyle by `EffectiveTextStyle()` when
+   *  the matching state flag is set. */
+  HoverTextStyle: Partial<TextStyle> | null = null;
+  ActiveTextStyle: Partial<TextStyle> | null = null;
+  FocusTextStyle: Partial<TextStyle> | null = null;
+  DisabledTextStyle: Partial<TextStyle> | null = null;
+
+  get Hover(): boolean { return this._hover; }
+  set Hover(v: boolean) {
+    if (this._hover === v) return;
+    this._hover = v;
+    if (this.HoverTextStyle) this._invalidateText();
+  }
+  get Active(): boolean { return this._active; }
+  set Active(v: boolean) {
+    if (this._active === v) return;
+    this._active = v;
+    if (this.ActiveTextStyle) this._invalidateText();
+  }
+  get Focus(): boolean { return this._focus; }
+  set Focus(v: boolean) {
+    if (this._focus === v) return;
+    this._focus = v;
+    if (this.FocusTextStyle) this._invalidateText();
+  }
+  get Disabled(): boolean { return this._disabled; }
+  set Disabled(v: boolean) {
+    if (this._disabled === v) return;
+    this._disabled = v;
+    if (this.DisabledTextStyle) this._invalidateText();
+  }
+
+  // Text-only invalidation — pushes a re-measure / re-paint without forcing
+  // a layout pass when the new TextStyle would only change Color or other
+  // non-metric props. The dirty-text flag flips on; the next frame's render
+  // pipeline calls EffectiveTextStyle() and rebuilds glyphs. We also bubble
+  // a Layout dirty mark to the parent because line breaks/heights might
+  // change when a font-metric prop is in the override (FontSize/Family/etc.).
+  private _invalidateText = (): void => {
+    this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
+    if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
+  };
 
   /** Optional style override for text selection highlights. */
   TextSelectionStyle: Partial<JivStyle> | null = null;
@@ -57,6 +106,10 @@ export class Jiv extends Element {
     ActiveStyle?: Partial<JivStyle>;
     FocusStyle?: Partial<JivStyle>;
     DisabledStyle?: Partial<JivStyle>;
+    HoverTextStyle?: Partial<TextStyle>;
+    ActiveTextStyle?: Partial<TextStyle>;
+    FocusTextStyle?: Partial<TextStyle>;
+    DisabledTextStyle?: Partial<TextStyle>;
     TextSelectionStyle?: Partial<JivStyle>;
     Springs?: Record<string, Partial<SpringConfig>>;
     SnapLayout?: boolean;
@@ -99,6 +152,10 @@ export class Jiv extends Element {
     this.ActiveStyle = options?.ActiveStyle ?? null;
     this.FocusStyle = options?.FocusStyle ?? null;
     this.DisabledStyle = options?.DisabledStyle ?? null;
+    this.HoverTextStyle = options?.HoverTextStyle ?? null;
+    this.ActiveTextStyle = options?.ActiveTextStyle ?? null;
+    this.FocusTextStyle = options?.FocusTextStyle ?? null;
+    this.DisabledTextStyle = options?.DisabledTextStyle ?? null;
     this.TextSelectionStyle = options?.TextSelectionStyle ?? null;
     this.Springs = options?.Springs ?? null;
   }
@@ -106,12 +163,27 @@ export class Jiv extends Element {
   /** Final render-time style: base + state overrides in priority order.
    *  Disabled beats Focus beats Active beats Hover. */
   EffectiveStyle = (): JivStyle => {
-    if (!this.Hover && !this.Active && !this.Focus && !this.Disabled) return this.Style;
+    if (!this._hover && !this._active && !this._focus && !this._disabled) return this.Style;
     const merged: JivStyle = { ...this.Style };
-    if (this.Hover && this.HoverStyle) Object.assign(merged, this.HoverStyle);
-    if (this.Active && this.ActiveStyle) Object.assign(merged, this.ActiveStyle);
-    if (this.Focus && this.FocusStyle) Object.assign(merged, this.FocusStyle);
-    if (this.Disabled && this.DisabledStyle) Object.assign(merged, this.DisabledStyle);
+    if (this._hover && this.HoverStyle) Object.assign(merged, this.HoverStyle);
+    if (this._active && this.ActiveStyle) Object.assign(merged, this.ActiveStyle);
+    if (this._focus && this.FocusStyle) Object.assign(merged, this.FocusStyle);
+    if (this._disabled && this.DisabledStyle) Object.assign(merged, this.DisabledStyle);
+    return merged;
+  };
+
+  /** Text-style counterpart to EffectiveStyle. Layout / render call sites
+   *  read this instead of `node.TextStyle` directly so JSS `Foo:Hover {
+   *  Color: red }` actually paints — the parser routes Color into
+   *  HoverTextStyle and we layer it here when the matching state is set.
+   *  Same priority order: Disabled > Focus > Active > Hover. */
+  override EffectiveTextStyle = (): TextStyle => {
+    if (!this._hover && !this._active && !this._focus && !this._disabled) return this.TextStyle;
+    const merged: TextStyle = { ...this.TextStyle };
+    if (this._hover && this.HoverTextStyle) Object.assign(merged, this.HoverTextStyle);
+    if (this._active && this.ActiveTextStyle) Object.assign(merged, this.ActiveTextStyle);
+    if (this._focus && this.FocusTextStyle) Object.assign(merged, this.FocusTextStyle);
+    if (this._disabled && this.DisabledTextStyle) Object.assign(merged, this.DisabledTextStyle);
     return merged;
   };
 }
