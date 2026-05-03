@@ -473,7 +473,7 @@ export class WebGPURenderer implements Renderer {
       params.Opacity,                         // opacity
       params.Feather,                         // feather (device px; 0 = full-element ramp)
       params.Background.R, params.Background.G, params.Background.B, params.Background.A, // background
-      params.Grading.Brightness, params.Grading.Saturation, params.Grading.Contrast, 0, // grading + pad
+      params.Grading.Brightness, params.Grading.Saturation, params.Grading.Contrast, params.Easing, // grading + easing
       params.ClipOffset, params.ClipCount, 0, 0, // clip_meta + pad
     ]));
 

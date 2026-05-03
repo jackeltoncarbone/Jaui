@@ -16,7 +16,7 @@ struct ProgressiveBlurUniforms {
   feather: f32,             // ramp length in device px; 0 = full-element ramp
   background: vec4f,        // RGBA tint mixed in along the ramp
   grading: vec3f,           // brightness, saturation, contrast (1 = identity)
-  _pad1: f32,
+  easing: f32,              // exponent on smoothstep'd ramp (1 = unchanged)
   clip_meta: vec4f,         // clipOffset, clipCount, _pad, _pad
 }
 
@@ -131,7 +131,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     return vec4f(uniforms.background.rgb, uniforms.opacity);
   }
 
-  let ramp = smoothstep(0.0, 1.0, t);
+  let ramp = pow(smoothstep(0.0, 1.0, t), uniforms.easing);
 
   // Clamp sample_uv so mipmap neighborhoods never reach past the parent's
   // clip AABB. Inset by half a texel at the current LOD so the bilinear

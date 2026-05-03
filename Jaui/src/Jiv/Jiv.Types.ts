@@ -46,6 +46,15 @@ export interface JivStyle {
    *  (the default, matches pre-feature behaviour). */
   ProgressiveBlurFeather: string;
 
+  /** Exponent applied to the smoothstep'd blur ramp — `ramp = pow(smoothstep(t), Easing)`.
+   *  Default `"1"` = unchanged smoothstep. Lower values (e.g. `"0.4"`) bias toward
+   *  MORE blur: ramp climbs fast at the clear end so most of the feather strip
+   *  reads as heavy blur with a tight falloff to clear. Higher values (e.g. `"2"`)
+   *  bias toward MORE clear: ramp stays low through most of the strip and the
+   *  blur only kicks in near the blurred edge. Affects blur LOD, backdrop
+   *  grading, and background-tint mix together. */
+  ProgressiveBlurEasing: string;
+
   /** Cascading base unit. `1pt` anywhere in this Jiv's subtree resolves to
    *  `N × PointScale`. When resolving PointScale itself, `pt` refers to
    *  PARENT's PointScale. Default `"1pt"` — inherit parent. */
@@ -166,6 +175,10 @@ export interface JivRenderStyle {
   ProgressiveBlurDirection: ProgressiveBlurDirection;
   /** Feather ramp length in device pixels. 0 = ramp spans whole element. */
   ProgressiveBlurFeather: number;
+  /** Exponent applied to the smoothstep'd ramp. 1 = unchanged smoothstep
+   *  (default). <1 = more blur, sharper falloff to clear. >1 = more clear,
+   *  blur weighted toward the blurred edge. */
+  ProgressiveBlurEasing: number;
   PointScale: number;
 
   BorderRadius: [number, number, number, number];          // tl, tr, br, bl

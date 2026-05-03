@@ -42,6 +42,9 @@ export interface ProgressiveBlurParams {
    *  (original behaviour). Anything else remaps the ramp so only the first
    *  `Feather` pixels from the clear edge transition; the rest is solid. */
   Feather: number;
+  /** Exponent applied to the smoothstep'd ramp. 1 = unchanged. <1 = blur
+   *  dominates with sharp falloff to clear. >1 = clear dominates. */
+  Easing: number;
   Opacity: number;
   Background: { R: number; G: number; B: number; A: number };
   Grading: { Brightness: number; Saturation: number; Contrast: number };

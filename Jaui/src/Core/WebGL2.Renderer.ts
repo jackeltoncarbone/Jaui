@@ -214,6 +214,7 @@ export class WebGL2Renderer implements Renderer {
     maxLod: WebGLUniformLocation | null;
     direction: WebGLUniformLocation | null;
     feather: WebGLUniformLocation | null;
+    easing: WebGLUniformLocation | null;
     opacity: WebGLUniformLocation | null;
     background: WebGLUniformLocation | null;
     grading: WebGLUniformLocation | null;
@@ -592,6 +593,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1f(this._progBlurLocs.maxLod, params.MaxLod);
     gl.uniform1i(this._progBlurLocs.direction, params.Direction);
     gl.uniform1f(this._progBlurLocs.feather, params.Feather);
+    gl.uniform1f(this._progBlurLocs.easing, params.Easing);
     gl.uniform1f(this._progBlurLocs.opacity, params.Opacity);
     gl.uniform4f(this._progBlurLocs.background,
       params.Background.R, params.Background.G, params.Background.B, params.Background.A);
@@ -913,6 +915,7 @@ export class WebGL2Renderer implements Renderer {
       maxLod: gl.getUniformLocation(p, 'u_MaxLod'),
       direction: gl.getUniformLocation(p, 'u_Direction'),
       feather: gl.getUniformLocation(p, 'u_Feather'),
+      easing: gl.getUniformLocation(p, 'u_Easing'),
       opacity: gl.getUniformLocation(p, 'u_Opacity'),
       background: gl.getUniformLocation(p, 'u_Background'),
       grading: gl.getUniformLocation(p, 'u_Grading'),

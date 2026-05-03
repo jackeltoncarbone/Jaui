@@ -61,6 +61,7 @@ uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = b
 uniform float u_MaxLod;                     // max mipmap LOD to sample (maps to ramp = 1.0)
 uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 ToRight
 uniform float u_Feather;                    // ramp length in device px (0 = span whole element)
+uniform float u_Easing;                     // exponent applied to smoothstep'd ramp (1 = unchanged)
 uniform float u_Opacity;
 uniform vec4 u_Background;                  // tint mixed IN along the ramp (fades clear → authored alpha)
 uniform vec3 u_Grading;                     // (Brightness, Saturation, Contrast) — all 1 = identity
@@ -163,7 +164,9 @@ void main() {
 
     // Smoothstep the ramp — linear feels like a hard diagonal line over
     // uniform content; smoothstep is what the eye reads as "feathered".
-    float ramp = smoothstep(0.0, 1.0, t);
+    // u_Easing reshapes the curve: 1.0 = unchanged, <1 biases toward blur
+    // (ramp climbs fast, sharp falloff to clear), >1 biases toward clear.
+    float ramp = pow(smoothstep(0.0, 1.0, t), u_Easing);
 
     // Sample the unblurred scene and a mipmap LOD from the blur pyramid.
     // At ramp = 0 show pure scene; quickly crossfade into the pyramid so

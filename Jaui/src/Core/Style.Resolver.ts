@@ -93,6 +93,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     Material: _inferMaterial(thickness, s.ProgressiveBlurDirection),
     ProgressiveBlurDirection: s.ProgressiveBlurDirection ?? 'ToTop',
     ProgressiveBlurFeather: Resolve(s.ProgressiveBlurFeather, ctx, 'H'),
+    ProgressiveBlurEasing: Resolve(s.ProgressiveBlurEasing, ctx, 'W'),
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 
     BorderRadius: borderRadius,
