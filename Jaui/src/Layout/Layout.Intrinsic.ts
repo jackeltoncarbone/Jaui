@@ -339,9 +339,29 @@ const _textWrapBudget = (
   horiz: boolean,
   ctx: ResolveContext,
 ): number => {
+  // Fast path: if the immediate parent has been solved (i.e. has a
+  // non-zero Width from a previous frame), its content area is the
+  // authoritative budget for any text living inside it. This already
+  // accounts for every flex/percentage/padding decision the solver made
+  // upstream, so we don't need to re-derive it from the spec.
+  const parent = node.Parent ?? null;
+  if (parent) {
+    const parentSolved = horiz ? parent.Width : parent.Height;
+    if (parentSolved > 0) {
+      const childCtx = parent.ResolveCtx ?? ctx;
+      const [pPt, pPr, pPb, pPl] = ResolveLengthTuple4(parent.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);
+      const pad = horiz ? (pPl + pPr) : (pPt + pPb);
+      return Math.max(0, parentSolved - pad);
+    }
+  }
+
+  // Spec-derived fallback for the first frame (no solved width yet).
+  // Walks ancestors accumulating paddings; pins the budget on the first
+  // explicit non-percent width, with any % ancestors descended through
+  // applied as a multiplier; falls back to viewport otherwise.
   let totalPad = 0;
   let multiplier = 1;
-  let cur: Element | null = node.Parent ?? null;
+  let cur: Element | null = parent;
   while (cur) {
     const childCtx = cur.ResolveCtx ?? ctx;
     const [_pt, pr, _pb, pl] = ResolveLengthTuple4(cur.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);
@@ -349,22 +369,14 @@ const _textWrapBudget = (
     const ownMain = horiz ? cur.ChildLayout.Width : cur.ChildLayout.Height;
     const explicit = _intrinsicOf(ownMain, childCtx, horiz ? 'W' : 'H');
     if (explicit !== null) {
-      // Bounded — pin the budget to this ancestor's explicit width
-      // (scaled by any accumulated percentages from descendants), minus
-      // accumulated paddings on the way down.
       return Math.max(0, explicit * multiplier - totalPad);
     }
-    // Percentage width? Accumulate as a multiplier and keep walking. Same
-    // for the height axis (`Height: 50%`).
     if (typeof ownMain === 'string' && ownMain.includes('%')) {
       const pctMatch = /^\s*([\d.]+)\s*%\s*$/.exec(ownMain);
-      if (pctMatch) {
-        multiplier *= Number(pctMatch[1]) / 100;
-      }
+      if (pctMatch) multiplier *= Number(pctMatch[1]) / 100;
     }
     cur = cur.Parent ?? null;
   }
-  // Unbounded ancestor chain → viewport (also scaled by accumulated %).
   const vp = horiz ? ctx.ViewportWidth : ctx.ViewportHeight;
   return Math.max(0, vp * multiplier - totalPad);
 };
