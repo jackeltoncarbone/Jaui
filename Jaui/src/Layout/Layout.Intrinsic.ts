@@ -96,11 +96,15 @@ const _compute = (node: Element): void => {
     // parent column's intrinsic height comes up short — flex-shrink kicks
     // in at solve time and crushes the title back to single-line height.
     const explicitW = _intrinsicOf(node.ChildLayout.Width, ctx, 'W');
-    const ancestorPad = _ancestorMainPadding(node, true, ctx);
-    const viewportBudget = Math.max(0, ctx.ViewportWidth - ancestorPad);
+    // Use the nearest ancestor's bounded width (rail, page section, etc.)
+    // when computing the wrap budget, not the raw viewport width — otherwise
+    // text inside a flex-shrunk container measures as 1 line at viewport
+    // width, the box gets sized to 1 line, and the actual rendering wraps
+    // many lines past the box.
+    const ancestorBudget = _textWrapBudget(node, true, ctx);
     const wrapBudget = Math.min(
       explicitW !== null ? explicitW : Infinity,
-      viewportBudget,
+      ancestorBudget,
     );
     const unboundedW = node.TextMeasurement.Width + pl + pr;
     if (wrapBudget > 0 && wrapBudget < unboundedW) {
@@ -109,6 +113,10 @@ const _compute = (node: Element): void => {
         const resolvedStyle = ResolveTextStyle(node.TextStyle, ctx);
         const wrapped = MeasureText(node.Text, resolvedStyle, textMaxWidth);
         mainHeight = wrapped.Height + pt + pb;
+        // Persist the wrapped measurement on the node so downstream code
+        // (including the renderer's word layout pass) sees the correct
+        // line count, not the unbounded single-line measurement.
+        node.TextMeasurement = wrapped;
       }
     }
     node.IntrinsicWidth = node.TextMeasurement.Width + pl + pr;
@@ -311,6 +319,45 @@ const _ancestorMainPadding = (
     cur = cur.Parent ?? null;
   }
   return total;
+};
+
+/** Wrap budget for a text node, taking flex-shrunk ancestors into account.
+ *  Walks up the entire ancestor chain accumulating paddings; when it hits
+ *  the first ancestor with an explicit non-percent width, returns that
+ *  width minus accumulated paddings. Without this, a label inside a 280pt
+ *  rail would measure against the 1200pt viewport, get a 1-line height,
+ *  and visually overflow when the solver shrinks it to 280pt.
+ *
+ *  Same-direction ancestors (Row ancestors for horiz text) accumulate
+ *  padding but don't pin the budget on their own width — siblings could
+ *  share that width. The first perpendicular-direction ancestor (or any
+ *  with an explicit width) terminates the walk.
+ *
+ *  Falls back to viewport width minus accumulated paddings if no bounded
+ *  ancestor is found. */
+const _textWrapBudget = (
+  node: Element,
+  horiz: boolean,
+  ctx: ResolveContext,
+): number => {
+  let totalPad = 0;
+  let cur: Element | null = node.Parent ?? null;
+  while (cur) {
+    const childCtx = cur.ResolveCtx ?? ctx;
+    const [_pt, pr, _pb, pl] = ResolveLengthTuple4(cur.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);
+    totalPad += horiz ? (pl + pr) : (_pt + _pb);
+    const ownMain = horiz ? cur.ChildLayout.Width : cur.ChildLayout.Height;
+    const explicit = _intrinsicOf(ownMain, childCtx, horiz ? 'W' : 'H');
+    if (explicit !== null) {
+      // Bounded — this ancestor pins the budget. (Subtract its own padding
+      // because the text node lives inside the ancestor's content box.)
+      return Math.max(0, explicit - totalPad);
+    }
+    cur = cur.Parent ?? null;
+  }
+  // Unbounded ancestor chain → viewport.
+  const vp = horiz ? ctx.ViewportWidth : ctx.ViewportHeight;
+  return Math.max(0, vp - totalPad);
 };
 
 /** Return a pixel value if the dimension is "known" without parent dims.

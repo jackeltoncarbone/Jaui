@@ -86,6 +86,12 @@ export const LayoutWords = (
       currentLine++;
     }
 
+    // MaxLines clip: stop laying out once we've wrapped past the cap, so
+    // long-text labels don't render N extra lines of glyphs through whatever
+    // sits below them. Without this, MaxLines only sized the layout box —
+    // the renderer kept drawing every word.
+    if (style.MaxLines !== null && currentLine >= style.MaxLines) break;
+
     positions.push({
       Content: word,
       X: currentX,
@@ -97,8 +103,11 @@ export const LayoutWords = (
 
     currentX += w + spaceWidth;
   }
-  // Final line
-  lineRanges.push({ start: lineStart, end: words.length - 1, width: currentX - spaceWidth });
+  // Final line — only emit if any positions were laid out (MaxLines may have
+  // clipped before any words landed, leaving an empty positions list).
+  if (positions.length > 0) {
+    lineRanges.push({ start: lineStart, end: positions.length - 1, width: currentX - spaceWidth });
+  }
 
   // Pass 2: apply TextAlign per-line (Center/Right shift)
   if (maxWidth !== null && style.TextAlign !== 'Left') {

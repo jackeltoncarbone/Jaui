@@ -205,13 +205,17 @@ export class TextAnimator implements Animatable {
   ): boolean => {
     const newTokens = Tokenize(newContent);
     const newPositions = LayoutWords(newContent, newStyle, maxWidth);
+    // LayoutWords may clip trailing tokens (e.g. MaxLines reached), so the
+    // visible token set is whatever has a position — anything past that is
+    // dropped from the animated word list.
+    const visibleCount = newPositions.length;
 
     // Match new tokens against living words by content — first-occurrence greedy match.
     const living = this.Words.filter((w) => !w.Dying);
     const usedLiving = new Set<AnimatedWord>();
-    const matched: (AnimatedWord | null)[] = newTokens.map(() => null);
+    const matched: (AnimatedWord | null)[] = new Array(visibleCount).fill(null);
 
-    for (let i = 0; i < newTokens.length; i++) {
+    for (let i = 0; i < visibleCount; i++) {
       const token = newTokens[i];
       for (const w of living) {
         if (!usedLiving.has(w) && w.Content === token) {
@@ -224,8 +228,17 @@ export class TextAnimator implements Animatable {
 
     let needsKick = false;
 
+    // Build the new Words array in newTokens order. Reusing matched words
+    // keeps their springs (smooth motion), creating new ones for unmatched
+    // positions, and dying ones (no longer in the new content) get appended
+    // at the end so they fade out without disturbing the live word order.
+    // Critical: Words[i] must correspond to newTokens[i] for the lifetime
+    // of the animator — _reflow zips positions by index, so any drift here
+    // causes words to render at the wrong x positions on the next reflow.
+    const reordered: AnimatedWord[] = [];
+
     // Update matched words (position change + style update)
-    for (let i = 0; i < newTokens.length; i++) {
+    for (let i = 0; i < visibleCount; i++) {
       const existing = matched[i];
       const p = newPositions[i];
       if (existing) {
@@ -244,6 +257,7 @@ export class TextAnimator implements Animatable {
         // Ensure fully visible in case it was fading
         if (existing.Opacity.Set(1)) needsKick = true;
         if (_setTintForColorChange(existing, oldStyle.Color, newStyle.Color)) needsKick = true;
+        reordered.push(existing);
       } else {
         // New word — fade in at target position
         const word: AnimatedWord = {
@@ -264,18 +278,27 @@ export class TextAnimator implements Animatable {
           Dying: false,
         };
         word.Opacity.Set(1);
-        this.Words.push(word);
+        reordered.push(word);
         needsKick = true;
       }
     }
 
-    // Words not matched → fade out
+    // Words not matched → fade out (kept in array but marked dying so the
+    // prune step after Update() can remove them once their opacity settles)
     for (const w of living) {
       if (!usedLiving.has(w)) {
         if (w.Opacity.Set(0)) needsKick = true;
         w.Dying = true;
+        reordered.push(w);
       }
     }
+    // Preserve any already-dying words (they haven't finished fading yet).
+    for (const w of this.Words) {
+      if (w.Dying && !reordered.includes(w)) reordered.push(w);
+    }
+
+    this.Words.length = 0;
+    this.Words.push(...reordered);
 
     return needsKick;
   };
