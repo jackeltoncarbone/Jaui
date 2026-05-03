@@ -386,37 +386,70 @@ const _solveNode = (
 
       // Text wrap-aware sizing — text's intrinsic is measured unbounded (single
       // line) because pre-solve we don't know the allocated width. Once we know
-      // the effective cross-axis width (the smaller of: the child's explicit
-      // Width, or the parent's allocated budget), re-measure at that width so
-      // the text's main-axis size reflects the wrapped line count. Without this,
-      // the solver sizes the text box at 1-line height and `_processTextTransitions`
-      // later wraps for rendering at the resolved width — text renders taller
-      // than its layout box and overlaps siblings.
+      // the available width budget (parent content width minus padding/margins/
+      // siblings), re-measure at that width so the text's main-axis size
+      // reflects the wrapped (or ellipsized) line count.
+      //
+      // Without this, the solver sizes the text box at 1-line height and
+      // `_processTextTransitions` later wraps for rendering at the resolved
+      // width — text renders taller than its layout box and overlaps siblings.
+      // Or with MaxLines:1 + Ellipsis, the line never gets clipped because the
+      // measurement was unbounded (no maxWidth → no truncation needed).
+      //
       // Local use only: don't persist to c.TextMeasurement / c.IntrinsicHeight
       // (those stay at the unbounded measurement so `ComputeIntrinsicSizes`
       // still reports max-content sizing, and the answer doesn't drift across
       // frames when container width animates past the wrap threshold).
-      // Column-direction parents only for now — Row-parent wrap needs post-flex
-      // shrink resolution which isn't available pre-solve.
-      if (!horiz && c.Text !== null && c.TextMeasurement !== null) {
+      if (c.Text !== null && c.TextMeasurement !== null) {
         const parentPad = container.Padding;
-        const contentCross = Math.max(0, width - parentPad[1] - parentPad[3]);
-        const crossBudget = Math.max(0, contentCross - ml - mr);
+        // Width budget = parent's WIDTH content rect minus this child's
+        // horizontal margins, regardless of flex direction. WIDTH is always
+        // horizontal — the parent's flex direction only changes which axis
+        // is "main", not which axis is horizontal.
+        const parentContentWidth = Math.max(0, width - parentPad[1] - parentPad[3]);
+        const widthBudget = Math.max(0, parentContentWidth - ml - mr);
         // Effective wrap width: child's explicit Width caps the parent's
         // budget. A `Width: 500pt` title in a 1200pt-wide parent wraps at
         // 500pt, not 1200pt — match what the renderer actually does.
         const explicitW = typeof finalW === 'number' ? finalW : Infinity;
-        const effectiveCross = Math.max(0, Math.min(explicitW, crossBudget));
+        const effectiveWidth = Math.max(0, Math.min(explicitW, widthBudget));
         const [tpt, tpr, tpb, tpl] = ResolveLengthTuple4(c.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);
-        const unboundedCross = c.TextMeasurement.Width + tpl + tpr;
-        if (unboundedCross > effectiveCross && effectiveCross > 0) {
-          const textMaxWidth = Math.max(0, effectiveCross - tpl - tpr);
+        const unboundedWidth = c.TextMeasurement.Width + tpl + tpr;
+        if (unboundedWidth > effectiveWidth && effectiveWidth > 0) {
+          const textMaxWidth = Math.max(0, effectiveWidth - tpl - tpr);
           if (textMaxWidth > 0) {
             const resolvedStyle = ResolveTextStyle(c.TextStyle, childCtx);
             const wrapped = MeasureText(c.Text, resolvedStyle, textMaxWidth);
-            const wrappedMain = wrapped.Height + tpt + tpb;
-            if (isKeyword(resolvedH)) finalH = wrappedMain;
-            if (isKeyword(resolvedW) && !crossStretches) finalW = effectiveCross;
+            const wrappedHeight = wrapped.Height + tpt + tpb;
+            // Height grows to fit wrapped lines (or stays 1 line under
+            // MaxLines:1). For column parents we also collapse the width
+            // when not cross-stretching (matches the original behavior).
+            if (isKeyword(resolvedH)) finalH = wrappedHeight;
+            if (!horiz && isKeyword(resolvedW) && !crossStretches) finalW = effectiveWidth;
+          }
+        }
+      }
+
+      // Wrap-aware row height — when c is a Row-direction container with
+      // a single text child whose unbounded width exceeds the row's
+      // allocated cross-axis width, the text will wrap inside the row at
+      // render time. The row's intrinsic was computed assuming that text
+      // takes 1 line, so its IntrinsicHeight under-estimates. Pre-flex,
+      // we know c's allocated cross-axis width (column-parent + cross-
+      // stretch → contentWidth), so simulate the wrap and grow finalH.
+      if (!horiz && crossStretches && isKeyword(resolvedH)) {
+        const childIsRow = c.Layout.Direction === 'Row' || c.Layout.Direction === 'RowReverse';
+        if (childIsRow) {
+          const wrapHeight = _predictRowHeightFromTextWrap(
+            c,
+            contentWidth - ml - mr,
+            childCtx,
+            rootPointScale,
+            viewport,
+            vars,
+          );
+          if (wrapHeight !== null && wrapHeight > (typeof finalH === 'number' ? finalH : 0)) {
+            finalH = wrapHeight;
           }
         }
       }
@@ -477,6 +510,101 @@ const _resolveSize = (
   if (lower === 'mincontent') return 'MinContent';
   if (lower === 'maxcontent') return 'MaxContent';
   return _r(size, ctx, axis);
+};
+
+/** Predict a Row container's actual height when its intrinsic was computed
+ *  assuming text children fit on 1 line, but the row's allocated width
+ *  forces them to wrap.
+ *
+ *  Returns null when no prediction applies (no text descendants worth
+ *  wrapping), otherwise the predicted height including row padding +
+ *  text padding + max non-text sibling cross sizes.
+ *
+ *  Approximation: for each text child, the available width is the row's
+ *  inner width minus the sum of OTHER siblings' main-axis widths and gaps.
+ *  This handles single-text-child rows (the sidebar-row case) precisely
+ *  and multi-child rows conservatively.
+ */
+const _predictRowHeightFromTextWrap = (
+  row: Element,
+  rowAllocatedWidth: number,
+  rowCtx: ResolveContext,
+  rootPointScale: number,
+  viewport: Viewport,
+  vars: ReadonlyMap<string, string> | undefined,
+): number | null => {
+  if (row.Children.length === 0) return null;
+  const [pt, pr, pb, pl] = ResolveLengthTuple4(row.Layout.Padding, rowCtx, ['H', 'W', 'H', 'W']);
+  const innerWidth = Math.max(0, rowAllocatedWidth - pl - pr);
+  if (innerWidth <= 0) return null;
+  // Inner content area for child ctx — children's `%` lengths resolve
+  // against this. We don't know height yet (we're computing it), so
+  // pass 0 as a stand-in; height-percent text padding is rare.
+  const childCtxBase: { contentWidth: number; contentHeight: number } = {
+    contentWidth: innerWidth, contentHeight: 0,
+  };
+  const mainGap = _r(row.Layout.ColumnGap, rowCtx, 'W') || _r(row.Layout.Gap, rowCtx, 'W');
+
+  // Pre-pass: sum the non-text-children's effective main widths. Text
+  // children contribute 0 here so the per-text budget = innerWidth -
+  // (other non-text widths) - gaps.
+  let nonTextMainTotal = 0;
+  let nonTextCount = 0;
+  let textCount = 0;
+  let nonTextMaxCross = 0;
+  for (const child of row.Children) {
+    if (child.ChildLayout.Position !== 'Flow' && child.ChildLayout.Position !== 'Offset') continue;
+    if (child.LeaveRequested) continue;
+    if (child.Text !== null && child.TextMeasurement !== null) {
+      textCount++;
+      continue;
+    }
+    nonTextCount++;
+    const cw = child.IntrinsicWidth ?? 0;
+    nonTextMainTotal += cw;
+    const ch = child.IntrinsicHeight ?? 0;
+    if (ch > nonTextMaxCross) nonTextMaxCross = ch;
+  }
+  if (textCount === 0) return null;
+
+  const totalGaps = Math.max(0, (textCount + nonTextCount - 1) * mainGap);
+  const widthForTextChildren = Math.max(0, innerWidth - nonTextMainTotal - totalGaps);
+  // Split equally among text children — single-text-child case (sidebar
+  // rows) gets the full budget, which is exact.
+  const perTextBudget = widthForTextChildren / textCount;
+
+  let maxTextCross = 0;
+  for (const child of row.Children) {
+    if (child.Text === null || child.TextMeasurement === null) continue;
+    if (child.ChildLayout.Position !== 'Flow' && child.ChildLayout.Position !== 'Offset') continue;
+    if (child.LeaveRequested) continue;
+    // Text child's ResolveCtx isn't built yet (it's set during _solveNode
+    // recursion into the row, which happens after this prediction). Build
+    // a transient ctx so length resolution (FontSize, padding) works.
+    const ctx = child.ResolveCtx ?? _buildChildCtx(
+      child,
+      childCtxBase.contentWidth,
+      childCtxBase.contentHeight,
+      rowCtx.PointScale,
+      rootPointScale,
+      viewport,
+      vars,
+    );
+    const [tpt, tpr, tpb, tpl] = ResolveLengthTuple4(child.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
+    const explicitW = typeof child.ChildLayout.Width === 'number' ? child.ChildLayout.Width : Infinity;
+    const effectiveOuter = Math.max(0, Math.min(explicitW, perTextBudget));
+    const textMaxWidth = Math.max(0, effectiveOuter - tpl - tpr);
+    if (textMaxWidth <= 0) continue;
+    if (child.TextMeasurement.Width <= textMaxWidth) continue;  // text fits
+    const resolvedStyle = ResolveTextStyle(child.TextStyle, ctx);
+    const wrapped = MeasureText(child.Text, resolvedStyle, textMaxWidth);
+    const childCross = wrapped.Height + tpt + tpb;
+    if (childCross > maxTextCross) maxTextCross = childCross;
+  }
+
+  if (maxTextCross === 0) return null;
+  const innerCross = Math.max(maxTextCross, nonTextMaxCross);
+  return innerCross + pt + pb;
 };
 
 /** Simulate how a Row-direction wrap container's children bin-pack into

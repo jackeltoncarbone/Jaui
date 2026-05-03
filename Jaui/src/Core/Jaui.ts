@@ -1302,9 +1302,17 @@ export class Canvas {
       const newPath = new Set<Jiv>();
       for (let n = newTopmost; n; n = n.Parent as Jiv | null) newPath.add(n);
       for (let n = oldTopmost; n; n = n.Parent as Jiv | null) {
-        if (!newPath.has(n)) n[flag] = false;
+        if (!newPath.has(n) && n[flag]) {
+          n[flag] = false;
+          if (flag === 'Hover') n.OnHoverChange?.(false);
+        }
       }
-      newPath.forEach(n => { n[flag] = true; });
+      newPath.forEach(n => {
+        if (!n[flag]) {
+          n[flag] = true;
+          if (flag === 'Hover') n.OnHoverChange?.(true);
+        }
+      });
     };
 
     this.Element.addEventListener('pointermove', (e: PointerEvent) => {

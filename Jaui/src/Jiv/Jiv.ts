@@ -38,6 +38,12 @@ export class Jiv extends Element {
   FocusStyle: Partial<JivStyle> | null = null;
   DisabledStyle: Partial<JivStyle> | null = null;
 
+  /** Fired when Hover transitions. Hover/Active flow up the ancestor chain
+   *  (CSS-like), so this fires on every Jiv whose flag flips — not just the
+   *  topmost hit. Use to bridge text-color or other non-JivStyle reactions
+   *  that EffectiveStyle can't express. */
+  OnHoverChange: ((hover: boolean) => void) | null = null;
+
   /** Optional style override for text selection highlights. */
   TextSelectionStyle: Partial<JivStyle> | null = null;
 
