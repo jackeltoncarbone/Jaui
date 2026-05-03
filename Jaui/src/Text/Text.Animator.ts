@@ -186,6 +186,9 @@ export class TextAnimator implements Animatable {
       // once fonts load is what recovers them.
       w.Width = p.Width;
       w.Height = p.Height;
+      // Spring on reflow (content unchanged) — late layout passes that
+      // recompute the wrap width should ease into the new positions, not
+      // pop. Snapping here makes a delayed reflow read as a glitch.
       if (w.TargetX !== p.X) {
         if (w.SpringX.Set(p.X)) needsKick = true;
         w.TargetX = p.X;
@@ -246,12 +249,19 @@ export class TextAnimator implements Animatable {
         existing.Style = _cloneStyle(newStyle);
         existing.Width = p.Width;
         existing.Height = p.Height;
+        // Snap positions on content reconcile (rather than spring) — the
+        // text content itself is changing, so animating individual matched
+        // words from their old positions to the new layout reads as a
+        // delayed/sliding mess instead of an instant text replacement.
+        // _reflow (width-only changes) keeps the spring path.
         if (existing.TargetX !== p.X) {
-          if (existing.SpringX.Set(p.X)) needsKick = true;
+          existing.SpringX.Set(p.X);
+          existing.SpringX.Snap();
           existing.TargetX = p.X;
         }
         if (existing.TargetY !== p.Y) {
-          if (existing.SpringY.Set(p.Y)) needsKick = true;
+          existing.SpringY.Set(p.Y);
+          existing.SpringY.Snap();
           existing.TargetY = p.Y;
         }
         // Ensure fully visible in case it was fading

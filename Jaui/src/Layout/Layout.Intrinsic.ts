@@ -328,10 +328,9 @@ const _ancestorMainPadding = (
  *  rail would measure against the 1200pt viewport, get a 1-line height,
  *  and visually overflow when the solver shrinks it to 280pt.
  *
- *  Same-direction ancestors (Row ancestors for horiz text) accumulate
- *  padding but don't pin the budget on their own width — siblings could
- *  share that width. The first perpendicular-direction ancestor (or any
- *  with an explicit width) terminates the walk.
+ *  Percentage widths (e.g. `Width: 40%`) accumulate as a multiplier — the
+ *  walk continues until it reaches the first explicit-pt or pixel-resolved
+ *  ancestor and multiplies the resulting budget by the running percentage.
  *
  *  Falls back to viewport width minus accumulated paddings if no bounded
  *  ancestor is found. */
@@ -341,6 +340,7 @@ const _textWrapBudget = (
   ctx: ResolveContext,
 ): number => {
   let totalPad = 0;
+  let multiplier = 1;
   let cur: Element | null = node.Parent ?? null;
   while (cur) {
     const childCtx = cur.ResolveCtx ?? ctx;
@@ -349,15 +349,24 @@ const _textWrapBudget = (
     const ownMain = horiz ? cur.ChildLayout.Width : cur.ChildLayout.Height;
     const explicit = _intrinsicOf(ownMain, childCtx, horiz ? 'W' : 'H');
     if (explicit !== null) {
-      // Bounded — this ancestor pins the budget. (Subtract its own padding
-      // because the text node lives inside the ancestor's content box.)
-      return Math.max(0, explicit - totalPad);
+      // Bounded — pin the budget to this ancestor's explicit width
+      // (scaled by any accumulated percentages from descendants), minus
+      // accumulated paddings on the way down.
+      return Math.max(0, explicit * multiplier - totalPad);
+    }
+    // Percentage width? Accumulate as a multiplier and keep walking. Same
+    // for the height axis (`Height: 50%`).
+    if (typeof ownMain === 'string' && ownMain.includes('%')) {
+      const pctMatch = /^\s*([\d.]+)\s*%\s*$/.exec(ownMain);
+      if (pctMatch) {
+        multiplier *= Number(pctMatch[1]) / 100;
+      }
     }
     cur = cur.Parent ?? null;
   }
-  // Unbounded ancestor chain → viewport.
+  // Unbounded ancestor chain → viewport (also scaled by accumulated %).
   const vp = horiz ? ctx.ViewportWidth : ctx.ViewportHeight;
-  return Math.max(0, vp - totalPad);
+  return Math.max(0, vp * multiplier - totalPad);
 };
 
 /** Return a pixel value if the dimension is "known" without parent dims.

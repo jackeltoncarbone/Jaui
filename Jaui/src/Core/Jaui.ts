@@ -1042,7 +1042,15 @@ export class Canvas {
   private _processTextTransitions = (node: Jiv): void => {
     const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
     const [, padR, , padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
-    const contentW = node.Width - padL - padR;
+    // Use the JivAnimator's target Width when one exists — node.Width is
+    // the live spring value, which means a parent whose Width is springing
+    // toward a new target would re-trigger text wrap every frame as its
+    // children's solved widths animate. Reading the target instead pins
+    // the wrap budget to the final dimension so word positions are stable
+    // from the first frame after content/layout changes.
+    const widthAnim = this._animators.get(node);
+    const targetWidth = widthAnim?.Springs.Width.Target ?? node.Width;
+    const contentW = targetWidth - padL - padR;
     const maxWidth = contentW > 0 ? contentW : null;
     const resolvedStyle = ResolveTextStyle(node.TextStyle, ctx);
 
