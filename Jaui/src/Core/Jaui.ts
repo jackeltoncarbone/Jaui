@@ -366,6 +366,13 @@ export class Canvas {
         // assume specific defaults; partial reset = subtle bugs (inverted
         // text from leftover blend equation, missing text from leftover
         // depth/colour mask, etc.).
+        //
+        // NOTE: a previous attempt trimmed the texture-unit unbind loop
+        // and the null program/VAO/buffer binds. CPU-submit time dropped
+        // by ~120ms/frame on software ANGLE, but wall-time *rose* by
+        // ~200ms/frame — the rasterizer was apparently doing extra work
+        // when we left bindings in their post-THREE state. Keep the
+        // full reset.
         this._renderer.RebindSceneTarget();
         gl.viewport(0, 0, w, h);
         gl.disable(gl.SCISSOR_TEST);
