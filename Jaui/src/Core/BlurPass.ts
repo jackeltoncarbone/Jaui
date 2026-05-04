@@ -265,7 +265,7 @@ export class BlurPass {
    *  Cost: one DOWN pass per mip level (≤ 8 total) on rapidly-shrinking
    *  images + matching blits. Same order of work as the prior
    *  implementation, just with the chain rooted at level 0. */
-  GenerateOutputMipmap = (): void => {
+  GenerateOutputMipmap = (maxLod?: number): void => {
     const gl = this._gl;
     const out = this._levels[0];
 
@@ -274,6 +274,16 @@ export class BlurPass {
     // below; the deepest few mips (≤ 4×4) keep the box-filter content but
     // progressive blur never samples them.
     out.GenerateMipmap();
+
+    // Cap the chain at the consumer's max sampled LOD. Trilinear
+    // interpolation between adjacent levels needs both endpoints populated,
+    // so we add 1 level of slack. Without a cap (legacy callers) we walk
+    // all the way to 1×1 — that matches the prior behaviour but on a
+    // software rasterizer it's pure waste; passing a real maxLod here
+    // typically halves this routine's fragment work.
+    const stopLevel = maxLod !== undefined
+      ? Math.min(MAX_LEVELS - 1, Math.max(1, Math.ceil(maxLod) + 1))
+      : MAX_LEVELS - 1;
 
     // Iterative 5-tap DOWN starting from level 0. _levels[1..N] are
     // re-purposed as scratch FBOs — their previous contents (dual-filter
@@ -290,7 +300,7 @@ export class BlurPass {
     let srcW = out.Width;
     let srcH = out.Height;
     let extendedDepth = 0;
-    for (let i = 1; i < MAX_LEVELS; i++) {
+    for (let i = 1; i <= stopLevel; i++) {
       const newW = Math.max(1, Math.floor(srcW / 2));
       const newH = Math.max(1, Math.floor(srcH / 2));
       if (newW === srcW && newH === srcH) break; // already at 1×1

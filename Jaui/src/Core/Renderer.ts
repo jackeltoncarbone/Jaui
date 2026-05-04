@@ -151,8 +151,11 @@ export interface Renderer {
   ): GpuTextureHandle;
 
   /** Generate mipmaps on the blur output so glass + progressive blur can
-   *  sample at arbitrary LODs via textureSampleLevel / textureLod. */
-  GenerateBlurMipmap(): void;
+   *  sample at arbitrary LODs via textureSampleLevel / textureLod. Pass
+   *  `maxLod` to cap the build at the consumer's actual sample range —
+   *  levels past `maxLod` are never read, so building them is pure
+   *  fragment-fill waste. Omit to build the full chain (legacy). */
+  GenerateBlurMipmap(maxLod?: number): void;
 
   /** The pyramid depth from the last ComputeBlur call. */
   readonly LastBlurDepth: number;

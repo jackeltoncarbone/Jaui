@@ -449,8 +449,10 @@ export class WebGPURenderer implements Renderer {
     return _wrap(result);
   };
 
-  GenerateBlurMipmap = (): void => {
+  GenerateBlurMipmap = (_maxLod?: number): void => {
     if (!this._blur) throw new Error('[Jaui WebGPU] Not initialized');
+    // TODO: WebGPU BlurPass mipmap-cap support. Today it always builds the
+    // full chain; ignoring _maxLod is correctness-safe (just slower).
     this._blur.GenerateOutputMipmap();
   };
 

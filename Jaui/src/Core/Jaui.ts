@@ -610,7 +610,11 @@ export class Canvas {
         // already smoothly dual-filtered.
         lastBackdrop = r.ComputeBlur(sceneSnap, w, h, baseBlurCssPx * d, undefined, scissor);
         lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
-        r.GenerateBlurMipmap();
+        // Cap mip build at this pblur's max sampled LOD — the shader does
+        // textureLod(u_Pyramid, uv, ramp²·maxLod), so it never reads past
+        // maxLod. Building deeper levels is pure fragment-fill waste on
+        // a software rasterizer.
+        r.GenerateBlurMipmap(maxLod);
         r.RebindSceneTarget();
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -677,7 +681,12 @@ export class Canvas {
         const sceneSnap = r.SnapshotScreen();
         lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, baseBlurCssPx * d, undefined, scissor);
         lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
-        r.GenerateBlurMipmap();
+        // Cap mip build at the largest LOD any glass panel will sample
+        // this frame: log2(maxFrostBlur) + slack for the lodBoost the
+        // glass shader stacks on (rim CA + inner blur, ≲ 2). Saves the
+        // chain-extension fill below the consumer's actual reach.
+        const glassMaxLod = Math.log2(Math.max(1, this._maxFrostBlur)) + 2;
+        r.GenerateBlurMipmap(glassMaxLod);
         r.RebindSceneTarget();
 
         r.EnableBlend();

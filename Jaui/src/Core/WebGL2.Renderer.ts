@@ -567,8 +567,8 @@ export class WebGL2Renderer implements Renderer {
     return _wrap(result);
   };
 
-  GenerateBlurMipmap = (): void => {
-    this._blur.GenerateOutputMipmap();
+  GenerateBlurMipmap = (maxLod?: number): void => {
+    this._blur.GenerateOutputMipmap(maxLod);
     // The blit-to-mip path in BlurPass.GenerateOutputMipmap doesn't touch
     // shader programs, but keep the invalidation paired with ComputeBlur
     // for consistency. Cheap to do.
