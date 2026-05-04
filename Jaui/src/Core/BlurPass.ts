@@ -239,78 +239,78 @@ export class BlurPass {
     return this._levels[0].Texture;
   };
 
-  /** Populate the output texture's mipmap chain with a Gaussian-quality
-   *  smooth pyramid instead of the driver's 2×2 box-filter output.
+  /** Populate the output texture's mipmap chain with a proper Gaussian
+   *  pyramid OF THE LEVEL-0 RESULT, instead of the driver's 2×2 box filter.
    *
-   *  The driver's `gl.generateMipmap` uses a minimal 2×2 box filter per
-   *  level, which preserves high-contrast edges as discrete color blocks
-   *  at mid/high LODs (visible as "blocky clusters" in heavy progressive-
-   *  blur regions). Replacing those levels with the dual-filter output
-   *  gives a Gaussian-approximation pyramid at every level and eliminates
-   *  the banding.
+   *  Why this matters: Blur() leaves `_levels[0]` holding a Gaussian-
+   *  approximation blur at the requested σ (full resolution). The
+   *  progressive-blur shader samples this texture with `textureLod` at
+   *  fractional LODs, so every mip level needs to be a monotonically-
+   *  wider Gaussian of the same scene. The driver's `generateMipmap`
+   *  preserves high-contrast edges as discrete color blocks at mid/high
+   *  LODs (visible as "stamps" in heavy progressive-blur regions), and
+   *  the previous implementation here re-used the dual-filter algorithm
+   *  intermediates (`_levels[1..depth]`) which are NOT proper Gaussian-
+   *  pyramid levels — at depth=1 mip 1 ended up LESS blurred than mip 0
+   *  (non-monotonic σ), which trilinear interpolation then visualised as
+   *  the same stamps near the bottom of the ramp.
    *
-   *  Two-stage pipeline:
-   *    1. `_levels[1..depth]` already hold upsample-chain results from
-   *       the just-finished `Blur()` — same-σ smooth representations at
-   *       mip-appropriate sizes. Blit each into the matching mip slot.
-   *    2. `_levels[depth]` holds a pure-downsample result. Extend the
-   *       chain by running `_down` (5-tap kernel) against it iteratively,
-   *       storing each output in `_levels[depth+1..]`, until we've covered
-   *       every mip level that the progressive-blur shader might sample
-   *       (up to MAX_LEVELS − 1). Blit those into their mip slots too.
+   *  Algorithm: build mip levels 1..N by iterating the 5-tap DOWN kernel
+   *  starting from level 0 itself. Each step is a small Gaussian
+   *  downsample of the previous mip — σ adds in quadrature, so successive
+   *  mips have monotonically increasing source-pixel σ. High-frequency
+   *  content is already smoothed by the time we downsample, so blocks
+   *  dissolve into a smooth gradient.
    *
-   *  Only levels past the extended chain still use generateMipmap's box
-   *  result — by that point the texture is ≤4×4 so banding is invisible.
-   *
-   *  Cost: ~8 mip blits (1:1 size, free) + a handful of tiny DOWN passes.
-   *  Replaces the driver generateMipmap's work on levels 1..depth+N.  */
+   *  Cost: one DOWN pass per mip level (≤ 8 total) on rapidly-shrinking
+   *  images + matching blits. Same order of work as the prior
+   *  implementation, just with the chain rooted at level 0. */
   GenerateOutputMipmap = (): void => {
     const gl = this._gl;
     const out = this._levels[0];
-    const depth = this._lastDepth;
 
-    // Allocate the mip chain + set trilinear sampling. Fill via box first;
-    // we'll overwrite the levels that matter with dual-filter quality.
+    // Allocate the mip chain + flip MIN_FILTER to LINEAR_MIPMAP_LINEAR so
+    // textureLod can sample. We overwrite the levels we actually populate
+    // below; the deepest few mips (≤ 4×4) keep the box-filter content but
+    // progressive blur never samples them.
     out.GenerateMipmap();
 
-    if (depth < 1) return;
+    // Iterative 5-tap DOWN starting from level 0. _levels[1..N] are
+    // re-purposed as scratch FBOs — their previous contents (dual-filter
+    // intermediates from the Blur() call) are no longer needed.
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.useProgram(this._down.Program);
+    gl.uniform1i(this._downTexLoc, 0);
+    gl.uniform1f(this._downOffLoc, 1.0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindVertexArray(this._quad.Vao);
 
-    // ── Stage 2: extend the pyramid past `depth` by iterating DOWN on the
-    // deepest existing level. This is the key insight vs. the previous
-    // implementation — instead of leaving mip levels N > depth as box-
-    // filtered garbage, we produce Gaussian-quality downsamples for every
-    // level we'll actually sample.
-    //
-    // Guards: stop when we'd go below 1×1 or run out of framebuffer slots.
-    let extW = this._levels[depth].Width;
-    let extH = this._levels[depth].Height;
-    let extTex = this._levels[depth].Texture;
-    let extendedDepth = depth;
-    for (let i = depth + 1; i < MAX_LEVELS; i++) {
-      const newW = Math.max(1, Math.floor(extW / 2));
-      const newH = Math.max(1, Math.floor(extH / 2));
-      if (newW === extW && newH === extH) break; // already at 1×1
+    let srcTex = out.Texture;
+    let srcW = out.Width;
+    let srcH = out.Height;
+    let extendedDepth = 0;
+    for (let i = 1; i < MAX_LEVELS; i++) {
+      const newW = Math.max(1, Math.floor(srcW / 2));
+      const newH = Math.max(1, Math.floor(srcH / 2));
+      if (newW === srcW && newH === srcH) break; // already at 1×1
       this._levels[i].Resize(newW, newH);
       const dst = this._levels[i];
       dst.Bind();
       gl.viewport(0, 0, newW, newH);
-      gl.disable(gl.SCISSOR_TEST); // extended levels are full-mip regardless of input scissor
-      gl.useProgram(this._down.Program);
-      gl.uniform1i(this._downTexLoc, 0);
-      gl.uniform1f(this._downOffLoc, 1.0);
-      gl.uniform2f(this._downHpLoc, 0.5 / extW, 0.5 / extH);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, extTex);
-      gl.bindVertexArray(this._quad.Vao);
+      gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-      extTex = dst.Texture;
-      extW = newW;
-      extH = newH;
+      srcTex = dst.Texture;
+      srcW = newW;
+      srcH = newH;
       extendedDepth = i;
     }
 
-    // ── Stage 1: blit every populated level (1..extendedDepth) into the
-    // corresponding mip slot of the output texture.
+    if (extendedDepth === 0) return;
+
+    // Blit each generated level into the corresponding mip slot of the
+    // output texture.
     if (!this._mipBlitFbo) {
       const fbo = gl.createFramebuffer();
       if (!fbo) throw new Error('[Jaui] Failed to create mip-blit FBO');
