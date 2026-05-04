@@ -190,11 +190,13 @@ export class Jiv implements OnInit, OnDestroy {
         delete style['Overflow'];
       }
       if ('Visible' in style) {
-        this.Node.Visible = style['Visible'] as boolean;
+        // JSS values arrive as strings ('true'/'false'); inline [style] passes
+        // real booleans. Coerce so 'false' doesn't end up truthy.
+        this.Node.Visible = style['Visible'] === true || style['Visible'] === 'true';
         delete style['Visible'];
       }
       if ('Interactive' in style) {
-        this.Node.Interactive = style['Interactive'] as boolean;
+        this.Node.Interactive = style['Interactive'] === true || style['Interactive'] === 'true';
         delete style['Interactive'];
       }
       if ('PointerEvents' in style) {
