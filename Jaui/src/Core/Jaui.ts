@@ -421,6 +421,19 @@ export class Canvas {
     // surface is cheap. If a future optimization needs to skip recompute
     // (e.g. fullscreen chrome pblurs with matching radius), add a local
     // cache scoped to the scissor rect + radius rather than a global flag.
+    //
+    // Within-frame pyramid sharing was attempted (track dirty rect, reuse
+    // pyramid when next surface's read region doesn't overlap) but
+    // regressed perf 2× on a software-rasterized device:
+    //   - Most blur surfaces' read regions overlap the accumulating
+    //     dirty rect (full-width pblurs + page text), so reuse rarely fires.
+    //   - Each ComputeBlur is scissored to its OWN read region — a cached
+    //     pyramid is only valid inside that scissor; reuse for a different
+    //     scissor reads stale pixels.
+    // To revisit this: build pyramids un-scissored (fills full canvas
+    // every time, costlier per build) or with the union scissor of all
+    // consumers (requires upfront scan of pblur/glass surfaces). Both
+    // change the calculus and need their own measurement pass.
 
     // Pending non-glass panel batch. The tree walk pushes every non-glass
     // panel into `_panelBuffer` instead of drawing it immediately; when we
@@ -564,7 +577,6 @@ export class Canvas {
         // copy sceneFbo → _snapshotTex and feed that as `u_Scene`.
         // `u_Pyramid` is the BlurPass output (a separate texture), no
         // feedback risk.
-        const sceneSnap = r.SnapshotScreen();
         const d = this._dpr;
         const maxFeatherSigma = node.RenderStyle.BackdropFrostBlur;
         const baseSigmaDevice = this._dpr;
@@ -607,14 +619,12 @@ export class Canvas {
           h: Math.min(h, Math.ceil(fh + lodMargin * 2)),
         };
         const baseBlurCssPx = 1;
+        const sceneSnap = r.SnapshotScreen();
         // Don't force deeper pyramid here: forcing depth > natural radius
         // over-blurs level 0 itself, which the shader uses as the "clear"
         // end of the gradient. The visible progression (clear → heavy) only
         // works when level 0 is LIGHTLY blurred (σ≈3-4) and higher LODs
-        // stack on top via mip sampling. Let BlurPass pick depth from the
-        // radius; mip levels beyond the dual-filter depth fall back to
-        // generateMipmap's box filter, which is adequate when level 0 is
-        // already smoothly dual-filtered.
+        // stack on top via mip sampling.
         lastBackdrop = r.ComputeBlur(sceneSnap, w, h, baseBlurCssPx * d, undefined, scissor);
         lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
         // Cap mip build at this pblur's max sampled LOD — the shader does
