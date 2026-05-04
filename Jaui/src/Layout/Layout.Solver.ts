@@ -501,7 +501,14 @@ const _simulateWrapHeight = (
     if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed') continue;
     if (c.LeaveRequested) continue;
 
-    const childCtx = c.ResolveCtx!;
+    // ResolveCtx is normally seeded by `_solveNode` before that child's own
+    // solve, but `_simulateWrapHeight` runs INSIDE the row's own solve (a
+    // pre-flex sizing helper), so a freshly-mounted child whose first solve
+    // hasn't happened yet has `ResolveCtx === null`. Fall back to the row's
+    // ctx — the parent inherits PointScale + Vars, which is enough for the
+    // simulate-wrap math (Length resolution). The child gets its real ctx
+    // in the next solver pass.
+    const childCtx = c.ResolveCtx ?? rowCtx;
     const rawW = c.ChildLayout.Width;
     const rawH = c.ChildLayout.Height;
     const explicitW = typeof rawW === 'number' ? rawW
