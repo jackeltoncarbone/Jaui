@@ -318,10 +318,28 @@ export class Jinput implements OnDestroy {
   }
 
   // ── Public API ──────────────────────────────────────────────────
-  focusInput = (): void => {
+  /** Programmatically focus the input — moves the caret to the end if no
+   *  selection is active, makes the caret visible, and re-arms the blink
+   *  cycle. Safe to call from any time after construction; if the hidden
+   *  input element isn't in the DOM yet (very early lifecycle), the call
+   *  is a no-op rather than throwing. */
+  Focus = (): void => {
     if (this.ReadOnly()) return;
-    this._hiddenInput()?.nativeElement.focus();
+    const input = this._hiddenInput()?.nativeElement;
+    if (!input) return;
+    input.focus();
+    // Move caret to end if currently selectionless and the input has text.
+    // Common case for "show placement bar with prefilled text and let the
+    // user keep typing where they left off".
+    const len = input.value.length;
+    if (input.selectionStart === input.selectionEnd && input.selectionStart === 0 && len > 0) {
+      input.setSelectionRange(len, len);
+    }
+    this.syncSelection();
   };
+
+  /** @deprecated Use Focus(). Kept so existing internal callers compile. */
+  focusInput = this.Focus;
 
   // ── Pointer handling ────────────────────────────────────────────
   private static readonly _BurstMs = 400;
