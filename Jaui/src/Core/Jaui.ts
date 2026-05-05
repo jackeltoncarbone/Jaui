@@ -1243,14 +1243,27 @@ export class Canvas {
     // the old DPR even after the browser hands us more device pixels.
     if (this._dpr > prevDpr) this._imageCache.RerasterizeSvgs(this._dpr);
 
-    // Mark root dirty so layout re-solves with new dimensions on the next
-    // tick. Rendering inline here triggered a forced reflow (~56ms on cold
-    // load): clientWidth reads above flush layout, then a synchronous full
-    // frame ran before the rAF cycle had a chance to settle. Letting the
-    // existing rAF tick pick up the dirty flag costs at most one ~16ms
-    // frame of "stale dimensions" and avoids the layout flush.
+    // Mark root dirty so layout re-solves with new dimensions
     this.Root.Dirty |= DirtyFlag.Layout;
-    this._animationManager.Kick();
+
+    // Re-render inline so the canvas backing store doesn't sit blank
+    // between the synchronous Element.width/height write above (which
+    // clears the WebGL framebuffer) and the next rAF tick. On user-
+    // driven resize that gap is visible as a flicker; keeping the inline
+    // render bridges it. The cold-load forced-reflow cost lives upstream
+    // of this — the clientWidth reads — and should be addressed by
+    // deferring size reads on first call, not by skipping the render.
+    if (this._running) {
+      if (this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root)) {
+        CascadePointScale(this.Root, this._viewport(), this._jssVars);
+        this._measureDirtyText(this.Root);
+        ComputeIntrinsicSizes(this.Root, this._viewport(), this._jssVars);
+        this._solveAndAnimate();
+        this._clearDirty(this.Root);
+      }
+      this._processTextTransitions(this.Root);
+      this._render(0);
+    }
   };
 
   private _observeResize = (): void => {
