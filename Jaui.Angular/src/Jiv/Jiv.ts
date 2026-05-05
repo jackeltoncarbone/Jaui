@@ -123,6 +123,15 @@ export class Jiv implements OnInit, OnDestroy {
       // cheap and keeps behavior uniform.
       this._registry?.Version();
       this._apply();
+      // Kick the animation loop so any style-spring deltas introduced by
+      // this re-apply (e.g. a class swap that changes Opacity through an
+      // @Transition) actually animate. Without this, the AnimationManager
+      // stays idle when nothing else is moving and the spring's new target
+      // sits unrealized until an external event (pointer move, resize,
+      // etc.) wakes it. _canvas may be unresolved on the first effect
+      // run if the directive is constructed before its parent canvas
+      // registers — fall back to the next call.
+      this._canvas?.Canvas.Animations.Kick();
     });
   }
 
