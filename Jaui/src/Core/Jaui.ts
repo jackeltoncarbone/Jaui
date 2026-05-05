@@ -167,8 +167,14 @@ export class Canvas {
     this._animationManager.Kick();
     this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv), this._animationManager);
 
-    this._resize();
+    // Defer the first _resize() to a rAF tick so layout is already settled
+    // when clientWidth runs as a fallback. Direct construction-time reads
+    // forced ~56ms of synchronous layout flush on cold load (flagged by
+    // Chrome's ForcedReflow analyzer). The ResizeObserver below also pushes
+    // contentRect into _pendingResize, so most boots will pick up the
+    // measured size from RO instead of falling through to clientWidth.
     this._observeResize();
+    requestAnimationFrame(() => this._resize());
     this._watchDpr();
     this._listenForScroll();
     this._listenForInteractionStates();
@@ -1233,8 +1239,19 @@ export class Canvas {
         && window.matchMedia('(pointer: coarse)').matches;
       this._dpr = isTouchPrimary ? Math.min(raw, 2) : raw;
     }
-    this._width = this.Element.clientWidth;
-    this._height = this.Element.clientHeight;
+    // Prefer the size pushed in by ResizeObserver (no layout flush) when
+    // available; fall back to clientWidth/Height for callers that don't
+    // have an entry handy (e.g. DPR change handler). Direct clientWidth
+    // reads on cold load force a synchronous layout flush — flagged as a
+    // ~56ms reflow by Chrome's Performance analyzer.
+    if (this._pendingResize) {
+      this._width = this._pendingResize.width;
+      this._height = this._pendingResize.height;
+      this._pendingResize = null;
+    } else {
+      this._width = this.Element.clientWidth;
+      this._height = this.Element.clientHeight;
+    }
     this.Element.width = Math.round(this._width * this._dpr);
     this.Element.height = Math.round(this._height * this._dpr);
 
@@ -1266,13 +1283,25 @@ export class Canvas {
     }
   };
 
+  /** Size pushed in by the most recent ResizeObserver callback. _resize()
+   *  consumes this when set, avoiding a clientWidth read that would force
+   *  the browser to flush pending layout. */
+  private _pendingResize: { width: number; height: number } | null = null;
+
   private _observeResize = (): void => {
     // Defer _resize() to the next animation frame so the ResizeObserver's
     // callback returns synchronously. Running layout changes in-line
     // causes the browser to emit "ResizeObserver loop completed with
     // undelivered notifications" (benign but noisy, and Angular's global
     // error listener amplifies each one into a console error).
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) {
+        this._pendingResize = {
+          width: entry.contentRect.width,
+          height: entry.contentRect.height,
+        };
+      }
       requestAnimationFrame(() => this._resize());
     });
     observer.observe(this.Element);
