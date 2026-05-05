@@ -1986,14 +1986,11 @@ export class Canvas {
     this._debugHud.textContent = hudText;
     this._debugLatest = hudText;
 
-    // Throttled console mirror — 1Hz, copy-pasteable. The DOM HUD is
-    // pointer-events:none (so it doesn't hijack canvas input) and can't be
-    // text-selected. `__jaui.canvas.DebugText` getter is a second escape
-    // hatch for on-demand reads.
-    if (time - this._debugLogLast > 1000) {
-      this._debugLogLast = time;
-      console.log('[Jaui perf]\n' + hudText);
-    }
+    // Console mirror disabled while diagnosing cold-load — the per-second
+    // dump drowns out BootProfiler / instrumentation lines. The on-screen
+    // HUD still updates 10×/s; `__jaui.canvas.DebugText` getter is the
+    // copy-paste escape hatch.
+    void this._debugLogLast;
   };
 
   /** Current HUD text as a single string. Set when `?debug` is active and
