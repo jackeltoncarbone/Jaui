@@ -12,6 +12,7 @@ export * from './Jiv/Jiv';
 export * from './Jext/Jext';
 export * from './Jyle/Jyle';
 export * from './SvgJiv/SvgJiv';
+export * from './Jinput/Jinput';
 export * from './Jss/Jss.Registry';
 
 // Re-export types from jaui core so consumers don't need a separate import
