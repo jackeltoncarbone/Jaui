@@ -94,6 +94,16 @@ export class Jiv implements OnInit, OnDestroy {
     this.Node.OnClick = () => {
       this._host.nativeElement.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     };
+    this.Node.OnContextMenu = (src: MouseEvent) => {
+      // Re-dispatch a bubbling DOM contextmenu on this jiv's host so any
+      // (contextmenu) Angular binding along the ancestor chain fires.
+      // The original event was already preventDefault'd in the canvas
+      // listener, so the browser's native menu never appears.
+      this._host.nativeElement.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true,
+        clientX: src.clientX, clientY: src.clientY, button: src.button,
+      }));
+    };
     this.Node.OnPointerDown = (e) => {
       this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerdown', e));
     };
@@ -266,6 +276,13 @@ function _clonePointerEvent(type: string, src: PointerEvent): PointerEvent {
     pointerType: src.pointerType,
     button: src.button,
     buttons: src.buttons,
+    // Modifier-key state — without these, shift/ctrl/alt/meta+click
+    // handlers in Angular templates can't tell what was held when the
+    // user pressed.
+    shiftKey: src.shiftKey,
+    ctrlKey: src.ctrlKey,
+    altKey: src.altKey,
+    metaKey: src.metaKey,
   });
   // Marker so DOM listeners on ancestor elements (e.g. page-root field
   // gesture handlers) can distinguish bridge-synthesized events — fired

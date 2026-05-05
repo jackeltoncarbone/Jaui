@@ -134,6 +134,17 @@ export class Element {
    *  in templates Just Work. */
   OnClick: (() => void) | null = null;
 
+  /** Contextmenu (right-click / long-press) handler. Jaui's canvas-level
+   *  listener hit-tests the click point and fires this on the topmost
+   *  hit Jiv; the bridge in Angular dispatches a synthetic `contextmenu`
+   *  event on the host element so `(contextmenu)` template bindings
+   *  work. The browser's default menu is suppressed unconditionally on
+   *  the canvas — apps that want it back should preventDefault their own
+   *  way (uncommon).  Deepest-Jiv-wins by default; ancestors still
+   *  receive the bubbled event and can override unless the deeper
+   *  handler called `stopPropagation`. */
+  OnContextMenu: ((e: MouseEvent) => void) | null = null;
+
   /** Pointer-down handler — fired on the topmost-hit Jiv when a pointer
    *  press lands on it. Move/up after a press route to `document` (the
    *  browser keeps firing pointermove/up even when the pointer leaves

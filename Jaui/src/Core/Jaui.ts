@@ -1386,6 +1386,18 @@ export class Canvas {
       _clickDownJiv = null;
       clearActive();
     });
+    // Contextmenu (right-click / long-press) — hit-test the click point
+    // like click does, fire OnContextMenu on the deepest interactive hit,
+    // and unconditionally preventDefault on the real event so the browser's
+    // own menu (Save image, etc.) never appears over the canvas. Apps that
+    // care about right-click should bind (contextmenu) on a Jaui jiv via
+    // the Angular bridge.
+    this.Element.addEventListener('contextmenu', (e: MouseEvent) => {
+      e.preventDefault();
+      const hit = topmostAt(e.clientX, e.clientY);
+      if (hit?.OnContextMenu) hit.OnContextMenu(e);
+    });
+
     this.Element.addEventListener('pointercancel', () => {
       _clickDownJiv = null;
       clearActive();
