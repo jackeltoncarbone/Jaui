@@ -42,11 +42,17 @@ export interface JinputSpan {
   End: number;
   Color?: string;
   Background?: string;
+  /** Optional CSS class applied to the rendered `<jext>` for this span,
+   *  in addition to the default `JinputSegment`. Lets consumers attach
+   *  per-span hover / focus / theme styling via JSS without per-span
+   *  Angular components. */
+  Class?: string;
 }
 
 interface RenderedSegment extends LayoutSegmentInput {
   Color?: string;
   Background?: string;
+  Class?: string;
 }
 
 @Component({
@@ -78,7 +84,7 @@ interface RenderedSegment extends LayoutSegmentInput {
           }
           @for (segment of RenderedSegments(); track $index) {
             <jext
-              class="JinputSegment"
+              [class]="segmentClass(segment)"
               [text]="segment.Text"
               [textStyle]="segmentTextStyle(segment)" />
           }
@@ -209,6 +215,7 @@ export class Jinput implements OnDestroy {
         EndIndex: span.End,
         Color: span.Color,
         Background: span.Background,
+        Class: span.Class,
       });
       cursor = span.End;
     }
@@ -271,6 +278,9 @@ export class Jinput implements OnDestroy {
 
   segmentTextStyle = (s: RenderedSegment): { Color?: string } | undefined =>
     s.Color ? { Color: s.Color } : undefined;
+
+  segmentClass = (s: RenderedSegment): string =>
+    s.Class ? `JinputSegment ${s.Class}` : 'JinputSegment';
 
   constructor() {
     // External Text changes (programmatic) flow into the hidden input value
