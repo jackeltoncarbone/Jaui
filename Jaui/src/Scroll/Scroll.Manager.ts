@@ -81,21 +81,28 @@ export class ScrollManager implements Animatable {
     s.velY = 0;
   };
 
-  /** Direct positional update during a drag — position tracks the finger 1:1.
+  /** Direct positional update during a drag — position tracks the finger 1:1
+   *  inside bounds, and is hard-clamped at the edges (no rubber-band overshoot:
+   *  exposing whitespace past the content bounds reveals chrome that's only
+   *  ever supposed to be visible inside the scroll, so we'd rather the finger
+   *  feel "stuck" at the edge than peel back the curtain).
    *  Also records a running-average velocity so DragEnd can hand off momentum. */
   DragMove = (jiv: Jiv, dx: number, dy: number, dt: number): void => {
     const s = this._ensureState(jiv);
     if (!s.dragging) return;
 
-    // Rubber-band: reduce the effective delta when past bounds so the drag
-    // feels resistant, not free. resistance grows with overscroll distance.
     const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
     const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
-    const scaledDx = dx * _rubberResistance(s.posX, 0, maxX);
-    const scaledDy = dy * _rubberResistance(s.posY, 0, maxY);
 
-    s.posX += scaledDx;
-    s.posY += scaledDy;
+    const prevX = s.posX;
+    const prevY = s.posY;
+    s.posX = Math.max(0, Math.min(maxX, s.posX + dx));
+    s.posY = Math.max(0, Math.min(maxY, s.posY + dy));
+    // Effective delta is what actually moved (zero when clamped against an
+    // edge) so velocity / momentum can't be charged from a finger that the
+    // edge swallowed.
+    const scaledDx = s.posX - prevX;
+    const scaledDy = s.posY - prevY;
     // Drag is authoritative — keep wheel-ease target locked to current pos
     // so a tap-then-wheel doesn't snap back to a stale target.
     s.targetX = s.posX;
@@ -161,33 +168,28 @@ export class ScrollManager implements Animatable {
 
       if (hasVel) {
         // ─── Drag-flick momentum path (touch / pointer release) ──────────────
-        // Rubber-band: elastic force past bounds
-        if (s.posX < 0) s.velX += (-s.posX) * RUBBER_K * dt;
-        else if (s.posX > maxX) s.velX -= (s.posX - maxX) * RUBBER_K * dt;
-        if (s.posY < 0) s.velY += (-s.posY) * RUBBER_K * dt;
-        else if (s.posY > maxY) s.velY -= (s.posY - maxY) * RUBBER_K * dt;
+        // No rubber-band: friction-decayed velocity, position hard-clamped to
+        // bounds. When momentum carries into an edge the velocity on that axis
+        // zeroes out so we don't keep accumulating energy against a wall.
+        s.velX *= Math.pow(FRICTION_PER_SEC, dt);
+        s.velY *= Math.pow(FRICTION_PER_SEC, dt);
 
-        // Friction (normal inside bounds, stronger past bounds)
-        const overX = s.posX < 0 || s.posX > maxX;
-        const overY = s.posY < 0 || s.posY > maxY;
-        const fx = overX ? OVER_FRICTION : FRICTION_PER_SEC;
-        const fy = overY ? OVER_FRICTION : FRICTION_PER_SEC;
-        s.velX *= Math.pow(fx, dt);
-        s.velY *= Math.pow(fy, dt);
-
-        // Integrate
         s.posX += s.velX * dt;
         s.posY += s.velY * dt;
+
+        if (s.posX <= 0) { s.posX = 0; s.velX = 0; }
+        else if (s.posX >= maxX) { s.posX = maxX; s.velX = 0; }
+        if (s.posY <= 0) { s.posY = 0; s.velY = 0; }
+        else if (s.posY >= maxY) { s.posY = maxY; s.velY = 0; }
 
         // Keep wheel-ease target tracking pos so an incoming wheel event
         // doesn't yank position back to a stale value.
         s.targetX = s.posX;
         s.targetY = s.posY;
 
-        // Settle: inside bounds AND velocity small → zero out so RAF can stop
-        const inBounds = !overX && !overY;
+        // Settle: velocity small → zero out so RAF can stop
         const slow = Math.abs(s.velX) < SETTLE_V && Math.abs(s.velY) < SETTLE_V;
-        if (inBounds && slow) {
+        if (slow) {
           s.velX = 0;
           s.velY = 0;
         } else {

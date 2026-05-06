@@ -68,7 +68,7 @@ interface RenderedSegment extends LayoutSegmentInput {
       (contextmenu)="onRootContextMenu($event)">
       <jiv #wrap class="JinputWrap">
         @if (showPlaceholder()) {
-          <jext class="JinputPlaceholder" [text]="Placeholder()" />
+          <jext class="JinputPlaceholder" [text]="Placeholder()" [textStyle]="placeholderTextStyle()" />
         } @else {
           <!-- Selection rects FIRST so segment text paints on top. -->
           @for (rect of SelectionRects(); track $index) {
@@ -276,11 +276,46 @@ export class Jinput implements OnDestroy {
     return RangeRects(this._LaidOutSegments(), a, b, this._Metrics(), this._measureWidth);
   });
 
-  segmentTextStyle = (s: RenderedSegment): { Color?: string } | undefined =>
-    s.Color ? { Color: s.Color } : undefined;
+  // Inline TextStyle on every rendered segment so the visual `<jext>`
+  // renders at the SAME font metrics jinput uses for canvas measureText
+  // (FontSizePx / FontFamily / FontWeight / LineHeightRatio). Without
+  // this, segments fell back to whatever the JinputSegment class
+  // resolved to in the registry — and class merging is last-write-wins,
+  // so an outer consumer that sideloaded JinputSegment with FontSize
+  // would still get clobbered by jinput's own JinputSegment merge when
+  // jinput mounted later in the tree. Inline textStyle is per-instance
+  // and reactive, so it always tracks the current input values.
+  segmentTextStyle = (s: RenderedSegment): {
+    FontFamily: string;
+    FontSize: string;
+    FontWeight: number;
+    LineHeight: string;
+    Color?: string;
+  } => ({
+    FontFamily: this.FontFamily(),
+    FontSize: `${this.FontSizePx()}px`,
+    FontWeight: this.FontWeight(),
+    LineHeight: String(this.LineHeightRatio()),
+    ...(s.Color ? { Color: s.Color } : {}),
+  });
 
   segmentClass = (s: RenderedSegment): string =>
     s.Class ? `JinputSegment ${s.Class}` : 'JinputSegment';
+
+  // Same metric-locking story as segmentTextStyle, applied to the
+  // placeholder `<jext>` so the empty-state text renders at the same
+  // size as real input would.
+  placeholderTextStyle = (): {
+    FontFamily: string;
+    FontSize: string;
+    FontWeight: number;
+    LineHeight: string;
+  } => ({
+    FontFamily: this.FontFamily(),
+    FontSize: `${this.FontSizePx()}px`,
+    FontWeight: this.FontWeight(),
+    LineHeight: String(this.LineHeightRatio()),
+  });
 
   constructor() {
     // External Text changes (programmatic) flow into the hidden input value
@@ -315,6 +350,7 @@ export class Jinput implements OnDestroy {
     document.removeEventListener('pointerup', this._onDocPointerUp);
     document.removeEventListener('pointercancel', this._onDocPointerUp);
     if (this._blinkTimer) clearInterval(this._blinkTimer);
+    this._clearLongPressTimer();
   }
 
   // ── Public API ──────────────────────────────────────────────────
@@ -344,6 +380,11 @@ export class Jinput implements OnDestroy {
   // ── Pointer handling ────────────────────────────────────────────
   private static readonly _BurstMs = 400;
   private static readonly _BurstPx = 5;
+  // Touch long-press = native "select word" gesture. The hidden <input>
+  // sits at top:-9999px so the browser's own selection UI never shows up
+  // on the canvas; we mimic it with a timer here.
+  private static readonly _LongPressMs = 500;
+  private static readonly _LongPressMovePx = 8;
   private _lastClickAt = 0;
   private _lastClickX = 0;
   private _lastClickY = 0;
@@ -351,9 +392,16 @@ export class Jinput implements OnDestroy {
   private _dragGranularity: 'char' | 'word' | 'line' = 'char';
   private _dragAnchor = 0;
   private _dragPointerId: number | null = null;
+  private _longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private _pointerDownX = 0;
+  private _pointerDownY = 0;
 
   onRootPointerDown = (e: PointerEvent): void => {
     if (this.ReadOnly()) return;
+    // Browser long-press suppression for touch happens in Jaui Core's
+    // canvas pointerdown listener — the event we receive here is a clone
+    // synthesized by the Jiv bridge, so preventDefault on it can't reach
+    // back to the original native event.
     const idx = this._indexAtClient(e.clientX, e.clientY);
     if (idx === null) { this.focusInput(); return; }
 
@@ -413,9 +461,24 @@ export class Jinput implements OnDestroy {
     }
     this._dragGranularity = granularity;
     this._dragPointerId = e.pointerId;
+    this._pointerDownX = e.clientX;
+    this._pointerDownY = e.clientY;
     document.addEventListener('pointermove', this._onDocPointerMove);
     document.addEventListener('pointerup', this._onDocPointerUp);
     document.addEventListener('pointercancel', this._onDocPointerUp);
+
+    // Touch long-press → select the word under the finger. Only kicks in
+    // for single-finger taps (not shift/burst paths, which already set a
+    // larger granularity). Movement beyond the threshold or pointer-up
+    // before the timer fires cancels it — see _onDocPointerMove /
+    // _onDocPointerUp.
+    if (e.pointerType === 'touch' && granularity === 'char' && !e.shiftKey) {
+      this._clearLongPressTimer();
+      this._longPressTimer = setTimeout(() => {
+        this._longPressTimer = null;
+        this._promoteToWordSelection(idx);
+      }, Jinput._LongPressMs);
+    }
 
     // Defer focus + selection: the browser's default pointerdown shifts
     // focus away from any currently-focused element after our listener
@@ -428,8 +491,44 @@ export class Jinput implements OnDestroy {
     }, 0);
   };
 
+  private _clearLongPressTimer = (): void => {
+    if (this._longPressTimer !== null) {
+      clearTimeout(this._longPressTimer);
+      this._longPressTimer = null;
+    }
+  };
+
+  /** Long-press fired: select the word at `idx` and switch the active drag
+   *  to word-granularity, so any subsequent finger drag extends by whole
+   *  words (matching iOS / Android native text selection semantics). No
+   *  navigator.vibrate here — Chrome / iOS already emit their own haptic
+   *  during long-press detection (suppressed visually by pointerdown's
+   *  preventDefault but the buzz fires before that takes effect, so a
+   *  second vibration on top would be a double-tap. */
+  private _promoteToWordSelection = (idx: number): void => {
+    const input = this._hiddenInput()?.nativeElement;
+    if (!input) return;
+    const text = this.Text();
+    const w = WordRangeAt(text, idx);
+    this._dragGranularity = 'word';
+    this._dragAnchor = w.start;
+    input.focus();
+    input.setSelectionRange(w.start, w.end, 'forward');
+    this.syncSelection();
+    this._scrollCaretIntoView();
+  };
+
   private _onDocPointerMove = (e: PointerEvent): void => {
     if (e.pointerId !== this._dragPointerId) return;
+    // Cancel the long-press timer once the finger has drifted past the
+    // jitter threshold — the user is dragging, not pressing-and-holding.
+    if (this._longPressTimer !== null) {
+      const dx = e.clientX - this._pointerDownX;
+      const dy = e.clientY - this._pointerDownY;
+      if (Math.abs(dx) > Jinput._LongPressMovePx || Math.abs(dy) > Jinput._LongPressMovePx) {
+        this._clearLongPressTimer();
+      }
+    }
     const idx = this._indexAtClient(e.clientX, e.clientY);
     if (idx === null) return;
     const input = this._hiddenInput()?.nativeElement;
@@ -455,6 +554,7 @@ export class Jinput implements OnDestroy {
   private _onDocPointerUp = (e: PointerEvent): void => {
     if (e.pointerId !== this._dragPointerId) return;
     this._dragPointerId = null;
+    this._clearLongPressTimer();
     document.removeEventListener('pointermove', this._onDocPointerMove);
     document.removeEventListener('pointerup', this._onDocPointerUp);
     document.removeEventListener('pointercancel', this._onDocPointerUp);
@@ -465,6 +565,11 @@ export class Jinput implements OnDestroy {
     if (this.ReadOnly()) return;
     const input = this._hiddenInput()?.nativeElement;
     if (!input) return;
+    // The original DOM contextmenu is already suppressed by Jaui Core's
+    // canvas-level listener (it preventDefaults unconditionally). The
+    // event arriving here is a synthetic clone; preventDefault on it has
+    // no effect on the browser's native menu — so we just pass through
+    // to the consumer.
     this.ContextMenuRequested.emit({
       event: e,
       selStart: this._selStart(),
