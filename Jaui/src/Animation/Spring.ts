@@ -40,6 +40,14 @@ export class Spring {
   }
 
   Step = (dt: number): boolean => {
+    // Stiffness: Infinity is the "no spring, just snap" sentinel produced by
+    // TransitionToSpring for Duration: 0ms. Skip the integrator entirely.
+    if (!isFinite(this.Stiffness)) {
+      if (this.Value === this.Target && this.Velocity === 0) return false;
+      this.Value = this.Target;
+      this.Velocity = 0;
+      return false;
+    }
     // Substep to stay inside the semi-implicit-Euler stability window.
     // For the critically-damped case the tight bound is dt·ω < 1 and the
     // damping coefficient c = 2ωm requires dt·c/m < 2 ⇒ dt·ω < 1 as well,

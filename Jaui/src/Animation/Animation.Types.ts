@@ -36,7 +36,9 @@ export const DefaultTransition: TransitionConfig = {
 export const TransitionToSpring = (cfg: Partial<TransitionConfig>): SpringConfig => {
   const durationMs = cfg.Duration ?? DefaultTransition.Duration;
   const mass = cfg.Spring?.Mass ?? 1;
-  const seconds = Math.max(0.016, durationMs / 1000);
+  // Duration 0 means snap — Spring.Step short-circuits on non-finite stiffness.
+  if (durationMs <= 0) return { Stiffness: Infinity, Damping: Infinity, Mass: mass };
+  const seconds = durationMs / 1000;
   const omega = 5 / seconds;
   const stiffness = omega * omega * mass;
   const dampingRatio = cfg.Easing === 'EaseInOut' ? 0.85 : 1;

@@ -176,7 +176,9 @@ export class Jiv implements OnInit, OnDestroy {
     Springs?: Record<string, Partial<SpringConfig>>;
     Text?: string;
   } {
-    const fromClass = this._registry?.Resolve(this.className()) ?? null;
+    // Signal inputs aren't populated at constructor time, so this.className() returns undefined on first run. Static class="..." is present on the host element from the start, so read it directly when the signal is empty — Springs only honour the construction-time value, missing them here means no class Springs ever apply.
+    const name = this.className() ?? this._host.nativeElement.getAttribute('class') ?? undefined;
+    const fromClass = this._registry?.Resolve(name) ?? null;
     const text = this.text();
     return {
       Style:         { ...fromClass?.Style,         ...this.style() },
