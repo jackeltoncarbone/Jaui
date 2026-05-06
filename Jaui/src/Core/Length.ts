@@ -66,6 +66,14 @@ export interface ResolveContext {
   /** 1 while the Jiv is leaving (Presence > 0 AND spring target === 0);
    *  0 otherwise. Symmetric counterpart to `Entering`. */
   Exiting?: number;
+  /** Internal flag — true on the seed context the Jiv constructor uses to
+   *  produce its initial RenderStyle before any layout / style-animator
+   *  pass has run. The registry's var table hasn't been merged at that
+   *  point, so an authored `@Name` reference would otherwise log a false-
+   *  positive "undefined var" warning every time. The animator's next
+   *  tick re-resolves with the live registry; that's where genuine
+   *  misspellings should still surface. */
+  IsSeed?: boolean;
 }
 
 // ─── Authoring helpers (PascalCase, return strings) ─────────────────────
@@ -163,7 +171,7 @@ const _resolveParsed = (
       return 0;
     }
     if (!ctx.Vars) {
-      if (!_warnedMissingVars.has(name)) {
+      if (!ctx.IsSeed && !_warnedMissingVars.has(name)) {
         _warnedMissingVars.add(name);
         console.warn(`[Jaui] "@${name}" referenced but no var table in context — falling back to 0`);
       }
@@ -171,7 +179,10 @@ const _resolveParsed = (
     }
     const raw = ctx.Vars.get(name);
     if (raw === undefined) {
-      if (!_warnedMissingVars.has(name)) {
+      // Seed context fires before the JSS registry has merged any
+      // sheet-local @Names — silence the warning there. Real misspellings
+      // surface on the next style-animator tick (which uses a live ctx).
+      if (!ctx.IsSeed && !_warnedMissingVars.has(name)) {
         _warnedMissingVars.add(name);
         console.warn(`[Jaui] Undefined var "@${name}" — falling back to 0`);
       }

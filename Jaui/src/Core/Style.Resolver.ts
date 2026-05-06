@@ -184,4 +184,5 @@ export const SEED_CONTEXT: ResolveContext = {
   PointScale: 16, ParentPointScale: 16, RootPointScale: 16,
   ViewportWidth: 0, ViewportHeight: 0,
   Vars: new Map(),
+  IsSeed: true,
 };
