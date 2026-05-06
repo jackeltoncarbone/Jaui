@@ -16,6 +16,14 @@ JinputRoot {
   UserSelect: None
 }
 
+// Visual treatment for read-only state. Drops opacity on the whole input so
+// segments + placeholder dim uniformly without per-element overrides, and
+// switches the cursor to the default pointer (no `Cursor: Text`).
+JinputReadOnly {
+  Cursor: Default
+  Opacity: 0.55
+}
+
 JinputWrap {
   Direction: Row
   Wrap: Wrap

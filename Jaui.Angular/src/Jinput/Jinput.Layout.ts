@@ -46,28 +46,100 @@ export interface LayoutMetrics {
 export type MeasureFn = (text: string) => number;
 
 /**
- * Greedy flex-row-wrap matching the canvas TokenWrap (Direction:Row, Wrap:Wrap,
- * ColumnGap:0). Each segment is one flex item; the algorithm walks left-to-right
- * and starts a new row when the next item would overflow. A single segment
- * wider than the wrap width still gets its own row (matches flex behavior of a
- * non-shrinkable item — wraps to its own line).
+ * Atom-based row wrap with hard newline support.
+ *
+ * Two-step algorithm:
+ *  1. Split segments at `\n` boundaries — each `\n` forces a new row. Empty
+ *     lines (consecutive newlines) emit a zero-width placeholder anchor at
+ *     the line's index, so caret positioning works on empty rows.
+ *  2. Within each line, group adjacent segments into "wrap atoms". Two
+ *     segments belong to the same atom when the preceding one doesn't end
+ *     in whitespace — this keeps a span and any trailing punctuation
+ *     ("token" + ".") on the same row, avoiding orphan punctuation at the
+ *     start of a line. Atom boundaries are the only soft-break points; a
+ *     single atom wider than `WrapWidth` still gets its own row.
  */
 export const LayoutSegments = (
   segs: readonly LayoutSegmentInput[],
   metrics: LayoutMetrics,
   measure: MeasureFn,
 ): LaidOutSegment[] => {
+  if (segs.length === 0) return [];
+
+  // Step 1: split into lines at \n. Each line tracks its own startIdx so an
+  // empty line can still emit a placeholder anchor for caret positioning.
+  interface Line { segs: LayoutSegmentInput[]; startIdx: number; }
+  const lines: Line[] = [{ segs: [], startIdx: segs[0].StartIndex }];
+  for (const seg of segs) {
+    if (!seg.Text.includes('\n')) {
+      lines[lines.length - 1].segs.push(seg);
+      continue;
+    }
+    let cursor = seg.StartIndex;
+    const parts = seg.Text.split('\n');
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (part.length > 0) {
+        lines[lines.length - 1].segs.push({
+          Text: part,
+          StartIndex: cursor,
+          EndIndex: cursor + part.length,
+        });
+      }
+      cursor += part.length;
+      if (i < parts.length - 1) {
+        cursor += 1; // consumed \n
+        lines.push({ segs: [], startIdx: cursor });
+      }
+    }
+  }
+
+  // Step 2: atom-group + row-fit each line.
+  interface Atom { segs: LayoutSegmentInput[]; widths: number[]; total: number; }
   const out: LaidOutSegment[] = [];
   let row = 0;
-  let x = 0;
-  for (const seg of segs) {
-    const w = measure(seg.Text);
-    if (x > 0 && x + w > metrics.WrapWidth) {
+  for (const line of lines) {
+    if (line.segs.length === 0) {
+      // Empty row — anchor for caret positioning.
+      out.push({
+        Seg: { Text: '', StartIndex: line.startIdx, EndIndex: line.startIdx },
+        X: 0,
+        Width: 0,
+        Row: row,
+      });
       row++;
-      x = 0;
+      continue;
     }
-    out.push({ Seg: seg, X: x, Width: w, Row: row });
-    x += w;
+    const atoms: Atom[] = [];
+    let current: Atom | null = null;
+    for (const seg of line.segs) {
+      const w = measure(seg.Text);
+      const prevText = current ? current.segs[current.segs.length - 1].Text : '';
+      const prevEndsWithSpace = prevText.length > 0 && /\s$/.test(prevText);
+      if (!current || prevEndsWithSpace) {
+        current = { segs: [seg], widths: [w], total: w };
+        atoms.push(current);
+      } else {
+        current.segs.push(seg);
+        current.widths.push(w);
+        current.total += w;
+      }
+    }
+    let x = 0;
+    let lineRow = row;
+    for (const atom of atoms) {
+      if (x > 0 && x + atom.total > metrics.WrapWidth) {
+        lineRow++;
+        x = 0;
+      }
+      let segX = x;
+      for (let i = 0; i < atom.segs.length; i++) {
+        out.push({ Seg: atom.segs[i], X: segX, Width: atom.widths[i], Row: lineRow });
+        segX += atom.widths[i];
+      }
+      x += atom.total;
+    }
+    row = lineRow + 1;
   }
   return out;
 };
@@ -75,10 +147,14 @@ export const LayoutSegments = (
 /**
  * Compute the caret rect for character index `idx` in a laid-out segment list.
  *
- * Tie-breaking at segment boundaries: when `idx` is on a boundary between
- * adjacent segments (idx == prev.EndIndex == next.StartIndex), the *next*
- * segment wins. That way, after a wrap, the caret correctly snaps to x=0 of
- * the new row instead of trailing off the right edge of the previous row.
+ * Boundary semantics:
+ *  - When `idx` is at a boundary between two adjacent segments (idx ==
+ *    prev.EndIndex == next.StartIndex), the *next* segment wins so the caret
+ *    snaps to x=0 of the new row after a wrap.
+ *  - When the next segment is non-adjacent (gap, e.g. `\n` was consumed),
+ *    pin to the right edge of `prev` instead.
+ *  - An empty placeholder (s == e) acts as a row anchor: when idx == s == e
+ *    the caret sits at that placeholder's row + x.
  *
  * Returns a rect even when `idx` is past the end of all text — pinned to the
  * right edge of the last segment.
@@ -92,12 +168,17 @@ export const CharPosition = (
   if (laid.length === 0) {
     return { x: 0, y: 0, height: metrics.LineHeightPx };
   }
-  // Prefer the segment where idx is strictly inside, OR where idx is at
-  // the start (idx == s). This means a boundary index resolves to the
-  // *later* segment, which is correct when wrap puts them on different rows.
-  for (const item of laid) {
+  for (let k = 0; k < laid.length; k++) {
+    const item = laid[k];
     const s = item.Seg.StartIndex;
     const e = item.Seg.EndIndex;
+    if (s === e && idx === s) {
+      return {
+        x: item.X,
+        y: item.Row * metrics.RowPitchPx,
+        height: metrics.LineHeightPx,
+      };
+    }
     if (idx >= s && idx < e) {
       const within = item.Seg.Text.substring(0, idx - s);
       return {
@@ -106,8 +187,20 @@ export const CharPosition = (
         height: metrics.LineHeightPx,
       };
     }
+    if (idx === e) {
+      // Boundary at end of this segment. If the next segment is adjacent
+      // (starts at e), defer — the next iter places caret at its left edge.
+      // Otherwise (gap from \n or end of list) pin to right edge of this.
+      const next = laid[k + 1];
+      if (next && next.Seg.StartIndex === e) continue;
+      return {
+        x: item.X + item.Width,
+        y: item.Row * metrics.RowPitchPx,
+        height: metrics.LineHeightPx,
+      };
+    }
   }
-  // Past the end (idx >= last.EndIndex) — pin to right edge of last segment.
+  // idx past everything — pin to last segment's right edge.
   const last = laid[laid.length - 1];
   return {
     x: last.X + last.Width,

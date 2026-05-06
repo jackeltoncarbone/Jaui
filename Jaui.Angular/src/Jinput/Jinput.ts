@@ -63,7 +63,7 @@ interface RenderedSegment extends LayoutSegmentInput {
   template: `
     <jyle [source]="JssSource" />
 
-    <jiv class="JinputRoot"
+    <jiv [class]="ReadOnly() ? 'JinputRoot JinputReadOnly' : 'JinputRoot'"
       (pointerdown)="onRootPointerDown($event)"
       (contextmenu)="onRootContextMenu($event)">
       <jiv #wrap class="JinputWrap">
@@ -103,21 +103,23 @@ interface RenderedSegment extends LayoutSegmentInput {
       </jiv>
     </jiv>
 
-    <input
+    <textarea
       #hiddenInput
-      type="text"
       class="HiddenInput"
       autocapitalize="off"
       autocomplete="off"
       autocorrect="off"
       spellcheck="false"
+      rows="1"
       [readOnly]="ReadOnly()"
       (input)="onInput($event)"
+      (compositionstart)="onCompositionStart()"
+      (compositionend)="onCompositionEnd()"
       (focus)="onFocus()"
       (blur)="onBlur()"
       (keydown)="onKeyDown($event)"
       (keyup)="syncSelection()"
-      (click)="syncSelection()" />
+      (click)="syncSelection()"></textarea>
   `,
   styles: [`
     :host { display: contents; }
@@ -143,6 +145,10 @@ export class Jinput implements OnDestroy {
   readonly Spans = input<readonly JinputSpan[]>([]);
   readonly Placeholder = input('');
   readonly ReadOnly = input(false);
+  /** Allow newline characters in the model. When false (default), Enter
+   *  emits Submitted instead of inserting a newline, and pasted text has
+   *  newlines stripped. Set true on long-form / multi-paragraph editors. */
+  readonly MultiLine = input(false);
 
   /** Font config used both for canvas measureText (layout) and JSS-driven
    *  rendering. Defaults to system-ui at 20px (16pt × 1.25 default scale).
@@ -168,10 +174,17 @@ export class Jinput implements OnDestroy {
     selEnd: number;
     value: string;
   }>();
+  /** Enter (without Shift) when not in multi-line mode. Consumer is expected
+   *  to use this to commit / submit. Shift+Enter is always ignored — leave
+   *  Shift for newline insertion in MultiLine consumers. */
+  readonly Submitted = output<KeyboardEvent>();
+  /** Esc — consumer is expected to dismiss / cancel / revert. The default
+   *  action (preventing default to swallow Esc) is the consumer's call. */
+  readonly Cancelled = output<KeyboardEvent>();
 
   // ── Refs ────────────────────────────────────────────────────────
   private readonly _jaui = inject(Jaui, { optional: true });
-  private readonly _hiddenInput = viewChild<ElementRef<HTMLInputElement>>('hiddenInput');
+  private readonly _hiddenInput = viewChild<ElementRef<HTMLTextAreaElement>>('hiddenInput');
   private readonly _wrap = viewChild<Jiv>('wrap');
 
   // ── Internal state ──────────────────────────────────────────────
@@ -332,16 +345,22 @@ export class Jinput implements OnDestroy {
     });
 
     // Re-read wrap width after every reflow trigger. Jaui resolves
-    // Width:100% lazily; rAF gives us the post-layout value.
+    // Width:100% lazily over one or more frames after Angular CD finishes,
+    // so a single rAF sometimes finds Node.Width still 0 — retry a few
+    // frames before giving up. Without this, the initial layout uses the
+    // signal's default and text either renders un-wrapped (initial value
+    // too large) or one-char-per-line (initial value too small) until a
+    // text change happens to retrigger the effect.
     effect(() => {
       this.RenderedSegments();
-      requestAnimationFrame(() => {
-        const w = this._wrap()?.Node.Width;
-        if (typeof w === 'number' && w > 0) this._wrapWidth.set(w);
-      });
+      this._scheduleWrapRead();
     });
 
     document.addEventListener('selectionchange', this._onSelectionChange);
+    // Wrap re-flows on viewport resize even when text hasn't changed; without
+    // this listener long content stays wrapped to the old width after the
+    // user resizes the window.
+    window.addEventListener('resize', this._onWindowResize);
   }
 
   ngOnDestroy(): void {
@@ -349,9 +368,29 @@ export class Jinput implements OnDestroy {
     document.removeEventListener('pointermove', this._onDocPointerMove);
     document.removeEventListener('pointerup', this._onDocPointerUp);
     document.removeEventListener('pointercancel', this._onDocPointerUp);
+    window.removeEventListener('resize', this._onWindowResize);
     if (this._blinkTimer) clearInterval(this._blinkTimer);
     this._clearLongPressTimer();
+    if (this._wrapReadFrame !== null) cancelAnimationFrame(this._wrapReadFrame);
   }
+
+  private _wrapReadFrame: number | null = null;
+  private _scheduleWrapRead = (attempt: number = 0): void => {
+    if (this._wrapReadFrame !== null) return;
+    this._wrapReadFrame = requestAnimationFrame(() => {
+      this._wrapReadFrame = null;
+      const w = this._wrap()?.Node.Width;
+      if (typeof w === 'number' && w > 0) {
+        if (w !== this._wrapWidth()) this._wrapWidth.set(w);
+        return;
+      }
+      if (attempt < 10) this._scheduleWrapRead(attempt + 1);
+    });
+  };
+
+  private _onWindowResize = (): void => {
+    this._scheduleWrapRead();
+  };
 
   // ── Public API ──────────────────────────────────────────────────
   /** Programmatically focus the input — moves the caret to the end if no
@@ -373,9 +412,6 @@ export class Jinput implements OnDestroy {
     }
     this.syncSelection();
   };
-
-  /** @deprecated Use Focus(). Kept so existing internal callers compile. */
-  focusInput = this.Focus;
 
   // ── Pointer handling ────────────────────────────────────────────
   private static readonly _BurstMs = 400;
@@ -403,16 +439,24 @@ export class Jinput implements OnDestroy {
     // synthesized by the Jiv bridge, so preventDefault on it can't reach
     // back to the original native event.
     const idx = this._indexAtClient(e.clientX, e.clientY);
-    if (idx === null) { this.focusInput(); return; }
+    if (idx === null) { this.Focus(); return; }
 
     // Emit PositionClicked first; consumer can preventDefault to skip caret
     // positioning (e.g. SS tokenizer wrapper opens a token settings popup
     // and doesn't want the caret to move).
     this.PositionClicked.emit({ index: idx, event: e });
-    if (e.defaultPrevented) return;
 
     const input = this._hiddenInput()?.nativeElement;
     if (!input) return;
+
+    if (e.defaultPrevented) {
+      // Consumer skipped caret positioning, but the user still clicked the
+      // editable surface — keep focus so subsequent typing lands here. Same
+      // setTimeout(0) reason as the full-path focus below: browser default
+      // pointerdown shifts focus away after our handler returns.
+      setTimeout(() => input.focus(), 0);
+      return;
+    }
 
     const now = performance.now();
     const dx = e.clientX - this._lastClickX;
@@ -452,9 +496,10 @@ export class Jinput implements OnDestroy {
       this._dragAnchor = w.start;
       granularity = 'word';
     } else if (this._clickCount >= 3) {
-      selA = 0;
-      selB = text.length;
-      this._dragAnchor = 0;
+      const row = this._rowRangeAt(idx);
+      selA = row.start;
+      selB = row.end;
+      this._dragAnchor = row.start;
       granularity = 'line';
     } else {
       this._dragAnchor = idx;
@@ -542,8 +587,10 @@ export class Jinput implements OnDestroy {
       a = Math.min(anchorWord.start, idxWord.start);
       b = Math.max(anchorWord.end, idxWord.end);
     } else if (this._dragGranularity === 'line') {
-      a = 0;
-      b = text.length;
+      const anchorRow = this._rowRangeAt(this._dragAnchor);
+      const idxRow = this._rowRangeAt(idx);
+      a = Math.min(anchorRow.start, idxRow.start);
+      b = Math.max(anchorRow.end, idxRow.end);
     }
     const dir = idx >= this._dragAnchor ? 'forward' : 'backward';
     input.setSelectionRange(a, b, dir as 'forward' | 'backward' | 'none');
@@ -601,6 +648,69 @@ export class Jinput implements OnDestroy {
     }
   }
 
+  // ── Visual-row caret navigation (ArrowUp / ArrowDown) ──────────
+  // Returns true if the caret moved (so the caller preventDefaults). When
+  // there's no row to move into (already on top row going up, or last row
+  // going down), returns false so the native input keeps its no-op behavior.
+  private _moveCaretByVisualRow(delta: -1 | 1, shiftExtend: boolean): boolean {
+    const laid = this._LaidOutSegments();
+    if (laid.length === 0) return false;
+    const lastRow = laid[laid.length - 1].Row;
+    if (lastRow === 0) return false;
+    const el = this._hiddenInput()?.nativeElement;
+    if (!el) return false;
+
+    const metrics = this._Metrics();
+    const isBackward = el.selectionDirection === 'backward';
+    const activeIdx = shiftExtend
+      ? (isBackward ? this._selStart() : this._selEnd())
+      : (delta === -1 ? this._selStart() : this._selEnd());
+    const cur = CharPosition(laid, activeIdx, metrics, this._measureWidth);
+    const curRow = Math.round(cur.y / metrics.RowPitchPx);
+    const targetRow = curRow + delta;
+    if (targetRow < 0 || targetRow > lastRow) return false;
+
+    const targetY = targetRow * metrics.RowPitchPx + metrics.LineHeightPx / 2;
+    const targetIdx = IndexAtPoint(laid, cur.x, targetY, metrics, this._measureWidth);
+
+    if (shiftExtend) {
+      const anchor = isBackward ? this._selEnd() : this._selStart();
+      const a = Math.min(anchor, targetIdx);
+      const b = Math.max(anchor, targetIdx);
+      const dir: 'forward' | 'backward' = targetIdx >= anchor ? 'forward' : 'backward';
+      el.setSelectionRange(a, b, dir);
+    } else {
+      el.setSelectionRange(targetIdx, targetIdx);
+    }
+    this.syncSelection();
+    this._scrollCaretIntoView();
+    return true;
+  }
+
+  // ── Row-range helper for triple-click / line-drag ──────────────
+  // Visual-row-aware "select this line" range. Picks the row containing the
+  // segment that owns idx, then bounds by first/last segment on that row.
+  // Falls back to whole-text when idx is past the end on an empty trailing
+  // row, and to [0, 0] for empty input.
+  private _rowRangeAt(idx: number): { start: number; end: number } {
+    const laid = this._LaidOutSegments();
+    const text = this.Text();
+    if (laid.length === 0) return { start: 0, end: text.length };
+    let row = laid[laid.length - 1].Row;
+    for (const item of laid) {
+      if (idx >= item.Seg.StartIndex && idx <= item.Seg.EndIndex) {
+        row = item.Row;
+        break;
+      }
+    }
+    const onRow = laid.filter(s => s.Row === row);
+    if (onRow.length === 0) return { start: 0, end: text.length };
+    return {
+      start: onRow[0].Seg.StartIndex,
+      end: onRow[onRow.length - 1].Seg.EndIndex,
+    };
+  }
+
   // ── Hit-testing ─────────────────────────────────────────────────
   private _indexAtClient(clientX: number, clientY: number): number | null {
     const w = this._wrap();
@@ -613,13 +723,72 @@ export class Jinput implements OnDestroy {
   }
 
   // ── Native input bridge ─────────────────────────────────────────
+  // IME composition (CJK, Korean, etc.) fires `input` events for each
+  // provisional commit. Forwarding those mid-composition recomputes
+  // downstream signals (tokenization, spans) on partial state and may
+  // flicker. Suppress during composition; emit one final Text.set on
+  // compositionend.
+  private _composing = false;
+
   onInput = (event: Event): void => {
-    const value = (event.target as HTMLInputElement).value;
+    if (this._composing) return;
+    const target = event.target as HTMLTextAreaElement;
+    let value = target.value;
+    if (!this.MultiLine() && /[\n\r]/.test(value)) {
+      // Single-line surfaces strip pasted newlines (mirrors browser
+      // behavior on <input type="text">). Write back to the textarea so
+      // selectionStart / End remain meaningful.
+      const cleaned = value.replace(/[\n\r]+/g, '');
+      target.value = cleaned;
+      const newPos = Math.min(target.selectionStart ?? cleaned.length, cleaned.length);
+      target.setSelectionRange(newPos, newPos);
+      value = cleaned;
+    }
     this.Text.set(value);
     this.syncSelection();
   };
 
+  onCompositionStart = (): void => {
+    this._composing = true;
+  };
+
+  onCompositionEnd = (): void => {
+    this._composing = false;
+    const el = this._hiddenInput()?.nativeElement;
+    if (!el) return;
+    this.Text.set(el.value);
+    this.syncSelection();
+  };
+
   onKeyDown = (e: KeyboardEvent): void => {
+    // Cmd/Ctrl + Enter is universal submit on every surface, even MultiLine.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      this.Submitted.emit(e);
+      return;
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      if (!this.MultiLine()) {
+        // Single-line surfaces: Enter commits, never inserts a newline.
+        e.preventDefault();
+        this.Submitted.emit(e);
+        return;
+      }
+      // MultiLine: let the textarea insert \n natively; do not preventDefault
+      // and do not emit Submitted (consumers use Cmd+Enter or Shift+Enter for
+      // alternate submit semantics).
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      this.Cancelled.emit(e);
+      return;
+    }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      if (this._moveCaretByVisualRow(e.key === 'ArrowUp' ? -1 : 1, e.shiftKey)) {
+        e.preventDefault();
+        return;
+      }
+    }
     const meta = e.metaKey || e.ctrlKey;
     if (!meta) return;
     const key = e.key.toLowerCase();
