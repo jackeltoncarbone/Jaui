@@ -2,6 +2,62 @@
 
 Written 2026-04-17. Constraint: **zero visual change** — no quality
 tradeoffs, no different z-order, no perceptible rendering difference.
+This includes the artist's pick within Show Studio (glass material,
+BackdropFrostBlur, ProgressiveBlur direction, Layer/z-order, BorderRadius
+concentricity, transition timings, spring physics) — those are baseline
+too.
+
+## Shipped log
+
+- **2026-04-17 → 2026-05-06** — Fix 4 (scene FBO replacing per-surface
+  SnapshotScreen), Fix 2 (`flushPanels` panel batching), Fix 3
+  (`flushText` text batching), Fix 6 (`orderedChildren` Layer-0 fast
+  path) all landed in `Jaui/src/Core/Jaui.ts` ahead of this plan being
+  reopened.
+- **2026-05-06** — **Fix 5** Canvas-level dirty flag. `MarkLayoutDirty`
+  bubbles `Layout` to the root with an early-out when an ancestor is
+  already dirty; `_tick`'s O(N) `_hasDirtyLayout` + `_hasDirtyText`
+  tree walks collapse to a single `(root.Dirty & (Layout|Text)) !== 0`
+  check. Dead `_hasDirtyLayout` / `_hasDirtyText` removed.
+- **2026-05-06** — **Fix 7** Gated `_processTextTransitions` on
+  `layoutDirty || animationManager.IsRunning`. AnimationManager already
+  tracks ScrollManager + PresenceManager + every spring, so this
+  covers all sources of "wrap thresholds could move next frame."
+- **2026-05-06** — **Fix 8 (NEW)** Scoped subtree re-solve. Element
+  pushes dirty marks through a `DirtyTracker` side-channel; Canvas
+  implements it. On every layout-dirty frame, `_chooseScopedRoot`
+  walks up from the (single) dirty node to the first ancestor with
+  explicit non-keyword `Width` AND `Height` in `ChildLayout` and
+  re-solves only that subtree. `CascadePointScale`,
+  `ComputeIntrinsicSizes`, `SolveLayout` all detect subtree mode
+  (subtree-root has Parent + populated ResolveCtx) and reuse the
+  prior frame's context instead of fabricating a viewport-anchored
+  root context. Multi-dirty / unbounded-ancestor cases fall back to
+  full-tree (today's behavior). Layout flags on the bubble path
+  above the subtree root are cleared after solve so next frame's
+  `(root.Dirty & Layout)` gate is honest.
+
+Idle-frame skip (Fix 1) is **off the table** for Show Studio: nothing
+on screen is ever idle (Reality 3D scene is always rendering, drill
+playback drives marcher updates, etc.). The remaining wins are scoped
+re-solve refinements, not idle skipping.
+
+## Open candidates
+
+- **Multi-dirty LCA scoping**. Today scoped solve only fires when
+  exactly one node is dirty per frame. For multi-dirty cases (toolbar
+  collapse touches Toolbar + ToolbarTitle, drawer expand touches
+  Drawer + Scroll), compute the LCA of dirty nodes and use that as
+  the subtree root. O(depth) per dirty mark, bounded shallow.
+- **Intrinsic-escalation propagation**. When a scoped solve runs, if
+  the subtree-root's `IntrinsicWidth`/`Height` exceeded the prior
+  allocation, escalate dirty up to its parent for next frame so
+  ancestors with `Auto` sizing can react. Today the heuristic skips
+  this by only scoping at fixed-box ancestors — safe but conservative.
+- **Janvas-only frames**. Many Show Studio "animating" frames are
+  purely Janvas-side (Reality 3D, marcher updates) and don't trigger
+  Jaui layout dirty. The Jaui frame budget on those is already
+  near-zero (post-Fix 5/7). Worth instrumenting to confirm.
 
 ---
 

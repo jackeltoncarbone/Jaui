@@ -83,8 +83,8 @@ export class Jiv extends Element {
   // a Layout dirty mark to the parent because line breaks/heights might
   // change when a font-metric prop is in the override (FontSize/Family/etc.).
   private _invalidateText = (): void => {
-    this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
-    if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
+    this.Dirty |= DirtyFlag.Text;
+    this.MarkLayoutDirty();
   };
 
   /** Optional style override for text selection highlights. */

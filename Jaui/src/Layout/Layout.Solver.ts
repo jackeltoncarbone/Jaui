@@ -35,34 +35,92 @@ export const SolveLayout = (
 ): Map<Element, LayoutResult> => {
   const results = new Map<Element, LayoutResult>();
 
-  // Root's ResolveCtx: no parent, so ParentWidth/Height = viewport,
-  // ParentPointScale = DEFAULT_POINT_SCALE, RootPointScale = root's own
-  // resolved PointScale (computed first, using parent-ref for self-ref safety).
-  const rootSeedCtx: ResolveContext = {
-    ParentWidth: viewport.Width,
-    ParentHeight: viewport.Height,
-    PointScale: DEFAULT_POINT_SCALE,
-    ParentPointScale: DEFAULT_POINT_SCALE,
-    RootPointScale: DEFAULT_POINT_SCALE,
-    ViewportWidth: viewport.Width,
-    ViewportHeight: viewport.Height,
-    Vars: vars,
-  };
-  const rootPointScale = Resolve(root.PointScale, rootSeedCtx, 'W', true);
+  // Subtree mode: when `root` already has a Parent + ResolveCtx, we're being
+  // invoked for a scoped re-solve (caller decided this subtree is contained
+  // — its size is fixed by an explicit-box ancestor that didn't change). Skip
+  // the rootCtx fabrication and reuse the prior frame's context: ParentWidth/
+  // Height come from the actual parent, RootPointScale stays anchored to the
+  // original tree's root (so `rpt` units don't drift), and the offset is the
+  // subtree-root's existing X/Y instead of (0, 0). Without this, every
+  // recursive `_buildChildCtx` would inherit DEFAULT_POINT_SCALE / viewport
+  // dims and the subtree would lay out as if it were a fresh standalone tree.
+  const isSubtree = root.Parent !== null && root.ResolveCtx !== null;
 
-  const rootCtx: ResolveContext = {
-    ParentWidth: viewport.Width,
-    ParentHeight: viewport.Height,
-    PointScale: rootPointScale,
-    ParentPointScale: DEFAULT_POINT_SCALE,
-    RootPointScale: rootPointScale,
-    ViewportWidth: viewport.Width,
-    ViewportHeight: viewport.Height,
-    Vars: vars,
-  };
-  root.ResolveCtx = rootCtx;
+  let rootCtx: ResolveContext;
+  let rootPointScale: number;
+  let offsetX: number;
+  let offsetY: number;
+  let boxWidth: number;
+  let boxHeight: number;
 
-  _solveNode(root, root.Width, root.Height, 0, 0, results, rootCtx, viewport, rootPointScale, vars);
+  if (isSubtree) {
+    // CascadePointScale runs before us and stamps `ParentWidth: 0` on every
+    // node it visits — intentional during the intrinsic phase, but the solve
+    // phase needs the actual parent content dims for percent padding/gap on
+    // the subtree-root and for any descendant that walks up to read it
+    // (e.g. `_textWrapBudget`). Full-tree mode handles this by fabricating a
+    // fresh viewport-anchored rootCtx; subtree mode mirrors that by reading
+    // the parent's content rect from its already-solved Width/Height minus
+    // its (already-resolved) padding. parent.ResolveCtx is unchanged from the
+    // prior frame's solve, so resolving parent's padding against it is safe.
+    const parent = root.Parent!;
+    const parentCtx = parent.ResolveCtx!;
+    const [pPt, pPr, pPb, pPl] = ResolveLengthTuple4(parent.Layout.Padding, parentCtx, ['H', 'W', 'H', 'W']);
+    const parentContentW = Math.max(0, parent.Width - pPl - pPr);
+    const parentContentH = Math.max(0, parent.Height - pPt - pPb);
+
+    const priorCtx = root.ResolveCtx!;
+    rootCtx = {
+      ParentWidth: parentContentW,
+      ParentHeight: parentContentH,
+      PointScale: priorCtx.PointScale,
+      ParentPointScale: parentCtx.PointScale,
+      RootPointScale: priorCtx.RootPointScale,
+      ViewportWidth: viewport.Width,
+      ViewportHeight: viewport.Height,
+      Vars: vars,
+    };
+    root.ResolveCtx = rootCtx;
+    rootPointScale = rootCtx.RootPointScale;
+    offsetX = root.X;
+    offsetY = root.Y;
+    boxWidth = root.Width;
+    boxHeight = root.Height;
+  } else {
+    // Full-tree path. Root's ResolveCtx: no parent, so ParentWidth/Height =
+    // viewport, ParentPointScale = DEFAULT_POINT_SCALE, RootPointScale =
+    // root's own resolved PointScale (computed first, using parent-ref for
+    // self-ref safety).
+    const rootSeedCtx: ResolveContext = {
+      ParentWidth: viewport.Width,
+      ParentHeight: viewport.Height,
+      PointScale: DEFAULT_POINT_SCALE,
+      ParentPointScale: DEFAULT_POINT_SCALE,
+      RootPointScale: DEFAULT_POINT_SCALE,
+      ViewportWidth: viewport.Width,
+      ViewportHeight: viewport.Height,
+      Vars: vars,
+    };
+    rootPointScale = Resolve(root.PointScale, rootSeedCtx, 'W', true);
+
+    rootCtx = {
+      ParentWidth: viewport.Width,
+      ParentHeight: viewport.Height,
+      PointScale: rootPointScale,
+      ParentPointScale: DEFAULT_POINT_SCALE,
+      RootPointScale: rootPointScale,
+      ViewportWidth: viewport.Width,
+      ViewportHeight: viewport.Height,
+      Vars: vars,
+    };
+    root.ResolveCtx = rootCtx;
+    offsetX = 0;
+    offsetY = 0;
+    boxWidth = root.Width;
+    boxHeight = root.Height;
+  }
+
+  _solveNode(root, boxWidth, boxHeight, offsetX, offsetY, results, rootCtx, viewport, rootPointScale, vars);
   _resolveAttachPass(root, results, viewport, rootPointScale, vars);
   return results;
 };

@@ -19,6 +19,14 @@ import type { ResolveContext } from '../Core/Length';
 import { DirtyFlag, type DirtyFlags } from '../Core/Types';
 import { Spring } from '../Animation/Spring';
 
+/** Side-channel from Element to its owning Canvas (or any consumer that wants
+ *  to react to dirty marks). Canvas implements this and registers itself on
+ *  Root; `AddChild` propagates so the whole tree shares one tracker. Defined
+ *  here (and not in `../Core/`) to avoid an Element → Canvas import cycle. */
+export interface DirtyTracker {
+  Notify(node: Element): void;
+}
+
 export type CursorStyle = 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
 
 /** How an image fills its Element's box.
@@ -188,6 +196,14 @@ export class Element {
   // ── Dirty tracking ──
   Dirty: DirtyFlags = DirtyFlag.Layout;
 
+  /** Per-tree dirty-tracker hook. Canvas implements `DirtyTracker` and stamps
+   *  itself onto Root at construction; `AddChild` / `RemoveChild` propagate the
+   *  reference so every node in the tree shares it. `MarkLayoutDirty` notifies
+   *  the tracker so Canvas can decide whether to scope re-solve to a subtree
+   *  vs. the whole tree on the next tick. Stays null for orphan elements
+   *  (e.g. test fixtures that don't run inside a Canvas). */
+  Tracker: DirtyTracker | null = null;
+
   constructor(options?: ElementOptions) {
     this.X = options?.X ?? 0;
     this.Y = options?.Y ?? 0;
@@ -244,7 +260,12 @@ export class Element {
     if (child.Parent) child.Parent.RemoveChild(child);
     child.Parent = this;
     this.Children.push(child);
-    this.Dirty |= DirtyFlag.Layout | DirtyFlag.Children;
+    this.Dirty |= DirtyFlag.Children;
+    // Inherit the parent's tracker so the freshly-mounted subtree starts
+    // notifying Canvas the moment it's part of the live tree. Pre-existing
+    // descendants under `child` get the tracker via `_propagateTracker`.
+    if (child.Tracker !== this.Tracker) child._propagateTracker(this.Tracker);
+    this.MarkLayoutDirty();
   };
 
   RemoveChild = (child: Element): void => {
@@ -252,13 +273,40 @@ export class Element {
     if (idx >= 0) {
       this.Children.splice(idx, 1);
       child.Parent = null;
-      this.Dirty |= DirtyFlag.Layout | DirtyFlag.Children;
+      // Detach the subtree's tracker — orphan nodes shouldn't push dirty
+      // notifications to a Canvas that no longer owns them.
+      child._propagateTracker(null);
+      this.Dirty |= DirtyFlag.Children;
+      this.MarkLayoutDirty();
     }
   };
 
+  /** Recursively set this node and its descendants' Tracker. Called by
+   *  AddChild/RemoveChild so the tracker invariant ("every reachable node
+   *  shares Root's tracker") holds across mount/unmount. */
+  _propagateTracker = (tracker: DirtyTracker | null): void => {
+    this.Tracker = tracker;
+    for (const c of this.Children) c._propagateTracker(tracker);
+  };
+
+  // Bubbles the Layout flag all the way to the root so the per-frame dirty
+  // check is O(1) — `(root.Dirty & Layout) !== 0` answers "anyone in the
+  // tree dirty?" without walking. Bubble cost is O(depth), early-out when
+  // we hit an ancestor that's already marked. The previous one-hop bubble
+  // forced an O(N) tree walk every frame to find dirty descendants.
+  //
+  // Notifies the Canvas-side tracker (if registered) so re-solve can be
+  // scoped to the smallest containing subtree instead of replaying from
+  // the root. The bubble itself is still useful even with the tracker —
+  // it gives `_tick` an O(1) "anything dirty?" gate at root.Dirty.
   MarkLayoutDirty = (): void => {
     this.Dirty |= DirtyFlag.Layout;
-    if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
+    let p = this.Parent;
+    while (p && (p.Dirty & DirtyFlag.Layout) === 0) {
+      p.Dirty |= DirtyFlag.Layout;
+      p = p.Parent;
+    }
+    this.Tracker?.Notify(this);
   };
 
   SetText = (text: string | null, style?: Partial<TextStyle>): void => {
@@ -276,8 +324,8 @@ export class Element {
       }
     }
     if (!changed) return;
-    this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
-    if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
+    this.Dirty |= DirtyFlag.Text;
+    this.MarkLayoutDirty();
   };
 
   /** Hook for subclasses (Jiv) to layer state-dependent text overrides on
@@ -293,7 +341,7 @@ export class Element {
   InvalidateText = (): void => {
     if (this.Text === null) return;
     this.TextMeasurement = null;
-    this.Dirty |= DirtyFlag.Text | DirtyFlag.Layout;
-    if (this.Parent) this.Parent.Dirty |= DirtyFlag.Layout;
+    this.Dirty |= DirtyFlag.Text;
+    this.MarkLayoutDirty();
   };
 }

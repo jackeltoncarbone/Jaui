@@ -42,7 +42,7 @@ const _hasBackdropFilter = (node: Jiv): boolean => {
     || s.BackdropFrostBlur > 0.001;
 };
 import { DirtyFlag } from './Types';
-import { Element as JauiElement } from '../Element/Element';
+import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
 import { PresenceManager } from '../Animation/Presence.Manager';
@@ -50,9 +50,20 @@ import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer } from './WebGL2.Renderer';
 import { Janvas } from '../Janvas/Janvas';
 
-export class Canvas {
+export class Canvas implements DirtyTracker {
   readonly Element: HTMLCanvasElement;
   readonly Root: Jiv;
+
+  /** Set of leaf nodes that have called `MarkLayoutDirty` since the last
+   *  layout pass. Populated via `Notify` from Element side. Used by `_tick`
+   *  to scope re-solve to the smallest containing subtree (single dirty
+   *  node => walk up to first ancestor with explicit Width+Height; fall
+   *  back to root for multi-dirty or unbounded ancestors).
+   *
+   *  Cleared after every solve. Membership is by-reference; nodes that get
+   *  removed from the tree mid-frame are simply ignored on next solve
+   *  (their entry is dropped when the set is wiped, no-op until then). */
+  private _dirtyNodes: Set<JauiElement> = new Set();
 
   private _renderer!: Renderer;
   private _width: number = 0;
@@ -131,6 +142,7 @@ export class Canvas {
   constructor(canvas: HTMLCanvasElement, renderer: Renderer) {
     this.Element = canvas;
     this.Root = new Jiv();
+    this.Root.Tracker = this;
     this._renderer = renderer;
 
     this.Element.style.touchAction = 'none';
@@ -262,23 +274,52 @@ export class Canvas {
     let t0 = 0, tDirtyEnd = 0, tLayoutEnd = 0, tTextEnd = 0;
     if (hud) t0 = performance.now();
 
-    // Check if layout needs re-solving
-    const layoutDirty = this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root);
+    // Single O(1) root-flag check. `MarkLayoutDirty` bubbles the Layout
+    // flag from any descendant to the root, so root.Dirty & Layout answers
+    // "any node in the tree dirty?" without walking. Text-only mutations
+    // also call MarkLayoutDirty (text changes always invalidate intrinsic
+    // sizing), so a separate Text walk is no longer needed.
+    const layoutDirty = (this.Root.Dirty & (DirtyFlag.Layout | DirtyFlag.Text)) !== 0;
     if (hud) tDirtyEnd = performance.now();
     if (layoutDirty) {
+      // Choose the smallest containing subtree we can re-solve in isolation.
+      // Returns Root for multi-dirty / unbounded-ancestor cases, equivalent
+      // to today's behavior. Returns a deeper element when the dirty change
+      // is contained inside a fixed-box ancestor — saves an O(N) full-tree
+      // pass on common cases (drawer resize, single-card hover, scrubber).
+      const scopedRoot = this._chooseScopedRoot();
       // Cascade PointScale first so _measureDirtyText can resolve FontSize
-      // against each Jiv's ResolveCtx before layout sizes are known.
-      CascadePointScale(this.Root, this._viewport(), this._jssVars);
-      this._measureDirtyText(this.Root);
-      ComputeIntrinsicSizes(this.Root, this._viewport(), this._jssVars);
-      this._solveAndAnimate();
-      this._clearDirty(this.Root);
+      // against each Jiv's ResolveCtx before layout sizes are known. The
+      // tree is all-Jivs (Root is a Jiv, AddChild only mounts Jivs), so the
+      // Element-typed path back from Parent walks safely casts to Jiv at
+      // these consumers.
+      CascadePointScale(scopedRoot, this._viewport(), this._jssVars);
+      this._measureDirtyText(scopedRoot as Jiv);
+      ComputeIntrinsicSizes(scopedRoot, this._viewport(), this._jssVars);
+      this._solveAndAnimate(scopedRoot);
+      this._clearDirty(scopedRoot as Jiv);
+      // The Layout flag was bubbled to the root by MarkLayoutDirty so the
+      // O(1) gate above could see it. After a scoped solve, the bubble path
+      // (subtree-root.Parent → ... → Root) still holds Layout flags it
+      // didn't deserve — clear them so next frame's gate is honest. Walks
+      // O(depth), bounded shallow.
+      if (scopedRoot !== this.Root) {
+        let p = scopedRoot.Parent;
+        while (p) { p.Dirty &= ~DirtyFlag.Layout; p = p.Parent; }
+      }
+      this._dirtyNodes.clear();
     }
     if (hud) tLayoutEnd = performance.now();
 
-    // Wrap-change detection runs every frame — spring-animated width can cross
-    // wrap thresholds continuously, and each crossing should cross-fade.
-    this._processTextTransitions(this.Root);
+    // Wrap-change detection only runs when something could have moved a wrap
+    // threshold this frame: a fresh layout solve (widths just updated) or any
+    // active animator (spring-animated width can cross wrap thresholds
+    // continuously). On steady-idle frames neither holds, so the full-tree
+    // walk is skipped entirely. AnimationManager.IsRunning covers springs,
+    // ScrollManager easings, and PresenceManager — all registered with it.
+    if (layoutDirty || this._animationManager.IsRunning) {
+      this._processTextTransitions(this.Root);
+    }
     if (hud) tTextEnd = performance.now();
 
     // Reset per-frame counters; _render increments them as it walks.
@@ -1108,14 +1149,6 @@ export class Canvas {
     for (const child of node.Children as Jiv[]) this._processTextTransitions(child);
   };
 
-  private _hasDirtyText = (node: Jiv): boolean => {
-    if (node.Dirty & DirtyFlag.Text) return true;
-    for (const child of node.Children as Jiv[]) {
-      if (this._hasDirtyText(child)) return true;
-    }
-    return false;
-  };
-
   private _measureDirtyText = (node: Jiv): void => {
     if (node.Text !== null && (node.Dirty & DirtyFlag.Text || node.TextMeasurement === null)) {
       // Unbounded measurement — intrinsic sizing with padding is handled by ComputeIntrinsicSizes.
@@ -1136,16 +1169,64 @@ export class Canvas {
 
   // ─── Layout Integration ───
 
-  private _solveAndAnimate = (): void => {
-    // Root fills the canvas
-    this.Root.Width = this._width;
-    this.Root.Height = this._height;
+  /** DirtyTracker.Notify — called from Element.MarkLayoutDirty for every
+   *  node in this Canvas's tree. Cheap O(1) Set add; LCA / scope-root
+   *  decision happens in `_chooseScopedRoot` at solve time, not here, to
+   *  keep the dirty path branchless. Cleared after every solve. */
+  Notify = (node: JauiElement): void => {
+    this._dirtyNodes.add(node);
+  };
 
-    const results = SolveLayout(this.Root, this._viewport(), this._jssVars);
+  /** Pick the smallest subtree we can re-solve in isolation this frame, or
+   *  fall back to Root for the whole tree.
+   *
+   *  v1 heuristic: scope only when exactly one node is dirty AND we can
+   *  walk up to an ancestor with explicit non-keyword Width AND Height in
+   *  its ChildLayout (i.e., a fixed box whose size doesn't depend on its
+   *  children's intrinsics). For multi-dirty cases, computing the LCA +
+   *  intrinsic-escalation logic is more involved and isn't worth it until
+   *  the scoped path is proven; full-tree solve falls through. */
+  private _chooseScopedRoot = (): JauiElement => {
+    if (this._dirtyNodes.size !== 1) return this.Root;
+    let node: JauiElement | null = null;
+    for (const n of this._dirtyNodes) { node = n; break; }
+    if (!node || node === this.Root) return this.Root;
+
+    // Walk up to the first ancestor whose layout box doesn't depend on
+    // child intrinsics. Width/Height as 'Auto' / 'MinContent' / 'MaxContent'
+    // means parent size depends on the dirty subtree's own intrinsic — a
+    // change there could propagate beyond the scope, so we keep climbing.
+    // Anything else (numeric pt/px/vw/vh, percent, arithmetic) is a fixed
+    // box from this subtree's perspective: parent isn't dirty, so its size
+    // hasn't changed, and our re-solve is contained.
+    let cur: JauiElement | null = node;
+    while (cur !== null && cur !== this.Root) {
+      const cl = cur.ChildLayout;
+      const wFixed = cl.Width !== 'Auto' && cl.Width !== 'MinContent' && cl.Width !== 'MaxContent';
+      const hFixed = cl.Height !== 'Auto' && cl.Height !== 'MinContent' && cl.Height !== 'MaxContent';
+      if (wFixed && hFixed) return cur;
+      cur = cur.Parent;
+    }
+    return this.Root;
+  };
+
+  private _solveAndAnimate = (subtreeRoot: JauiElement = this.Root): void => {
+    if (subtreeRoot === this.Root) {
+      // Root fills the canvas (only meaningful on full-tree solves; in
+      // subtree mode the box is fixed by the prior frame's solve and
+      // SolveLayout reads it from root.Width/Height directly).
+      this.Root.Width = this._width;
+      this.Root.Height = this._height;
+    }
+
+    const results = SolveLayout(subtreeRoot, this._viewport(), this._jssVars);
 
     for (const [node, result] of results) {
-      // Skip the root — it doesn't animate to its own position
-      if (node === this.Root) continue;
+      // Skip the root — it doesn't animate to its own position. (When in
+      // subtree mode `subtreeRoot !== this.Root`, but we still don't
+      // animate the subtree-root either: its box was already fixed by the
+      // prior solve and SolveLayout just reflected that into `results`.)
+      if (node === this.Root || node === subtreeRoot) continue;
 
       let animator = this._animators.get(node);
       if (!animator) {
@@ -1201,14 +1282,6 @@ export class Canvas {
       }
     }
 
-  };
-
-  private _hasDirtyLayout = (node: Jiv): boolean => {
-    if (node.Dirty & DirtyFlag.Layout) return true;
-    for (const child of node.Children as Jiv[]) {
-      if (this._hasDirtyLayout(child)) return true;
-    }
-    return false;
   };
 
   private _clearDirty = (node: Jiv): void => {
@@ -1271,12 +1344,16 @@ export class Canvas {
     // of this — the clientWidth reads — and should be addressed by
     // deferring size reads on first call, not by skipping the render.
     if (this._running) {
-      if (this._hasDirtyLayout(this.Root) || this._hasDirtyText(this.Root)) {
+      if ((this.Root.Dirty & (DirtyFlag.Layout | DirtyFlag.Text)) !== 0) {
         CascadePointScale(this.Root, this._viewport(), this._jssVars);
         this._measureDirtyText(this.Root);
         ComputeIntrinsicSizes(this.Root, this._viewport(), this._jssVars);
         this._solveAndAnimate();
         this._clearDirty(this.Root);
+        // Resize forces a full-tree solve, so any pre-resize dirty marks
+        // are now stale. Clear so the next tick's `_chooseScopedRoot`
+        // doesn't see a phantom single-dirty node and scope incorrectly.
+        this._dirtyNodes.clear();
       }
       this._processTextTransitions(this.Root);
       this._render(0);

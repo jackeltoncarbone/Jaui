@@ -36,13 +36,20 @@ export const ComputeIntrinsicSizes = (
  *  ParentWidth/Height = 0 (unknown pre-solve) but real PointScale +
  *  viewport. Parent PointScale flows to child; child's PointScale expressed
  *  in `pt` resolves against parent's PointScale (ptRefersToParent=true).
- *  Idempotent — safe to call multiple times per frame. */
+ *  Idempotent — safe to call multiple times per frame.
+ *
+ *  Subtree-friendly: when `root` has a Parent with an existing ResolveCtx
+ *  (i.e. this is a scoped re-solve, not the full-tree pass), we seed from
+ *  the parent's PointScale instead of DEFAULT_POINT_SCALE so subtree
+ *  PointScale inherits correctly. Full-tree calls pass the actual canvas
+ *  Root (Parent === null) and behave as before. */
 export const CascadePointScale = (
   root: Element,
   viewport: Viewport = DEFAULT_VIEWPORT,
   vars?: ReadonlyMap<string, string>,
 ): void => {
-  _cascadePointScale(root, null, viewport, vars);
+  const seedParentScale = root.Parent?.ResolveCtx?.PointScale ?? null;
+  _cascadePointScale(root, seedParentScale, viewport, vars);
 };
 
 const _cascadePointScale = (
