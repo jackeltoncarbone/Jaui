@@ -29,6 +29,7 @@ export const HashTextKey = (content: string, style: ResolvedTextStyle, dpr: numb
   h = _hashNumber(h, style.LineHeight);
   h = _hashNumber(h, style.LetterSpacing);
   h = _hashString(h, style.TextAlign);
+  h = _hashString(h, style.TextAlignLast);
   h = _hashString(h, style.TextOverflow);
   h = _hashNumber(h, style.MaxLines === null ? -1 : style.MaxLines);
   h = _hashNumber(h, dpr);

@@ -1,6 +1,7 @@
 import type { ResolvedTextStyle, TextMeasurement } from './Text.Types';
 import { MeasureText, ApplyTextStyle } from './Text.Measure';
 import { HashTextKey } from './Text.Hash';
+import { LayoutWords } from './Text.WordLayout';
 import type { Renderer, GpuTextureHandle } from '../Core/Renderer';
 
 /** UV rect within the atlas texture (normalized 0→1). */
@@ -70,7 +71,7 @@ export class TextCache {
     }
 
     const measurement = MeasureText(content, style, maxWidth);
-    const entry = this._rasterize(content, style, measurement, dpr);
+    const entry = this._rasterize(content, style, measurement, maxWidth, dpr);
     this._cache.set(key, entry);
 
     if (this._cache.size > this._maxEntries) this._evict();
@@ -140,12 +141,20 @@ export class TextCache {
   };
 
   private _rasterize = (
-    _content: string,
+    content: string,
     style: ResolvedTextStyle,
     measurement: TextMeasurement,
+    maxWidth: number | null,
     dpr: number,
   ): TextCacheEntry => {
-    const cssW = Math.max(1, Math.ceil(measurement.Width));
+    // For Justify, the canvas needs to be at least as wide as the wrap
+    // budget — otherwise justified words spill past the right edge of the
+    // backing texture and clip. For all other alignments the natural max-
+    // line width is sufficient.
+    const naturalCssW = Math.max(1, Math.ceil(measurement.Width));
+    const cssW = style.TextAlign === 'Justify' && maxWidth !== null
+      ? Math.max(naturalCssW, Math.ceil(maxWidth))
+      : naturalCssW;
     const cssH = Math.max(1, Math.ceil(measurement.Height));
     const pxW = Math.max(1, Math.ceil(cssW * dpr));
     const pxH = Math.max(1, Math.ceil(cssH * dpr));
@@ -160,17 +169,33 @@ export class TextCache {
     const lineHeightPx = style.FontSize * style.LineHeight * dpr;
     ctx.fillStyle = _colorToCss(style.Color);
 
-    for (let i = 0; i < measurement.Lines.length; i++) {
-      const line = measurement.Lines[i];
-      let x = 0;
-      if (style.TextAlign === 'Center' || style.TextAlign === 'Right') {
-        const lineWidth = ctx.measureText(line).width;
-        if (style.TextAlign === 'Center') x = (pxW - lineWidth) / 2;
-        else if (style.TextAlign === 'Right') x = pxW - lineWidth;
+    if (style.TextAlign === 'Justify' && maxWidth !== null) {
+      // Justify needs per-word X distribution — use LayoutWords for the
+      // gap math, then per-word fillText. Run LayoutWords with the cache
+      // ctx so its measurement matches our raster ctx; reapply font after
+      // because LayoutWords sets dpr=1 internally.
+      const positions = LayoutWords(content, style, maxWidth, ctx);
+      ApplyTextStyle(ctx, style, dpr);
+      ctx.fillStyle = _colorToCss(style.Color);
+      for (const w of positions) {
+        ctx.fillText(w.Content, w.X * dpr, w.Y * dpr + lineHeightPx / 2);
       }
-      // textBaseline='middle' — draw y = line top + half line height so the
-      // glyph centers on the midline of each line-height box.
-      ctx.fillText(line, x, i * lineHeightPx + lineHeightPx / 2);
+    } else {
+      // Original per-line path. Cheap, well-tested; preserved verbatim
+      // for non-Justify alignments to avoid regressing the hot path that
+      // every <jext>/Token segment in the app travels through.
+      for (let i = 0; i < measurement.Lines.length; i++) {
+        const line = measurement.Lines[i];
+        let x = 0;
+        if (style.TextAlign === 'Center' || style.TextAlign === 'Right') {
+          const lineWidth = ctx.measureText(line).width;
+          if (style.TextAlign === 'Center') x = (pxW - lineWidth) / 2;
+          else if (style.TextAlign === 'Right') x = pxW - lineWidth;
+        }
+        // textBaseline='middle' — draw y = line top + half line height so
+        // the glyph centers on the midline of each line-height box.
+        ctx.fillText(line, x, i * lineHeightPx + lineHeightPx / 2);
+      }
     }
 
     // Upload to atlas via Renderer

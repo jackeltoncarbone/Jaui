@@ -350,6 +350,10 @@ const _stylesDiffer = (a: ResolvedTextStyle, b: ResolvedTextStyle): boolean => {
     || a.LineHeight !== b.LineHeight
     || a.LetterSpacing !== b.LetterSpacing
     || a.TextAlign !== b.TextAlign
+    // Nullish-safe — JSS-derived partial styles can omit TextAlignLast,
+    // so a missing value on either side reads as the default 'Auto'
+    // instead of triggering a false-positive style diff every frame.
+    || (a.TextAlignLast ?? 'Auto') !== (b.TextAlignLast ?? 'Auto')
     || a.TextOverflow !== b.TextOverflow
     || a.MaxLines !== b.MaxLines
     || a.Color.R !== b.Color.R || a.Color.G !== b.Color.G

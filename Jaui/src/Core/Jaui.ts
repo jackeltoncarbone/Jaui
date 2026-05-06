@@ -1402,6 +1402,19 @@ export class Canvas {
     // descendant in the same tap target). Matches DOM click semantics.
     let _clickDownJiv: Jiv | null = null;
 
+    // Touch: kill the browser's own long-press detector (haptic + OS
+    // selection callout / context menu) at the actual source. On Chrome
+    // Android the long-press timer arms on `touchstart`, which fires
+    // BEFORE the matching `pointerdown` — so preventDefault on the
+    // pointer event is too late. Touch events are passive by default;
+    // `{ passive: false }` is required for preventDefault to register.
+    // The canvas already has `touch-action: none`, so we're not breaking
+    // any scroll/zoom default — we're just opting out of the long-press
+    // gesture in the same swing.
+    this.Element.addEventListener('touchstart', (e: TouchEvent) => {
+      e.preventDefault();
+    }, { passive: false });
+
     this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
       _clickDownJiv = hit;

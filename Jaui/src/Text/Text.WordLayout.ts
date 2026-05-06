@@ -1,4 +1,5 @@
 import type { ResolvedTextStyle, TextAlign } from './Text.Types';
+import { ResolveLastLineAlign } from './Text.Types';
 import { ApplyTextStyle } from './Text.Measure';
 
 export interface WordPosition {
@@ -109,10 +110,37 @@ export const LayoutWords = (
     lineRanges.push({ start: lineStart, end: positions.length - 1, width: currentX - spaceWidth });
   }
 
-  // Pass 2: apply TextAlign per-line (Center/Right shift)
-  if (maxWidth !== null && style.TextAlign !== 'Left') {
-    for (const line of lineRanges) {
-      const offset = _alignOffset(style.TextAlign, line.width, maxWidth);
+  // Pass 2: apply TextAlign per-line.
+  //   Left      → no-op (already laid out flush-left).
+  //   Center    → shift the line right by half the slack.
+  //   Right     → shift the line right by the full slack.
+  //   Justify   → distribute the slack across inter-word gaps in the line.
+  // Last line uses TextAlignLast (resolved via ResolveLastLineAlign — `Auto`
+  // for Justify falls back to Left so the final ragged line doesn't stretch).
+  if (maxWidth !== null && lineRanges.length > 0) {
+    const lastLineAlign = ResolveLastLineAlign(style);
+    for (let li = 0; li < lineRanges.length; li++) {
+      const line = lineRanges[li];
+      const isLast = li === lineRanges.length - 1;
+      const align = isLast ? lastLineAlign : style.TextAlign;
+      if (align === 'Left') continue;
+
+      if (align === 'Justify') {
+        // Single-word lines have no inter-word gap to grow into; leave them
+        // flush-left rather than dividing by zero / pushing the lone word
+        // to the right edge.
+        const wordCount = line.end - line.start + 1;
+        if (wordCount < 2) continue;
+        const slack = maxWidth - line.width;
+        if (slack <= 0) continue;
+        const extraPerGap = slack / (wordCount - 1);
+        for (let i = line.start + 1; i <= line.end; i++) {
+          positions[i].X += extraPerGap * (i - line.start);
+        }
+        continue;
+      }
+
+      const offset = _alignOffset(align, line.width, maxWidth);
       if (offset === 0) continue;
       for (let i = line.start; i <= line.end; i++) {
         positions[i].X += offset;

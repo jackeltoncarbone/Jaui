@@ -2,7 +2,11 @@ import type { Color } from '../Core/Types';
 import { Resolve, type ResolveContext } from '../Core/Length';
 import { ParseColor } from '../Core/Color.Parse';
 
-export type TextAlign = 'Left' | 'Center' | 'Right';
+export type TextAlign = 'Left' | 'Center' | 'Right' | 'Justify';
+/** Per-line override for the *last* line — mirrors CSS `text-align-last`.
+ *  `'Auto'` = inherit from `TextAlign`, except `Justify` falls back to `Left`
+ *  (the typographic default — never stretch the last line). */
+export type TextAlignLast = 'Auto' | 'Left' | 'Center' | 'Right' | 'Justify';
 export type TextOverflow = 'Clip' | 'Ellipsis';
 export type FontStyle = 'Normal' | 'Italic';
 
@@ -20,6 +24,7 @@ export interface TextStyle {
   LineHeight: string;          // multiplier (1.0 = normal)
   LetterSpacing: string;
   TextAlign: TextAlign;
+  TextAlignLast: TextAlignLast;
   TextOverflow: TextOverflow;
   MaxLines: number | null;     // null = unlimited
 }
@@ -35,6 +40,7 @@ export interface ResolvedTextStyle {
   LineHeight: number;
   LetterSpacing: number;
   TextAlign: TextAlign;
+  TextAlignLast: TextAlignLast;
   TextOverflow: TextOverflow;
   MaxLines: number | null;
 }
@@ -49,9 +55,20 @@ export const ResolveTextStyle = (style: TextStyle, ctx: ResolveContext): Resolve
   LineHeight: Resolve(style.LineHeight, ctx, 'W'),
   LetterSpacing: Resolve(style.LetterSpacing, ctx, 'W'),
   TextAlign: style.TextAlign,
+  TextAlignLast: style.TextAlignLast,
   TextOverflow: style.TextOverflow,
   MaxLines: style.MaxLines,
 });
+
+/** Resolve `TextAlignLast: 'Auto'` to a concrete TextAlign value. Justified
+ *  text falls back to Left (don't stretch the last line — typographic
+ *  default); other modes inherit from the base alignment. */
+export const ResolveLastLineAlign = (style: ResolvedTextStyle): TextAlign => {
+  if (style.TextAlignLast === 'Auto') {
+    return style.TextAlign === 'Justify' ? 'Left' : style.TextAlign;
+  }
+  return style.TextAlignLast;
+};
 
 export const DefaultTextStyle: TextStyle = {
   FontFamily: 'system-ui',
@@ -62,6 +79,7 @@ export const DefaultTextStyle: TextStyle = {
   LineHeight: '1.2',
   LetterSpacing: '0',
   TextAlign: 'Left',
+  TextAlignLast: 'Auto',
   TextOverflow: 'Clip',
   MaxLines: null,
 };
