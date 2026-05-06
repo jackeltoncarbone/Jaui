@@ -169,9 +169,19 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 };
 
 /** Seed ResolveContext for contexts that haven't had layout run yet. Used
- *  by Jiv constructor to give RenderStyle a plausible initial state. */
+ *  by Jiv constructor to give RenderStyle a plausible initial state.
+ *
+ *  Vars is intentionally an empty Map (rather than omitted): an authored
+ *  style that references a var (e.g. `BorderRadius: @CellR`) hits this
+ *  context first at construction, before the StyleAnimator ever ticks
+ *  and re-resolves with the live registry's var table. Omitting Vars
+ *  here would trip Length.Resolve's "no var table in context" warning
+ *  on every Jiv whose author used a var — even though the next animator
+ *  tick resolves them correctly. The seed value falls back to 0; the
+ *  real value lands one frame later. */
 export const SEED_CONTEXT: ResolveContext = {
   ParentWidth: 0, ParentHeight: 0,
   PointScale: 16, ParentPointScale: 16, RootPointScale: 16,
   ViewportWidth: 0, ViewportHeight: 0,
+  Vars: new Map(),
 };
