@@ -1,6 +1,7 @@
 import type { Element } from '../Element/Element';
 import { Resolve, type ResolveContext } from '../Core/Length';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
+import { Jath } from '../Core/Jath';
 import type { Viewport } from './Layout.Solver';
 import { MeasureText } from '../Text/Text.Measure';
 import { ResolveTextStyle } from '../Text/Text.Types';
@@ -169,13 +170,27 @@ const _compute = (node: Element): void => {
     const h = c.ChildLayout.Height;
     const explicitW = _intrinsicOf(w, childCtx, 'W');
     const explicitH = _intrinsicOf(h, childCtx, 'H');
-    const effectiveW = explicitW ?? c.IntrinsicWidth ?? 0;
-    const effectiveH = explicitH ?? c.IntrinsicHeight ?? 0;
+    // Min/Max bounds participate in intrinsic too: at solve time the flex
+    // pass clamps each child's main size by [MinHeight..MaxHeight] before
+    // distributing free space, so the parent's intrinsic must reflect the
+    // same clamp — otherwise an unbounded text child runs through its
+    // Max-clamped parent's intrinsic and overflows the grandparent's
+    // available space, where flex-shrink crushes the grandparent to fill.
+    // Bounds that depend on parent dims (`%`-based) can't resolve here;
+    // they collapse to "no clamp" (0..Infinity) — the right pre-layout
+    // behavior since we can't know the eventual cap.
+    const minBoundW = _boundOf(c.ChildLayout.MinWidth, childCtx, 'W', false);
+    const maxBoundW = _boundOf(c.ChildLayout.MaxWidth, childCtx, 'W', true);
+    const minBoundH = _boundOf(c.ChildLayout.MinHeight, childCtx, 'H', false);
+    const maxBoundH = _boundOf(c.ChildLayout.MaxHeight, childCtx, 'H', true);
+    const effectiveW = Jath.Clamp(explicitW ?? c.IntrinsicWidth ?? 0, minBoundW, maxBoundW);
+    const effectiveH = Jath.Clamp(explicitH ?? c.IntrinsicHeight ?? 0, minBoundH, maxBoundH);
     // For min-content: explicit sizes pin the child (an explicit 200px child
     // contributes 200px even to min-content); only auto/content-sized children
-    // fall back to their IntrinsicMin.
-    const effectiveMinW = explicitW ?? c.IntrinsicMinWidth ?? c.IntrinsicWidth ?? 0;
-    const effectiveMinH = explicitH ?? c.IntrinsicMinHeight ?? c.IntrinsicHeight ?? 0;
+    // fall back to their IntrinsicMin. Min-content also obeys Max-bounds —
+    // a child can never legitimately need more than its Max even at minimum.
+    const effectiveMinW = Jath.Clamp(explicitW ?? c.IntrinsicMinWidth ?? c.IntrinsicWidth ?? 0, minBoundW, maxBoundW);
+    const effectiveMinH = Jath.Clamp(explicitH ?? c.IntrinsicMinHeight ?? c.IntrinsicHeight ?? 0, minBoundH, maxBoundH);
 
     // Child's own margins participate in its intrinsic contribution —
     // otherwise a child with a big cross-axis margin makes the parent too
@@ -270,8 +285,14 @@ const _simulateWrapCrossSize = (
     const childCtx = c.ResolveCtx!;
     const explicitW = _intrinsicOf(c.ChildLayout.Width, childCtx, 'W');
     const explicitH = _intrinsicOf(c.ChildLayout.Height, childCtx, 'H');
-    const effW = explicitW ?? c.IntrinsicWidth ?? 0;
-    const effH = explicitH ?? c.IntrinsicHeight ?? 0;
+    // Same Min/Max clamp as the main intrinsic loop — wrap simulation must
+    // see the post-clamp size or it bin-packs against an unbounded child.
+    const minBoundW = _boundOf(c.ChildLayout.MinWidth, childCtx, 'W', false);
+    const maxBoundW = _boundOf(c.ChildLayout.MaxWidth, childCtx, 'W', true);
+    const minBoundH = _boundOf(c.ChildLayout.MinHeight, childCtx, 'H', false);
+    const maxBoundH = _boundOf(c.ChildLayout.MaxHeight, childCtx, 'H', true);
+    const effW = Jath.Clamp(explicitW ?? c.IntrinsicWidth ?? 0, minBoundW, maxBoundW);
+    const effH = Jath.Clamp(explicitH ?? c.IntrinsicHeight ?? 0, minBoundH, maxBoundH);
     const childMain = horiz ? effW : effH;
     const childCross = horiz ? effH : effW;
     const addWithGap = lineMain === 0 ? childMain : lineMain + mainGap + childMain;
@@ -402,4 +423,23 @@ const _intrinsicOf = (
   if (typeof size === 'number') return size;
   if (size.includes('%')) return null;   // parent-relative — skip
   return Resolve(size, ctx, axis);
+};
+
+/** Resolve a Min/Max bound for the intrinsic pass. Mirrors `ResolveBound`
+ *  for the solver, with the additional pre-layout escape: bounds that
+ *  reference parent dims (`%`) can't resolve here, so collapse to the
+ *  no-clamp identity (0 for min, Infinity for max) — the parent's
+ *  intrinsic intentionally ignores caps it can't yet evaluate, matching
+ *  the existing convention for explicit sizes (`_intrinsicOf` returns
+ *  null for `%`). 'none' is the schema default for Max (CSS-style).
+ *  Empty/missing collapses to identity too. */
+const _boundOf = (
+  raw: string,
+  ctx: ResolveContext,
+  axis: 'W' | 'H',
+  isMax: boolean,
+): number => {
+  if (!raw || raw === 'none') return isMax ? Infinity : 0;
+  if (raw.includes('%')) return isMax ? Infinity : 0;
+  return Resolve(raw, ctx, axis);
 };
