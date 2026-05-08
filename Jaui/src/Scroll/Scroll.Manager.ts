@@ -31,6 +31,11 @@ interface ScrollState {
   velY: number;
   /** While true, physics is suspended — position is externally driven (drag). */
   dragging: boolean;
+  /** performance.now() of the last DragMove sample. Used at DragEnd to discard
+   *  stale velocity when the finger has been held still — pointermove doesn't
+   *  fire while stationary, so EMA samples freeze and the last fling's
+   *  velocity would otherwise leak into the release. */
+  lastMoveT: number;
 }
 
 /** Drag-momentum velocity retention per second. Smaller = faster decay.
@@ -42,6 +47,10 @@ const RUBBER_K = 180;
 const OVER_FRICTION = 0.005;
 /** Velocity magnitude below which we settle to zero (px/s). */
 const SETTLE_V = 1;
+/** If the finger has been stationary (no DragMove) for longer than this at
+ *  release, drop momentum entirely — matches the iOS trailing-window model
+ *  where only motion within the last ~50 ms contributes to flick velocity. */
+const HOLD_RELEASE_MS = 50;
 /** Wheel-ease retention per second. 0.005/s ⇒ half-life ≈ 130 ms; pos reaches
  *  ~95 % of target in ~250 ms. Matches a snappy browser smooth-scroll feel. */
 const WHEEL_EASE_PER_SEC = 0.005;
@@ -79,6 +88,7 @@ export class ScrollManager implements Animatable {
     s.dragging = true;
     s.velX = 0;
     s.velY = 0;
+    s.lastMoveT = performance.now();
   };
 
   /** Direct positional update during a drag — position tracks the finger 1:1
@@ -115,14 +125,23 @@ export class ScrollManager implements Animatable {
       s.velX = s.velX * 0.6 + instVX * 0.4;
       s.velY = s.velY * 0.6 + instVY * 0.4;
     }
+    s.lastMoveT = performance.now();
     this._syncJiv(jiv, s);
   };
 
-  /** Release a drag — physics resumes, exit velocity drives momentum. */
+  /** Release a drag — physics resumes, exit velocity drives momentum.
+   *  If the finger was held stationary at release (no DragMove inside the
+   *  trailing HOLD_RELEASE_MS window), discard velocity so the scroll stops
+   *  exactly where the finger was, instead of coasting on a stale fling
+   *  sample from before the hold. */
   DragEnd = (jiv: Jiv): void => {
     const s = this._states.get(jiv);
     if (!s) return;
     s.dragging = false;
+    if (performance.now() - s.lastMoveT >= HOLD_RELEASE_MS) {
+      s.velX = 0;
+      s.velY = 0;
+    }
   };
 
   /** Snap immediately to ScrollTargetX/Y (used for resize / programmatic jumps). */
@@ -223,6 +242,7 @@ export class ScrollManager implements Animatable {
         velX: 0,
         velY: 0,
         dragging: false,
+        lastMoveT: 0,
       };
       this._states.set(jiv, s);
     }
