@@ -46,6 +46,16 @@ export class JssRegistry {
    *  `@Name` references against this table at property-resolution time. */
   private _vars = new Map<string, string>();
 
+  /** Memoized ParseJss results, keyed by source string. Same `.jss`
+   *  module imported repeatedly (re-mounting a page, HMR re-evaluating a
+   *  component, multiple `<jaui>` roots) reuses the parsed result instead
+   *  of re-walking 16KB+ of source character-by-character. Cleared on
+   *  every RegisterGlobal call because parse output depends on the
+   *  globals tier — when a new global is added, an extends chain that
+   *  previously fell through to runtime defaults could now resolve to the
+   *  fresh global. */
+  private _parseCache = new Map<string, ParsedJss>();
+
   private _version = signal(0);
 
   /** Monotonic version — increments on every merge. Angular effects that
@@ -79,10 +89,17 @@ export class JssRegistry {
   /** Add raw JSS source — convenience for `<jyle>` projections. The
    *  globals tier is passed through to the parser so any `: Base`
    *  reference in the source can resolve to a registered global when
-   *  it isn't declared in the same sheet. */
+   *  it isn't declared in the same sheet. Parse result is cached by
+   *  source string identity so re-mounts (or HMR re-runs) skip the
+   *  scanner. */
   MergeSource = (source: string): void => {
     if (!source.trim()) return;
-    this.Merge(ParseJss(source, this._globals));
+    let parsed = this._parseCache.get(source);
+    if (!parsed) {
+      parsed = ParseJss(source, this._globals);
+      this._parseCache.set(source, parsed);
+    }
+    this.Merge(parsed);
   };
 
   /** Register a sheet of design-system base classes that ANY later
@@ -100,6 +117,11 @@ export class JssRegistry {
     for (const [name, ruleset] of Object.entries(parsed.Sheet)) {
       this._globals[name] = ruleset;
     }
+    // Globals shifted — any cached scoped-sheet parse from before this
+    // moment may have resolved `: Base` extends to the OLD global state
+    // (or fallen through to defaults), so drop the cache. RegisterGlobal
+    // typically runs once at app boot, so the clear is rare in practice.
+    this._parseCache.clear();
     this.Merge(parsed);
   };
 
