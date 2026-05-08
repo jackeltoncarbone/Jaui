@@ -1192,14 +1192,24 @@ export class Canvas implements DirtyTracker {
     for (const n of this._dirtyNodes) { node = n; break; }
     if (!node || node === this.Root) return this.Root;
 
-    // Walk up to the first ancestor whose layout box doesn't depend on
+    // Walk up to the first ANCESTOR whose layout box doesn't depend on
     // child intrinsics. Width/Height as 'Auto' / 'MinContent' / 'MaxContent'
     // means parent size depends on the dirty subtree's own intrinsic — a
     // change there could propagate beyond the scope, so we keep climbing.
     // Anything else (numeric pt/px/vw/vh, percent, arithmetic) is a fixed
     // box from this subtree's perspective: parent isn't dirty, so its size
     // hasn't changed, and our re-solve is contained.
-    let cur: JauiElement | null = node;
+    //
+    // Start at node.Parent, NOT node itself: subtree mode in SolveLayout
+    // freezes the scope-root's Width/Height to the prior frame's values
+    // (Layout.Solver.ts uses `root.Width` as the seed box), and
+    // _solveAndAnimate explicitly skips the subtreeRoot from animator
+    // updates. So if the dirty node is picked as its own scope, its newly-
+    // mutated ChildLayout (e.g. a per-frame `Width: '12%'` on a scrub fill
+    // driven from a playback RAF) is silently dropped — the percent never
+    // gets re-resolved against the parent's actual width. Picking the
+    // parent guarantees the dirty node appears as a child of the solve.
+    let cur: JauiElement | null = node.Parent;
     while (cur !== null && cur !== this.Root) {
       const cl = cur.ChildLayout;
       const wFixed = cl.Width !== 'Auto' && cl.Width !== 'MinContent' && cl.Width !== 'MaxContent';
