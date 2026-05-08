@@ -19,6 +19,15 @@ import type { Animatable } from '../Animation/Animation.Manager';
  * paths are suspended and the caller drives position directly via DragMove.
  */
 
+/** One DragMove sample: how much the content moved (after edge clamp) and
+ *  when. The trailing window of these is what determines release velocity. */
+interface DragSample {
+  dx: number;
+  dy: number;
+  /** performance.now() ms timestamp. */
+  t: number;
+}
+
 interface ScrollState {
   posX: number;
   posY: number;
@@ -31,11 +40,13 @@ interface ScrollState {
   velY: number;
   /** While true, physics is suspended — position is externally driven (drag). */
   dragging: boolean;
-  /** performance.now() of the last DragMove sample. Used at DragEnd to discard
-   *  stale velocity when the finger has been held still — pointermove doesn't
-   *  fire while stationary, so EMA samples freeze and the last fling's
-   *  velocity would otherwise leak into the release. */
-  lastMoveT: number;
+  /** Trailing-window of recent DragMove samples (oldest first). Pruned to the
+   *  last RELEASE_WINDOW_MS each move. At DragEnd we sum these for momentum
+   *  velocity — using a fixed time window (not an EMA) prevents older, faster
+   *  samples from biasing the release: if you decelerate the finger before
+   *  lifting, only the slow recent motion contributes, so content can't
+   *  briefly outpace your finger after release. */
+  samples: DragSample[];
 }
 
 /** Drag-momentum velocity retention per second. Smaller = faster decay.
@@ -47,10 +58,15 @@ const RUBBER_K = 180;
 const OVER_FRICTION = 0.005;
 /** Velocity magnitude below which we settle to zero (px/s). */
 const SETTLE_V = 1;
-/** If the finger has been stationary (no DragMove) for longer than this at
- *  release, drop momentum entirely — matches the iOS trailing-window model
- *  where only motion within the last ~50 ms contributes to flick velocity. */
-const HOLD_RELEASE_MS = 50;
+/** Trailing window of DragMove samples used to derive release velocity, ms.
+ *  Only motion inside this window contributes to momentum at DragEnd:
+ *    • if the finger held still for longer than this, samples drain to empty
+ *      → release velocity is zero (no leftover-fling drift);
+ *    • if the finger decelerated before lifting, the high-velocity samples
+ *      from earlier in the fling fall outside the window → momentum starts
+ *      from the actual recent finger speed (no perceived acceleration).
+ *  ~50 ms ≈ 3 frames @60fps; matches iOS's native flick-window. */
+const RELEASE_WINDOW_MS = 50;
 /** Wheel-ease retention per second. 0.005/s ⇒ half-life ≈ 130 ms; pos reaches
  *  ~95 % of target in ~250 ms. Matches a snappy browser smooth-scroll feel. */
 const WHEEL_EASE_PER_SEC = 0.005;
@@ -88,7 +104,7 @@ export class ScrollManager implements Animatable {
     s.dragging = true;
     s.velX = 0;
     s.velY = 0;
-    s.lastMoveT = performance.now();
+    s.samples.length = 0;
   };
 
   /** Direct positional update during a drag — position tracks the finger 1:1
@@ -96,8 +112,9 @@ export class ScrollManager implements Animatable {
    *  exposing whitespace past the content bounds reveals chrome that's only
    *  ever supposed to be visible inside the scroll, so we'd rather the finger
    *  feel "stuck" at the edge than peel back the curtain).
-   *  Also records a running-average velocity so DragEnd can hand off momentum. */
-  DragMove = (jiv: Jiv, dx: number, dy: number, dt: number): void => {
+   *  Also records the move into the trailing window so DragEnd can derive
+   *  release velocity from the most recent ~RELEASE_WINDOW_MS only. */
+  DragMove = (jiv: Jiv, dx: number, dy: number, _dt: number): void => {
     const s = this._ensureState(jiv);
     if (!s.dragging) return;
 
@@ -118,27 +135,52 @@ export class ScrollManager implements Animatable {
     s.targetX = s.posX;
     s.targetY = s.posY;
 
-    // EMA velocity estimate (for handoff to momentum at DragEnd)
-    if (dt > 0) {
-      const instVX = scaledDx / dt;
-      const instVY = scaledDy / dt;
-      s.velX = s.velX * 0.6 + instVX * 0.4;
-      s.velY = s.velY * 0.6 + instVY * 0.4;
-    }
-    s.lastMoveT = performance.now();
+    const now = performance.now();
+    s.samples.push({ dx: scaledDx, dy: scaledDy, t: now });
+    // Drop anything older than the trailing window so the buffer can never
+    // grow unbounded and DragEnd's sum is O(window-size).
+    const cutoff = now - RELEASE_WINDOW_MS;
+    while (s.samples.length > 0 && s.samples[0].t < cutoff) s.samples.shift();
+
     this._syncJiv(jiv, s);
   };
 
   /** Release a drag — physics resumes, exit velocity drives momentum.
-   *  If the finger was held stationary at release (no DragMove inside the
-   *  trailing HOLD_RELEASE_MS window), discard velocity so the scroll stops
-   *  exactly where the finger was, instead of coasting on a stale fling
-   *  sample from before the hold. */
+   *  Velocity is the average over the trailing RELEASE_WINDOW_MS:
+   *  total displacement in the window ÷ span. Held-still releases collapse
+   *  to zero (samples drained by the prune in DragMove), and decelerated
+   *  releases match the actual recent finger speed instead of a stale EMA. */
   DragEnd = (jiv: Jiv): void => {
     const s = this._states.get(jiv);
     if (!s) return;
     s.dragging = false;
-    if (performance.now() - s.lastMoveT >= HOLD_RELEASE_MS) {
+
+    const now = performance.now();
+    const cutoff = now - RELEASE_WINDOW_MS;
+    while (s.samples.length > 0 && s.samples[0].t < cutoff) s.samples.shift();
+
+    if (s.samples.length === 0) {
+      s.velX = 0;
+      s.velY = 0;
+      return;
+    }
+
+    let totalDx = 0;
+    let totalDy = 0;
+    for (let i = 0; i < s.samples.length; i++) {
+      totalDx += s.samples[i].dx;
+      totalDy += s.samples[i].dy;
+    }
+    // Span from the first sample's timestamp to now — using `now` (not the
+    // last sample's t) is what makes a "decelerate-then-release" release
+    // honest: a long quiet tail between the last sample and lift-off
+    // stretches the denominator and lowers velocity, instead of being
+    // hidden by the EMA.
+    const span = (now - s.samples[0].t) / 1000;
+    if (span > 0) {
+      s.velX = totalDx / span;
+      s.velY = totalDy / span;
+    } else {
       s.velX = 0;
       s.velY = 0;
     }
@@ -242,7 +284,7 @@ export class ScrollManager implements Animatable {
         velX: 0,
         velY: 0,
         dragging: false,
-        lastMoveT: 0,
+        samples: [],
       };
       this._states.set(jiv, s);
     }
