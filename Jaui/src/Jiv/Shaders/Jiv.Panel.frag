@@ -313,6 +313,26 @@ float ShapeSDF_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
 // Magnitude falls out when normalized.
 vec2 ShapeGrad_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
     vec2 q = abs(p) - halfSize + rAxis;
+
+    // Flat interior — q.x ≤ 0 && q.y ≤ 0 means we're inside the
+    // rectangular box that sits between the 4 corner regions, so the
+    // corner superellipse gradient is undefined here. Mirror the
+    // early-out ShapeSDF_inner already does and return the closest-edge
+    // straight normal. Without this, panels with BorderRadius:0 in rect
+    // mode produce qc=(0,0) and rAxis=(0,0) → pow(eps, n-1) / 0 = ±Inf,
+    // gLen = Inf, the `gLen < 1e-4` fallback below is skipped, and the
+    // function returns Inf/Inf = NaN. Any caller (e.g. the glass-path
+    // refraction math) that propagates NaN into UVs samples u_Backdrop
+    // at NaN, which drivers resolve to one constant texel — producing a
+    // uniform color across the whole panel.
+    if (q.x <= 0.0 && q.y <= 0.0) {
+        float dx = halfSize.x - abs(p.x);
+        float dy = halfSize.y - abs(p.y);
+        return dx < dy
+            ? vec2(sign(p.x), 0.0)
+            : vec2(0.0, sign(p.y));
+    }
+
     vec2 qc = max(q, vec2(0.0));
     vec2 uv = qc / rAxis;
     vec2 uvE = max(uv, vec2(1e-5));
