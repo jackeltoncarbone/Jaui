@@ -37,7 +37,14 @@ export class AnimationManager {
 
   private _tick = (time: number): void => {
     if (!this._lastTime) this._lastTime = time;
-    const dt = Math.min((time - this._lastTime) / 1000, 0.033); // cap at ~30fps
+    // Cap at 1s of catch-up. Spring.Step substeps internally for stability
+    // (up to 64 substeps), so honoring real wall-clock dt is safe — and
+    // necessary, otherwise a main-thread block during a fade-in leaves
+    // springs frozen mid-curve until they crawl back up at 33ms/frame
+    // (the symptom that looks like UI "freezing mid-opacity"). 1s is a
+    // long-enough cap that ~all visible blocks resolve in one Step, but
+    // still bounds work after a backgrounded-tab return.
+    const dt = Math.min((time - this._lastTime) / 1000, 1.0);
     this._lastTime = time;
 
     let anyActive = false;

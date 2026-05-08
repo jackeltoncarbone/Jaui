@@ -87,17 +87,22 @@ export class TextCache {
     this._nextShelfY = 0;
   };
 
-  /** Flush all cached entries and reset the atlas. Call when something
-   *  outside the cache invalidates existing measurements — notably, when
-   *  web fonts finish loading after the first render (entries rasterized
-   *  against the fallback font must be re-rasterized). */
+  /** Flush all cached entries and reset the shelf packer. Call when
+   *  something outside the cache invalidates existing measurements —
+   *  notably, when web fonts finish loading after the first render
+   *  (entries rasterized against the fallback font must be re-rasterized).
+   *
+   *  Keeps the existing GPU atlas texture: newly-allocated slots will be
+   *  overwritten by subsequent `_rasterize` UploadSubTexture calls; any
+   *  stale pixels in unreferenced regions are harmless because no UV
+   *  points at them. Recreating the texture left every text/icon glyph
+   *  sampling from an empty atlas for at least one render frame between
+   *  the clear and the next rasterize pass — visible as a hard text+icon
+   *  blink on font-load. */
   Clear = (): void => {
     this._cache.clear();
     this._shelves.length = 0;
     this._nextShelfY = 0;
-    if (this._atlas) {
-      this._atlas = this._renderer.CreateTexture(this._atlasSize, this._atlasSize);
-    }
   };
 
   private _ensureAtlas = (): GpuTextureHandle => {

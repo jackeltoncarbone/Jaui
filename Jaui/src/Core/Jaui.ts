@@ -1880,27 +1880,36 @@ export class Canvas implements DirtyTracker {
     for (const c of node.Children as Jiv[]) this._measureScrollContents(c);
   };
 
-  /** Flush every text-related cache and recompute from scratch on the next
-   *  tick. Called when fonts finish loading after the engine has already
-   *  rendered — cached measurements/atlases captured with the fallback font
-   *  are now stale and will produce wrong word spacing until replaced. */
+  /** Re-rasterize every text node against the current font set. Called
+   *  when fonts finish loading after the engine has already rendered —
+   *  cached glyph rasters captured with the fallback font are now stale.
+   *
+   *  A font load is a *re-rasterization* event, not a content/presence
+   *  event: the words are the same words, the user already sees them,
+   *  only the glyph pixels and metrics need refreshing. So:
+   *   - drop cache entries (atlas slots are keyed against the old font)
+   *     but keep the atlas texture itself — Text.Cache.Clear no longer
+   *     reallocates it, so reads are never serviced from an empty
+   *     texture between the wipe and the next rasterize
+   *   - keep TextAnimators alive: each word's Opacity spring stays at
+   *     its current settled 1.0, no fade-in pop. Resync runs _reflow
+   *     against the new metrics so widths/positions catch up
+   *   - invalidate node measurements so _measureDirtyText re-runs
+   *     (intrinsic widths may shift)
+   *   - mark layout dirty so reflow propagates */
   private _invalidateAllText = (): void => {
     this._textCache.Clear();
-    // Drop TextAnimators so _processTextTransitions rebuilds them fresh
-    // against the now-correct font metrics. Positions, widths, and the
-    // per-word springs all reset.
+    let needsKick = false;
     for (const anim of this._textAnimators.values()) {
-      this._animationManager.Unregister(anim);
+      if (anim.Resync()) needsKick = true;
     }
-    this._textAnimators.clear();
-    // Invalidate each node's measurement so _measureDirtyText re-runs.
     const invalidate = (node: JauiElement): void => {
       node.InvalidateText();
       for (const child of node.Children) invalidate(child);
     };
     invalidate(this.Root);
     this.Root.Dirty |= DirtyFlag.Layout;
-    this._animationManager.Kick();
+    if (needsKick) this._animationManager.Kick();
   };
 
   /** Listen for fonts that arrive AFTER the first tick — e.g. a lazy

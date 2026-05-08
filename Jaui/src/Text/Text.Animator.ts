@@ -110,6 +110,19 @@ export class TextAnimator implements Animatable {
     return needsKick;
   };
 
+  /**
+   * Re-run word layout against current content/style/maxWidth without
+   * touching per-word identities or springs. Used when font metrics
+   * change after the first measurement — e.g. a web font finishes
+   * loading. Word Opacity stays where it is (already visible words
+   * stay visible; no fade-in pop), only Width/Height/positions refresh
+   * to the new metrics. Returns true if any position spring needs to
+   * animate (caller should Kick).
+   */
+  Resync = (): boolean => {
+    return this._reflow(this._maxWidth);
+  };
+
   Tick = (dt: number): boolean => {
     let active = false;
     for (const w of this.Words) {
