@@ -47,14 +47,18 @@ const _parse = (s: string): Color => {
   throw new Error(`[Jaui] Unrecognized color: "${s}"`);
 };
 
-let _probeCtx: CanvasRenderingContext2D | null | undefined;
-const _getProbeCtx = (): CanvasRenderingContext2D | null => {
+// Color round-trip canonicalizer — write the input string to fillStyle and
+// read it back; the browser's CSS parser normalizes it (`red` → `#ff0000`,
+// `rgb(0 0 0)` → `#000000`, etc). Used to widen the set of color strings we
+// accept beyond what we parse natively. OffscreenCanvas's 2D context shares
+// fillStyle behavior with HTMLCanvasElement's, so this works on main thread
+// and (once we move there) in workers without code change.
+type ProbeCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+let _probeCtx: ProbeCtx | null | undefined;
+const _getProbeCtx = (): ProbeCtx | null => {
   if (_probeCtx !== undefined) return _probeCtx;
-  if (typeof document === 'undefined') { _probeCtx = null; return null; }
-  const canvas = document.createElement('canvas');
-  canvas.width = 1;
-  canvas.height = 1;
-  _probeCtx = canvas.getContext('2d');
+  if (typeof OffscreenCanvas === 'undefined') { _probeCtx = null; return null; }
+  _probeCtx = new OffscreenCanvas(1, 1).getContext('2d');
   return _probeCtx;
 };
 

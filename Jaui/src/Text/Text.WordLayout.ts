@@ -17,18 +17,38 @@ export interface WordPosition {
   Line: number;
 }
 
-// Module-level shared measurement context
-let _sharedCtx: CanvasRenderingContext2D | null = null;
+// Module-level shared measurement context. OffscreenCanvas works on main
+// thread and in workers; the methods we need (measureText) are identical.
+type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+let _sharedCtx: Ctx2D | null = null;
 
-const _getCtx = (): CanvasRenderingContext2D => {
+const _getCtx = (): Ctx2D => {
   if (_sharedCtx) return _sharedCtx;
-  const canvas = document.createElement('canvas');
-  canvas.width = 1;
-  canvas.height = 1;
-  const ctx = canvas.getContext('2d');
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) throw new Error('[Jaui] Failed to get 2D context for word layout');
   _sharedCtx = ctx;
   return ctx;
+};
+
+/** Force a font into the shared measurement context's font registry.
+ *  WebKit (iPad/iOS Safari) only binds a font to a canvas's font registry
+ *  on first reference; FontFaceSet.add() alone isn't enough. After adding
+ *  a FontFace to `self.fonts`, the bridge calls this to prime the *exact*
+ *  context the engine measures against — without this step, measureText
+ *  on iOS keeps returning fallback widths even though `self.fonts` has
+ *  the loaded face. Idempotent and side-effect-free for Chromium. */
+export const PrimeFontInSharedCtx = (
+  family: string,
+  weight: string = '400',
+  style: string = 'normal',
+): void => {
+  const ctx = _getCtx();
+  const prev = ctx.font;
+  try {
+    ctx.font = `${style} ${weight} 16px "${family}"`;
+    ctx.measureText('Mg');
+  } catch { /* invalid spec — skip */ }
+  ctx.font = prev;
 };
 
 /**
@@ -48,7 +68,7 @@ export const LayoutWords = (
   content: string,
   style: ResolvedTextStyle,
   maxWidth: number | null,
-  ctx?: CanvasRenderingContext2D,
+  ctx?: Ctx2D,
 ): WordPosition[] => {
   const c = ctx ?? _getCtx();
   ApplyTextStyle(c, style, 1);

@@ -12,7 +12,7 @@ export class WebGPUDevice {
   readonly Adapter: GPUAdapter;
   readonly Context: GPUCanvasContext;
   readonly Format: GPUTextureFormat;
-  readonly Canvas: HTMLCanvasElement;
+  readonly Canvas: HTMLCanvasElement | OffscreenCanvas;
 
   private _onDeviceLost: (() => void) | null = null;
 
@@ -21,7 +21,7 @@ export class WebGPUDevice {
     device: GPUDevice,
     context: GPUCanvasContext,
     format: GPUTextureFormat,
-    canvas: HTMLCanvasElement,
+    canvas: HTMLCanvasElement | OffscreenCanvas,
   ) {
     this.Adapter = adapter;
     this.Device = device;
@@ -42,7 +42,7 @@ export class WebGPUDevice {
    *  to-end on machines where Chrome reports "WebGPU: Software only" in
    *  chrome://gpu. Useful for development/shader validation, not production
    *  performance. */
-  static Create = async (canvas: HTMLCanvasElement): Promise<WebGPUDevice> => {
+  static Create = async (canvas: HTMLCanvasElement | OffscreenCanvas): Promise<WebGPUDevice> => {
     if (!navigator.gpu) {
       throw new Error('[Jaui] WebGPU not supported in this browser');
     }

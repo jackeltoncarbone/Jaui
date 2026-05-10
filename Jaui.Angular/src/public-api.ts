@@ -26,3 +26,7 @@ export type {
   Stylesheet, Ruleset,
 } from 'jaui';
 export { LiquidGlass, ClearGlass, ParseJss, Canvas } from 'jaui';
+
+// Worker bootstrap helpers — apps call `CheckBrowserSupport()` at boot
+// to feature-detect OffscreenCanvas + Worker before kicking Angular.
+export { CheckBrowserSupport, type BrowserSupportResult } from 'jaui';

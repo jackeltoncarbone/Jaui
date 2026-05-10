@@ -10,38 +10,28 @@ import {
   input,
 } from '@angular/core';
 import {
-  Jiv as JivCore,
+  JivHandle,
+  type JivApplyOpts,
   type JivStyle,
   type LayoutConfig,
   type ChildLayout,
   type TextStyle,
   type SpringConfig,
+  type PointerPayload,
 } from 'jaui';
 import { Jaui } from '../Jaui/Jaui';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
 
 /**
- * `<jiv>` — generic Jaui node. Creates a Jiv on construction, attaches
- * to the nearest ancestor `<jiv>` or `<jaui>` on init, removes
- * itself on destroy.
+ * `<jiv>` — generic Jaui node.
  *
- * Parent resolution is pure Angular DI — `inject(ParentClass, { skipSelf,
- * optional })`. The closer ancestor wins; if nested under another `<jiv>`
- * that Jiv is the parent; otherwise we fall through to the enclosing
- * `<jaui>`'s Root. No custom InjectionToken ceremony.
- *
- * Inputs (signal-based, all optional):
- *   class       — space-separated class names; resolved against the local
- *                 JssRegistry (Style/Layout/ChildLayout/TextStyle)
- *   style       — Partial<JivStyle> applied AFTER class resolution (wins)
- *   layout      — Partial<LayoutConfig>
- *   childLayout — Partial<ChildLayout>
- *   text        — string; sets jiv.Text
- *   textStyle   — Partial<TextStyle>
- *
- * Native DOM events (`click`, `pointerdown`, …) bubble through the host
- * `<jiv>` element — Angular's standard event binding works without any
- * special wiring on our side.
+ * Worker-mode shape: each `<jiv>` allocates a worker-side ID at
+ * construction, posts a `create` op to the bridge, an `attach` op on
+ * init, and `apply` ops on input changes. The exposed `Node` is a
+ * `JivHandle` — a stand-in for the engine `Jiv` whose property writes
+ * (Style/Layout/ChildLayout via Proxy, scalar setters, AddChild, etc.)
+ * forward through the bridge. Reads of geometry come from rect snapshots
+ * the worker pushes back per frame for nodes that subscribe.
  */
 @Component({
   selector: 'jiv',
@@ -59,12 +49,9 @@ export class Jiv implements OnInit, OnDestroy {
   readonly textStyle = input<Partial<TextStyle> | undefined>(undefined);
   readonly imageSrc = input<string | null | undefined>(undefined, { alias: 'image' });
 
-  /** The underlying Jiv instance, created in the constructor. */
-  readonly Node: JivCore;
+  /** Worker-side Jiv handle. Property writes buffer ops + flush per microtask. */
+  readonly Node: JivHandle;
 
-  // forwardRef because Jiv (this class) references itself via DI. The
-  // parent Jiv — if any — is the nearest ancestor. If there's no parent
-  // Jiv, we're a top-level child of <jaui> and attach to its Root.
   private _parentJiv = inject<Jiv | null>(forwardRef(() => Jiv), {
     skipSelf: true,
     optional: true,
@@ -74,232 +61,116 @@ export class Jiv implements OnInit, OnDestroy {
   private _host = inject(ElementRef<HTMLElement>);
 
   constructor() {
-    const opts = this._buildOptions();
-    // Extract Element-level properties from Style before constructing
-    const style = (opts.Style ?? {}) as Record<string, unknown>;
-    const elementProps: Record<string, unknown> = {};
-    for (const key of ['Overflow', 'Visible', 'Interactive', 'PointerEvents', 'Cursor', 'UserSelect', 'PointScale', 'FitMode']) {
-      if (key in style) {
-        elementProps[key] = style[key];
-        delete style[key];
-      }
+    if (!this._canvas) {
+      throw new Error('[Jaui.Angular] <jiv> must be inside a <jaui>');
     }
-    this.Node = new JivCore({ ...opts, ...elementProps });
-    // Bridge Jaui's canvas-level pointer + click gestures to DOM events
-    // on this component's host element so standard Angular `(click)`
-    // and `(pointerdown/move/up)` bindings work. Synthesized events
-    // bubble so parent handlers / Angular change detection pick them
-    // up naturally. Pointer events carry through clientX/Y/pointerId/
-    // pointerType/button so handlers reading drag positions still work.
-    this.Node.OnClick = () => {
-      this._host.nativeElement.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    };
-    this.Node.OnContextMenu = (src: MouseEvent) => {
-      // Re-dispatch a bubbling DOM contextmenu on this jiv's host so any
-      // (contextmenu) Angular binding along the ancestor chain fires.
-      // The original event was already preventDefault'd in the canvas
-      // listener, so the browser's native menu never appears.
-      this._host.nativeElement.dispatchEvent(new MouseEvent('contextmenu', {
-        bubbles: true, cancelable: true,
-        clientX: src.clientX, clientY: src.clientY, button: src.button,
-      }));
-    };
-    this.Node.OnPointerDown = (e) => {
-      this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerdown', e));
-    };
-    this.Node.OnPointerMove = (e) => {
-      this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointermove', e));
-    };
-    this.Node.OnPointerUp = (e) => {
-      this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerup', e));
-    };
-    // Reactively re-apply on input changes — spring animator handles the
-    // smooth transition; we don't recreate the Jiv. Tracking the registry
-    // version signal here is what makes live `.jss` hot-edits propagate:
-    // when a `<jyle>` re-parses, the registry version bumps, every Jiv
-    // that reads it via this effect re-resolves its class rules.
+    const bridge = this._canvas.Bridge;
+    this.Node = new JivHandle(bridge, bridge.AllocateId());
+
+    // Bridge engine-side hit handlers to bubbling DOM events on this
+    // component's host element so Angular `(click)` / `(pointerdown)` etc.
+    // bindings still fire — same shape as the pre-worker `<jiv>`.
+    this.Node.SetHit({
+      OnClick: () => {
+        this._host.nativeElement.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      },
+      OnContextMenu: (src) => {
+        this._host.nativeElement.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true, cancelable: true,
+          clientX: src.ClientX, clientY: src.ClientY, button: src.Button,
+        }));
+      },
+      OnPointerDown: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerdown', src)),
+      OnPointerMove: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointermove', src)),
+      OnPointerUp: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerup', src)),
+    });
+
+    // Initial create — sends construction-time options. Attach fires
+    // in ngOnInit once the parent chain is settled.
+    bridge.Enqueue({ K: 'create', Id: this.Node.Id, Opts: this._buildOptions() });
+
+    // Re-apply on input or registry-version change. The worker
+    // auto-kicks its animation loop after applying ops.
     effect(() => {
-      // Subscribe to registry changes — even for class-less jivs, this is
-      // cheap and keeps behavior uniform.
       this._registry?.Version();
-      this._apply();
-      // Kick the animation loop so any style-spring deltas introduced by
-      // this re-apply (e.g. a class swap that changes Opacity through an
-      // @Transition) actually animate. Without this, the AnimationManager
-      // stays idle when nothing else is moving and the spring's new target
-      // sits unrealized until an external event (pointer move, resize,
-      // etc.) wakes it. _canvas may be unresolved on the first effect
-      // run if the directive is constructed before its parent canvas
-      // registers — fall back to the next call.
-      this._canvas?.Canvas.Animations.Kick();
+      this.Node.Apply(this._buildOptions());
     });
   }
 
   ngOnInit(): void {
-    this._parent().AddChild(this.Node);
-    // Kick the animation loop so the new Jiv's Presence spring (0 → 1)
-    // starts animating on the next RAF. Idempotent when already running.
-    this._canvas?.Canvas.Animations.Kick();
+    const parentNode = this._parentJiv ? this._parentJiv.Node : this._canvas!.Root;
+    parentNode.AddChild(this.Node);
   }
 
   ngOnDestroy(): void {
-    // Defer the actual tree removal to the engine: RequestLeave flips the
-    // Presence spring's target to 0, and the PresenceManager hard-removes
-    // the node once the spring settles. Gives the Jiv a fade-out instead
-    // of a hard pop when the Angular component goes away.
     this.Node.RequestLeave();
-    this._canvas?.Canvas.Animations.Kick();
+    this.Node.Destroy();
   }
 
-  /** Nearest ancestor Jiv or the canvas root. Always defined if this
-   *  `<jiv>` is used inside a `<jaui>` (which it must be — a
-   *  floating `<jiv>` with no canvas ancestor throws a clear error). */
-  private _parent(): JivCore {
-    if (this._parentJiv) return this._parentJiv.Node;
-    if (this._canvas) return this._canvas.Root;
-    throw new Error('[Jaui.Angular] <jiv> must be inside a <jaui>');
-  }
-
-  private _buildOptions(): {
-    Style?: Partial<JivStyle>;
-    Layout?: Partial<LayoutConfig>;
-    ChildLayout?: Partial<ChildLayout>;
-    TextStyle?: Partial<TextStyle>;
-    HoverStyle?: Partial<JivStyle>;
-    ActiveStyle?: Partial<JivStyle>;
-    FocusStyle?: Partial<JivStyle>;
-    DisabledStyle?: Partial<JivStyle>;
-    HoverTextStyle?: Partial<TextStyle>;
-    ActiveTextStyle?: Partial<TextStyle>;
-    FocusTextStyle?: Partial<TextStyle>;
-    DisabledTextStyle?: Partial<TextStyle>;
-    Springs?: Record<string, Partial<SpringConfig>>;
-    Text?: string;
-  } {
-    // Signal inputs aren't populated at constructor time, so this.className() returns undefined on first run. Static class="..." is present on the host element from the start, so read it directly when the signal is empty — Springs only honour the construction-time value, missing them here means no class Springs ever apply.
+  private _buildOptions(): JivApplyOpts {
+    // className signal isn't populated at constructor time; fall back to
+    // the static host attribute so initial Springs see the right value.
     const name = this.className() ?? this._host.nativeElement.getAttribute('class') ?? undefined;
     const fromClass = this._registry?.Resolve(name) ?? null;
     const text = this.text();
-    return {
-      Style:         { ...fromClass?.Style,         ...this.style() },
-      Layout:        { ...fromClass?.Layout,        ...this.layout() },
-      ChildLayout:   { ...fromClass?.ChildLayout,   ...this.childLayout() },
-      TextStyle:     { ...fromClass?.TextStyle,     ...this.textStyle() },
-      HoverStyle:        fromClass?.HoverStyle,
-      ActiveStyle:       fromClass?.ActiveStyle,
-      FocusStyle:        fromClass?.FocusStyle,
-      DisabledStyle:     fromClass?.DisabledStyle,
-      HoverTextStyle:    fromClass?.HoverTextStyle,
-      ActiveTextStyle:   fromClass?.ActiveTextStyle,
-      FocusTextStyle:    fromClass?.FocusTextStyle,
-      DisabledTextStyle: fromClass?.DisabledTextStyle,
-      Springs:           fromClass?.Springs,
-      ...(text != null ? { Text: text } : {}),
-    };
-  }
-
-  /** Re-apply merged options to the live Node on input change. Spring
-   *  animator picks up field deltas automatically — no manual transitions. */
-  private _apply(): void {
-    const opts = this._buildOptions();
-    if (opts.Style) {
-      // Extract Element-level properties that JSS may have placed in the
-      // Style bucket (they moved from JivStyle to Element).
-      const style = opts.Style as Record<string, unknown>;
-      if ('Overflow' in style) {
-        this.Node.Overflow = style['Overflow'] as 'Visible' | 'Hidden' | 'Scroll';
-        delete style['Overflow'];
-      }
-      if ('Visible' in style) {
-        // JSS values arrive as strings ('true'/'false'); inline [style] passes
-        // real booleans. Coerce so 'false' doesn't end up truthy.
-        this.Node.Visible = style['Visible'] === true || style['Visible'] === 'true';
-        delete style['Visible'];
-      }
-      if ('Interactive' in style) {
-        this.Node.Interactive = style['Interactive'] === true || style['Interactive'] === 'true';
-        delete style['Interactive'];
-      }
-      if ('PointerEvents' in style) {
-        this.Node.PointerEvents = style['PointerEvents'] as 'Auto' | 'None';
-        delete style['PointerEvents'];
-      }
-      if ('Cursor' in style) {
-        this.Node.Cursor = style['Cursor'] as 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
-        delete style['Cursor'];
-      }
-      if ('UserSelect' in style) {
-        this.Node.UserSelect = style['UserSelect'] as 'Auto' | 'None';
-        delete style['UserSelect'];
-      }
-      if ('PointScale' in style) {
-        const next = String(style['PointScale']);
-        if (this.Node.PointScale !== next) {
-          this.Node.PointScale = next;
-          this.Node.MarkLayoutDirty();
-        }
-        delete style['PointScale'];
-      }
-      if ('FitMode' in style) {
-        this.Node.FitMode = style['FitMode'] as 'Contain' | 'Cover';
-        delete style['FitMode'];
-      }
-      Object.assign(this.Node.Style, style);
-    }
-    if (opts.Layout) Object.assign(this.Node.Layout, opts.Layout);
-    if (opts.ChildLayout) Object.assign(this.Node.ChildLayout, opts.ChildLayout);
-    // State styles (Hover/Active/Focus/Disabled) — assigning the whole
-    // bag is safe since EffectiveStyle merges Style + the active state on
-    // every read; spring animator picks up deltas.
-    if (opts.HoverStyle !== undefined)        this.Node.HoverStyle        = opts.HoverStyle        ?? null;
-    if (opts.ActiveStyle !== undefined)       this.Node.ActiveStyle       = opts.ActiveStyle       ?? null;
-    if (opts.FocusStyle !== undefined)        this.Node.FocusStyle        = opts.FocusStyle        ?? null;
-    if (opts.DisabledStyle !== undefined)     this.Node.DisabledStyle     = opts.DisabledStyle     ?? null;
-    if (opts.HoverTextStyle !== undefined)    this.Node.HoverTextStyle    = opts.HoverTextStyle    ?? null;
-    if (opts.ActiveTextStyle !== undefined)   this.Node.ActiveTextStyle   = opts.ActiveTextStyle   ?? null;
-    if (opts.FocusTextStyle !== undefined)    this.Node.FocusTextStyle    = opts.FocusTextStyle    ?? null;
-    if (opts.DisabledTextStyle !== undefined) this.Node.DisabledTextStyle = opts.DisabledTextStyle ?? null;
-    // Note: Springs only honoured at JivCore construction (StyleAnimator
-    // builds the per-channel spring set once); changing them after mount
-    // doesn't re-tune existing springs. Late-bound state changes still
-    // work — they just chase targets at the configured stiffness.
-    // Route text + textStyle through SetText: it diffs before dirtying, so
-    // calling every effect run is cheap when nothing changed and still marks
-    // DirtyFlag.Text when font metrics (FontSize, FontFamily, LetterSpacing…)
-    // change — which Object.assign on TextStyle silently missed.
-    if ('Text' in opts || opts.TextStyle) {
-      const nextText = 'Text' in opts ? (opts.Text ?? null) : this.Node.Text;
-      this.Node.SetText(nextText, opts.TextStyle);
-    }
     const img = this.imageSrc();
-    if (img !== undefined) this.Node.ImageSrc = img;
-    this.Node.MarkLayoutDirty();
+
+    const styleBag = { ...fromClass?.Style, ...this.style() } as Record<string, unknown>;
+    const elementProps: JivApplyOpts['ElementProps'] = {};
+    for (const key of [
+      'Overflow', 'Visible', 'Interactive', 'PointerEvents',
+      'Cursor', 'UserSelect', 'PointScale', 'FitMode',
+    ]) {
+      if (key in styleBag) {
+        const v = styleBag[key];
+        if (key === 'Visible' || key === 'Interactive') {
+          (elementProps as Record<string, unknown>)[key] = (v === true || v === 'true');
+        } else {
+          (elementProps as Record<string, unknown>)[key] = v;
+        }
+        delete styleBag[key];
+      }
+    }
+
+    const opts: JivApplyOpts = {
+      Style:         styleBag,
+      Layout:        { ...fromClass?.Layout,        ...this.layout() } as Record<string, unknown>,
+      ChildLayout:   { ...fromClass?.ChildLayout,   ...this.childLayout() } as Record<string, unknown>,
+      TextStyle:     { ...fromClass?.TextStyle,     ...this.textStyle() } as Record<string, unknown>,
+      HoverStyle:        fromClass?.HoverStyle as Record<string, unknown> | undefined,
+      ActiveStyle:       fromClass?.ActiveStyle as Record<string, unknown> | undefined,
+      FocusStyle:        fromClass?.FocusStyle as Record<string, unknown> | undefined,
+      DisabledStyle:     fromClass?.DisabledStyle as Record<string, unknown> | undefined,
+      HoverTextStyle:    fromClass?.HoverTextStyle as Record<string, unknown> | undefined,
+      ActiveTextStyle:   fromClass?.ActiveTextStyle as Record<string, unknown> | undefined,
+      FocusTextStyle:    fromClass?.FocusTextStyle as Record<string, unknown> | undefined,
+      DisabledTextStyle: fromClass?.DisabledTextStyle as Record<string, unknown> | undefined,
+      Springs:           fromClass?.Springs as Record<string, Record<string, unknown>> | undefined,
+      ElementProps:      Object.keys(elementProps).length > 0 ? elementProps : undefined,
+    };
+    if (text !== undefined) opts.Text = text;
+    if (img !== undefined) opts.ImageSrc = img;
+    return opts;
   }
 }
 
-function _clonePointerEvent(type: string, src: PointerEvent): PointerEvent {
+function _clonePointerEvent(type: string, src: PointerPayload): PointerEvent {
   const evt = new PointerEvent(type, {
     bubbles: true,
     cancelable: true,
-    clientX: src.clientX,
-    clientY: src.clientY,
-    pointerId: src.pointerId,
-    pointerType: src.pointerType,
-    button: src.button,
-    buttons: src.buttons,
-    // Modifier-key state — without these, shift/ctrl/alt/meta+click
-    // handlers in Angular templates can't tell what was held when the
-    // user pressed.
-    shiftKey: src.shiftKey,
-    ctrlKey: src.ctrlKey,
-    altKey: src.altKey,
-    metaKey: src.metaKey,
+    clientX: src.ClientX,
+    clientY: src.ClientY,
+    pointerId: src.PointerId,
+    pointerType: src.PointerType,
+    button: src.Button,
+    buttons: src.Buttons,
+    shiftKey: src.Shift,
+    ctrlKey: src.Ctrl,
+    altKey: src.Alt,
+    metaKey: src.Meta,
   });
-  // Marker so DOM listeners on ancestor elements (e.g. page-root field
-  // gesture handlers) can distinguish bridge-synthesized events — fired
-  // because Jaui hit-tested a Jiv-painted child — from native pointer
-  // events on the canvas, which target real field area.
   (evt as PointerEvent & { __jauiBridged?: boolean }).__jauiBridged = true;
   return evt;
 }
 
+export type { SpringConfig };

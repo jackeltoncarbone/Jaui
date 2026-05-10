@@ -59,8 +59,10 @@ export interface Renderer {
 
   // ── Lifecycle ──
 
-  /** Async — WebGPU adapter/device negotiation requires promises. */
-  Init(canvas: HTMLCanvasElement): Promise<void>;
+  /** Async — WebGPU adapter/device negotiation requires promises.
+   *  Accepts both DOM canvases and OffscreenCanvas so the engine can run
+   *  inside a Web Worker via transferControlToOffscreen. */
+  Init(canvas: HTMLCanvasElement | OffscreenCanvas): Promise<void>;
   Destroy(): void;
 
   /** Reconfigure surfaces and render targets for the new size. */
@@ -178,12 +180,14 @@ export interface Renderer {
   /** Create a 2D texture (e.g. for the text atlas). */
   CreateTexture(width: number, height: number): GpuTextureHandle;
 
-  /** Upload a sub-region of a texture from a canvas, ImageBitmap, or ImageData. */
+  /** Upload a sub-region of a texture from a canvas, ImageBitmap, or ImageData.
+   *  OffscreenCanvas is included so worker-side text/image rasterization can
+   *  upload without round-tripping through the main thread. */
   UploadSubTexture(
     texture: GpuTextureHandle,
     x: number,
     y: number,
-    source: HTMLCanvasElement | ImageBitmap | ImageData,
+    source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | ImageData,
   ): void;
 
   // ── Clip Stack ──

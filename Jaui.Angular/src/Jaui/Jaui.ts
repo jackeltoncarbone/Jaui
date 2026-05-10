@@ -1,6 +1,7 @@
 import {
   Component,
   ElementRef,
+  InjectionToken,
   OnDestroy,
   OnInit,
   effect,
@@ -8,23 +9,41 @@ import {
   input,
   output,
 } from '@angular/core';
-import { Canvas, WebGL2Renderer, type ParsedJss, type Stylesheet } from 'jaui';
+import {
+  MainBridge,
+  CanvasProxy,
+  type ParsedJss,
+  type Stylesheet,
+} from 'jaui';
 import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
 
-/**
- * `<jaui>` — the Jaui canvas at the app shell. Provides the
- * JssRegistry to descendants; children inject `Jaui` directly (via
- * `inject(Jaui, { optional: true })`) to reach the root Jiv.
+/** DI token for the `<jaui>`-hosted Worker. The consumer must provide a
+ *  Worker instance — there's no sane default because the worker is
+ *  responsible for registering Janvas renderer factories synchronously
+ *  before `BootJauiWorker` runs. Provided at the consumer's host
+ *  component (e.g. App.ts):
  *
- * Init timing: the underlying Jaui Canvas is created in the constructor
- * so `Root` is available BEFORE any projected child runs its own
- * lifecycle hooks. No afterRender / afterNextRender hacks.
+ *      providers: [{ provide: JAUI_WORKER, useFactory: SpawnRealityWorker }]
+ *
+ *  DI is resolved at constructor time, so `<jaui>` reads the worker
+ *  before any child `<jiv>` / `<janvas>` constructor runs. (Signal-based
+ *  inputs throw `RequiredInputNotSetError` when read in the constructor,
+ *  which is why this isn't an `input.required<Worker>`.) */
+export const JAUI_WORKER = new InjectionToken<Worker>('JAUI_WORKER');
+
+/**
+ * `<jaui>` — host of the Jaui rendering canvas.
+ *
+ * Worker-only architecture: takes a consumer-built Worker (provided via
+ * the `JAUI_WORKER` DI token), transfers an OffscreenCanvas to it, and
+ * exposes a `CanvasProxy` (`Canvas`) that forwards calls via postMessage.
+ * Children inject `Jaui` and read `Canvas` / `Root` exactly as before.
  *
  * Inputs:
  *   stylesheet — pre-parsed Stylesheet (e.g. from CompileJss('foo.jss'))
  *
  * Outputs:
- *   ready — emits the live Canvas instance once initialized
+ *   ready — emits the live CanvasProxy once initialized.
  */
 @Component({
   selector: 'jaui',
@@ -41,48 +60,47 @@ import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
 })
 export class Jaui implements OnInit, OnDestroy {
   readonly stylesheet = input<ParsedJss | Stylesheet | undefined>(undefined);
-  readonly ready = output<Canvas>();
+  readonly ready = output<CanvasProxy>();
 
-  /** The Jaui Canvas — created eagerly in the constructor so descendants
-   *  can read `.Root` immediately, without waiting for any Angular
-   *  lifecycle hook to fire. */
-  readonly Canvas: Canvas;
+  /** Main-thread proxy for the worker-side Canvas. Children inject this
+   *  component and read `Canvas.Root` / `Canvas.Images.LoadSvg` etc. as
+   *  before; the proxy forwards everything to the worker. */
+  readonly Canvas: CanvasProxy;
 
-  /** Shortcut for `Canvas.Root` — what <jiv> uses as a fallback parent. */
+  /** Shortcut for `Canvas.Root` — what `<jiv>` uses as a fallback parent. */
   get Root() { return this.Canvas.Root; }
+
+  /** The MainBridge instance — exposed for `<jiv>` descendants that
+   *  need to enqueue Jiv ops directly. */
+  readonly Bridge: MainBridge;
 
   private _host = inject(ElementRef<HTMLElement>);
   private _registry = inject(JssRegistry);
   private _canvasEl: HTMLCanvasElement;
 
   constructor() {
-    // Build the <canvas> imperatively and attach it as our host element's
-    // first child. Doing this in the constructor (instead of via ViewChild
-    // + ngAfterViewInit) means Jaui.Canvas is alive before children's
-    // hooks fire — eliminates the cross-lifecycle ordering problem.
-    //
-    // Inline styles bypass Angular's view encapsulation — scoped CSS rules
-    // in this component's `styles` wouldn't match an element we created
-    // via DOM APIs (no _ngcontent-xxx attribute).
+    // Build the proxy <canvas>. This element captures DOM events and
+    // hosts the OffscreenCanvas (transferred to the worker). Inline
+    // styles bypass Angular's view encapsulation.
     this._canvasEl = document.createElement('canvas');
     this._canvasEl.style.display = 'block';
     this._canvasEl.style.width = '100%';
     this._canvasEl.style.height = '100%';
     this._host.nativeElement.appendChild(this._canvasEl);
-    // WebGL2 explicitly: projected <jiv> children read `.Root` synchronously
-    // during their own ngOnInit, and WebGL2Renderer.Init is the only backend
-    // init that's actually sync-in-practice (pure GL state calls). The
-    // Promise return on Init is cosmetic; `void` fires and forgets.
-    const renderer = new WebGL2Renderer();
-    void renderer.Init(this._canvasEl);
-    this.Canvas = new Canvas(this._canvasEl, renderer);
-    (window as any).__jaui = { canvas: this.Canvas };
 
-    // Push the active registry's var table into the Canvas whenever the
-    // registry version bumps (a <jyle> merge, hot-edit, etc.). Layout +
-    // intrinsic passes read it via ResolveContext.Vars to substitute
-    // `@Name` refs in authored expressions. Initial push catches any
-    // vars declared by the @Input() stylesheet before the first tick.
+    // Wire bridge to the consumer-supplied worker injected via JAUI_WORKER.
+    // Required because the worker is responsible for registering Janvas
+    // renderer factories synchronously before BootJauiWorker — no default
+    // makes sense.
+    const worker = inject(JAUI_WORKER);
+    this.Bridge = new MainBridge({
+      Canvas: this._canvasEl,
+      Worker: worker,
+    });
+    this.Canvas = new CanvasProxy(this.Bridge);
+    (window as { __jaui?: { canvas: CanvasProxy } }).__jaui = { canvas: this.Canvas };
+
+    // Push JSS var table to the worker on every registry version bump.
     effect(() => {
       this._registry.Version();
       this.Canvas.SetJssVars(this._registry.Vars);
@@ -92,13 +110,13 @@ export class Jaui implements OnInit, OnDestroy {
   ngOnInit(): void {
     const sheet = this.stylesheet();
     if (sheet) this._registry.Merge(sheet);
-    // Canvas.Start() kicks rAF immediately; text re-measures on
-    // FontFaceSet.loadingdone via Canvas' own listener.
     this.Canvas.Start();
     this.ready.emit(this.Canvas);
   }
 
   ngOnDestroy(): void {
+    this.Canvas.Stop();
+    this.Bridge.Worker.terminate();
     this._canvasEl.remove();
   }
 }

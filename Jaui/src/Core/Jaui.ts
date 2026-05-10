@@ -22,6 +22,7 @@ import type { Renderer, GpuTextureHandle } from './Renderer';
 // `Renderer.Factory.ts` and handed in. Canvas has no opinion about
 // which backend is running underneath it.
 import { ImageCache } from '../Image/Image.Cache';
+import { BrowserPlatform, type Platform } from './Platform';
 import type { MaterialType } from '../Jiv/Jiv.Types';
 
 /** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
@@ -66,6 +67,7 @@ export class Canvas implements DirtyTracker {
   private _dirtyNodes: Set<JauiElement> = new Set();
 
   private _renderer!: Renderer;
+  private _platform!: Platform;
   private _width: number = 0;
   private _height: number = 0;
   private _dpr: number = 1;
@@ -139,13 +141,22 @@ export class Canvas implements DirtyTracker {
    *  here — callers build a renderer via `Renderer.Factory` (or their own
    *  path) and hand it in. Keeps this class free of concrete-backend
    *  imports so new backends can land without touching Canvas. */
-  constructor(canvas: HTMLCanvasElement, renderer: Renderer) {
+  constructor(canvas: HTMLCanvasElement, renderer: Renderer, platform: Platform = BrowserPlatform) {
     this.Element = canvas;
     this.Root = new Jiv();
     this.Root.Tracker = this;
     this._renderer = renderer;
+    this._platform = platform;
 
-    this.Element.style.touchAction = 'none';
+    // touch-action:none on the canvas tells the browser "don't intercept
+    // drags as scroll/zoom" — without it, pointermove during a touch
+    // drag never reaches our handlers (Chrome Android browser-default
+    // is `auto`). Only valid on HTMLCanvasElement; OffscreenCanvas has
+    // no `.style`. In worker mode the proxy element on main owns the
+    // listeners and sets this itself.
+    if (typeof HTMLCanvasElement !== 'undefined' && canvas instanceof HTMLCanvasElement) {
+      canvas.style.touchAction = 'none';
+    }
     this._initDebugFromUrl();
 
     this._textCache = new TextCache(renderer);
@@ -194,10 +205,65 @@ export class Canvas implements DirtyTracker {
     this._listenForSelectionKeys();
     this._listenForFontLoad();
     void this._listenForSpecularTilt;
+
+    // Main-thread mode: bind real DOM listeners on the canvas that
+    // translate to `IngestEvent` calls. The engine's `_listenForX`
+    // methods register internal handlers via `_on(...)` — without this
+    // bridge, those internal handlers never fire because the DOM events
+    // have nowhere to land. In worker mode (canvas is OffscreenCanvas),
+    // the main-thread MainBridge owns this responsibility on the proxy
+    // canvas element instead — skip the bind here.
+    if (typeof HTMLCanvasElement !== 'undefined' && canvas instanceof HTMLCanvasElement) {
+      this._bindMainThreadDomEvents(canvas);
+    }
   }
+
+  /** Bridge real DOM events on the canvas to `IngestEvent`. Used in
+   *  main-thread mode (no worker). Mirrors what `MainBridge._wireDomEvents`
+   *  does on the proxy canvas in worker mode — translate clientX/Y to
+   *  canvas-local CSS pixels, forward as a synth event payload, and
+   *  `preventDefault()` on touchstart/wheel synchronously so the browser
+   *  doesn't intercept gestures as scroll/zoom. */
+  private _bindMainThreadDomEvents = (el: HTMLCanvasElement): void => {
+    const dispatch = (kind: string, e: PointerEvent | WheelEvent | MouseEvent | TouchEvent | KeyboardEvent | Event): void => {
+      this.IngestEvent(kind, e);
+    };
+    el.addEventListener('pointermove', (e) => dispatch('pointermove', e));
+    el.addEventListener('pointerdown', (e) => dispatch('pointerdown', e));
+    el.addEventListener('pointerup', (e) => dispatch('pointerup', e));
+    el.addEventListener('pointercancel', (e) => dispatch('pointercancel', e));
+    el.addEventListener('pointerleave', (e) => dispatch('pointerleave', e));
+    el.addEventListener('pointerenter', (e) => dispatch('pointerenter', e));
+    el.addEventListener('contextmenu', (e) => dispatch('contextmenu', e));
+    // touchstart needs preventDefault on Chrome Android to suppress the
+    // long-press magnifier / native text selection. `{passive:false}` so
+    // the browser honors the call.
+    el.addEventListener('touchstart', (e) => { e.preventDefault(); dispatch('touchstart', e); }, { passive: false });
+    // wheel needs preventDefault synchronously; the engine handler can't
+    // do it asynchronously.
+    el.addEventListener('wheel', (e) => { e.preventDefault(); dispatch('wheel', e); }, { passive: false });
+  };
 
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
   get Animations(): AnimationManager { return this._animationManager; }
+
+  /** Post-frame hook list — invoked at the end of every render tick.
+   *  Used by the worker's JivRegistry to broadcast rect snapshots once
+   *  per frame to subscribed nodes. */
+  private _postFrameSubs: (() => void)[] = [];
+  RegisterPostFrame = (cb: () => void): (() => void) => {
+    this._postFrameSubs.push(cb);
+    return () => {
+      const i = this._postFrameSubs.indexOf(cb);
+      if (i >= 0) this._postFrameSubs.splice(i, 1);
+    };
+  };
+  /** Internal — fired by the render loop after a frame's paint completes. */
+  private _firePostFrame = (): void => {
+    for (let i = 0; i < this._postFrameSubs.length; i++) {
+      try { this._postFrameSubs[i](); } catch (e) { console.error('[Jaui] post-frame sub threw', e); }
+    }
+  };
 
   /** Replace the active JSS var table. The Angular layer calls this when
    *  the nearest `JssRegistry` picks up new declarations (e.g. a `<jyle>`
@@ -240,6 +306,157 @@ export class Canvas implements DirtyTracker {
   get Width(): number { return this._width; }
   get Height(): number { return this._height; }
 
+  // ─── Event ingestion (worker mode) ──────────────────────────────────────
+  // The engine no longer binds DOM listeners on its canvas — `this.Element`
+  // is an OffscreenCanvas and isn't an EventTarget for pointer/wheel/key
+  // events anyway. Instead, the main-thread bridge captures real DOM events
+  // on a sibling proxy element (the `<canvas>` Angular mounted) and forwards
+  // them via postMessage. The bridge calls `IngestEvent(kind, e)` for each;
+  // we dispatch to handlers registered through `_on`.
+  //
+  // Synth event payload contract:
+  //   • clientX / clientY are CANVAS-LOCAL CSS pixels (already translated by
+  //     the bridge), so `clientX - getBoundingClientRect().left` still
+  //     produces the right number — the rect we serve is anchored at (0,0).
+  //   • All other fields (pointerId, pointerType, button, modifiers, delta*,
+  //     getCoalescedEvents) match the corresponding DOM event.
+  //   • preventDefault / stopPropagation are no-ops; main has already
+  //     decided whether to preventDefault on touchstart/wheel.
+
+  /** Map of event kind → handler list. Engine internals register here via
+   *  `_on()`; bridge-driven `IngestEvent` dispatches to all listeners.
+   *
+   *  Handler param type is `any` (not `unknown`) because the original
+   *  per-element listeners were strongly typed (e.g. `(e: PointerEvent)`)
+   *  and TS's contravariance rule forbids assigning those to
+   *  `(e: unknown) => void`. Engine handlers know the shape they expect;
+   *  the bridge guarantees the synth payload supplies those fields. */
+  private _eventListeners = new Map<string, ((e: any) => void)[]>();
+
+  /** Bridge callbacks. Set by the worker entry once Canvas is constructed. */
+  private _cursorRelay: ((cursor: string) => void) | null = null;
+  private _captureRelay: ((action: 'set' | 'release', pointerId: number) => void) | null = null;
+
+  /** Pointers we hold capture for. Mirrors what the proxy element on main
+   *  has setPointerCapture'd, so `_hasCapture` answers synchronously. */
+  private _capturedPointers = new Set<number>();
+
+  /** Bridge installs these once. Worker entry → Canvas wires them up. */
+  OnCursorChange = (cb: ((cursor: string) => void) | null): void => { this._cursorRelay = cb; };
+  OnPointerCaptureRequest = (cb: ((action: 'set' | 'release', pointerId: number) => void) | null): void => {
+    this._captureRelay = cb;
+  };
+
+  /** Bridge inbound: dispatch a normalized event to engine handlers.
+   *  Unknown kinds are silently dropped (the bridge may forward kinds the
+   *  engine doesn't currently listen for, e.g. pointerenter). */
+  IngestEvent = (kind: string, e: unknown): void => {
+    const list = this._eventListeners.get(kind);
+    if (!list) return;
+    // Iterate a snapshot so a handler that adds/removes during dispatch
+    // doesn't shift indices on us.
+    const snapshot = list.slice();
+    for (const h of snapshot) {
+      try { h(e as never); } catch (err) { console.error(`[Jaui] handler for "${kind}" threw`, err); }
+    }
+  };
+
+  /** Bridge inbound: pointer-capture was actually granted on main. Track
+   *  the id so subsequent `_hasCapture(id)` checks are correct. */
+  IngestPointerCaptureGranted = (pointerId: number): void => { this._capturedPointers.add(pointerId); };
+  IngestPointerCaptureReleased = (pointerId: number): void => { this._capturedPointers.delete(pointerId); };
+
+  /** Bridge inbound: ResizeObserver delivered a new contentRect on main.
+   *  Re-uses the same `_pendingResize` slot the original (now-removed)
+   *  in-engine ResizeObserver filled, so the existing _resize() pipeline
+   *  picks it up on its next tick. */
+  ResizeFromBridge = (cssWidth: number, cssHeight: number): void => {
+    this._pendingResize = { width: cssWidth, height: cssHeight };
+    requestAnimationFrame(() => this._resize());
+  };
+
+  /** Internal — register an engine handler for `kind`. Returns disposer.
+   *  `_options` is accepted (and ignored) for source-compatibility with
+   *  the prior `addEventListener(kind, h, { passive: false })` calls;
+   *  passive/capture flags only matter at the DOM-listener layer, which
+   *  lives on main now. */
+  private _on = (kind: string, handler: (e: any) => void, _options?: AddEventListenerOptions | boolean): (() => void) => {
+    let list = this._eventListeners.get(kind);
+    if (!list) { list = []; this._eventListeners.set(kind, list); }
+    list.push(handler);
+    return () => {
+      const cur = this._eventListeners.get(kind);
+      if (!cur) return;
+      const i = cur.indexOf(handler);
+      if (i >= 0) cur.splice(i, 1);
+    };
+  };
+
+  /** Internal — substitute for `Element.getBoundingClientRect()`.
+   *
+   *  Main-thread mode (canvas is HTMLCanvasElement): defer to the real
+   *  `getBoundingClientRect()` so engine handlers translating
+   *  `clientX - rect.left` produce correct canvas-local coords.
+   *
+   *  Worker mode (canvas is OffscreenCanvas): there is no bounding
+   *  rect — the bridge has already pre-translated `clientX/Y` to
+   *  canvas-local CSS pixels before posting, so we return a (0, 0)-
+   *  anchored rect. The same `clientX - rect.left` math then
+   *  collapses to `clientX - 0 = clientX` (already canvas-local). */
+  private _pageRect = (): { left: number; top: number; width: number; height: number; right: number; bottom: number; x: number; y: number } => {
+    const el = this.Element as unknown as { getBoundingClientRect?: () => DOMRect };
+    if (typeof el.getBoundingClientRect === 'function') {
+      return el.getBoundingClientRect();
+    }
+    return {
+      left: 0, top: 0,
+      width: this._width, height: this._height,
+      right: this._width, bottom: this._height,
+      x: 0, y: 0,
+    };
+  };
+
+  /** Internal — substitute for `Element.setPointerCapture(id)`.
+   *  Main-thread mode: call the real DOM API so the browser keeps
+   *  routing pointermove to us even when the finger drifts off the
+   *  canvas (essential for drag/scroll). Worker mode: forward via the
+   *  bridge's relay; main calls the real API on the proxy element. */
+  private _capturePointer = (pointerId: number): void => {
+    this._capturedPointers.add(pointerId);
+    if (this._captureRelay) {
+      this._captureRelay('set', pointerId);
+      return;
+    }
+    const el = this.Element as unknown as { setPointerCapture?: (id: number) => void };
+    try { el.setPointerCapture?.(pointerId); } catch { /* pointer not active */ }
+  };
+
+  private _releasePointer = (pointerId: number): void => {
+    this._capturedPointers.delete(pointerId);
+    if (this._captureRelay) {
+      this._captureRelay('release', pointerId);
+      return;
+    }
+    const el = this.Element as unknown as {
+      hasPointerCapture?: (id: number) => boolean;
+      releasePointerCapture?: (id: number) => void;
+    };
+    try {
+      if (el.hasPointerCapture?.(pointerId)) el.releasePointerCapture?.(pointerId);
+    } catch { /* idempotent */ }
+  };
+
+  private _hasCapture = (pointerId: number): boolean => this._capturedPointers.has(pointerId);
+
+  /** Internal — substitute for `Element.style.cursor = X`. Worker mode
+   *  relays to main; main-thread mode writes directly. */
+  private _setCursor = (cursor: string): void => {
+    if (this._cursorRelay) { this._cursorRelay(cursor); return; }
+    const el = this.Element as unknown as { style?: CSSStyleDeclaration };
+    if (el.style) el.style.cursor = cursor;
+  };
+
+
   /** Viewport passed to layout passes for Length resolution — `vw`/`vh`
    *  resolve against these dims, and `%` on root-level placed children
    *  falls back here when there's no parent rect. */
@@ -254,10 +471,27 @@ export class Canvas implements DirtyTracker {
   RequestFrame = (): void => {
   };
 
+  private _tickErrorCount = 0;
   private _tick = (time: number): void => {
     if (!this._running) return;
     this._frameId = requestAnimationFrame(this._tick);
+    try {
+      this._tickInner(time);
+    } catch (err) {
+      // One bad frame shouldn't take down the engine. Log the first few
+      // occurrences (so we see the bug) and then go quiet to keep the
+      // console / postMessage channel from melting under millions of
+      // identical errors per second.
+      if (this._tickErrorCount < 3) {
+        console.error('[Jaui] tick threw', err);
+      } else if (this._tickErrorCount === 3) {
+        console.error('[Jaui] tick still throwing — suppressing further duplicates');
+      }
+      this._tickErrorCount++;
+    }
+  };
 
+  private _tickInner = (time: number): void => {
     // Feed the HUD BEFORE we overwrite _lastTime — the HUD uses it to derive
     // the rAF-to-rAF delta (which, on iOS, includes time the main thread spent
     // blocked — a better signal than render-only dt for "is the browser
@@ -332,6 +566,7 @@ export class Canvas implements DirtyTracker {
     }
 
     this._render(dt);
+    this._firePostFrame();
 
     // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
     // `?debug-layout`; no cost when disabled.
@@ -1312,29 +1547,32 @@ export class Canvas implements DirtyTracker {
     //
     // `?dpr=N` in the URL overrides both paths, so the user can A/B on device
     // without rebuilding. NaN/≤0 is ignored.
-    const raw = window.devicePixelRatio || 1;
+    const raw = this._platform.GetDevicePixelRatio();
     const override = this._dprOverride;
     const prevDpr = this._dpr;
     if (override !== null) {
       this._dpr = override;
     } else {
-      const isTouchPrimary = typeof window !== 'undefined' && !!window.matchMedia
-        && window.matchMedia('(pointer: coarse)').matches;
+      const isTouchPrimary = this._platform.IsPointerCoarse();
       this._dpr = isTouchPrimary ? Math.min(raw, 2) : raw;
     }
-    // Prefer the size pushed in by ResizeObserver (no layout flush) when
-    // available; fall back to clientWidth/Height for callers that don't
-    // have an entry handy (e.g. DPR change handler). Direct clientWidth
-    // reads on cold load force a synchronous layout flush — flagged as a
-    // ~56ms reflow by Chrome's Performance analyzer.
+    // Size always comes from ResizeObserver (or main-thread proxy in worker
+    // mode) via _pendingResize. We never read clientWidth/Height on the
+    // canvas itself: (a) it forces a synchronous layout flush on cold load
+    // (~56ms reflow per Chrome's Performance analyzer), and (b) OffscreenCanvas
+    // has no clientWidth/Height — the engine has to be size-pushed regardless.
     if (this._pendingResize) {
       this._width = this._pendingResize.width;
       this._height = this._pendingResize.height;
       this._pendingResize = null;
-    } else {
-      this._width = this.Element.clientWidth;
-      this._height = this.Element.clientHeight;
+    } else if (this._width === 0 || this._height === 0) {
+      // First call before ResizeObserver has delivered an entry. Skip;
+      // observer's own callback will rAF a follow-up _resize() once the
+      // first entry lands.
+      return;
     }
+    // Otherwise, keep the cached size and just re-apply DPR (this path is
+    // taken by the matchMedia DPR change handler).
     this.Element.width = Math.round(this._width * this._dpr);
     this.Element.height = Math.round(this._height * this._dpr);
 
@@ -1376,11 +1614,18 @@ export class Canvas implements DirtyTracker {
   private _pendingResize: { width: number; height: number } | null = null;
 
   private _observeResize = (): void => {
-    // Defer _resize() to the next animation frame so the ResizeObserver's
-    // callback returns synchronously. Running layout changes in-line
-    // causes the browser to emit "ResizeObserver loop completed with
-    // undelivered notifications" (benign but noisy, and Angular's global
-    // error listener amplifies each one into a console error).
+    // Worker mode: ResizeObserver doesn't exist in DedicatedWorkerGlobalScope
+    // (it's a DOM API). The MainBridge owns its own ResizeObserver on the
+    // proxy canvas element and pushes contentRect deltas via `M2W_Resize`,
+    // which calls `ResizeFromBridge` here — same pipeline, different
+    // source. Skip the engine-side observer entirely when RO isn't
+    // available (= we're in a worker).
+    //
+    // Main-thread mode: defer _resize() to the next animation frame so
+    // the RO callback returns synchronously. Running layout changes
+    // in-line causes the browser to emit "ResizeObserver loop completed
+    // with undelivered notifications" (benign but noisy).
+    if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (entry) {
@@ -1391,7 +1636,7 @@ export class Canvas implements DirtyTracker {
       }
       requestAnimationFrame(() => this._resize());
     });
-    observer.observe(this.Element);
+    observer.observe(this.Element as unknown as Element);
   };
 
   /** Pointer tracking → specular tilt. Simulates Apple's gyro-driven catchlight:
@@ -1404,7 +1649,7 @@ export class Canvas implements DirtyTracker {
   // a suppression comment until we actually wire it up.
   private _listenForSpecularTilt = (): void => {
     const updateFromEvent = (clientX: number, clientY: number): void => {
-      const r = this.Element.getBoundingClientRect();
+      const r = this._pageRect();
       // Map pointer to [-1, +1] relative to canvas center, then scale to a
       // modest tilt magnitude (Apple's gyro tilt rarely exceeds ~30°, which
       // in light-direction space is about 0.5 unit). Clamp to ±0.5.
@@ -1419,11 +1664,11 @@ export class Canvas implements DirtyTracker {
       this.RequestFrame();
     };
 
-    this.Element.addEventListener('pointermove', (e: PointerEvent) => {
+    this._on('pointermove', (e: PointerEvent) => {
       updateFromEvent(e.clientX, e.clientY);
     }, { passive: true });
 
-    this.Element.addEventListener('pointerleave', () => {
+    this._on('pointerleave', () => {
       this._specTiltX = 0;
       this._specTiltY = 0;
       this.RequestFrame();
@@ -1443,7 +1688,7 @@ export class Canvas implements DirtyTracker {
 
   private _listenForInteractionStates = (): void => {
     const topmostAt = (clientX: number, clientY: number): Jiv | null => {
-      const rect = this.Element.getBoundingClientRect();
+      const rect = this._pageRect();
       return this._scrollManager.HitTopmost(clientX - rect.left, clientY - rect.top);
     };
 
@@ -1464,22 +1709,22 @@ export class Canvas implements DirtyTracker {
       newPath.forEach(n => { n[flag] = true; });
     };
 
-    this.Element.addEventListener('pointermove', (e: PointerEvent) => {
+    this._on('pointermove', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
       if (hit !== this._hoveredJiv) {
         setStateChain(hit, this._hoveredJiv, 'Hover');
         this._hoveredJiv = hit;
-        this.Element.style.cursor = _resolveCursor(hit);
+        this._setCursor(_resolveCursor(hit));
         this._animationManager.Kick();
       }
       if (hit?.OnPointerMove) hit.OnPointerMove(e);
     });
 
-    this.Element.addEventListener('pointerleave', () => {
+    this._on('pointerleave', () => {
       if (this._hoveredJiv) {
         setStateChain(null, this._hoveredJiv, 'Hover');
         this._hoveredJiv = null;
-        this.Element.style.cursor = '';
+        this._setCursor('');
         this._animationManager.Kick();
       }
     });
@@ -1498,11 +1743,11 @@ export class Canvas implements DirtyTracker {
     // The canvas already has `touch-action: none`, so we're not breaking
     // any scroll/zoom default — we're just opting out of the long-press
     // gesture in the same swing.
-    this.Element.addEventListener('touchstart', (e: TouchEvent) => {
+    this._on('touchstart', (e: TouchEvent) => {
       e.preventDefault();
     }, { passive: false });
 
-    this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
+    this._on('pointerdown', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
       _clickDownJiv = hit;
       if (!hit) return;
@@ -1519,7 +1764,7 @@ export class Canvas implements DirtyTracker {
         this._animationManager.Kick();
       }
     };
-    this.Element.addEventListener('pointerup', (e: PointerEvent) => {
+    this._on('pointerup', (e: PointerEvent) => {
       const upHit = topmostAt(e.clientX, e.clientY);
       if (upHit && _clickDownJiv === upHit && upHit.OnClick) {
         upHit.OnClick();
@@ -1534,13 +1779,13 @@ export class Canvas implements DirtyTracker {
     // own menu (Save image, etc.) never appears over the canvas. Apps that
     // care about right-click should bind (contextmenu) on a Jaui jiv via
     // the Angular bridge.
-    this.Element.addEventListener('contextmenu', (e: MouseEvent) => {
+    this._on('contextmenu', (e: MouseEvent) => {
       e.preventDefault();
       const hit = topmostAt(e.clientX, e.clientY);
       if (hit?.OnContextMenu) hit.OnContextMenu(e);
     });
 
-    this.Element.addEventListener('pointercancel', () => {
+    this._on('pointercancel', () => {
       _clickDownJiv = null;
       clearActive();
     });
@@ -1581,11 +1826,11 @@ export class Canvas implements DirtyTracker {
 
     const selMgr = this._selectionManager;
 
-    this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
+    this._on('pointerdown', (e: PointerEvent) => {
       if (e.pointerType !== 'mouse') return;
       if (e.button !== 0) return;
 
-      const rect = this.Element.getBoundingClientRect();
+      const rect = this._pageRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
       const hit = this._scrollManager.HitTopmost(cssX, cssY);
@@ -1650,13 +1895,13 @@ export class Canvas implements DirtyTracker {
         }
       }
 
-      this.Element.setPointerCapture(e.pointerId);
+      this._capturePointer(e.pointerId);
       e.preventDefault();
     });
 
-    this.Element.addEventListener('pointermove', (e: PointerEvent) => {
+    this._on('pointermove', (e: PointerEvent) => {
       if (!anchorJiv) return;
-      const rect = this.Element.getBoundingClientRect();
+      const rect = this._pageRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
 
@@ -1712,12 +1957,12 @@ export class Canvas implements DirtyTracker {
       dragging = false;
       armed = false;
       anchorJiv = null;
-      if (this.Element.hasPointerCapture(e.pointerId)) {
-        this.Element.releasePointerCapture(e.pointerId);
+      if (this._hasCapture(e.pointerId)) {
+        this._releasePointer(e.pointerId);
       }
     };
-    this.Element.addEventListener('pointerup', end);
-    this.Element.addEventListener('pointercancel', end);
+    this._on('pointerup', end);
+    this._on('pointercancel', end);
   };
 
   /** Keyboard shortcuts on the active selection — Cmd/Ctrl+A select-all
@@ -1728,13 +1973,8 @@ export class Canvas implements DirtyTracker {
    *  a real <input> on the page still does the native thing. */
   private _listenForSelectionKeys = (): void => {
     const selMgr = this._selectionManager;
-    window.addEventListener('keydown', (e: KeyboardEvent) => {
-      const ae = document.activeElement;
-      const inEditable = ae && (
-        ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' ||
-        (ae as HTMLElement).isContentEditable
-      );
-      if (inEditable) return;
+    this._platform.AddKeydownListener((e: KeyboardEvent) => {
+      if (this._platform.IsTextInputFocused()) return;
 
       const meta = e.ctrlKey || e.metaKey;
       if (meta && (e.key === 'a' || e.key === 'A')) {
@@ -1766,7 +2006,7 @@ export class Canvas implements DirtyTracker {
    *  rubber-bands past bounds. */
   private _listenForScroll = (): void => {
     // ─── Wheel ───
-    this.Element.addEventListener('wheel', (e: WheelEvent) => {
+    this._on('wheel', (e: WheelEvent) => {
       // Browser zoom (Ctrl/Cmd + wheel, or pinch-zoom which Chrome delivers
       // as wheel + ctrlKey) is a browser-owned gesture — we must NOT consume
       // it as scroll. Let it bubble to the browser's zoom handler.
@@ -1774,7 +2014,7 @@ export class Canvas implements DirtyTracker {
 
       this._measureScrollContents(this.Root);
 
-      const rect = this.Element.getBoundingClientRect();
+      const rect = this._pageRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
       const target = this._scrollManager.ResolveScrollTarget(cssX, cssY);
@@ -1795,22 +2035,22 @@ export class Canvas implements DirtyTracker {
     interface DragCtx { target: Jiv; lastX: number; lastY: number; lastT: number; }
     const drags = new Map<number, DragCtx>();
 
-    this.Element.addEventListener('pointerdown', (e: PointerEvent) => {
+    this._on('pointerdown', (e: PointerEvent) => {
       if (e.pointerType === 'mouse') return; // reserve mouse-drag for future selection
 
       this._measureScrollContents(this.Root);
-      const rect = this.Element.getBoundingClientRect();
+      const rect = this._pageRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
       const target = this._scrollManager.ResolveScrollTarget(cssX, cssY);
       if (!target) return;
 
-      this.Element.setPointerCapture(e.pointerId);
+      this._capturePointer(e.pointerId);
       this._scrollManager.DragStart(target);
       drags.set(e.pointerId, { target, lastX: e.clientX, lastY: e.clientY, lastT: performance.now() });
     });
 
-    this.Element.addEventListener('pointermove', (e: PointerEvent) => {
+    this._on('pointermove', (e: PointerEvent) => {
       const ctx = drags.get(e.pointerId);
       if (!ctx) return;
 
@@ -1848,12 +2088,12 @@ export class Canvas implements DirtyTracker {
       this._scrollManager.DragEnd(ctx.target);
       this._animationManager.Kick();
       drags.delete(e.pointerId);
-      if (this.Element.hasPointerCapture(e.pointerId)) {
-        this.Element.releasePointerCapture(e.pointerId);
+      if (this._hasCapture(e.pointerId)) {
+        this._releasePointer(e.pointerId);
       }
     };
-    this.Element.addEventListener('pointerup', finish);
-    this.Element.addEventListener('pointercancel', finish);
+    this._on('pointerup', finish);
+    this._on('pointercancel', finish);
   };
 
   /** Walk the tree, compute ContentWidth/Height for each Overflow:Scroll Jiv from
@@ -1918,35 +2158,26 @@ export class Canvas implements DirtyTracker {
    *  FontFaceSet.loadingdone fires once per batch; that's our cue to
    *  flush stale atlas entries. */
   private _listenForFontLoad = (): void => {
-    if (typeof document === 'undefined' || !document.fonts) return;
-    // `addEventListener` on FontFaceSet — supported everywhere we ship.
-    document.fonts.addEventListener('loadingdone', () => {
+    this._platform.ObserveFontsLoadingDone(() => {
       this._invalidateAllText();
     });
   };
 
   private _watchDpr = (): void => {
-    // matchMedia only fires when the specified dpr condition changes (e.g. on browser zoom).
-    // We register a one-shot listener, then re-register with the new dpr.
-    if (typeof window === 'undefined' || !window.matchMedia) return;
-    const mql = window.matchMedia(`(resolution: ${this._dpr}dppx)`);
-    const handler = (): void => {
+    // matchMedia only fires when the specified dpr condition changes (e.g.
+    // on browser zoom). One-shot — when it fires, re-arm at the new dpr.
+    this._platform.ObserveDprChange(this._dpr, () => {
       this._resize();
       this._watchDpr();
-    };
-    if (mql.addEventListener) {
-      mql.addEventListener('change', handler, { once: true } as AddEventListenerOptions);
-    }
+    });
   };
 
   /** Parse `?debug` / `#debug` and `?dpr=N` from the URL. Calling this early
    *  in the constructor lets `_resize()` pick up the DPR override on its
    *  first run, and attaches the HUD once the canvas is in the DOM. */
   private _initDebugFromUrl = (): void => {
-    if (typeof window === 'undefined') return;
-
-    const search = window.location.search || '';
-    const hash = window.location.hash || '';
+    const search = this._platform.GetUrlSearch();
+    const hash = this._platform.GetUrlHash();
     const params = new URLSearchParams(search);
     const debug = params.has('debug') || hash.includes('debug');
 
@@ -1998,7 +2229,7 @@ export class Canvas implements DirtyTracker {
     const ctx = this._debugLayoutCtx;
     if (!canvas || !ctx) return;
     const dpr = this._dpr;
-    const rect = this.Element.getBoundingClientRect();
+    const rect = this._pageRect();
     const pw = Math.max(1, Math.round(rect.width * dpr));
     const ph = Math.max(1, Math.round(rect.height * dpr));
     if (canvas.width !== pw || canvas.height !== ph) {
@@ -2260,10 +2491,10 @@ export class Jaui {
    *                       WebGL2Renderer (sync init, safe for descendants
    *                       that read `Root` in their own ngOnInit).
    */
-  constructor(canvasEl: HTMLCanvasElement, opts?: { renderer?: Renderer }) {
+  constructor(canvasEl: HTMLCanvasElement, opts?: { renderer?: Renderer; platform?: Platform }) {
     const r = opts?.renderer ?? new WebGL2Renderer();
     void r.Init(canvasEl);
-    this.Canvas = new Canvas(canvasEl, r);
+    this.Canvas = new Canvas(canvasEl, r, opts?.platform ?? BrowserPlatform);
   }
 
   /** Start the render loop (rAF). */
@@ -2361,3 +2592,18 @@ export type { AccessibilityConfig } from '../Accessibility/Accessibility.Types';
 export { ParseJss } from '../Jss/Jss.Parser';
 export type { Stylesheet, Ruleset, ParsedJss, VarTable } from '../Jss/Jss.Parser';
 export { SlotFor, type Slot } from '../Jss/Jss.Routes';
+
+// Worker boot — apps call CheckBrowserSupport() before mounting Angular.
+export { CheckBrowserSupport, type BrowserSupportResult } from '../Worker/Browser.Support';
+export { MainBridge, RootId, type BridgeOptions, type JivHitHandlers } from '../Worker/Bridge.Main';
+export { JivHandle } from '../Worker/Jiv.Handle';
+export { CanvasProxy } from '../Worker/Canvas.Proxy';
+export { SpawnJauiWorker } from '../Worker/Worker.Spawn';
+export { BootJauiWorker } from '../Worker/Worker.Boot';
+export {
+  RegisterJanvasRenderer,
+  LookupJanvasRenderer,
+  type JanvasRendererFactory,
+} from '../Worker/Worker.RendererRegistry';
+export type { JanvasFactoryContext } from '../Janvas/Janvas.Renderer';
+export type { JivApplyOpts, JivOp, M2W, W2M, PointerPayload } from '../Worker/Bridge.Types';

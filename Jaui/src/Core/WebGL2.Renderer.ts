@@ -254,14 +254,18 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Lifecycle ──
 
-  Init = async (canvas: HTMLCanvasElement): Promise<void> => {
+  Init = async (canvas: HTMLCanvasElement | OffscreenCanvas): Promise<void> => {
+    // Cast the result: with the union canvas type, TS widens getContext's
+    // return to the disjunction of every possible context type. The
+    // 'webgl2' string literal selects WebGL2RenderingContext at runtime
+    // — assert that here so downstream calls type-check cleanly.
     const gl = canvas.getContext('webgl2', {
       alpha: false,
       antialias: false,
       premultipliedAlpha: true,
       preserveDrawingBuffer: false,
       powerPreference: 'high-performance',
-    });
+    }) as WebGL2RenderingContext | null;
     if (!gl) throw new Error('[Jaui] WebGL2 not supported');
     this._gl = gl;
 
@@ -681,7 +685,7 @@ export class WebGL2Renderer implements Renderer {
 
   UploadSubTexture = (
     texture: GpuTextureHandle, x: number, y: number,
-    source: HTMLCanvasElement | ImageBitmap | ImageData,
+    source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | ImageData,
   ): void => {
     const gl = this._gl;
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(texture));

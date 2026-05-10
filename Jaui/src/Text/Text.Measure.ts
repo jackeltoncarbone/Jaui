@@ -1,21 +1,40 @@
 import type { ResolvedTextStyle, TextMeasurement } from './Text.Types';
 
-// Module-level shared measurement canvas (created lazily)
-let _sharedCtx: CanvasRenderingContext2D | null = null;
+// Worker-safe 2D context: OffscreenCanvas's context shares every method we
+// touch (measureText, fillText, fillStyle, font) with HTMLCanvasElement's.
+type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
-const _getSharedContext = (): CanvasRenderingContext2D => {
+// Module-level shared measurement canvas (created lazily)
+let _sharedCtx: Ctx2D | null = null;
+
+const _getSharedContext = (): Ctx2D => {
   if (_sharedCtx) return _sharedCtx;
-  const canvas = document.createElement('canvas');
-  canvas.width = 1;
-  canvas.height = 1;
-  const ctx = canvas.getContext('2d');
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d');
   if (!ctx) throw new Error('[Jaui] Failed to get 2D context for text measurement');
   _sharedCtx = ctx;
   return ctx;
 };
 
+/** Force a font into this module's shared measurement ctx. See
+ *  Text.WordLayout.PrimeFontInSharedCtx for the WebKit rationale —
+ *  this measurement ctx and the WordLayout ctx are *separate* canvas
+ *  font registries, so iOS Safari needs both primed independently. */
+export const PrimeFontInMeasureCtx = (
+  family: string,
+  weight: string = '400',
+  style: string = 'normal',
+): void => {
+  const ctx = _getSharedContext();
+  const prev = ctx.font;
+  try {
+    ctx.font = `${style} ${weight} 16px "${family}"`;
+    ctx.measureText('Mg');
+  } catch { /* invalid spec — skip */ }
+  ctx.font = prev;
+};
+
 /** Apply style to a 2D context (matches browser font string syntax). */
-export const ApplyTextStyle = (ctx: CanvasRenderingContext2D, style: ResolvedTextStyle, dpr: number = 1): void => {
+export const ApplyTextStyle = (ctx: Ctx2D, style: ResolvedTextStyle, dpr: number = 1): void => {
   const italic = style.FontStyle === 'Italic' ? 'italic ' : '';
   const size = style.FontSize * dpr;
   ctx.font = `${italic}${style.FontWeight} ${size}px ${style.FontFamily}`;
@@ -43,7 +62,7 @@ export const MeasureText = (
   content: string,
   style: ResolvedTextStyle,
   maxWidth: number | null,
-  ctx?: CanvasRenderingContext2D,
+  ctx?: Ctx2D,
 ): TextMeasurement => {
   const c = ctx ?? _getSharedContext();
   ApplyTextStyle(c, style, 1);
@@ -85,7 +104,7 @@ export const MeasureText = (
 
 /** Longest individual word's width. Drives min-content sizing — the smallest
  *  width the text can take without a word overflowing. */
-const _measureLongestWord = (content: string, ctx: CanvasRenderingContext2D): number => {
+const _measureLongestWord = (content: string, ctx: Ctx2D): number => {
   let max = 0;
   for (const paragraph of content.split('\n')) {
     for (const word of paragraph.split(/\s+/)) {
@@ -101,7 +120,7 @@ const _measureLongestWord = (content: string, ctx: CanvasRenderingContext2D): nu
 const _wrapParagraph = (
   paragraph: string,
   maxWidth: number,
-  ctx: CanvasRenderingContext2D,
+  ctx: Ctx2D,
   out: string[],
 ): void => {
   if (paragraph === '') {
@@ -132,7 +151,7 @@ const _wrapParagraph = (
 const _applyMaxLines = (
   lines: string[],
   style: ResolvedTextStyle,
-  ctx: CanvasRenderingContext2D,
+  ctx: Ctx2D,
   maxWidth: number | null = null,
 ): string[] => {
   if (style.MaxLines === null || lines.length <= style.MaxLines) return lines;
@@ -148,7 +167,7 @@ const _applyMaxLines = (
 /** Truncate a line and append ellipsis so it fits in maxWidth. */
 const _truncateWithEllipsis = (
   line: string,
-  ctx: CanvasRenderingContext2D,
+  ctx: Ctx2D,
   maxWidth: number | null,
 ): string => {
   const ellipsis = '…';

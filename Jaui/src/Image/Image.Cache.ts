@@ -36,8 +36,8 @@ export class ImageCache {
   private _failed = new Set<string>();
   private _svgSources = new Map<string, _SvgSource>();
   private _lastSvgDpr = new Map<string, number>();
-  private _rasterCanvas: HTMLCanvasElement | null = null;
-  private _rasterCtx: CanvasRenderingContext2D | null = null;
+  private _rasterCanvas: OffscreenCanvas | null = null;
+  private _rasterCtx: OffscreenCanvasRenderingContext2D | null = null;
 
   private _onLoad: (() => void) | null = null;
 
@@ -57,7 +57,12 @@ export class ImageCache {
 
   /** Load an image from a URL. Async — returns immediately; the entry
    *  becomes Ready when the image finishes loading. Failed loads are
-   *  remembered so a subsequent call for the same URL is a no-op. */
+   *  remembered so a subsequent call for the same URL is a no-op.
+   *
+   *  Worker-safe path: `fetch → blob → createImageBitmap` instead of
+   *  `new Image()`. ImageBitmap is a TexImageSource the renderer uploads
+   *  directly (no rasterCanvas round-trip), and it works in workers.
+   *  `mode:'cors'` matches the previous `crossOrigin = 'anonymous'`. */
   LoadUrl = (url: string, _dpr: number = 1): void => {
     const isDataUrl = url.startsWith('data:');
     if (this._cache.has(url)) return;
@@ -65,29 +70,28 @@ export class ImageCache {
     if (this._failed.has(url)) return;
     this._loading.add(url);
 
-    const img = new Image();
-    if (!isDataUrl) img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      this._loading.delete(url);
-      const w = img.naturalWidth;
-      const h = img.naturalHeight;
-      const ctx = this._getRasterCtx();
-      ctx.canvas.width = w;
-      ctx.canvas.height = h;
-      ctx.clearRect(0, 0, w, h);
-      ctx.drawImage(img, 0, 0, w, h);
-      const imageData = ctx.getImageData(0, 0, w, h);
-      const tex = this._renderer.CreateTexture(w, h);
-      this._renderer.UploadSubTexture(tex, 0, 0, imageData);
-      this._cache.set(url, { Texture: tex, Width: w, Height: h, Ready: true });
-      this._onLoad?.();
-    };
-    img.onerror = () => {
-      this._loading.delete(url);
-      this._failed.add(url);
-      console.warn(`[Jaui] Failed to load image: ${url.slice(0, 80)}`);
-    };
-    img.src = url;
+    const init: RequestInit = isDataUrl ? {} : { mode: 'cors', credentials: 'omit' };
+    fetch(url, init)
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.blob();
+      })
+      .then(b => createImageBitmap(b))
+      .then(bmp => {
+        this._loading.delete(url);
+        const w = bmp.width;
+        const h = bmp.height;
+        const tex = this._renderer.CreateTexture(w, h);
+        this._renderer.UploadSubTexture(tex, 0, 0, bmp);
+        bmp.close();
+        this._cache.set(url, { Texture: tex, Width: w, Height: h, Ready: true });
+        this._onLoad?.();
+      })
+      .catch(err => {
+        this._loading.delete(url);
+        this._failed.add(url);
+        console.warn(`[Jaui] Failed to load image: ${url.slice(0, 80)} (${(err as Error).message})`);
+      });
   };
 
   /** Load an SVG from a string. Rasterizes at `width*dpr × height*dpr` so
@@ -119,41 +123,60 @@ export class ImageCache {
     const pxW = Math.max(1, Math.ceil(src.CssWidth * dpr));
     const pxH = Math.max(1, Math.ceil(src.CssHeight * dpr));
 
+    // Worker-safe: pass the SVG blob directly to createImageBitmap (no
+    // Image() element, no object URL). The decoded ImageBitmap has the
+    // SVG's intrinsic size; we still scale to (pxW, pxH) via drawImage
+    // because `resizeWidth/resizeHeight` on createImageBitmap is not
+    // universally honored for SVG sources.
     const blob = new Blob([src.SvgString], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
+    createImageBitmap(blob)
+      .then(bmp => {
+        this._loading.delete(key);
 
-    const img = new Image();
-    img.onload = () => {
-      this._loading.delete(key);
-      URL.revokeObjectURL(url);
+        const ctx = this._getRasterCtx();
+        ctx.canvas.width = pxW;
+        ctx.canvas.height = pxH;
+        ctx.clearRect(0, 0, pxW, pxH);
+        ctx.drawImage(bmp, 0, 0, pxW, pxH);
+        bmp.close();
 
-      const ctx = this._getRasterCtx();
-      ctx.canvas.width = pxW;
-      ctx.canvas.height = pxH;
-      ctx.clearRect(0, 0, pxW, pxH);
-      ctx.drawImage(img, 0, 0, pxW, pxH);
-
-      const existing = this._cache.get(key);
-      const tex = existing?.Texture ?? this._renderer.CreateTexture(pxW, pxH);
-      // If the texture size changed we need a fresh texture — the renderer
-      // doesn't support resizing a GPU texture in place.
-      const sizeChanged = existing !== undefined && (existing.Width !== pxW || existing.Height !== pxH);
-      const finalTex = sizeChanged ? this._renderer.CreateTexture(pxW, pxH) : tex;
-      this._renderer.UploadSubTexture(finalTex, 0, 0, ctx.canvas);
-      this._cache.set(key, { Texture: finalTex, Width: pxW, Height: pxH, Ready: true });
-      this._lastSvgDpr.set(key, dpr);
-      this._onLoad?.();
-    };
-    img.onerror = () => {
-      this._loading.delete(key);
-      URL.revokeObjectURL(url);
-      console.warn(`[Jaui] Failed to rasterize SVG: ${key}`);
-    };
-    img.src = url;
+        const existing = this._cache.get(key);
+        const tex = existing?.Texture ?? this._renderer.CreateTexture(pxW, pxH);
+        // If the texture size changed we need a fresh texture — the renderer
+        // doesn't support resizing a GPU texture in place.
+        const sizeChanged = existing !== undefined && (existing.Width !== pxW || existing.Height !== pxH);
+        const finalTex = sizeChanged ? this._renderer.CreateTexture(pxW, pxH) : tex;
+        this._renderer.UploadSubTexture(finalTex, 0, 0, ctx.canvas);
+        this._cache.set(key, { Texture: finalTex, Width: pxW, Height: pxH, Ready: true });
+        this._lastSvgDpr.set(key, dpr);
+        this._onLoad?.();
+      })
+      .catch(err => {
+        this._loading.delete(key);
+        console.warn(`[Jaui] Failed to rasterize SVG: ${key} (${(err as Error).message})`);
+      });
   };
 
-  /** Upload a pre-rendered canvas as an image entry. Synchronous. */
-  LoadCanvas = (key: string, canvas: HTMLCanvasElement): void => {
+  /** Upload a pre-rasterized ImageBitmap as an image entry. Synchronous.
+   *  Used by the worker bridge for SVGs decoded on the main thread (Chrome
+   *  workers can't decode SVG via createImageBitmap). The bitmap is
+   *  consumed and `.close()`d after upload. */
+  LoadBitmap = (key: string, bitmap: ImageBitmap): void => {
+    if (this._cache.has(key)) {
+      bitmap.close?.();
+      return;
+    }
+    const tex = this._renderer.CreateTexture(bitmap.width, bitmap.height);
+    this._renderer.UploadSubTexture(tex, 0, 0, bitmap);
+    this._cache.set(key, { Texture: tex, Width: bitmap.width, Height: bitmap.height, Ready: true });
+    bitmap.close?.();
+    this._onLoad?.();
+  };
+
+  /** Upload a pre-rendered canvas as an image entry. Synchronous.
+   *  Accepts OffscreenCanvas as well so worker-side callers can pass the
+   *  same kind of surface they rasterize into. */
+  LoadCanvas = (key: string, canvas: HTMLCanvasElement | OffscreenCanvas): void => {
     if (this._cache.has(key)) return;
     const tex = this._renderer.CreateTexture(canvas.width, canvas.height);
     this._renderer.UploadSubTexture(tex, 0, 0, canvas);
@@ -176,9 +199,11 @@ export class ImageCache {
     this._failed.clear();
   };
 
-  private _getRasterCtx = (): CanvasRenderingContext2D => {
+  private _getRasterCtx = (): OffscreenCanvasRenderingContext2D => {
     if (this._rasterCtx) return this._rasterCtx;
-    this._rasterCanvas = document.createElement('canvas');
+    // OffscreenCanvas: works on main thread + in workers. Initial size is
+    // 1×1; per-image rasterize calls resize via .width/.height before draw.
+    this._rasterCanvas = new OffscreenCanvas(1, 1);
     // willReadFrequently signals the browser to back this canvas with a
     // CPU-side buffer instead of the GPU. Avatar / image rasterization
     // calls getImageData on every load — without this hint Chrome warns

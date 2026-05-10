@@ -41,8 +41,8 @@ export class TextCache {
   private _cache = new Map<string, TextCacheEntry>();
   private _maxEntries: number;
   private _frameCounter: number = 0;
-  private _rasterCanvas: HTMLCanvasElement | null = null;
-  private _rasterCtx: CanvasRenderingContext2D | null = null;
+  private _rasterCanvas: OffscreenCanvas | null = null;
+  private _rasterCtx: OffscreenCanvasRenderingContext2D | null = null;
 
   // ─── Atlas ───
   private _atlas: GpuTextureHandle | null = null;
@@ -225,9 +225,13 @@ export class TextCache {
     };
   };
 
-  private _getRasterCtx = (): CanvasRenderingContext2D => {
+  private _getRasterCtx = (): OffscreenCanvasRenderingContext2D => {
     if (this._rasterCtx) return this._rasterCtx;
-    this._rasterCanvas = document.createElement('canvas');
+    // OffscreenCanvas: works on main thread + in workers, with the same
+    // 2D drawing surface we previously got from a DOM <canvas>. Initial
+    // size is 1×1; per-glyph rasterization resizes via .width/.height
+    // assignment as before.
+    this._rasterCanvas = new OffscreenCanvas(1, 1);
     const ctx = this._rasterCanvas.getContext('2d');
     if (!ctx) throw new Error('[Jaui] Failed to get 2D context for text rasterization');
     this._rasterCtx = ctx;

@@ -46,5 +46,26 @@ export interface JanvasRenderer {
    *             `WebGLRenderTarget` + `__webglFramebuffer` override.
    *  @param rect Screen rect in device pixels for the janvas region. */
   Render(gl: WebGL2RenderingContext, fbo: WebGLFramebuffer | null, rect: JanvasRect, dt: number): void;
+  /** Receive a state push from main (or another worker-side service) by
+   *  named channel. Optional — renderers that don't track external state
+   *  omit it. The registry forwards `M2W_JanvasInput` messages addressed
+   *  to this Janvas's id. Channels namespace by intent: `'reality:camera'`,
+   *  `'reality:marchers'`, `'reality:selection'`, etc. */
+  Input?(channel: string, payload: unknown): void;
   Dispose?(): void;
+}
+
+/** Construction context handed to a `JanvasRendererFactory` at attach time.
+ *  Lets the factory close over per-instance plumbing it can't access
+ *  globally — most importantly `PostEvent`, which the renderer uses to
+ *  surface state changes back to its main-side counterpart. */
+export interface JanvasFactoryContext {
+  /** Worker-side Jiv id of the Janvas this renderer is being constructed
+   *  for. Useful for renderers that maintain a side-table keyed by id
+   *  (e.g. a multi-Janvas selection registry). */
+  JivId: number;
+  /** Forwarder to `WorkerBridge.PostJanvasEvent` with this Janvas's id
+   *  pre-bound. Calling `PostEvent('foo', payload)` emits a `W2M_JanvasEvent`
+   *  on main with `{JivId: <this>, Channel: 'foo', Payload}`. */
+  PostEvent: (channel: string, payload: unknown, transfer?: Transferable[]) => void;
 }

@@ -99,7 +99,7 @@ export class WebGPURenderer implements Renderer {
 
   // ── Lifecycle ──
 
-  Init = async (canvas: HTMLCanvasElement): Promise<void> => {
+  Init = async (canvas: HTMLCanvasElement | OffscreenCanvas): Promise<void> => {
     this._gpu = await WebGPUDevice.Create(canvas);
     const device = this._gpu.Device;
     this._cache = new WebGPUPipelineCache(this._gpu);
@@ -548,7 +548,7 @@ export class WebGPURenderer implements Renderer {
 
   UploadSubTexture = (
     texture: GpuTextureHandle, x: number, y: number,
-    source: HTMLCanvasElement | ImageBitmap,
+    source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap,
   ): void => {
     this._gpu!.Device.queue.copyExternalImageToTexture(
       { source },
