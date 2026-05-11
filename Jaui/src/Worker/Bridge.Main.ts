@@ -204,6 +204,34 @@ export class MainBridge {
       case 'hud':           return; // HUD relocation lands in P1g; no-op for now.
       case 'svg-rerasterize': return;
       case 'janvas-event':  return this._onJanvasEvent(m);
+      case 'fps':           return this._onFps(m);
+    }
+  };
+
+  /** Subscribers for worker-side FPS samples. Powers the `?fps` overlay's
+   *  worker-FPS line — main rAF can run at the display refresh rate even
+   *  when the worker stalls, so the overlay needs the worker number to
+   *  reflect perceived smoothness. */
+  private _fpsHandlers = new Set<(avg: number, min: number) => void>();
+
+  /** Register a callback fired each time the worker emits a FPS sample
+   *  (~4× per second). Returns an unsubscriber. */
+  OnWorkerFps = (handler: (avg: number, min: number) => void): () => void => {
+    this._fpsHandlers.add(handler);
+    return () => { this._fpsHandlers.delete(handler); };
+  };
+
+  private _onFps = (m: { Avg: number; Min: number }): void => {
+    for (const h of this._fpsHandlers) h(m.Avg, m.Min);
+    // Out-of-band channel for the standalone `?fps` overlay (which runs
+    // before Angular boot and doesn't hold a Jaui handle). Listeners
+    // wire up with `window.addEventListener('jaui-worker-fps', ...)`.
+    if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
+      try {
+        window.dispatchEvent(new CustomEvent('jaui-worker-fps', {
+          detail: { avg: m.Avg, min: m.Min },
+        }));
+      } catch { /* ignore */ }
     }
   };
 

@@ -411,6 +411,17 @@ export interface W2M_JanvasEvent {
   Payload: unknown;
 }
 
+/** Worker-side rAF cadence sample. Posted once every ~250ms so main can
+ *  surface a reliable worker-FPS readout without flooding the bridge.
+ *  Avg/Min are computed over the last 1-second window of frame stamps. */
+export interface W2M_FpsSample {
+  T: 'fps';
+  Avg: number;
+  Min: number;
+  /** Frame index since boot — handy for diagnosing dropped reports. */
+  Frame: number;
+}
+
 export type W2M =
   | W2M_Ready
   | W2M_Cursor
@@ -419,7 +430,8 @@ export type W2M =
   | W2M_RectSnapshot
   | W2M_HudStats
   | W2M_SvgRerasterize
-  | W2M_JanvasEvent;
+  | W2M_JanvasEvent
+  | W2M_FpsSample;
 
 // ─── Helpers shared by both sides ─────────────────────────────────────────
 

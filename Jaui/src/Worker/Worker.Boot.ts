@@ -112,6 +112,60 @@ export const BootJauiWorker = (): void => {
 
       canvas.RegisterPostFrame(() => registry.EmitRectSnapshots());
 
+      // Worker-side FPS sampling. Main thread's rAF cadence stays at the
+      // display rate even when the worker stalls, so the on-screen
+      // ?fps overlay needs the WORKER's actual paint cadence to report
+      // perceived smoothness. Sample over a 1-second sliding window;
+      // emit a `fps` message every ~250ms — short enough to react to
+      // recent stalls, sparse enough not to flood the bridge.
+      const fpsStamps: number[] = [];
+      let fpsFrame = 0;
+      let fpsLastEmit = 0;
+      let lastFrameStart = 0;
+      // Phase timing — accumulate per-phase durations across the
+      // sample window so we can see which phase eats the budget.
+      // Each entry tracks total ms + count of samples.
+      const phases: Record<string, { ms: number; n: number }> = {};
+      const _trackPhase = (name: string, dur: number): void => {
+        const e = phases[name] ?? (phases[name] = { ms: 0, n: 0 });
+        e.ms += dur; e.n += 1;
+      };
+      // Hook into the start-of-frame so we can measure inter-frame gap
+      // (full rAF period including any worker idleness — a long gap with
+      // no work means the worker rAF isn't being scheduled fast enough,
+      // not that the work itself is slow).
+      canvas.RegisterPostFrame(() => {
+        const now = performance.now();
+        if (lastFrameStart > 0) _trackPhase('frame', now - lastFrameStart);
+        lastFrameStart = now;
+        fpsStamps.push(now);
+        fpsFrame++;
+        while (fpsStamps.length > 0 && fpsStamps[0] < now - 1000) fpsStamps.shift();
+        if (now - fpsLastEmit < 250) return;
+        fpsLastEmit = now;
+        const span = fpsStamps[fpsStamps.length - 1] - fpsStamps[0];
+        const avg = span > 0 ? (fpsStamps.length - 1) * 1000 / span : 0;
+        let worstGap = 0;
+        for (let i = 1; i < fpsStamps.length; i++) {
+          const g = fpsStamps[i] - fpsStamps[i - 1];
+          if (g > worstGap) worstGap = g;
+        }
+        const min = worstGap > 0 ? 1000 / worstGap : 0;
+        // Snapshot phase averages for this window and reset.
+        const phaseAvg: Record<string, number> = {};
+        for (const k in phases) {
+          phaseAvg[k] = phases[k].n > 0 ? phases[k].ms / phases[k].n : 0;
+          phases[k].ms = 0; phases[k].n = 0;
+        }
+        post({ T: 'fps', Avg: avg, Min: min, Frame: fpsFrame });
+        // Surface phase timings on the same channel via console — the
+        // ?fps overlay only renders fps; phase data shows up in the
+        // ?debug=console overlay so iPad users can read it on-device.
+        if (Object.keys(phaseAvg).length > 0) {
+          console.log(`[wkr-fps] ${avg.toFixed(0)}avg ${min.toFixed(0)}min frame=${phaseAvg['frame']?.toFixed(1)}ms`);
+        }
+      });
+
       canvas.ResizeFromBridge(m.Width, m.Height);
 
       console.log('[Jaui.Worker] ready');
