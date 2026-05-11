@@ -282,12 +282,20 @@ export class JivHandle {
   };
 
   /** Push state to this Janvas's renderer by named channel. Bypasses the
-   *  Angular CD-flushed jiv-ops batch — sent immediately as a top-level
+   *  Angular CD-flushed jiv-ops batch, sent immediately as a top-level
    *  message so hot data (camera transform, marcher poses) doesn't wait
    *  for the next change-detection cycle. Optional `transfer` for
    *  zero-copy ImageBitmap / typed-array hand-offs. */
   PostJanvasInput = (channel: string, payload: unknown, transfer?: Transferable[]): void => {
     this._bridge.PostJanvasInput(this.Id, channel, payload, transfer);
+  };
+
+  /** Subscribe to events posted by this Janvas's worker-side renderer
+   *  (`ctx.PostEvent(channel, payload)`). Returns an unsubscriber. One
+   *  handler per Janvas, last-registration-wins (matches MainBridge's
+   *  registry semantics). */
+  OnJanvasEvent = (handler: (channel: string, payload: unknown) => void): () => void => {
+    return this._bridge.OnJanvasEvent(this.Id, handler);
   };
 
   /** Convenience setter — engine `SetText(text, style?)` shape preserved
