@@ -191,7 +191,11 @@ export class WorkerBridge {
       // throwaway OffscreenCanvas wouldn't cover them.
       PrimeFontInSharedCtx(m.Family, weight, style);
       PrimeFontInMeasureCtx(m.Family, weight, style);
-      console.log(`[Jaui.Worker] FontFace loaded: ${m.Family}`, m.Descriptors?.Weight ?? '');
+      // Per-font-face load log used to print here on every webfont arrival —
+      // 25+ lines per cold load. Removed unconditionally; if a font fails
+      // to load, the canvas falls back to the next family in the stack and
+      // the visual difference is what users would notice, not a console
+      // line. Re-add behind a guard if a real diagnostic need shows up.
       // Trigger the engine's font-load handler — flushes the glyph atlas
       // and marks all text dirty so layout re-measures with the newly
       // available font metrics. Without this, text was sized against

@@ -132,10 +132,22 @@ export class Jiv implements OnInit, OnDestroy {
       }
     }
 
+    const childLayoutBag = { ...fromClass?.ChildLayout, ...this.childLayout() } as Record<string, unknown>;
+    // ChildLayout.AttachTo crosses the worker boundary. On main it's a
+    // JivHandle (structurally compatible with AttachTarget); on the wire
+    // it must be the target's numeric Id so the worker can resolve to its
+    // local JivCore. JivHandle has a back-ref to MainBridge → Canvas (an
+    // HTMLCanvasElement), which structured-clone refuses, so the message
+    // gets DataCloneError and the entire batch is dropped.
+    const at = childLayoutBag['AttachTo'];
+    if (at && typeof at === 'object' && typeof (at as { Id?: unknown }).Id === 'number') {
+      childLayoutBag['AttachTo'] = (at as { Id: number }).Id;
+    }
+
     const opts: JivApplyOpts = {
       Style:         styleBag,
       Layout:        { ...fromClass?.Layout,        ...this.layout() } as Record<string, unknown>,
-      ChildLayout:   { ...fromClass?.ChildLayout,   ...this.childLayout() } as Record<string, unknown>,
+      ChildLayout:   childLayoutBag,
       TextStyle:     { ...fromClass?.TextStyle,     ...this.textStyle() } as Record<string, unknown>,
       HoverStyle:        fromClass?.HoverStyle as Record<string, unknown> | undefined,
       ActiveStyle:       fromClass?.ActiveStyle as Record<string, unknown> | undefined,

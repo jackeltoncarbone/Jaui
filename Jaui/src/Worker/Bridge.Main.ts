@@ -31,6 +31,11 @@ import type {
 
 const ROOT_ID = 0;
 
+const _DEBUG: boolean =
+  typeof window !== 'undefined' &&
+  typeof window.location !== 'undefined' &&
+  /[?&](debug|jdebug)\b/.test(window.location.search);
+
 export interface BridgeOptions {
   /** Canvas DOM element that Angular created. The bridge transfers it
    *  to the worker (one-way) and keeps the element only as an event
@@ -86,7 +91,7 @@ export class MainBridge {
     this.Canvas = opts.Canvas;
     this.Worker = opts.Worker;
 
-    console.log('[Jaui.MainBridge] constructed; canvas=', this.Canvas, 'worker=', this.Worker);
+    if (_DEBUG) console.log('[Jaui.MainBridge] constructed; canvas=', this.Canvas, 'worker=', this.Worker);
 
     this.Ready = new Promise<void>(r => { this._readyResolve = r; });
 
@@ -132,10 +137,16 @@ export class MainBridge {
       this._eventBacklog.push(msg);
       return;
     }
-    if (transfer && transfer.length > 0) {
-      this.Worker.postMessage(msg, transfer);
-    } else {
-      this.Worker.postMessage(msg);
+    try {
+      if (transfer && transfer.length > 0) {
+        this.Worker.postMessage(msg, transfer);
+      } else {
+        this.Worker.postMessage(msg);
+      }
+    } catch (err) {
+      const t = (msg as { T: string }).T;
+      const shape = _describeShape(msg);
+      console.error(`[Jaui.MainBridge] postMessage FAILED for T=${t}\n${JSON.stringify(shape, null, 2)}`, { msg, err });
     }
   };
 
@@ -190,6 +201,7 @@ export class MainBridge {
     // guard because the W2M union doesn't list this T (it's an out-of-band
     // dev channel — production builds can strip it).
     if ((m as { T: string }).T === 'console') {
+      if (!_DEBUG) return;
       const c = m as unknown as { Level: string; Args: unknown[] };
       const fn = (console as unknown as Record<string, (...args: unknown[]) => void>)[c.Level] || console.log;
       try { fn.call(console, '[worker]', ...c.Args); } catch { /* ignore */ }
@@ -263,7 +275,17 @@ export class MainBridge {
     if (this._eventBacklog.length > 0) {
       const drain = this._eventBacklog;
       this._eventBacklog = [];
-      for (const m of drain) this.Worker.postMessage(m);
+      if (_DEBUG) console.log(`[Jaui.MainBridge] draining ${drain.length} backlogged message(s):`,
+        drain.map(m => (m as { T: string }).T));
+      for (const m of drain) {
+        try {
+          this.Worker.postMessage(m);
+        } catch (err) {
+          const t = (m as { T: string }).T;
+          const shape = _describeShape(m);
+          console.error(`[Jaui.MainBridge] backlog drain FAILED for T=${t}\n${JSON.stringify(shape, null, 2)}`, { msg: m, err });
+        }
+      }
     }
   };
 
@@ -537,7 +559,7 @@ export class MainBridge {
       const fetchAndParse = (url: string): void => {
         if (fetchedSheets.has(url)) return;
         fetchedSheets.add(url);
-        console.log(`[FontScan] fetching CORS-locked sheet: ${url}`);
+        if (_DEBUG) console.log(`[FontScan] fetching CORS-locked sheet: ${url}`);
         fetch(url).then((r) => {
           if (!r.ok) {
             console.warn(`[FontScan] fetch ${url} failed: HTTP ${r.status}`);
@@ -548,7 +570,7 @@ export class MainBridge {
           if (!txt) return;
           const beforeCount = sentFamilies.size;
           parseFontFacesFromText(txt, url);
-          console.log(`[FontScan] parsed ${url}: +${sentFamilies.size - beforeCount} font-face(s)`);
+          if (_DEBUG) console.log(`[FontScan] parsed ${url}: +${sentFamilies.size - beforeCount} font-face(s)`);
         }).catch((err) => {
           console.warn(`[FontScan] fetch ${url} threw:`, err?.message ?? err);
         });
@@ -569,13 +591,13 @@ export class MainBridge {
             }
           }
         } else if (sheet.href) {
-          if (corsBlocked) console.log(`[FontScan] CORS-blocked, fetching: ${sheet.href}`);
+          if (corsBlocked && _DEBUG) console.log(`[FontScan] CORS-blocked, fetching: ${sheet.href}`);
           fetchAndParse(sheet.href);
         }
       };
 
       const scan = (): void => {
-        console.log(`[FontScan] scanning ${document.styleSheets.length} stylesheet(s)`);
+        if (_DEBUG) console.log(`[FontScan] scanning ${document.styleSheets.length} stylesheet(s)`);
         for (let i = 0; i < document.styleSheets.length; i++) walk(document.styleSheets[i]);
       };
 
@@ -607,3 +629,31 @@ export class MainBridge {
 /** Convenience: id of the Canvas root in the worker. Use this as the
  *  parent in attach ops for top-level Jivs. */
 export const RootId = ROOT_ID;
+
+// Diagnostic — describes shape of an unclonable message so the console
+// points at the offending field. Recurses deeply (depth 8) and fully
+// expands arrays so jiv-ops batches surface the bad Op + field.
+function _describeShape(v: unknown, depth = 0): unknown {
+  if (depth > 8) return '<…>';
+  if (v === null || v === undefined) return v;
+  const t = typeof v;
+  if (t !== 'object') {
+    if (t === 'string') return (v as string).length > 60 ? `string(${(v as string).length})` : v;
+    return t;
+  }
+  if (v instanceof ArrayBuffer) return `ArrayBuffer(${v.byteLength})`;
+  if (ArrayBuffer.isView(v)) {
+    const c = (v.constructor && v.constructor.name) || 'TypedArray';
+    return `${c}(${(v as ArrayBufferView).byteLength})`;
+  }
+  if (typeof Blob !== 'undefined' && v instanceof Blob) return `Blob(${v.size})`;
+  if (typeof ImageBitmap !== 'undefined' && v instanceof ImageBitmap) return 'ImageBitmap';
+  if (typeof OffscreenCanvas !== 'undefined' && v instanceof OffscreenCanvas) return 'OffscreenCanvas';
+  if (typeof HTMLCanvasElement !== 'undefined' && v instanceof HTMLCanvasElement) return '🚨HTMLCanvasElement🚨';
+  if (typeof HTMLImageElement !== 'undefined' && v instanceof HTMLImageElement) return '🚨HTMLImageElement🚨';
+  if (typeof HTMLElement !== 'undefined' && v instanceof HTMLElement) return `🚨HTMLElement<${(v as HTMLElement).tagName}>🚨`;
+  if (Array.isArray(v)) return v.map(x => _describeShape(x, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(v as object)) out[k] = _describeShape((v as Record<string, unknown>)[k], depth + 1);
+  return out;
+}

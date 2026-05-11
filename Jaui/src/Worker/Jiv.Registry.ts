@@ -203,7 +203,10 @@ export class JivRegistry {
     this._applyElementProps(core, opts);
     if (opts.Style)        Object.assign(core.Style, opts.Style as Partial<JivStyle>);
     if (opts.Layout)       Object.assign(core.Layout, opts.Layout as Partial<LayoutConfig>);
-    if (opts.ChildLayout)  Object.assign(core.ChildLayout, opts.ChildLayout as Partial<ChildLayout>);
+    if (opts.ChildLayout) {
+      const cl = this._resolveAttachTo(opts.ChildLayout);
+      Object.assign(core.ChildLayout, cl as Partial<ChildLayout>);
+    }
     // State-style buckets: assigning the whole object is safe; engine
     // mixes the active state into EffectiveStyle on every read.
     if (opts.HoverStyle !== undefined)        core.HoverStyle        = (opts.HoverStyle ?? null) as Partial<JivStyle> | null;
@@ -256,6 +259,26 @@ export class JivRegistry {
 
   // ─── Helpers ────────────────────────────────────────────────────────────
 
+  /** Translate `ChildLayout.AttachTo` from the wire form (numeric Jiv Id,
+   *  emitted by the main-side `<jiv>` directive) into the local JivCore
+   *  reference the layout solver reads. Returns a shallow clone of the
+   *  bag — never mutates the input from main. Silently drops the field
+   *  if the target id doesn't resolve (target hasn't been created yet
+   *  or has already been destroyed); the solver treats null AttachTo as
+   *  inert. */
+  private _resolveAttachTo = (
+    src: Record<string, unknown>,
+  ): Record<string, unknown> => {
+    if (!('AttachTo' in src)) return src;
+    const v = src['AttachTo'];
+    if (typeof v !== 'number') return src;
+    const target = this._nodes.get(v);
+    const out: Record<string, unknown> = { ...src };
+    out['AttachTo'] = target ?? null;
+    return out;
+  };
+
+
   private _coreOptsFromApply = (opts: JivApplyOpts): {
     Style?: Partial<JivStyle>;
     Layout?: Partial<LayoutConfig>;
@@ -274,7 +297,7 @@ export class JivRegistry {
   } => ({
     Style: opts.Style as Partial<JivStyle> | undefined,
     Layout: opts.Layout as Partial<LayoutConfig> | undefined,
-    ChildLayout: opts.ChildLayout as Partial<ChildLayout> | undefined,
+    ChildLayout: opts.ChildLayout ? this._resolveAttachTo(opts.ChildLayout) as Partial<ChildLayout> : undefined,
     TextStyle: opts.TextStyle as Partial<TextStyle> | undefined,
     HoverStyle: opts.HoverStyle as Partial<JivStyle> | undefined ?? undefined,
     ActiveStyle: opts.ActiveStyle as Partial<JivStyle> | undefined ?? undefined,

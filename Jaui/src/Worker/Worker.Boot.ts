@@ -74,7 +74,6 @@ const _forwardWorkerConsole = (): void => {
  *  Call once per worker scope. */
 export const BootJauiWorker = (): void => {
   _forwardWorkerConsole();
-  console.log('[Jaui.Worker] booted');
 
   const post = (msg: W2M, transfer?: Transferable[]): void => {
     if (transfer && transfer.length > 0) {
@@ -87,7 +86,11 @@ export const BootJauiWorker = (): void => {
   const bridge = new WorkerBridge(post);
 
   bridge.OnInit = async (m: M2W_Init): Promise<void> => {
-    console.log('[Jaui.Worker] init received', {
+    // Gate noisy worker logs behind `?debug` (or `?jdebug`) on the launching
+    // page. Production / casual reload should see a clean console; we only
+    // want fps/phase chatter when explicitly profiling.
+    const _debug = /[?&](debug|jdebug)\b/.test(m.UrlSearch ?? '');
+    if (_debug) console.log('[Jaui.Worker] init received', {
       Width: m.Width,
       Height: m.Height,
       Dpr: m.DevicePixelRatio,
@@ -161,14 +164,14 @@ export const BootJauiWorker = (): void => {
         // Surface phase timings on the same channel via console — the
         // ?fps overlay only renders fps; phase data shows up in the
         // ?debug=console overlay so iPad users can read it on-device.
-        if (Object.keys(phaseAvg).length > 0) {
+        if (_debug && Object.keys(phaseAvg).length > 0) {
           console.log(`[wkr-fps] ${avg.toFixed(0)}avg ${min.toFixed(0)}min frame=${phaseAvg['frame']?.toFixed(1)}ms`);
         }
       });
 
       canvas.ResizeFromBridge(m.Width, m.Height);
 
-      console.log('[Jaui.Worker] ready');
+      if (_debug) console.log('[Jaui.Worker] ready');
       post({ T: 'ready' });
     } catch (err) {
       console.error('[Jaui.Worker] init failed:', err);
