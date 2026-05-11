@@ -1449,7 +1449,34 @@ export class Canvas implements DirtyTracker {
       const cl = cur.ChildLayout;
       const wFixed = cl.Width !== 'Auto' && cl.Width !== 'MinContent' && cl.Width !== 'MaxContent';
       const hFixed = cl.Height !== 'Auto' && cl.Height !== 'MinContent' && cl.Height !== 'MaxContent';
-      if (wFixed && hFixed) return cur;
+      if (wFixed && hFixed) {
+        // Scope is only safe when the candidate's RESOLVED rect is stable.
+        // `cur.ChildLayout.Width/Height` being a "fixed token" (`100%`, `100vh`,
+        // a length expression) doesn't imply the resolved `cur.Width/Height`
+        // is settled — `JivAnimator.Tick` writes `_element.Width = Springs.Width.Value`
+        // every frame, so a candidate whose animator is mid-spring exposes a
+        // transient value as its rect. `SolveLayout` in subtree mode seeds
+        // `boxWidth = root.Width / boxHeight = root.Height`, then `_solveAndAnimate`
+        // calls `animator.SetTargets(...)` on every descendant against that
+        // mid-spring box. If a descendant's new target lands within `Spring.Set`'s
+        // 0.1px deadband, the kick is skipped and the corrupted target sticks —
+        // the trap that turned a Chrome page-zoom into a permanently-shifted
+        // Drill editor panel that no subsequent zoom could recover.
+        //
+        // Skip candidates with an in-flight animator; keep climbing so the
+        // scope-root is always a settled box. Falls back to Root when nothing
+        // up the chain is stable, which yields the full-tree solve that
+        // `_resize` already runs — i.e. the worst case is "no perf win for
+        // a few frames during a resize-driven cascade," not "wrong layout."
+        const anim = this._animators.get(cur);
+        if (!anim
+            || (anim.Springs.X.IsSettled
+                && anim.Springs.Y.IsSettled
+                && anim.Springs.Width.IsSettled
+                && anim.Springs.Height.IsSettled)) {
+          return cur;
+        }
+      }
       cur = cur.Parent;
     }
     return this.Root;
