@@ -202,11 +202,181 @@ Animation is declarative, not imperative:
 }
 ```
 
-Entry / exit animations — when a Jiv is added to or removed from the
-tree — are driven by a built-in `Presence` identifier on every node.
+Entry / exit animations, when a Jiv is added to or removed from the
+tree, are driven by a built-in `Presence` identifier on every node.
 See
 **`Presence.md`** for the full spec: implicit opacity fade by default,
 customization via `Presence` arithmetic, `@Spring Presence` overrides.
+
+## Transitions
+
+`@Transition` is the CSS-style shorthand for `@Spring`. It accepts a
+familiar `Duration` and translates internally to critically-damped
+spring coefficients. Use it when you don't care about the underlying
+spring physics and just want "smooth over N milliseconds":
+
+```jss
+.Drawer {
+  @Transition Width { Duration: 240ms }
+  @Transition Opacity { Duration: 180ms, Easing: EaseOut }
+}
+```
+
+`@Transition` is purely *reactive*. It tunes how a property interpolates
+when something else writes a new value (a class swap, an Angular
+binding, a hover-state flip, a viewport breakpoint). It never drives
+the value itself.
+
+`@Transition` and `@Spring` configure the same underlying spring; the
+two forms are interchangeable, pick whichever expresses intent better.
+If both are declared on the same property, `@Spring` wins (the more
+specific physical declaration overrides the duration shorthand).
+
+## Animations
+
+`@Animation` is the *proactive* counterpart to `@Transition`. Where
+`@Transition` smooths a value somebody else writes, `@Animation`
+writes the value itself, on a schedule, in a loop.
+
+### Three forms
+
+**Root-level named definition.** A reusable animation profile:
+
+```jss
+@Animation Pulse {
+  Duration: 1.8s
+  Loop: Mirror
+  From: PulseDim
+  To: PulseBright
+}
+
+.PulseDim    { Opacity: 0, Background: rgb(0, 0, 0) }
+.PulseBright { Opacity: 1, Background: rgb(34, 34, 34) }
+```
+
+`From` and `To` are class references. Stops are resolved at compile
+time, the keyframe table is baked into the animation's static config.
+Changing the referenced class after the fact does not re-trigger
+active animations until the next class apply.
+
+**Application inside a class.** Attaches a named animation to every
+instance of the class:
+
+```jss
+.LoaderOverlay {
+  @Animation Pulse
+  @Animation Pulse, FadeIn       // multiple, comma-separated
+}
+```
+
+**Inline anonymous animation.** Targets one property, declared
+directly on the class:
+
+```jss
+.LoaderOverlay {
+  @Animation Opacity {
+    From: 0
+    To: 1
+    Duration: 1.8s
+    Loop: Mirror
+  }
+}
+```
+
+Parser disambiguation: at root level, `@Animation Identifier { ... }`
+defines a named animation. Inside a class, `@Animation Identifier`
+without a block applies a named animation; `@Animation PropertyName { ... }`
+with a block declares an inline anonymous animation on that property.
+
+### Stops beyond two
+
+For animations with more than two stops, drop `From` / `To` and use
+percent stops. Each stop is either a class reference (shorthand for
+"all properties from this class") or an inline property block:
+
+```jss
+@Animation Wave {
+  Duration: 2s
+  Loop: Repeat
+
+  0%: WaveLow              // class-ref shorthand
+  50% { Opacity: 0.7 }     // inline ad-hoc
+  100%: WaveHigh
+}
+```
+
+### Loop modes
+
+| Mode | Behavior |
+| --- | --- |
+| `Once` | Play 0% to 100% and settle. Default if `Loop` is omitted. |
+| `Repeat` | At 100%, jump back to 0% and replay forward. Discontinuous. |
+| `Mirror` | At 100%, reverse direction back to 0%. Smooth ping-pong. |
+
+`Duration` is one-direction travel time, not the full cycle. A `Mirror`
+animation with `Duration: 1.8s` has a 3.6s full cycle.
+
+### Ease and spring tuning
+
+By default, `@Animation` uses the spring engine, the same physics that
+drives `@Transition` and `@Spring`. If the class declares an `@Spring`
+or `@Transition` for the animated property, the animation inherits those
+coefficients. Explicit override on the animation:
+
+```jss
+@Animation Pulse {
+  Duration: 1.8s
+  Loop: Mirror
+  Ease: Spring(Stiffness: 60, Damping: 22)   // custom spring
+  // or
+  Ease: Linear                                // no spring, exact metronome
+  From: PulseDim
+  To: PulseBright
+}
+```
+
+`Ease: Linear` exists as the escape hatch for cases where physics is
+wrong (a strict beat, a UI loading bar). The default and the right
+answer for almost everything is `Spring`.
+
+### Precedence
+
+When two animations target the same property on the same Jiv, highest
+specificity wins:
+
+1. **Inline anonymous animation** declared on the class.
+2. **Named animation applied** to the class. Last-declared wins among
+   multiple.
+3. **`@Transition` or `@Spring`** declared on the same property.
+   Contributes spring tuning only; doesn't drive a loop.
+4. **Static class value.** The property's resolved value when no
+   animation is active.
+
+Source-order last-wins within a tier. This mirrors the cascade Jaui
+already uses for multi-inheritance.
+
+### Driver model
+
+Each Jiv instance gets its own per-property spring state. Animations
+are not coalesced across instances, so 100 marchers with `@Animation
+Pulse` run 100 independent springs. This keeps animations independent
+under stagger, hover overrides, and per-instance Presence transitions.
+If app-wide synchronized motion across many instances becomes a real
+need, a `Sync: true` flag can be added later, opt-in.
+
+### Relationship to `@Transition`
+
+| Concept | Drives values? | Loops? | Form |
+| --- | --- | --- | --- |
+| `@Spring` | No, tunes spring | No | Per-property block |
+| `@Transition` | No, tunes spring | No | Per-property block, Duration sugar |
+| `@Animation` | Yes | Yes | Named or inline, From / To / stops, Loop |
+
+`@Transition` answers "*how* should this property interpolate when
+written?". `@Animation` answers "*what values* should this property
+cycle through, and how often?". They compose: an `@Animation`'s
+interpolation tuning falls back to the `@Transition` declared on the
+same property if no explicit `Ease` is set.
 
 ## Materials
 
