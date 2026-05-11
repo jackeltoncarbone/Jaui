@@ -158,6 +158,10 @@ export class Jiv implements OnInit, OnDestroy {
       FocusTextStyle:    fromClass?.FocusTextStyle as Record<string, unknown> | undefined,
       DisabledTextStyle: fromClass?.DisabledTextStyle as Record<string, unknown> | undefined,
       Springs:           fromClass?.Springs as Record<string, Record<string, unknown>> | undefined,
+      Animations:        fromClass?.Animations as Array<Record<string, unknown>> | undefined,
+      AnimationTable:    this._registry
+        ? Object.fromEntries(this._registry.Animations) as unknown as Record<string, Record<string, unknown>>
+        : undefined,
       ElementProps:      Object.keys(elementProps).length > 0 ? elementProps : undefined,
     };
     if (text !== undefined) opts.Text = text;

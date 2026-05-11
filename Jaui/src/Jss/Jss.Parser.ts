@@ -2,7 +2,14 @@ import { SlotFor } from './Jss.Routes';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
-import { type SpringConfig, TransitionToSpring } from '../Animation/Animation.Types';
+import {
+  type SpringConfig,
+  type AnimationDefinition,
+  type AnimationApplication,
+  type AnimationStop,
+  type LoopMode,
+  TransitionToSpring,
+} from '../Animation/Animation.Types';
 
 /**
  * JSS v1 parser — turns `Name { prop: value ... }` rulesets into a
@@ -68,6 +75,13 @@ export interface Ruleset {
    *  the Jiv's per-channel springs; missing properties fall back to the
    *  global defaults. Inherited through `extends` (per-property merge). */
   Springs?: Record<string, Partial<SpringConfig>>;
+  /** Animations applied to this class via `@Animation Name` or declared
+   *  inline as `@Animation Property { From, To, Duration, Loop }`. The
+   *  style animator reads this list each frame to override property
+   *  targets along the animation timeline. Source-order preserved so
+   *  the cascade can apply last-wins within a tier. Inherited through
+   *  `extends` (concatenated, base first). */
+  Animations?: AnimationApplication[];
 }
 
 export type Stylesheet = Record<string, Ruleset>;
@@ -78,9 +92,16 @@ export type Stylesheet = Record<string, Ruleset>;
  *  vars like `@B: @A * 2` work naturally). */
 export type VarTable = Record<string, string>;
 
+/** Named animation definitions authored at the top level via
+ *  `@Animation Name { ... }`. The runtime looks up applied animations
+ *  by name against this table. Forward references are illegal, the
+ *  definition must precede any application referencing it. */
+export type AnimationTable = Record<string, AnimationDefinition>;
+
 export interface ParsedJss {
   Sheet: Stylesheet;
   Vars: VarTable;
+  Animations: AnimationTable;
 }
 
 /** Reserved identifiers — engine-provided built-ins that can't be
@@ -102,17 +123,19 @@ export const ParseJss = (source: string, globals?: Stylesheet): ParsedJss => {
   const cleaned = _stripComments(source);
   const sheet: Stylesheet = {};
   const vars: VarTable = {};
+  const animations: AnimationTable = {};
   const state: _ScanState = { src: cleaned, pos: 0 };
   _skipWs(state);
   while (state.pos < state.src.length) {
     if (state.src[state.pos] === '@') {
-      _parseTopLevelAt(state, vars);
+      _parseTopLevelAt(state, vars, animations, sheet, globals);
     } else {
       _parseRuleset(state, sheet, globals);
     }
     _skipWs(state);
   }
-  return { Sheet: sheet, Vars: vars };
+  _resolveClassRefStops(animations, sheet, globals);
+  return { Sheet: sheet, Vars: vars, Animations: animations };
 };
 
 // ─── Scanner ────────────────────────────────────────────────────────────
@@ -164,30 +187,52 @@ const _expect = (s: _ScanState, char: string): void => {
 
 // ─── Top-level @ directives ─────────────────────────────────────────────
 
-/** Parse a top-level `@Name: value` var declaration. The `@var` keyword
- *  was dropped — `@Name:` at top level is already unambiguous. Any other
- *  `@Keyword` at top level (future `@Import`, `@Theme`, etc.) is a parse
- *  error for now. */
-const _parseTopLevelAt = (s: _ScanState, vars: VarTable): void => {
+/** Parse a top-level `@`-rule. Two shapes:
+ *    `@Name: value`           - var declaration (any name except reserved).
+ *    `@Animation Name { ... }` - named animation definition.
+ *  The `@var` keyword was dropped; `@Name:` at top level is already
+ *  unambiguous. Other unknown `@Keyword` forms are parse errors. */
+const _parseTopLevelAt = (
+  s: _ScanState,
+  vars: VarTable,
+  animations: AnimationTable,
+  sheet: Stylesheet,
+  globals?: Stylesheet,
+): void => {
   _expect(s, '@');
   const name = _readIdent(s);
   _skipWs(s);
 
+  if (name === 'Animation') {
+    // Root form: `@Animation Pulse { ... }`.
+    const animName = _readIdent(s);
+    _skipWs(s);
+    const def = _parseAnimationBlock(s, animName);
+    if (animations[animName]) {
+      throw new Error(`[Jaui] @Animation "${animName}" declared more than once at top level`);
+    }
+    animations[animName] = def;
+    return;
+  }
+
   if (s.src[s.pos] !== ':') {
     if (name === 'var') {
-      throw new Error(`[Jaui] "@var" is no longer a keyword — declare variables as "@Name: value" directly (drop the "@var" prefix)`);
+      throw new Error(`[Jaui] "@var" is no longer a keyword, declare variables as "@Name: value" directly (drop the "@var" prefix)`);
     }
-    throw new Error(`[Jaui] Unexpected "@${name}" at top level — only "@Name: value" var declarations are allowed here`);
+    throw new Error(`[Jaui] Unexpected "@${name}" at top level, only "@Name: value" var declarations and "@Animation Name { ... }" definitions are allowed here`);
   }
 
   if (_RESERVED_IDENTS.has(name)) {
-    throw new Error(`[Jaui] Cannot declare "@${name}: …" — "${name}" is a reserved built-in identifier provided by the engine per Jiv. Reference it without the "@" prefix in property values (e.g. "Opacity: ${name}").`);
+    throw new Error(`[Jaui] Cannot declare "@${name}: …", "${name}" is a reserved built-in identifier provided by the engine per Jiv. Reference it without the "@" prefix in property values (e.g. "Opacity: ${name}").`);
   }
 
   s.pos++; // consume ':'
   _skipWs(s);
   const value = _readValue(s);
   vars[name] = value;
+  // Sheet and globals threaded through for future top-level rules; not
+  // used by var declarations themselves.
+  void sheet; void globals;
 };
 
 // ─── Rulesets ───────────────────────────────────────────────────────────
@@ -294,18 +339,35 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
   }
 };
 
-/** Inside-ruleset `@` directives. `@Spring Property { Stiffness: …, Damping: …, Mass: … }`
- *  authors a spring directly. `@Transition Property { Duration: 150ms, Easing: EaseOut }`
- *  is the CSS-flavoured shorthand — both end up as a SpringConfig in the
- *  Springs map (transitions are translated to a critically-damped spring). */
+/** Inside-ruleset `@` directives. Three supported keywords:
+ *    `@Spring Property { Stiffness, Damping, Mass }` - direct spring tune.
+ *    `@Spring * { ... }`                    - universal default for every animatable property.
+ *    `@Transition Property { Duration, Easing }` - CSS-style shorthand,
+ *      translates to a critically-damped spring with matching settle.
+ *    `@Animation Name[, Name2, ...]`        - apply named animations (no block, comma-separated).
+ *    `@Animation Property { From, To, Duration, Loop }` - inline anonymous. */
 const _parseRulesetAt = (s: _ScanState, ruleset: Ruleset, className: string): void => {
   s.pos++; // skip '@'
   const directive = _readIdent(s);
+  if (directive === 'Animation') {
+    _parseRulesetAnimation(s, ruleset, className);
+    return;
+  }
   if (directive !== 'Spring' && directive !== 'Transition') {
-    throw new Error(`[Jaui] "${className}" — unknown @${directive}; supported: @Spring, @Transition.`);
+    throw new Error(`[Jaui] "${className}" unknown @${directive}; supported: @Spring, @Transition, @Animation.`);
   }
   _skipWs(s);
-  const property = _readIdent(s);
+  // Property name — identifier OR `*` (universal default, @Spring only).
+  let property: string;
+  if (s.src[s.pos] === '*') {
+    if (directive !== 'Spring') {
+      throw new Error(`[Jaui] "${className}" @${directive} cannot target "*"; only @Spring supports the universal selector.`);
+    }
+    property = '*';
+    s.pos++;
+  } else {
+    property = _readIdent(s);
+  }
   _skipWs(s);
   _expect(s, '{');
   const raw: Record<string, string> = {};
@@ -313,13 +375,13 @@ const _parseRulesetAt = (s: _ScanState, ruleset: Ruleset, className: string): vo
     _skipWs(s);
     if (s.src[s.pos] === '}') { s.pos++; break; }
     if (s.pos >= s.src.length) {
-      throw new Error(`[Jaui] Unterminated @${directive} ${property} in "${className}" — missing "}"`);
+      throw new Error(`[Jaui] Unterminated @${directive} ${property} in "${className}", missing "}"`);
     }
     const k = _readIdent(s);
     _skipWs(s);
     _expect(s, ':');
     _skipWs(s);
-    raw[k] = _readValue(s);
+    raw[k] = _readShortValue(s);
   }
   let spring: Partial<SpringConfig>;
   if (directive === 'Spring') {
@@ -333,7 +395,7 @@ const _parseRulesetAt = (s: _ScanState, ruleset: Ruleset, className: string): vo
       }
     }
   } else {
-    // @Transition — strip optional `ms` suffix, translate to a critically
+    // @Transition: strip optional `ms` suffix, translate to a critically
     // damped spring with matching settle time.
     const dStr = raw['Duration'] ?? '';
     const dNum = parseFloat(dStr.replace(/ms$/, ''));
@@ -341,8 +403,393 @@ const _parseRulesetAt = (s: _ScanState, ruleset: Ruleset, className: string): vo
     const easing = raw['Easing'] as 'Linear' | 'EaseOut' | 'EaseInOut' | 'Spring' | undefined;
     spring = TransitionToSpring({ Duration: dNum, Easing: easing ?? 'EaseOut', Spring: null });
   }
+  // Per-ruleset @Spring > @Transition precedence (spec): if an @Spring entry
+  // already exists for this property in THIS ruleset, a later @Transition
+  // must not stomp it. We track source kind in a side WeakMap so the
+  // Ruleset shape stays clean for downstream consumers.
   ruleset.Springs ??= {};
+  const sources = _ensureSpringSources(ruleset);
+  const prevKind = sources[property];
+  if (prevKind === 'Spring' && directive === 'Transition') return;
   ruleset.Springs[property] = { ...ruleset.Springs[property], ...spring };
+  sources[property] = directive;
+};
+
+/** Tracks whether each Springs[prop] entry came from @Spring or @Transition.
+ *  Used so a later @Transition on the same property within one ruleset
+ *  can't stomp an earlier @Spring (spec: @Spring wins on conflict). Kept
+ *  off the Ruleset shape so consumers don't see internal bookkeeping. */
+const _springSources = new WeakMap<Ruleset, Record<string, 'Spring' | 'Transition'>>();
+const _ensureSpringSources = (r: Ruleset): Record<string, 'Spring' | 'Transition'> => {
+  let m = _springSources.get(r);
+  if (!m) { m = {}; _springSources.set(r, m); }
+  return m;
+};
+
+/** Like `_readValue` but additionally treats `,` (at paren depth 0) as a
+ *  terminator. Used inside `@Spring` / `@Transition` / `@Animation` block
+ *  bodies so authors can write keys on a single line:
+ *    `@Transition Opacity { Duration: 180ms, Easing: EaseOut }`
+ *  The base `_readValue` doesn't handle this because top-level declarations
+ *  use `,` inside values like `rgba(0, 0, 0, 0.5)` — parens balance there,
+ *  so the depth gate still lets commas inside paren groups through. */
+const _readShortValue = (s: _ScanState): string => {
+  const start = s.pos;
+  let depth = 0;
+  while (s.pos < s.src.length) {
+    const c = s.src[s.pos];
+    if (c === '(') { depth++; s.pos++; continue; }
+    if (c === ')') { depth--; s.pos++; continue; }
+    if (depth === 0) {
+      if (c === '\n' || c === ';' || c === ',') { const v = s.src.slice(start, s.pos).trim(); s.pos++; return v; }
+      if (c === '}') { return s.src.slice(start, s.pos).trim(); }
+    }
+    s.pos++;
+  }
+  return s.src.slice(start, s.pos).trim();
+};
+
+/** Parse `@Animation` inside a class. Three shapes distinguished by what
+ *  follows the first identifier:
+ *    `@Animation Pulse`                     - apply a single named animation.
+ *    `@Animation Pulse, FadeIn`             - apply multiple named animations.
+ *    `@Animation Opacity { From, To, ... }` - inline anonymous animation on a property.
+ *  The comma form is only valid for named applications; an inline anonymous
+ *  with a following comma is a parse error (the spec doesn't define how
+ *  multiple inline blocks on one line would compose). */
+const _parseRulesetAnimation = (s: _ScanState, ruleset: Ruleset, className: string): void => {
+  _skipWs(s);
+  const ident = _readIdent(s);
+  _skipWs(s);
+  ruleset.Animations ??= [];
+  if (s.src[s.pos] === '{') {
+    // Inline anonymous: `@Animation Opacity { From, To, Duration, Loop }`.
+    // `ident` here is the target property name, not an animation name.
+    // From/To values are raw property values (not class-refs) and get
+    // wrapped under the target property's key in each stop's Values.
+    const def = _parseAnimationBlock(s, `${className}.@Animation ${ident}`, ident);
+    ruleset.Animations.push({ Kind: 'Inline', Property: ident, Definition: def });
+    return;
+  }
+  // Named application (possibly multi). The identifier is the animation
+  // name; lookup is deferred to resolve time so forward references within
+  // a single sheet work.
+  ruleset.Animations.push({ Kind: 'Named', Name: ident });
+  while (s.src[s.pos] === ',') {
+    s.pos++;
+    _skipWs(s);
+    const next = _readIdent(s);
+    _skipWs(s);
+    if (s.src[s.pos] === '{') {
+      throw new Error(`[Jaui] "${className}" @Animation: comma-separated multi-apply only supports named animations; "${next} { ... }" is an inline form and must stand alone on its own @Animation line.`);
+    }
+    ruleset.Animations.push({ Kind: 'Named', Name: next });
+  }
+};
+
+/** Parse the `{ Duration: ..., Loop: ..., From: ..., To: ..., 0%: ..., ... }`
+ *  body of an animation definition. Used by both the root form (named def)
+ *  and the in-class inline form. Stops with class-ref identifiers are
+ *  kept as a single `__classRef__` marker on the stop's Values and
+ *  resolved in a post-pass once all rulesets are known.
+ *
+ *  `inlineProperty` distinguishes the two forms:
+ *    - undefined: named def at root. From/To values are class-refs or
+ *      inline blocks; multi-property semantics apply.
+ *    - string: inline anonymous on a class targeting that one property.
+ *      From/To values are raw property values, wrapped under that key
+ *      in each stop's Values.
+ */
+const _parseAnimationBlock = (
+  s: _ScanState,
+  contextLabel: string,
+  inlineProperty?: string,
+): AnimationDefinition => {
+  _expect(s, '{');
+  let duration = 0;
+  let loop: LoopMode = 'Once';
+  let ease: SpringConfig | 'Linear' | null = null;
+  const stops: AnimationStop[] = [];
+  let fromStop: AnimationStop | null = null;
+  let toStop: AnimationStop | null = null;
+
+  while (true) {
+    _skipWs(s);
+    if (s.src[s.pos] === '}') { s.pos++; break; }
+    if (s.pos >= s.src.length) {
+      throw new Error(`[Jaui] Unterminated ${contextLabel}, missing "}"`);
+    }
+
+    // Peek for a percent stop (`0%`, `100%`, `50%`). Otherwise it's an
+    // identifier-keyed declaration (Duration, Loop, From, To, Ease).
+    const percentMatch = _tryReadPercent(s);
+    if (percentMatch !== null) {
+      _skipWs(s);
+      // Two value shapes:
+      //   `0%: ClassName`        - colon then class-ref or raw value.
+      //   `0% { Opacity: 0; ... }` - no colon, inline property block.
+      if (s.src[s.pos] === ':') {
+        s.pos++;
+        _skipWs(s);
+      }
+      stops.push(_parseStop(s, percentMatch / 100, contextLabel, inlineProperty));
+      _consumeTerminator(s);
+      continue;
+    }
+
+    const key = _readIdent(s);
+    _skipWs(s);
+    _expect(s, ':');
+    _skipWs(s);
+    if (key === 'Duration') {
+      const v = _readShortValue(s);
+      // Accept `ms` or `s` (seconds). Bare numbers are interpreted as ms.
+      let n: number;
+      if (/s$/.test(v) && !/ms$/.test(v)) {
+        n = parseFloat(v.replace(/s$/, '')) * 1000;
+      } else {
+        n = parseFloat(v.replace(/ms$/, ''));
+      }
+      if (Number.isNaN(n)) throw new Error(`[Jaui] ${contextLabel}.Duration must be a number (optionally s- or ms-suffixed), got "${v}"`);
+      duration = n;
+    } else if (key === 'Loop') {
+      const v = _readShortValue(s);
+      if (v !== 'Once' && v !== 'Repeat' && v !== 'Mirror') {
+        throw new Error(`[Jaui] ${contextLabel}.Loop must be Once, Repeat, or Mirror; got "${v}"`);
+      }
+      loop = v;
+    } else if (key === 'Ease') {
+      ease = _parseEase(s, contextLabel);
+    } else if (key === 'From') {
+      fromStop = _parseStop(s, 0, contextLabel, inlineProperty);
+      _consumeTerminator(s);
+    } else if (key === 'To') {
+      toStop = _parseStop(s, 1, contextLabel, inlineProperty);
+      _consumeTerminator(s);
+    } else {
+      throw new Error(`[Jaui] ${contextLabel}: unexpected key "${key}". Expected Duration, Loop, Ease, From, To, or a percent stop.`);
+    }
+  }
+
+  if (fromStop) stops.push(fromStop);
+  if (toStop)   stops.push(toStop);
+  // Sort by phase so the runtime can walk in order. Stable sort keeps
+  // duplicates in source order so last-wins still holds.
+  stops.sort((a, b) => a.Phase - b.Phase);
+
+  if (stops.length < 2) {
+    throw new Error(`[Jaui] ${contextLabel} needs at least two stops (From/To or 0%/100%); got ${stops.length}.`);
+  }
+  if (duration <= 0) {
+    throw new Error(`[Jaui] ${contextLabel}.Duration must be > 0, got ${duration}.`);
+  }
+
+  return {
+    // Name is filled in by the caller (root form has it, inline doesn't need it).
+    Name: '',
+    Duration: duration,
+    Loop: loop,
+    Ease: ease,
+    Stops: stops,
+  };
+};
+
+/** Parse one stop body. Three forms accepted, picked by surrounding
+ *  context and the next token:
+ *    `0%: PulseDim`         class-ref shorthand (named anim, no inlineProperty).
+ *    `0% { Opacity: 0, ...}` inline property block (named anim, multi-prop).
+ *    `0%: 0.5`              raw value for the targeted property (inline anim).
+ *  `inlineProperty` set means we're inside an inline anonymous animation
+ *  on the named property, so a bare value should be wrapped as
+ *  `{ [inlineProperty]: value }` rather than read as a class-ref. */
+const _parseStop = (
+  s: _ScanState,
+  phase: number,
+  contextLabel: string,
+  inlineProperty: string | undefined,
+): AnimationStop => {
+  _skipWs(s);
+  if (s.src[s.pos] === '{') {
+    // Inline property block. Parsed as a tiny ruleset body, but we keep
+    // values as raw strings keyed by property name (the runtime applies
+    // them as a Style/Layout/etc patch on top of EffectiveStyle).
+    s.pos++; // consume '{'
+    const values: Record<string, string> = {};
+    while (true) {
+      _skipWs(s);
+      if (s.src[s.pos] === '}') { s.pos++; break; }
+      if (s.pos >= s.src.length) {
+        throw new Error(`[Jaui] Unterminated stop block in ${contextLabel}, missing "}"`);
+      }
+      const k = _readIdent(s);
+      _skipWs(s);
+      _expect(s, ':');
+      _skipWs(s);
+      values[k] = _readValue(s);
+    }
+    return { Phase: phase, Values: values };
+  }
+  if (inlineProperty !== undefined) {
+    // Inline anonymous animation: stop value is the raw value for the
+    // single targeted property. _readValue handles numbers, units,
+    // colors, and other value forms uniformly.
+    const v = _readValue(s);
+    return { Phase: phase, Values: { [inlineProperty]: v } };
+  }
+  // Class-ref shorthand inside a named animation. Mark for post-parse
+  // resolution; the resolver flattens the referenced ruleset's
+  // Style / Layout / TextStyle / ChildLayout bags into the stop's Values.
+  const cls = _readIdent(s);
+  return { Phase: phase, Values: { __classRef__: cls } };
+};
+
+/** Read a `12.5%` token and return the numeric percent. Returns null when
+ *  the next token isn't a percent (so the caller can fall through to an
+ *  identifier key like `Duration` or `From`). */
+const _tryReadPercent = (s: _ScanState): number | null => {
+  const start = s.pos;
+  while (s.pos < s.src.length && /[0-9.]/.test(s.src[s.pos])) s.pos++;
+  if (s.pos > start && s.src[s.pos] === '%') {
+    const n = parseFloat(s.src.slice(start, s.pos));
+    s.pos++; // consume '%'
+    return n;
+  }
+  // Not a percent; rewind for the identifier-key path.
+  s.pos = start;
+  return null;
+};
+
+/** Parse an `Ease: ...` value. Forms:
+ *    `Ease: Linear`
+ *    `Ease: Spring`                                     - spring with defaults
+ *    `Ease: Spring(Stiffness: 60, Damping: 22, Mass: 1)` - tuned spring */
+const _parseEase = (s: _ScanState, contextLabel: string): SpringConfig | 'Linear' | null => {
+  const head = _readIdent(s);
+  if (head === 'Linear') {
+    // Consume any trailing value bits up to terminator so the outer loop
+    // is positioned correctly.
+    _readValueRemainder(s);
+    return 'Linear';
+  }
+  if (head !== 'Spring') {
+    throw new Error(`[Jaui] ${contextLabel}.Ease must be Linear or Spring(...), got "${head}"`);
+  }
+  _skipWs(s);
+  if (s.src[s.pos] !== '(') {
+    // `Spring` with no args, use defaults.
+    _readValueRemainder(s);
+    return { Stiffness: 170, Damping: 26, Mass: 1 };
+  }
+  s.pos++; // consume '('
+  const raw: Record<string, string> = {};
+  while (true) {
+    _skipWs(s);
+    if (s.src[s.pos] === ')') { s.pos++; break; }
+    const k = _readIdent(s);
+    _skipWs(s);
+    _expect(s, ':');
+    _skipWs(s);
+    // Read until ',' or ')' or terminator.
+    const start = s.pos;
+    while (s.pos < s.src.length && s.src[s.pos] !== ',' && s.src[s.pos] !== ')' && s.src[s.pos] !== '\n') s.pos++;
+    raw[k] = s.src.slice(start, s.pos).trim();
+    _skipWs(s);
+    if (s.src[s.pos] === ',') s.pos++;
+  }
+  _readValueRemainder(s);
+  const stiffness = parseFloat(raw['Stiffness'] ?? '170');
+  const damping = parseFloat(raw['Damping'] ?? '26');
+  const mass = parseFloat(raw['Mass'] ?? '1');
+  return { Stiffness: stiffness, Damping: damping, Mass: mass };
+};
+
+/** Consume any trailing whitespace / terminator after a value that didn't
+ *  use the generic _readValue() consumption (Ease parser walks its own
+ *  shape). Stops at newline, `;`, `,`, or the surrounding `}` — so authors
+ *  can use any of `; , \n` as a separator between keys on one line. */
+const _readValueRemainder = (s: _ScanState): void => {
+  while (s.pos < s.src.length) {
+    const c = s.src[s.pos];
+    if (c === '\n' || c === ';' || c === ',') { s.pos++; return; }
+    if (c === '}') return;
+    if (!/\s/.test(c)) return;
+    s.pos++;
+  }
+};
+
+/** Consume an optional `;` / `,` / newline terminator after a stop value
+ *  that was parsed by a path that doesn't itself consume the terminator
+ *  (`_parseStop`, `_parseEase`). Whitespace is skipped both before and
+ *  after the terminator so the next iteration of the @Animation block
+ *  loop starts cleanly on either the next key or the closing `}`. */
+const _consumeTerminator = (s: _ScanState): void => {
+  while (s.pos < s.src.length) {
+    const c = s.src[s.pos];
+    if (c === ' ' || c === '\t') { s.pos++; continue; }
+    if (c === ';' || c === '\n' || c === ',') { s.pos++; return; }
+    return;
+  }
+};
+
+/** Post-parse pass: any animation stop whose Values contains the
+ *  `__classRef__` sentinel gets flattened by copying every property out
+ *  of the referenced ruleset's Style / Layout / TextStyle / ChildLayout
+ *  bags. Missing classes throw. Runs once per ParseJss after all
+ *  rulesets are known so order-of-declaration within a sheet doesn't
+ *  matter for stop refs. */
+const _resolveClassRefStops = (
+  animations: AnimationTable,
+  sheet: Stylesheet,
+  globals?: Stylesheet,
+): void => {
+  for (const name of Object.keys(animations)) {
+    const def = animations[name];
+    def.Name = name; // backfill the name slot
+    for (const stop of def.Stops) {
+      const ref = stop.Values['__classRef__'];
+      if (ref === undefined) continue;
+      const target = sheet[ref] ?? globals?.[ref];
+      if (!target) {
+        throw new Error(`[Jaui] @Animation "${name}" references unknown class "${ref}". Declare it earlier in the sheet, or register it as a global.`);
+      }
+      const flat: Record<string, string> = {};
+      for (const bag of [target.Style, target.Layout, target.ChildLayout, target.TextStyle]) {
+        if (!bag) continue;
+        for (const k of Object.keys(bag)) {
+          const v = (bag as Record<string, unknown>)[k];
+          if (typeof v === 'string') flat[k] = v;
+        }
+      }
+      stop.Values = flat;
+    }
+  }
+  // Inline animations on rulesets also need class-ref resolution. The
+  // post-pass walks every ruleset's Animations[] and resolves any inline
+  // definitions the same way.
+  for (const className of Object.keys(sheet)) {
+    const r = sheet[className];
+    if (!r.Animations) continue;
+    for (const app of r.Animations) {
+      if (app.Kind !== 'Inline') continue;
+      for (const stop of app.Definition.Stops) {
+        const ref = stop.Values['__classRef__'];
+        if (ref === undefined) continue;
+        const target = sheet[ref] ?? globals?.[ref];
+        if (!target) {
+          throw new Error(`[Jaui] @Animation inline on "${className}.${app.Property}" references unknown class "${ref}".`);
+        }
+        const flat: Record<string, string> = {};
+        for (const bag of [target.Style, target.Layout, target.ChildLayout, target.TextStyle]) {
+          if (!bag) continue;
+          for (const k of Object.keys(bag)) {
+            const v = (bag as Record<string, unknown>)[k];
+            if (typeof v === 'string') flat[k] = v;
+          }
+        }
+        stop.Values = flat;
+      }
+    }
+  }
 };
 
 const _parseDeclaration = (s: _ScanState, ruleset: Ruleset): void => {
@@ -399,6 +846,11 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
   FocusTextStyle:    { ...a.FocusTextStyle,    ...b.FocusTextStyle },
   DisabledTextStyle: { ...a.DisabledTextStyle, ...b.DisabledTextStyle },
   Springs:           { ...a.Springs,           ...b.Springs },
+  // Animations concatenate (base first, then own). Source-order is
+  // preserved so the cascade can apply last-wins within a tier.
+  Animations: (a.Animations || b.Animations)
+    ? [...(a.Animations ?? []), ...(b.Animations ?? [])]
+    : undefined,
 });
 
 /** Reserved pseudo-state names following the `:` in `Foo:State`. Maps to

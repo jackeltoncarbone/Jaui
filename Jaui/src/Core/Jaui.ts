@@ -1511,13 +1511,20 @@ export class Canvas implements DirtyTracker {
         this._animators.set(node, animator);
         this._animationManager.Register(animator);
 
-        // Style animator is Jiv-specific — it springs every animatable
+        // Style animator is Jiv-specific, it springs every animatable
         // JivStyle field toward EffectiveStyle. Only created for Jivs.
         if (node instanceof Jiv) {
           const styleAnim = new JivStyleAnimator(node);
           styleAnim.SnapToTargets();
           this._styleAnimators.set(node, styleAnim);
           this._animationManager.Register(styleAnim);
+          // Kick the rAF loop if the Jiv carries @Animation declarations
+          // so the driver starts ticking immediately. Without this the
+          // loop stays parked until something else (layout / hover / etc)
+          // wakes it.
+          if (node.Animations && node.Animations.length > 0) {
+            this._animationManager.Kick();
+          }
         }
       } else {
         const needsKick = animator.SetTargets({
@@ -2607,17 +2614,25 @@ export { ImageCache, RecolorSvg, type ImageEntry } from '../Image/Image.Cache';
 export type { ScrollConfig } from '../Scroll/Scroll.Types';
 
 // Animation
-export type { SpringConfig, TransitionConfig } from '../Animation/Animation.Types';
+export type {
+  SpringConfig,
+  TransitionConfig,
+  AnimationDefinition,
+  AnimationApplication,
+  AnimationStop,
+  LoopMode,
+} from '../Animation/Animation.Types';
 export { AnimationManager } from '../Animation/Animation.Manager';
 export { JivAnimator } from '../Jiv/Jiv.Animator';
 export { Spring } from '../Animation/Spring';
+export { JivAnimationDriver } from '../Animation/Animation.Driver';
 
 // Accessibility
 export type { AccessibilityConfig } from '../Accessibility/Accessibility.Types';
 
 // JSS
 export { ParseJss } from '../Jss/Jss.Parser';
-export type { Stylesheet, Ruleset, ParsedJss, VarTable } from '../Jss/Jss.Parser';
+export type { Stylesheet, Ruleset, ParsedJss, VarTable, AnimationTable } from '../Jss/Jss.Parser';
 export { SlotFor, type Slot } from '../Jss/Jss.Routes';
 
 // Worker boot — apps call CheckBrowserSupport() before mounting Angular.

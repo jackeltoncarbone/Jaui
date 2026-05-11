@@ -3,7 +3,7 @@ import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { DefaultJivStyle } from './Jiv.Defaults';
 import type { LayoutConfig, ChildLayout, Overflow } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
-import type { SpringConfig } from '../Animation/Animation.Types';
+import type { SpringConfig, AnimationApplication, AnimationDefinition } from '../Animation/Animation.Types';
 import { Element, type CursorStyle } from '../Element/Element';
 import { DirtyFlag } from '../Core/Types';
 
@@ -96,6 +96,32 @@ export class Jiv extends Element {
    *  properties use the global default. */
   Springs: Record<string, Partial<SpringConfig>> | null = null;
 
+  /** Animations applied to this Jiv (authored via `@Animation Name` or
+   *  `@Animation Property { From, To, ... }` in JSS). The style animator
+   *  reads this list to override the per-frame property targets via the
+   *  driver. Source-order preserved so the cascade applies last-wins.
+   *  Named applications are resolved against `AnimationTable` at attach
+   *  time; missing names throw. */
+  Animations: AnimationApplication[] | null = null;
+
+  /** Stylesheet-wide animation definitions table, used to resolve named
+   *  `@Animation Pulse` applications. Wired in by JssRegistry when the
+   *  Jiv is constructed from a JSS class. Inline anonymous animations
+   *  carry their definition directly and don't consult this map. */
+  AnimationTable: Record<string, AnimationDefinition> | null = null;
+
+  /** Back-ref to the per-Jiv style animator once registered with the
+   *  canvas. The worker registry consults this from the class-swap path
+   *  (`_applyOpts`) so animation set changes propagate without going
+   *  through Canvas. Typed loosely to avoid a circular import between
+   *  Jiv.ts and Jiv.StyleAnimator.ts; the animator sets itself here in
+   *  its constructor. */
+  StyleAnimator: {
+    ReapplyAnimations: (apps: AnimationApplication[] | null, table: Record<string, AnimationDefinition> | null) => void;
+    RetuneSprings: (overrides: Record<string, Partial<SpringConfig>> | null) => void;
+    readonly HasAnimations: boolean;
+  } | null = null;
+
   constructor(options?: {
     X?: number;
     Y?: number;
@@ -112,6 +138,8 @@ export class Jiv extends Element {
     DisabledTextStyle?: Partial<TextStyle>;
     TextSelectionStyle?: Partial<JivStyle>;
     Springs?: Record<string, Partial<SpringConfig>>;
+    Animations?: AnimationApplication[];
+    AnimationTable?: Record<string, AnimationDefinition>;
     SnapLayout?: boolean;
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
@@ -158,6 +186,8 @@ export class Jiv extends Element {
     this.DisabledTextStyle = options?.DisabledTextStyle ?? null;
     this.TextSelectionStyle = options?.TextSelectionStyle ?? null;
     this.Springs = options?.Springs ?? null;
+    this.Animations = options?.Animations ?? null;
+    this.AnimationTable = options?.AnimationTable ?? null;
   }
 
   /** Final render-time style: base + state overrides in priority order.

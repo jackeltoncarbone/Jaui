@@ -222,8 +222,47 @@ export class JivRegistry {
       core.SetText(nextText, opts.TextStyle as Partial<TextStyle> | undefined);
     }
     if (opts.ImageSrc !== undefined) core.ImageSrc = opts.ImageSrc;
+    // Animation / Spring re-apply on class swap. The Angular Jiv directive
+    // re-emits these every time `className()` changes — until this branch
+    // landed they were silently dropped after construction, so a class
+    // swap could not add or remove `@Animation`/`@Spring`/`@Transition`
+    // declarations. The Jiv carries a StyleAnimator back-ref set by the
+    // animator's constructor; we route through it to retune springs and
+    // re-target animation drivers. AnimationTable is also pulled through
+    // because named animations may have been newly defined in the sheet.
+    if (opts.Springs !== undefined) {
+      core.Springs = (opts.Springs ?? null) as Record<string, Partial<SpringConfig>> | null;
+      core.StyleAnimator?.RetuneSprings(core.Springs);
+    }
+    if (opts.Animations !== undefined || opts.AnimationTable !== undefined) {
+      if (opts.Animations !== undefined) {
+        core.Animations = (opts.Animations ?? null) as JivCore['Animations'];
+      }
+      if (opts.AnimationTable !== undefined) {
+        core.AnimationTable = (opts.AnimationTable ?? null) as unknown as JivCore['AnimationTable'];
+      }
+      core.StyleAnimator?.ReapplyAnimations(core.Animations, core.AnimationTable);
+      // Re-kick the animation loop if the new set has any active
+      // animations. The Animation.Manager auto-parks itself when no
+      // animatable returns true from Tick, so a fresh @Animation needs a
+      // nudge to start the rAF loop again.
+      if (core.StyleAnimator?.HasAnimations) {
+        this._kickAnimationLoop?.();
+      }
+    }
     core.MarkLayoutDirty();
   };
+
+  /** Set by the worker bootstrap so the registry can wake the rAF loop
+   *  whenever a class swap brings in new `@Animation` declarations. The
+   *  AnimationManager belongs to the Canvas, but the registry doesn't
+   *  hold the Canvas directly — bootstrap wires this in after Canvas
+   *  construction. Optional so unit tests that drive the registry
+   *  standalone don't need a manager. */
+  SetAnimationKick = (fn: () => void): void => {
+    this._kickAnimationLoop = fn;
+  };
+  private _kickAnimationLoop: (() => void) | null = null;
 
   private _leave = (id: number): void => {
     const core = this._nodes.get(id);
@@ -293,6 +332,8 @@ export class JivRegistry {
     FocusTextStyle?: Partial<TextStyle>;
     DisabledTextStyle?: Partial<TextStyle>;
     Springs?: Record<string, Partial<SpringConfig>>;
+    Animations?: import('../Animation/Animation.Types').AnimationApplication[];
+    AnimationTable?: Record<string, import('../Animation/Animation.Types').AnimationDefinition>;
     Text?: string;
   } => ({
     Style: opts.Style as Partial<JivStyle> | undefined,
@@ -308,6 +349,8 @@ export class JivRegistry {
     FocusTextStyle: opts.FocusTextStyle as Partial<TextStyle> | undefined ?? undefined,
     DisabledTextStyle: opts.DisabledTextStyle as Partial<TextStyle> | undefined ?? undefined,
     Springs: opts.Springs as Record<string, Partial<SpringConfig>> | undefined,
+    Animations: opts.Animations as import('../Animation/Animation.Types').AnimationApplication[] | undefined,
+    AnimationTable: opts.AnimationTable as Record<string, import('../Animation/Animation.Types').AnimationDefinition> | undefined,
     Text: opts.Text ?? undefined,
   });
 

@@ -111,6 +111,11 @@ export const BootJauiWorker = (): void => {
       bridge.AttachCanvas(canvas);
 
       const registry = new JivRegistry(canvas.Root, post);
+      // Wire the rAF kick so class-swap `@Animation` re-applies can wake
+      // the loop. Without this, the AnimationManager parks itself when
+      // all current animations settle and a newly-applied looping
+      // animation would never tick until something else nudged it.
+      registry.SetAnimationKick(() => canvas.Animations.Kick());
       bridge.AttachRegistry(registry);
 
       canvas.RegisterPostFrame(() => registry.EmitRectSnapshots());

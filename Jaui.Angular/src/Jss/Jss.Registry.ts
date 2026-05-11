@@ -1,5 +1,11 @@
 import { Injectable, InjectionToken, signal } from '@angular/core';
-import { ParseJss, type ParsedJss, type Stylesheet, type Ruleset } from 'jaui';
+import {
+  ParseJss,
+  type ParsedJss,
+  type Stylesheet,
+  type Ruleset,
+  type AnimationDefinition,
+} from 'jaui';
 
 /**
  * Holds the JSS rulesets + var table in scope for a part of the component
@@ -46,6 +52,12 @@ export class JssRegistry {
    *  `@Name` references against this table at property-resolution time. */
   private _vars = new Map<string, string>();
 
+  /** Animation name → fully-resolved definition. Aggregated from every
+   *  parsed sheet (scoped and global). Jiv attaches a reference to this
+   *  map so its animation driver can resolve `@Animation Pulse` named
+   *  applications declared on its class. */
+  private _animations = new Map<string, AnimationDefinition>();
+
   /** Memoized ParseJss results, keyed by source string. Same `.jss`
    *  module imported repeatedly (re-mounting a page, HMR re-evaluating a
    *  component, multiple `<jaui>` roots) reuses the parsed result instead
@@ -69,6 +81,13 @@ export class JssRegistry {
     return this._vars;
   }
 
+  /** Animation definition table (name → resolved definition). Handed to
+   *  Jiv at construction so its animation driver can resolve named
+   *  `@Animation Pulse` applications. */
+  get Animations(): ReadonlyMap<string, AnimationDefinition> {
+    return this._animations;
+  }
+
   /** Add (or replace) a parsed sheet's contents (+ its var declarations)
    *  in this registry. */
   Merge = (parsed: ParsedJss | Stylesheet): void => {
@@ -77,11 +96,17 @@ export class JssRegistry {
     const isParsed = parsed !== null && typeof parsed === 'object' && 'Sheet' in parsed && 'Vars' in parsed;
     const sheet: Stylesheet = isParsed ? (parsed as ParsedJss).Sheet : (parsed as Stylesheet);
     const vars: Record<string, string> = isParsed ? (parsed as ParsedJss).Vars : {};
+    const anims: Record<string, AnimationDefinition> = isParsed && 'Animations' in (parsed as ParsedJss)
+      ? (parsed as ParsedJss).Animations
+      : {};
     for (const [name, ruleset] of Object.entries(sheet)) {
       this._rules.set(name, ruleset);
     }
     for (const [name, value] of Object.entries(vars)) {
       this._vars.set(name, value);
+    }
+    for (const [name, def] of Object.entries(anims)) {
+      this._animations.set(name, def);
     }
     this._version.update((v) => v + 1);
   };
@@ -149,6 +174,7 @@ export class JssRegistry {
       if (r.FocusTextStyle)    out.FocusTextStyle    = { ...out.FocusTextStyle,    ...r.FocusTextStyle };
       if (r.DisabledTextStyle) out.DisabledTextStyle = { ...out.DisabledTextStyle, ...r.DisabledTextStyle };
       if (r.Springs)           out.Springs           = { ...out.Springs,           ...r.Springs };
+      if (r.Animations)        out.Animations        = [...(out.Animations ?? []),  ...r.Animations];
     }
     return matched ? out : null;
   };

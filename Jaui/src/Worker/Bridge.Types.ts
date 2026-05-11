@@ -197,6 +197,18 @@ export interface JivApplyOpts {
   FocusTextStyle?: Record<string, unknown> | null;
   DisabledTextStyle?: Record<string, unknown> | null;
   Springs?: Record<string, Record<string, unknown>>;
+  /** `@Animation` applications declared on this Jiv's class. Each entry
+   *  is either a `{ Kind: 'Named', Name }` reference resolved against
+   *  `AnimationTable`, or a `{ Kind: 'Inline', Property, Definition }`
+   *  inline anonymous animation. Both are plain data and survive
+   *  structured-clone unchanged. */
+  Animations?: Array<Record<string, unknown>>;
+  /** Stylesheet-wide named animation definitions keyed by name. Sent on
+   *  every apply for now (small table, deterministic); the worker just
+   *  stashes a reference on the Jiv so its driver can resolve named
+   *  applications. A future optimization could ship this once via a
+   *  separate channel and reference by id. */
+  AnimationTable?: Record<string, Record<string, unknown>>;
   Text?: string | null;
   ImageSrc?: string | null;
   ElementProps?: {

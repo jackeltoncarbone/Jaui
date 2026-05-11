@@ -1,7 +1,13 @@
 import { Spring } from '../Animation/Spring';
 import type { Animatable } from '../Animation/Animation.Manager';
+import { JivAnimationDriver } from '../Animation/Animation.Driver';
+import type {
+  SpringConfig,
+  AnimationApplication,
+  AnimationDefinition,
+} from '../Animation/Animation.Types';
 import type { Jiv } from './Jiv';
-import type { JivRenderStyle } from './Jiv.Types';
+import type { JivStyle, JivRenderStyle } from './Jiv.Types';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 
 /**
@@ -143,6 +149,13 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
 
 export class JivStyleAnimator implements Animatable {
   private _springs: Spring[];
+  /** Per-binding spring config snapshot captured at construction or after
+   *  a RetuneSprings() call. Tick() restores from here whenever no active
+   *  @Animation is imposing an Ease override on the property. Same shape
+   *  as Spring's mutable fields so a Linear / Spring(...) Ease can stomp
+   *  in-place and Tick can restore on the next frame. */
+  private _baseConfigs: Array<{ Stiffness: number; Damping: number; Mass: number }>;
+  private _animDriver = new JivAnimationDriver();
 
   constructor(private _jiv: Jiv) {
     // Resolve the initial target under the seed ctx (or the Jiv's ctx if
@@ -150,16 +163,58 @@ export class JivStyleAnimator implements Animatable {
     // initial values so there's no entry animation.
     const target = ResolveStyle(_jiv.Style, this._ctx());
     const overrides = _jiv.Springs;
+    this._baseConfigs = [];
     this._springs = BINDINGS.map(([prop, get]) => {
-      const cfg = overrides?.[prop];
-      return new Spring(
-        get(target),
-        cfg?.Stiffness ?? DEFAULT_STIFFNESS,
-        cfg?.Damping ?? DEFAULT_DAMPING,
-        cfg?.Mass ?? DEFAULT_MASS,
-      );
+      const cfg = _resolveSpringConfig(overrides, prop);
+      this._baseConfigs.push(cfg);
+      return new Spring(get(target), cfg.Stiffness, cfg.Damping, cfg.Mass);
     });
+    // Wire any @Animation declared on the Jiv into the driver. The Jiv
+    // carries both the applications and the stylesheet-wide animation
+    // table (named applications resolve against it).
+    if (_jiv.Animations && _jiv.Animations.length > 0) {
+      this._animDriver.Apply(_jiv.Animations, _jiv.AnimationTable ?? {});
+    }
+    // Back-ref so the worker registry can reach this animator on re-apply
+    // without going through Canvas. Set late so the Jiv carries its own
+    // StyleAnimator reference for class-swap path (`_applyOpts`).
+    _jiv.StyleAnimator = this;
   }
+
+  /** Re-tune the per-channel springs from a new `Springs` map (e.g. after
+   *  the Jiv's class list changed and the registry re-emitted the resolved
+   *  spring overrides). Updates `_baseConfigs` AND the live spring values
+   *  so a stale @Animation Ease override is not preserved across the swap.
+   *  Spec: per-class @Spring/@Transition wins over Animation default. */
+  RetuneSprings = (overrides: Record<string, Partial<SpringConfig>> | null): void => {
+    for (let i = 0; i < BINDINGS.length; i++) {
+      const prop = BINDINGS[i][0];
+      const cfg = _resolveSpringConfig(overrides, prop);
+      this._baseConfigs[i] = cfg;
+      const s = this._springs[i];
+      s.Stiffness = cfg.Stiffness;
+      s.Damping = cfg.Damping;
+      s.Mass = cfg.Mass;
+    }
+  };
+
+  /** Re-apply the animation set for this Jiv. Called by the worker
+   *  registry when a class swap brings in new `@Animation` declarations
+   *  (or removes existing ones). Phase resets to 0 for every animation so
+   *  newly-applied loops start from the beginning rather than picking up
+   *  a stale offset. */
+  ReapplyAnimations = (
+    apps: AnimationApplication[] | null,
+    table: Record<string, AnimationDefinition> | null,
+  ): void => {
+    this._animDriver.Apply(apps ?? [], table ?? {});
+  };
+
+  /** True iff this animator currently has active @Animation declarations.
+   *  Used by the registry to decide whether a kick is needed after a
+   *  re-apply (the Animation.Manager only ticks when something requests
+   *  it; turning animations on at runtime needs a manual nudge). */
+  get HasAnimations(): boolean { return this._animDriver.HasAnimations; }
 
   /** Extend the Jiv's layout context with current Presence spring state so
    *  style expressions like `OffsetY: -20 * (1 - Presence)` resolve against
@@ -194,15 +249,52 @@ export class JivStyleAnimator implements Animatable {
   };
 
   Tick = (dt: number): boolean => {
-    const target = ResolveStyle(this._jiv.EffectiveStyle(), this._ctx());
+    // Advance any @Animation drivers first so the patched style flows
+    // through ResolveStyle alongside the static base. The driver's patch
+    // is a Record<string, string> of source-level property values that
+    // shadow the matching keys on EffectiveStyle; springs then chase the
+    // moving target as usual.
+    let driverActive = false;
+    let patched = this._jiv.EffectiveStyle();
+    const hasAnims = this._animDriver.HasAnimations;
+    if (hasAnims) {
+      driverActive = this._animDriver.Tick(dt);
+      const patch = this._animDriver.Patch();
+      patched = _applyStylePatch(patched, patch);
+    }
+    const target = ResolveStyle(patched, this._ctx());
     const render = this._jiv.RenderStyle;
     _copyNonAnimated(render, target);
-    let active = false;
+    let springActive = false;
     for (let i = 0; i < BINDINGS.length; i++) {
-      const [, get, set] = BINDINGS[i];
+      const [prop, get, set] = BINDINGS[i];
       const s = this._springs[i];
+      // Ease override: an active @Animation driving this property can
+      // dictate its own interpolation style — Linear snaps each tick
+      // (true metronome), a Spring(...) config retunes this channel for
+      // the animation's lifetime, and null falls back to the class's
+      // per-property @Spring / @Transition tuning captured in _baseConfigs.
+      const ease = hasAnims ? this._animDriver.EaseFor(prop) : null;
       s.Target = get(target);
-      if (s.Step(dt)) active = true;
+      if (ease === 'Linear') {
+        s.Snap();
+      } else {
+        const base = this._baseConfigs[i];
+        if (ease) {
+          s.Stiffness = ease.Stiffness;
+          s.Damping = ease.Damping;
+          s.Mass = ease.Mass;
+        } else if (s.Stiffness !== base.Stiffness || s.Damping !== base.Damping || s.Mass !== base.Mass) {
+          // Restore the class-declared tuning once the animation imposing
+          // a Spring(...) Ease clears (or moves Done — EaseFor returns
+          // null for Done). The equality guard avoids touching the spring
+          // when nothing changed, the common case.
+          s.Stiffness = base.Stiffness;
+          s.Damping = base.Damping;
+          s.Mass = base.Mass;
+        }
+        if (s.Step(dt)) springActive = true;
+      }
       set(render, s.Value);
     }
 
@@ -213,6 +305,43 @@ export class JivStyleAnimator implements Animatable {
       render.Material = t > 0.01 ? 'LiquidGlass' : 'None';
     }
 
-    return active;
+    return springActive || driverActive;
   };
 }
+
+/** Resolve a per-property spring config against the overrides map. Falls
+ *  back to `@Spring *` (universal default) before the global defaults so
+ *  authors can write one universal block instead of declaring every
+ *  property explicitly. Spec: every animatable property gets the same
+ *  config unless a per-property `@Spring`/`@Transition` overrides it. */
+const _resolveSpringConfig = (
+  overrides: Record<string, Partial<SpringConfig>> | null | undefined,
+  prop: string,
+): { Stiffness: number; Damping: number; Mass: number } => {
+  const own = overrides?.[prop];
+  const universal = overrides?.['*'];
+  return {
+    Stiffness: own?.Stiffness ?? universal?.Stiffness ?? DEFAULT_STIFFNESS,
+    Damping: own?.Damping ?? universal?.Damping ?? DEFAULT_DAMPING,
+    Mass: own?.Mass ?? universal?.Mass ?? DEFAULT_MASS,
+  };
+};
+
+/** Layer a `Record<string, string>` patch from an active @Animation on
+ *  top of a JivStyle. The patch's keys are source-level property names;
+ *  we shallow-merge into a new style object so the driver doesn't mutate
+ *  the Jiv's authored Style. Properties that don't live in the Style
+ *  slot (Layout / TextStyle / ChildLayout) are silently dropped at this
+ *  layer; the v1 driver targets Style-slot animations only. */
+const _applyStylePatch = (base: JivStyle, patch: Record<string, string>): JivStyle => {
+  let merged: JivStyle | null = null;
+  for (const k of Object.keys(patch)) {
+    // Only fields that exist in JivStyle are merged. Unknown keys are
+    // ignored rather than throwing so future cross-slot animation
+    // support can land additively.
+    if (!(k in base)) continue;
+    if (merged === null) merged = { ...base };
+    (merged as unknown as Record<string, unknown>)[k] = patch[k];
+  }
+  return merged ?? base;
+};
