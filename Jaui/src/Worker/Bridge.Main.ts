@@ -287,6 +287,31 @@ export class MainBridge {
         }
       }
     }
+    // Defensive rebase against the canvas's actually-rendered size. _sendInit
+    // snapshots `getBoundingClientRect()` synchronously in the MainBridge
+    // constructor — that fires while Angular is still in its initial CD pass,
+    // so the canvas's parent-relative percent dimensions may not have flowed
+    // through layout yet. Pre-worker-migration this was hidden by the slow
+    // Jaui worker boot (~6 seconds of import + parse gave the page time to
+    // settle, and the ResizeObserver's first callback corrected the dims
+    // before the worker became ready). Post-Reality-lazy-load the worker is
+    // ready in ~500ms — well before ResizeObserver fires its first delta —
+    // and if the canvas's CSS size never *changes* after init the RO never
+    // fires at all, so the worker stays at the stale init dims and the page
+    // renders as if the viewport were the size captured at construction.
+    // One post-ready `resize` with the live `getBoundingClientRect` brings
+    // the worker to the actually-rendered size — cheap (single message) and
+    // idempotent (a same-size RO callback would just no-op the second one).
+    requestAnimationFrame(() => {
+      const rect = this.Canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        this.Worker.postMessage({
+          T: 'resize',
+          Width: rect.width,
+          Height: rect.height,
+        });
+      }
+    });
   };
 
   private _onCursor = (m: W2M_Cursor): void => {
