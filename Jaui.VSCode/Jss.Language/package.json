@@ -1,0 +1,22 @@
+{
+  "name": "jss-language",
+  "displayName": "JSS Language",
+  "description": "Syntax highlighting for Jaui Style Sheets (.jss)",
+  "version": "0.1.0",
+  "publisher": "jaui",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [{
+      "id": "jss",
+      "aliases": ["JSS", "Jaui Style Sheet"],
+      "extensions": [".jss"],
+      "configuration": "./Jss.Language.Configuration.json"
+    }],
+    "grammars": [{
+      "language": "jss",
+      "scopeName": "source.jss",
+      "path": "./Jss.TmLanguage.json"
+    }]
+  }
+}

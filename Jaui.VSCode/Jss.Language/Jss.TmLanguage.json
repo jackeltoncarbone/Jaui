@@ -1,0 +1,351 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "JSS",
+  "scopeName": "source.jss",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#variable-declaration" },
+    { "include": "#animation-root-block" },
+    { "include": "#at-rule-block" },
+    { "include": "#selector-block" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.jss",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.jss",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+
+    "variable-declaration": {
+      "match": "^\\s*(@[A-Za-z_][A-Za-z0-9_]*)\\s*(:)\\s*(.*)$",
+      "captures": {
+        "1": { "name": "variable.other.jss" },
+        "2": { "name": "punctuation.separator.key-value.jss" },
+        "3": {
+          "patterns": [ { "include": "#value" } ]
+        }
+      }
+    },
+
+    "animation-root-block": {
+      "begin": "(@Animation)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\{)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.animation.jss" },
+        "2": { "name": "entity.name.function.animation.jss" }
+      },
+      "end": "(?<=\\})",
+      "patterns": [
+        { "include": "#animation-body" }
+      ]
+    },
+
+    "at-rule-block": {
+      "patterns": [
+        {
+          "begin": "(@Spring)\\s+(\\*|[A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\{)",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.spring.jss" },
+            "2": { "name": "variable.parameter.spring-target.jss" }
+          },
+          "end": "(?<=\\})",
+          "patterns": [ { "include": "#spring-body" } ]
+        },
+        {
+          "begin": "(@Transition)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\{)",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.transition.jss" },
+            "2": { "name": "variable.parameter.transition-target.jss" }
+          },
+          "end": "(?<=\\})",
+          "patterns": [ { "include": "#transition-body" } ]
+        },
+        {
+          "begin": "(@Animation)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\{)",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.animation.jss" },
+            "2": { "name": "variable.parameter.animation-property.jss" }
+          },
+          "end": "(?<=\\})",
+          "patterns": [ { "include": "#animation-body" } ]
+        },
+        {
+          "match": "(@Animation)\\s+([A-Za-z_][A-Za-z0-9_]*(?:\\s*,\\s*[A-Za-z_][A-Za-z0-9_]*)*)\\s*(?=$|//|\\})",
+          "captures": {
+            "1": { "name": "keyword.control.animation.jss" },
+            "2": {
+              "patterns": [
+                { "name": "entity.name.function.animation-ref.jss", "match": "[A-Za-z_][A-Za-z0-9_]*" },
+                { "name": "punctuation.separator.comma.jss", "match": "," }
+              ]
+            }
+          }
+        },
+        {
+          "begin": "(@[A-Za-z_][A-Za-z0-9_]*)(?:\\s+([A-Za-z_][A-Za-z0-9_]*))?\\s*(?=\\{)",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.at-rule.jss" },
+            "2": { "name": "variable.parameter.jss" }
+          },
+          "end": "(?<=\\})",
+          "patterns": [ { "include": "#block" } ]
+        }
+      ]
+    },
+
+    "selector-block": {
+      "begin": "([A-Z][A-Za-z0-9_]*)(?:\\s*(:)\\s*([A-Z][A-Za-z0-9_]*(?:\\s*,\\s*[A-Z][A-Za-z0-9_]*)*))?\\s*(?=\\{)",
+      "beginCaptures": {
+        "1": { "name": "entity.name.type.class.jss" },
+        "2": { "name": "punctuation.separator.inheritance.jss" },
+        "3": {
+          "patterns": [
+            { "name": "entity.other.inherited-class.jss", "match": "[A-Z][A-Za-z0-9_]*" },
+            { "name": "punctuation.separator.comma.jss", "match": "," }
+          ]
+        }
+      },
+      "end": "(?<=\\})",
+      "patterns": [
+        { "include": "#block" }
+      ]
+    },
+
+    "block": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.block.begin.jss" } },
+      "endCaptures":   { "0": { "name": "punctuation.section.block.end.jss" } },
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#animation-root-block" },
+        { "include": "#at-rule-block" },
+        { "include": "#selector-block" },
+        { "include": "#property" }
+      ]
+    },
+
+    "spring-body": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.block.begin.jss" } },
+      "endCaptures":   { "0": { "name": "punctuation.section.block.end.jss" } },
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "match": "\\b(Stiffness|Damping|Mass)\\b\\s*(:)\\s*([^,;\\n}]*)",
+          "captures": {
+            "1": { "name": "support.type.spring-key.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "patterns": [ { "include": "#value" } ] }
+          }
+        },
+        { "name": "punctuation.separator.comma.jss", "match": "," }
+      ]
+    },
+
+    "transition-body": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.block.begin.jss" } },
+      "endCaptures":   { "0": { "name": "punctuation.section.block.end.jss" } },
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "match": "\\b(Duration)\\b\\s*(:)\\s*([^,;\\n}]*)",
+          "captures": {
+            "1": { "name": "support.type.transition-key.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "patterns": [ { "include": "#value" } ] }
+          }
+        },
+        {
+          "match": "\\b(Easing)\\b\\s*(:)\\s*(Linear|EaseOut|EaseInOut|Spring)\\b",
+          "captures": {
+            "1": { "name": "support.type.transition-key.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "name": "support.constant.easing.jss" }
+          }
+        },
+        { "name": "punctuation.separator.comma.jss", "match": "," }
+      ]
+    },
+
+    "animation-body": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.block.begin.jss" } },
+      "endCaptures":   { "0": { "name": "punctuation.section.block.end.jss" } },
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "match": "\\b(Duration)\\b\\s*(:)\\s*([^,;\\n}]*)",
+          "captures": {
+            "1": { "name": "support.type.animation-key.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "patterns": [ { "include": "#value" } ] }
+          }
+        },
+        {
+          "match": "\\b(Loop)\\b\\s*(:)\\s*(Once|Repeat|Mirror)\\b",
+          "captures": {
+            "1": { "name": "support.type.animation-key.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "name": "support.constant.loop-mode.jss" }
+          }
+        },
+        {
+          "match": "\\b(Ease)\\b\\s*(:)\\s*(Linear)\\b",
+          "captures": {
+            "1": { "name": "support.type.animation-key.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "name": "support.constant.easing.jss" }
+          }
+        },
+        {
+          "begin": "\\b(Ease)\\b\\s*(:)\\s*(Spring)\\s*(\\()",
+          "beginCaptures": {
+            "1": { "name": "support.type.animation-key.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "name": "support.function.spring.jss" },
+            "4": { "name": "punctuation.section.parens.begin.jss" }
+          },
+          "end": "\\)",
+          "endCaptures": { "0": { "name": "punctuation.section.parens.end.jss" } },
+          "patterns": [
+            {
+              "match": "\\b(Stiffness|Damping|Mass)\\b\\s*(:)\\s*([^,)]*)",
+              "captures": {
+                "1": { "name": "support.type.spring-key.jss" },
+                "2": { "name": "punctuation.separator.key-value.jss" },
+                "3": { "patterns": [ { "include": "#value" } ] }
+              }
+            },
+            { "name": "punctuation.separator.comma.jss", "match": "," }
+          ]
+        },
+        {
+          "match": "\\b(From|To)\\b\\s*(:)\\s*([^,;\\n}]*)",
+          "captures": {
+            "1": { "name": "support.type.animation-key.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "patterns": [ { "include": "#value" } ] }
+          }
+        },
+        {
+          "match": "(-?\\d+(?:\\.\\d+)?%)\\s*(:)\\s*([^,;\\n}{]*)",
+          "captures": {
+            "1": { "name": "constant.numeric.percent-stop.jss" },
+            "2": { "name": "punctuation.separator.key-value.jss" },
+            "3": { "patterns": [ { "include": "#value" } ] }
+          }
+        },
+        {
+          "begin": "(-?\\d+(?:\\.\\d+)?%)\\s*(?=\\{)",
+          "beginCaptures": {
+            "1": { "name": "constant.numeric.percent-stop.jss" }
+          },
+          "end": "(?<=\\})",
+          "patterns": [ { "include": "#block" } ]
+        },
+        { "name": "punctuation.separator.comma.jss", "match": "," }
+      ]
+    },
+
+    "property": {
+      "match": "([A-Z][A-Za-z0-9_]*)\\s*(:)\\s*([^\\n}]*)",
+      "captures": {
+        "1": { "name": "support.type.property-name.jss" },
+        "2": { "name": "punctuation.separator.key-value.jss" },
+        "3": {
+          "patterns": [ { "include": "#value" } ]
+        }
+      }
+    },
+
+    "value": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#string" },
+        { "include": "#function" },
+        { "include": "#hex-color" },
+        { "include": "#number-with-unit" },
+        { "include": "#number" },
+        { "include": "#variable-ref" },
+        { "include": "#boolean" },
+        { "include": "#enum-value" }
+      ]
+    },
+
+    "string": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.jss",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [ { "name": "constant.character.escape.jss", "match": "\\\\." } ]
+        },
+        {
+          "name": "string.quoted.single.jss",
+          "begin": "'",
+          "end": "'",
+          "patterns": [ { "name": "constant.character.escape.jss", "match": "\\\\." } ]
+        }
+      ]
+    },
+
+    "function": {
+      "begin": "([a-zA-Z_][a-zA-Z0-9_-]*)\\s*(\\()",
+      "beginCaptures": {
+        "1": { "name": "support.function.jss" },
+        "2": { "name": "punctuation.section.parens.begin.jss" }
+      },
+      "end": "\\)",
+      "endCaptures": { "0": { "name": "punctuation.section.parens.end.jss" } },
+      "patterns": [
+        { "include": "#value" },
+        { "name": "punctuation.separator.comma.jss", "match": "," }
+      ]
+    },
+
+    "hex-color": {
+      "name": "constant.other.color.rgb-value.hex.jss",
+      "match": "#[0-9a-fA-F]{3,8}\\b"
+    },
+
+    "number-with-unit": {
+      "match": "(-?\\d+(?:\\.\\d+)?)(pt|px|em|rem|ms|s|%|deg|rad|turn|vh|vw|fr)\\b",
+      "captures": {
+        "1": { "name": "constant.numeric.jss" },
+        "2": { "name": "keyword.other.unit.jss" }
+      }
+    },
+
+    "number": {
+      "name": "constant.numeric.jss",
+      "match": "-?\\d+(?:\\.\\d+)?\\b"
+    },
+
+    "variable-ref": {
+      "name": "variable.other.jss",
+      "match": "@[A-Za-z_][A-Za-z0-9_]*"
+    },
+
+    "boolean": {
+      "name": "constant.language.boolean.jss",
+      "match": "\\b(true|false)\\b"
+    },
+
+    "enum-value": {
+      "name": "support.constant.jss",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+    }
+  }
+}
