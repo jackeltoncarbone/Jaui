@@ -1,6 +1,6 @@
 import {
   ChangeDetectionStrategy, Component, ElementRef, OnDestroy,
-  computed, effect, inject, input, model, output, signal, viewChild,
+  computed, effect, inject, input, model, output, signal, viewChild, viewChildren,
 } from '@angular/core';
 import { Jaui } from '../Jaui/Jaui';
 import { Jiv } from '../Jiv/Jiv';
@@ -84,6 +84,7 @@ interface RenderedSegment extends LayoutSegmentInput {
           }
           @for (segment of RenderedSegments(); track $index) {
             <jext
+              #segment
               [class]="segmentClass(segment)"
               [text]="segment.Text"
               [textStyle]="segmentTextStyle(segment)" />
@@ -186,6 +187,13 @@ export class Jinput implements OnDestroy {
   private readonly _jaui = inject(Jaui, { optional: true });
   private readonly _hiddenInput = viewChild<ElementRef<HTMLTextAreaElement>>('hiddenInput');
   private readonly _wrap = viewChild<Jiv>('wrap');
+  // Text segments need SnapLayout = true so that paste / token-driven
+  // re-segmentation lands at the final X/Y instantly. Without this, each
+  // segment Jiv's JivAnimator springs from its previous layout slot to its
+  // new one over ~0.5s, making segments visibly drift between rows
+  // (Reconcile content is already a snap at the per-word level; the segment
+  // Jiv container itself must snap too).
+  private readonly _segments = viewChildren<Jiv>('segment');
 
   // ── Internal state ──────────────────────────────────────────────
   private readonly _selStart = signal(0);
@@ -351,9 +359,29 @@ export class Jinput implements OnDestroy {
     // signal's default and text either renders un-wrapped (initial value
     // too large) or one-char-per-line (initial value too small) until a
     // text change happens to retrigger the effect.
+    //
+    // Subscribe the wrap Jiv to per-frame rect snapshots the first frame
+    // it's available — JivHandle geometry reads return 0 unless WatchRect
+    // is on, so without this the rAF retries above always see Width: 0
+    // and we fall back to the default WrapWidth (600px), which makes long
+    // prompts wrap at the wrong column.
     effect(() => {
       this.RenderedSegments();
+      const wrap = this._wrap();
+      if (wrap && !this._wrapWatched) {
+        wrap.Node.WatchRect(true);
+        this._wrapWatched = true;
+      }
       this._scheduleWrapRead();
+    });
+
+    // Stamp SnapLayout on every segment Jiv as soon as it mounts. New
+    // jext instances appear when @for grows; reused ones already had the
+    // flag set from a prior tick (set is idempotent on the handle).
+    effect(() => {
+      for (const seg of this._segments()) {
+        if (!seg.Node.SnapLayout) seg.Node.SnapLayout = true;
+      }
     });
 
     document.addEventListener('selectionchange', this._onSelectionChange);
@@ -372,9 +400,14 @@ export class Jinput implements OnDestroy {
     if (this._blinkTimer) clearInterval(this._blinkTimer);
     this._clearLongPressTimer();
     if (this._wrapReadFrame !== null) cancelAnimationFrame(this._wrapReadFrame);
+    if (this._wrapWatched) {
+      this._wrap()?.Node.WatchRect(false);
+      this._wrapWatched = false;
+    }
   }
 
   private _wrapReadFrame: number | null = null;
+  private _wrapWatched = false;
   private _scheduleWrapRead = (attempt: number = 0): void => {
     if (this._wrapReadFrame !== null) return;
     this._wrapReadFrame = requestAnimationFrame(() => {
