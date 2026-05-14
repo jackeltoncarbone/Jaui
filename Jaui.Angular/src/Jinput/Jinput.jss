@@ -52,8 +52,12 @@ JinputCaret {
   Background: rgba(255, 255, 255, 0.95)
 }
 
+// Visual matches Selection.Manager's DEFAULT_SELECTION_STYLE so plain-text
+// and input selection rects read as the same primitive. Per-line rect
+// position / size are mutated in TS each frame.
 JinputSelectionRect {
-  // Soft Apple-style rounded corners — matches macOS / iOS text selection.
   Background: rgba(120, 170, 255, 0.32)
-  BorderRadius: 4pt
+  BorderRadius: 8pt
+  @Transition Width  { Duration: 90ms }
+  @Transition Height { Duration: 90ms }
 }

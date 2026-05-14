@@ -291,10 +291,24 @@ export class Jinput implements OnDestroy {
     return CharPosition(this._LaidOutSegments(), this._selStart(), this._Metrics(), this._measureWidth);
   });
 
+  // Small halo around each selection line. Shared with Selection.Manager
+  // (see SELECTION_PAD_X / SELECTION_PAD_Y there) so plain-text and input
+  // selection halos have identical visual padding.
+  private readonly _SELECTION_PAD_X = 3;
+  private readonly _SELECTION_PAD_Y = 2;
+
   readonly SelectionRects = computed(() => {
     const a = Math.min(this._selStart(), this._selEnd());
     const b = Math.max(this._selStart(), this._selEnd());
-    return RangeRects(this._LaidOutSegments(), a, b, this._Metrics(), this._measureWidth);
+    const raw = RangeRects(this._LaidOutSegments(), a, b, this._Metrics(), this._measureWidth);
+    const px = this._SELECTION_PAD_X;
+    const py = this._SELECTION_PAD_Y;
+    return raw.map(r => ({
+      x: r.x - px,
+      y: r.y - py,
+      width: r.width + px * 2,
+      height: r.height + py * 2,
+    }));
   });
 
   // Inline TextStyle on every rendered segment so the visual `<jext>`

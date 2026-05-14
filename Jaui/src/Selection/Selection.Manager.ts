@@ -51,8 +51,14 @@ export interface SelectionRange {
  *  primitive. Override per-text-Jiv via Jiv.TextSelectionStyle. */
 const DEFAULT_SELECTION_STYLE: Partial<JivStyle> = {
   Background: 'rgba(120, 170, 255, 0.32)',
-  BorderRadius: '4pt',
+  BorderRadius: '8pt',
 };
+
+/** Halo padding around each selected line. Mirrored in Jinput.SelectionRects
+ *  so the same N-px breathing room shows up in both the input rect and the
+ *  plain-text rect. */
+const SELECTION_PAD_X = 3;
+const SELECTION_PAD_Y = 2;
 
 export class SelectionManager implements Animatable {
   private _selection: SelectionRange | null = null;
@@ -509,10 +515,8 @@ export class SelectionManager implements Animatable {
     }
     const yOff = (contentH - totalH) / 2;
 
-    // Tight rect — no halo padding, matching jinput's per-char rect so the
-    // bounding box across both selection mechanisms reads the same.
-    const padX = 0;
-    const padY = 0;
+    const padX = SELECTION_PAD_X;
+    const padY = SELECTION_PAD_Y;
 
     const rectsPerLine = Array.from(lineMap.values()).sort((a, b) => a.y - b.y);
     const existing = this._highlights.get(textJiv) ?? [];
