@@ -31,15 +31,12 @@ export interface SelectionRange {
   ExtentWord: number;
 }
 
-/** iOS-like selection color — subtle, readable on any backdrop. Border
- *  radius is set huge so the shape always clamps into PILL MODE via the
- *  master SDF — ends up as Show Studio's smooth Bezier-pill curve rather
- *  than a chunky rounded-rect. Override any or all via Jiv.TextSelectionStyle
- *  — Material:'LiquidGlass' works for glassy selection, BorderColor for an
- *  outline, Thickness for a bevel, custom BorderRadius to force a rect look. */
+/** Matches jinput's selection rect (Jinput.jss → JinputSelectionRect) so
+ *  general text selection and text-input selection read as the same
+ *  primitive. Override per-text-Jiv via Jiv.TextSelectionStyle. */
 const DEFAULT_SELECTION_STYLE: Partial<JivStyle> = {
-  Background: 'rgba(84, 143, 250, 0.38)',
-  BorderRadius: '9999',
+  Background: 'rgba(120, 170, 255, 0.32)',
+  BorderRadius: '4pt',
 };
 
 export class SelectionManager implements Animatable {
@@ -187,6 +184,41 @@ export class SelectionManager implements Animatable {
     const anim = this._getAnimator(textJiv);
     if (!anim || anim.Words.length === 0) return [0, 0];
     return [0, anim.Words.length - 1];
+  };
+
+  /** Plain-text representation of the current selection. Spans all Jivs
+   *  between the (normalized) anchor and extent; words on the same Jiv join
+   *  with a single space, Jiv-boundary joins use a newline. Returns '' when
+   *  there's no selection. */
+  GetSelectedText = (root: Jiv): string => {
+    const sel = this._selection;
+    if (!sel) return '';
+    const order = this._collectTextJivs(root);
+    const idxOf = new Map<Jiv, number>();
+    for (let i = 0; i < order.length; i++) idxOf.set(order[i], i);
+    const aIdx = idxOf.get(sel.AnchorJiv);
+    const eIdx = idxOf.get(sel.ExtentJiv);
+    if (aIdx === undefined || eIdx === undefined) return '';
+    let loIdx: number, hiIdx: number, loWord: number, hiWord: number;
+    if (aIdx < eIdx || (aIdx === eIdx && sel.AnchorWord <= sel.ExtentWord)) {
+      loIdx = aIdx; hiIdx = eIdx; loWord = sel.AnchorWord; hiWord = sel.ExtentWord;
+    } else {
+      loIdx = eIdx; hiIdx = aIdx; loWord = sel.ExtentWord; hiWord = sel.AnchorWord;
+    }
+    const lines: string[] = [];
+    for (let i = loIdx; i <= hiIdx; i++) {
+      const j = order[i];
+      const anim = this._getAnimator(j);
+      if (!anim || anim.Words.length === 0) continue;
+      const sWord = i === loIdx ? loWord : 0;
+      const eWord = i === hiIdx ? hiWord : anim.Words.length - 1;
+      const lo = Math.max(0, Math.min(sWord, eWord));
+      const hi = Math.min(anim.Words.length - 1, Math.max(sWord, eWord));
+      const words: string[] = [];
+      for (let k = lo; k <= hi; k++) words.push(anim.Words[k].Content);
+      lines.push(words.join(' '));
+    }
+    return lines.join('\n');
   };
 
   /** Map a canvas-space point to a word index within a text Jiv. Always
@@ -374,11 +406,10 @@ export class SelectionManager implements Animatable {
     }
     const yOff = (contentH - totalH) / 2;
 
-    // Halo around each selected line — extends beyond the glyph bounds so
-    // the pill ends have room to curve and the selection reads as a
-    // highlight surround, not a skin-tight wrap. Generous by default.
-    const padX = 20;
-    const padY = 7;
+    // Tight rect — no halo padding, matching jinput's per-char rect so the
+    // bounding box across both selection mechanisms reads the same.
+    const padX = 0;
+    const padY = 0;
 
     const rectsPerLine = Array.from(lineMap.values()).sort((a, b) => a.y - b.y);
     const existing = this._highlights.get(textJiv) ?? [];

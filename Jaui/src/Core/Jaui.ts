@@ -2025,6 +2025,16 @@ export class Canvas implements DirtyTracker {
           this._animationManager.Kick();
           e.preventDefault();
         }
+      } else if (meta && (e.key === 'c' || e.key === 'C')) {
+        // Copy the current selection across any Jiv tree to the clipboard.
+        // Mirrors what jinput's hidden <textarea> gives focused text inputs;
+        // here we cover the case of selection across plain text Jivs that
+        // never had a textarea behind them.
+        const text = selMgr.GetSelectedText(this.Root);
+        if (text && typeof navigator !== 'undefined' && navigator.clipboard) {
+          navigator.clipboard.writeText(text).catch(() => {/* swallow */});
+          e.preventDefault();
+        }
       } else if (e.key === 'Escape') {
         if (selMgr.Current) {
           selMgr.Set(null, this.Root);
@@ -2543,11 +2553,17 @@ export class Jaui {
 // (so a disabled button kills its own pointer cursor); otherwise the first
 // non-Default Cursor wins, mimicking CSS cursor inheritance so children of
 // a button automatically pick up the button's pointer.
+//
+// Fallback: if no explicit Cursor is set anywhere in the chain AND the hit
+// Jiv carries text, return the I-beam — text content reads as selectable by
+// default. Any ancestor with an explicit Cursor (e.g. Pointer on a link)
+// still wins via the loop above.
 const _resolveCursor = (hit: Jiv | null): string => {
   for (let n: Jiv | null = hit; n; n = n.Parent as Jiv | null) {
     if (n.Disabled) return '';
     if (n.Cursor !== 'Default') return _CURSOR_CSS[n.Cursor];
   }
+  if (hit && hit.Text !== null) return _CURSOR_CSS.Text;
   return '';
 };
 
