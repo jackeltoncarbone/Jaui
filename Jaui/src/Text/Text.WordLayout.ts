@@ -15,6 +15,10 @@ export interface WordPosition {
   Height: number;
   /** Line index this word belongs to. */
   Line: number;
+  /** Inclusive char offset into the source content where this word starts. */
+  CharStart: number;
+  /** Exclusive char offset into the source content where this word ends. */
+  CharEnd: number;
 }
 
 // Module-level shared measurement context. OffscreenCanvas works on main
@@ -59,6 +63,19 @@ export const Tokenize = (content: string): string[] => {
   return content.split(/\s+/).filter((w) => w.length > 0);
 };
 
+/** Same as Tokenize, but also reports each word's char range in the
+ *  original content — used by per-char selection so a char index can be
+ *  mapped back to (word, offset-within-word). */
+export const TokenizeWithOffsets = (content: string): { Content: string; CharStart: number; CharEnd: number }[] => {
+  const out: { Content: string; CharStart: number; CharEnd: number }[] = [];
+  const re = /\S+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    out.push({ Content: m[0], CharStart: m.index, CharEnd: m.index + m[0].length });
+  }
+  return out;
+};
+
 /**
  * Compute per-word positions given content + style + optional wrap width.
  * Positions are relative to the text container's content box (0,0 = top-left).
@@ -82,7 +99,7 @@ export const LayoutWords = (
   const spaceWidth = rawSpace > 0 && Number.isFinite(rawSpace)
     ? rawSpace
     : style.FontSize * 0.25;
-  const words = Tokenize(content);
+  const words = TokenizeWithOffsets(content);
   if (words.length === 0) return [];
 
   // Pass 1: lay out flush-left, recording word metrics + line groupings
@@ -94,23 +111,18 @@ export const LayoutWords = (
   let currentLine = 0;
 
   for (let i = 0; i < words.length; i++) {
-    const word = words[i];
+    const tok = words[i];
+    const word = tok.Content;
     const w = c.measureText(word).width;
 
     if (maxWidth !== null && currentX > 0 && currentX + w > maxWidth) {
-      // Finalize previous line
       lineRanges.push({ start: lineStart, end: i - 1, width: currentX - spaceWidth });
-      // Wrap
       lineStart = i;
       currentX = 0;
       currentY += lineHeight;
       currentLine++;
     }
 
-    // MaxLines clip: stop laying out once we've wrapped past the cap, so
-    // long-text labels don't render N extra lines of glyphs through whatever
-    // sits below them. Without this, MaxLines only sized the layout box —
-    // the renderer kept drawing every word.
     if (style.MaxLines !== null && currentLine >= style.MaxLines) break;
 
     positions.push({
@@ -120,6 +132,8 @@ export const LayoutWords = (
       Width: w,
       Height: lineHeight,
       Line: currentLine,
+      CharStart: tok.CharStart,
+      CharEnd: tok.CharEnd,
     });
 
     currentX += w + spaceWidth;

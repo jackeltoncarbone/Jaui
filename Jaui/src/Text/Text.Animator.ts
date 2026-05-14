@@ -24,6 +24,10 @@ export interface AnimatedWord {
   Height: number;          // CSS px (line height)
   TargetX: number;
   TargetY: number;
+  /** Inclusive char offset into the TextAnimator's source content. */
+  CharStart: number;
+  /** Exclusive char offset into the TextAnimator's source content. */
+  CharEnd: number;
   SpringX: Spring;
   SpringY: Spring;
   Opacity: Spring;         // fade in/out
@@ -167,6 +171,8 @@ export class TextAnimator implements Animatable {
       w.Style = _cloneStyle(newStyle);
       w.Width = p.Width;
       w.Height = p.Height;
+      w.CharStart = p.CharStart;
+      w.CharEnd = p.CharEnd;
       if (w.TargetX !== p.X) {
         if (w.SpringX.Set(p.X)) needsKick = true;
         w.TargetX = p.X;
@@ -175,8 +181,6 @@ export class TextAnimator implements Animatable {
         if (w.SpringY.Set(p.Y)) needsKick = true;
         w.TargetY = p.Y;
       }
-      // Snap the scale spring to the old/new ratio so visuals match the
-      // pre-change size, then target 1.0 so it springs to real size.
       w.Scale.Value = ratio;
       w.Scale.Velocity = 0;
       if (w.Scale.Set(1)) needsKick = true;
@@ -186,7 +190,6 @@ export class TextAnimator implements Animatable {
   };
 
   private _reflow = (maxWidth: number | null): boolean => {
-    // Content + style unchanged — just reposition living words to new targets.
     const living = this.Words.filter((w) => !w.Dying);
     const positions = LayoutWords(this._content, this._style, maxWidth);
 
@@ -194,14 +197,10 @@ export class TextAnimator implements Animatable {
     for (let i = 0; i < living.length && i < positions.length; i++) {
       const w = living[i];
       const p = positions[i];
-      // Refresh metrics every reflow — if the last LayoutWords ran before
-      // fonts were ready and returned bad Widths, the reflow that fires
-      // once fonts load is what recovers them.
       w.Width = p.Width;
       w.Height = p.Height;
-      // Spring on reflow (content unchanged) — late layout passes that
-      // recompute the wrap width should ease into the new positions, not
-      // pop. Snapping here makes a delayed reflow read as a glitch.
+      w.CharStart = p.CharStart;
+      w.CharEnd = p.CharEnd;
       if (w.TargetX !== p.X) {
         if (w.SpringX.Set(p.X)) needsKick = true;
         w.TargetX = p.X;
@@ -262,11 +261,8 @@ export class TextAnimator implements Animatable {
         existing.Style = _cloneStyle(newStyle);
         existing.Width = p.Width;
         existing.Height = p.Height;
-        // Snap positions on content reconcile (rather than spring) — the
-        // text content itself is changing, so animating individual matched
-        // words from their old positions to the new layout reads as a
-        // delayed/sliding mess instead of an instant text replacement.
-        // _reflow (width-only changes) keeps the spring path.
+        existing.CharStart = p.CharStart;
+        existing.CharEnd = p.CharEnd;
         if (existing.TargetX !== p.X) {
           existing.SpringX.Set(p.X);
           existing.SpringX.Snap();
@@ -277,12 +273,10 @@ export class TextAnimator implements Animatable {
           existing.SpringY.Snap();
           existing.TargetY = p.Y;
         }
-        // Ensure fully visible in case it was fading
         if (existing.Opacity.Set(1)) needsKick = true;
         if (_setTintForColorChange(existing, oldStyle.Color, newStyle.Color)) needsKick = true;
         reordered.push(existing);
       } else {
-        // New word — fade in at target position
         const word: AnimatedWord = {
           Content: newTokens[i],
           Style: _cloneStyle(newStyle),
@@ -290,6 +284,8 @@ export class TextAnimator implements Animatable {
           Height: p.Height,
           TargetX: p.X,
           TargetY: p.Y,
+          CharStart: p.CharStart,
+          CharEnd: p.CharEnd,
           SpringX: new Spring(p.X, this._stiffness, this._damping, 1),
           SpringY: new Spring(p.Y, this._stiffness, this._damping, 1),
           Opacity: new Spring(0, this._stiffness, this._damping, 1),

@@ -1842,7 +1842,7 @@ export class Canvas implements DirtyTracker {
    *  across the burst so a triple-click always lands on the same Jiv. */
   private _listenForTextSelection = (): void => {
     let anchorJiv: Jiv | null = null;
-    let anchorWord: number = -1;
+    let anchorChar: number = -1;
     /** Granularity of the current drag: 'char' (word-by-word), 'word'
      *  (double-click — extend by whole words), 'line' (triple-click). */
     let granularity: 'char' | 'word' | 'line' = 'char';
@@ -1876,10 +1876,9 @@ export class Canvas implements DirtyTracker {
         return;
       }
 
-      const wordIdx = selMgr.WordIndexAt(textJiv, cssX, cssY);
-      if (wordIdx === null) return;
+      const charIdx = selMgr.CharIndexAt(textJiv, cssX, cssY);
+      if (charIdx === null) return;
 
-      // Click-count detection — must be same Jiv and within the burst window
       const now = performance.now();
       const burstAlive = (now - lastClickAt) < 400
         && Math.hypot(cssX - lastClickX, cssY - lastClickY) < 5;
@@ -1889,35 +1888,29 @@ export class Canvas implements DirtyTracker {
       lastClickY = cssY;
 
       anchorJiv = textJiv;
-      anchorWord = wordIdx;
+      anchorChar = charIdx;
 
       if (clickCount >= 3) {
-        // Triple-click: select the whole line immediately. Further drag
-        // extends line-by-line.
         granularity = 'line';
         armed = false;
         dragging = true;
-        const [s, eIdx] = selMgr.LineRangeFor(textJiv, wordIdx);
+        const [s, eIdx] = selMgr.LineCharRangeAt(textJiv, charIdx);
         selMgr.Set({
-          AnchorJiv: textJiv, AnchorWord: s,
-          ExtentJiv: textJiv, ExtentWord: eIdx,
+          AnchorJiv: textJiv, AnchorChar: s,
+          ExtentJiv: textJiv, ExtentChar: eIdx,
         }, this.Root);
         this._animationManager.Kick();
       } else if (clickCount === 2) {
-        // Double-click: select the clicked word immediately. Word is our
-        // atom, so a collapsed range already paints one word.
         granularity = 'word';
         armed = false;
         dragging = true;
+        const [ws, we] = selMgr.WordCharRangeAt(textJiv, charIdx);
         selMgr.Set({
-          AnchorJiv: textJiv, AnchorWord: wordIdx,
-          ExtentJiv: textJiv, ExtentWord: wordIdx,
+          AnchorJiv: textJiv, AnchorChar: ws,
+          ExtentJiv: textJiv, ExtentChar: we,
         }, this.Root);
         this._animationManager.Kick();
       } else {
-        // Single-click: arm only. Collapse any existing selection (native
-        // collapses to caret on mousedown) but paint nothing — the user
-        // has to drag past DRAG_SLOP before a highlight appears.
         granularity = 'char';
         armed = true;
         dragging = false;
@@ -1954,34 +1947,42 @@ export class Canvas implements DirtyTracker {
       // to the closest text Jiv by rect distance.
       const hit = this._scrollManager.HitTopmost(cssX, cssY);
       const extentJiv = selMgr.NearestTextJiv(this.Root, hit, cssX, cssY) ?? anchorJiv;
-      const extentWord = selMgr.WordIndexAt(extentJiv, cssX, cssY);
-      if (extentWord === null) return;
+      const extentChar = selMgr.CharIndexAt(extentJiv, cssX, cssY);
+      if (extentChar === null) return;
 
-      let aJiv = anchorJiv, aWord = anchorWord;
-      let eJiv = extentJiv, eWord = extentWord;
+      let aJiv = anchorJiv, aChar = anchorChar;
+      let eJiv = extentJiv, eChar = extentChar;
 
       if (granularity === 'line') {
-        // Expand each endpoint to cover its whole line. Lines don't cross
-        // Jiv boundaries, so we line-expand anchor and extent independently
-        // inside their own Jivs. Pick each endpoint's OUTER edge (facing
-        // away from the other) so both full lines end up in the range.
-        const [as, ae] = selMgr.LineRangeFor(anchorJiv, anchorWord);
-        const [es, ee] = selMgr.LineRangeFor(extentJiv, extentWord);
+        const [as, ae] = selMgr.LineCharRangeAt(anchorJiv, anchorChar);
+        const [es, ee] = selMgr.LineCharRangeAt(extentJiv, extentChar);
         if (aJiv === eJiv) {
-          aWord = Math.min(as, es);
-          eWord = Math.max(ae, ee);
+          aChar = Math.min(as, es);
+          eChar = Math.max(ae, ee);
         } else {
           const cmp = selMgr.DocOrder(anchorJiv, extentJiv, this.Root);
-          if (cmp <= 0) { aWord = as; eWord = ee; }  // anchor is before extent
-          else { aWord = ae; eWord = es; }            // anchor is after extent
+          if (cmp <= 0) { aChar = as; eChar = ee; }
+          else { aChar = ae; eChar = es; }
+        }
+      } else if (granularity === 'word') {
+        // Snap each endpoint outward to its word's char range so the
+        // double-click-and-drag never collapses below one full word.
+        const [aws, awe] = selMgr.WordCharRangeAt(anchorJiv, anchorChar);
+        const [ews, ewe] = selMgr.WordCharRangeAt(extentJiv, extentChar);
+        if (aJiv === eJiv) {
+          aChar = Math.min(aws, ews);
+          eChar = Math.max(awe, ewe);
+        } else {
+          const cmp = selMgr.DocOrder(anchorJiv, extentJiv, this.Root);
+          if (cmp <= 0) { aChar = aws; eChar = ewe; }
+          else { aChar = awe; eChar = ews; }
         }
       }
-      // 'word' and 'char' granularities just forward the raw endpoints —
-      // words are already our atom, so there's nothing to snap.
+      // 'char' granularity forwards raw char endpoints.
 
       selMgr.Set({
-        AnchorJiv: aJiv, AnchorWord: aWord,
-        ExtentJiv: eJiv, ExtentWord: eWord,
+        AnchorJiv: aJiv, AnchorChar: aChar,
+        ExtentJiv: eJiv, ExtentChar: eChar,
       }, this.Root);
       this._animationManager.Kick();
     });
@@ -2012,15 +2013,13 @@ export class Canvas implements DirtyTracker {
 
       const meta = e.ctrlKey || e.metaKey;
       if (meta && (e.key === 'a' || e.key === 'A')) {
-        // Select from the first text Jiv's first word to the last text Jiv's
-        // last word — selection is document-wide, not scoped to one Jiv.
         const first = selMgr.FirstTextJiv(this.Root);
         const last = selMgr.LastTextJiv(this.Root);
         if (first && last) {
-          const [, lastWord] = selMgr.FullRange(last);
+          const [, lastChar] = selMgr.FullRange(last);
           selMgr.Set({
-            AnchorJiv: first, AnchorWord: 0,
-            ExtentJiv: last, ExtentWord: lastWord,
+            AnchorJiv: first, AnchorChar: 0,
+            ExtentJiv: last, ExtentChar: lastChar,
           }, this.Root);
           this._animationManager.Kick();
           e.preventDefault();

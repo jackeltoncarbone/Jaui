@@ -3,6 +3,19 @@ import type { TextAnimator } from '../Text/Text.Animator';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { Animatable, AnimationManager } from '../Animation/Animation.Manager';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
+import { ApplyTextStyle } from '../Text/Text.Measure';
+
+// Shared OffscreenCanvas 2D context used to measureText word prefixes for
+// per-char selection geometry. Lazy because OffscreenCanvas isn't on every
+// hot path that imports this file.
+let _measureCtx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null = null;
+const _getMeasureCtx = (): CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D => {
+  if (_measureCtx) return _measureCtx;
+  const ctx = new OffscreenCanvas(1, 1).getContext('2d');
+  if (!ctx) throw new Error('[Jaui] Selection.Manager: no 2D context');
+  _measureCtx = ctx;
+  return ctx;
+};
 
 /**
  * Text selection — each selected LINE of each Jiv is its own Jiv, so
@@ -26,9 +39,11 @@ import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 
 export interface SelectionRange {
   AnchorJiv: Jiv;
-  AnchorWord: number;
+  /** Char offset into AnchorJiv's TextAnimator content. */
+  AnchorChar: number;
   ExtentJiv: Jiv;
-  ExtentWord: number;
+  /** Char offset into ExtentJiv's TextAnimator content. */
+  ExtentChar: number;
 }
 
 /** Matches jinput's selection rect (Jinput.jss → JinputSelectionRect) so
@@ -165,31 +180,64 @@ export class SelectionManager implements Animatable {
     return ai < bi ? -1 : 1;
   };
 
-  /** Word range of the line containing `wordIdx` within `textJiv`. Lines
-   *  don't cross Jiv boundaries — triple-click stays inside one paragraph. */
-  LineRangeFor = (textJiv: Jiv, wordIdx: number): [number, number] => {
+  /** Char range of the word containing char `idx`. If `idx` lands between
+   *  words (whitespace), returns the char range of the nearest preceding
+   *  word, or the next one if there's none before. */
+  WordCharRangeAt = (textJiv: Jiv, idx: number): [number, number] => {
     const anim = this._getAnimator(textJiv);
-    if (!anim || wordIdx < 0 || wordIdx >= anim.Words.length) return [0, 0];
+    if (!anim || anim.Words.length === 0) return [0, 0];
+    // Word containing idx
+    for (const w of anim.Words) {
+      if (idx >= w.CharStart && idx <= w.CharEnd) return [w.CharStart, w.CharEnd];
+    }
+    // Between words — find nearest
+    let best = anim.Words[0];
+    let bestDist = Math.abs(idx - best.CharStart);
+    for (const w of anim.Words) {
+      const d = Math.min(Math.abs(idx - w.CharStart), Math.abs(idx - w.CharEnd));
+      if (d < bestDist) { bestDist = d; best = w; }
+    }
+    return [best.CharStart, best.CharEnd];
+  };
+
+  /** Char range of the line containing char `idx`. Lines don't cross Jiv
+   *  boundaries — triple-click stays inside one paragraph. */
+  LineCharRangeAt = (textJiv: Jiv, idx: number): [number, number] => {
+    const anim = this._getAnimator(textJiv);
+    if (!anim || anim.Words.length === 0) return [0, 0];
+    // Locate the word for idx, then expand to all words on that line.
+    let wordIdx = -1;
+    for (let i = 0; i < anim.Words.length; i++) {
+      const w = anim.Words[i];
+      if (idx >= w.CharStart && idx <= w.CharEnd) { wordIdx = i; break; }
+    }
+    if (wordIdx < 0) {
+      // Find nearest by index
+      let best = 0, bestDist = Math.abs(idx - anim.Words[0].CharStart);
+      for (let i = 0; i < anim.Words.length; i++) {
+        const d = Math.min(Math.abs(idx - anim.Words[i].CharStart), Math.abs(idx - anim.Words[i].CharEnd));
+        if (d < bestDist) { bestDist = d; best = i; }
+      }
+      wordIdx = best;
+    }
     const lineY = Math.round(anim.Words[wordIdx].TargetY);
     let start = wordIdx;
     while (start > 0 && Math.round(anim.Words[start - 1].TargetY) === lineY) start--;
     let end = wordIdx;
     while (end < anim.Words.length - 1 && Math.round(anim.Words[end + 1].TargetY) === lineY) end++;
-    return [start, end];
+    return [anim.Words[start].CharStart, anim.Words[end].CharEnd];
   };
 
-  /** Word-count range [0, N-1] for one text Jiv (used by single-Jiv full
-   *  select; Cmd+A across the document uses FirstTextJiv/LastTextJiv). */
+  /** [0, content.length] for one text Jiv. */
   FullRange = (textJiv: Jiv): [number, number] => {
     const anim = this._getAnimator(textJiv);
-    if (!anim || anim.Words.length === 0) return [0, 0];
-    return [0, anim.Words.length - 1];
+    if (!anim) return [0, 0];
+    return [0, anim.Content.length];
   };
 
-  /** Plain-text representation of the current selection. Spans all Jivs
-   *  between the (normalized) anchor and extent; words on the same Jiv join
-   *  with a single space, Jiv-boundary joins use a newline. Returns '' when
-   *  there's no selection. */
+  /** Plain-text representation of the current selection across Jivs.
+   *  Slices each Jiv's source content by char range; Jiv boundaries join
+   *  with a newline. */
   GetSelectedText = (root: Jiv): string => {
     const sel = this._selection;
     if (!sel) return '';
@@ -199,33 +247,30 @@ export class SelectionManager implements Animatable {
     const aIdx = idxOf.get(sel.AnchorJiv);
     const eIdx = idxOf.get(sel.ExtentJiv);
     if (aIdx === undefined || eIdx === undefined) return '';
-    let loIdx: number, hiIdx: number, loWord: number, hiWord: number;
-    if (aIdx < eIdx || (aIdx === eIdx && sel.AnchorWord <= sel.ExtentWord)) {
-      loIdx = aIdx; hiIdx = eIdx; loWord = sel.AnchorWord; hiWord = sel.ExtentWord;
+    let loIdx: number, hiIdx: number, loChar: number, hiChar: number;
+    if (aIdx < eIdx || (aIdx === eIdx && sel.AnchorChar <= sel.ExtentChar)) {
+      loIdx = aIdx; hiIdx = eIdx; loChar = sel.AnchorChar; hiChar = sel.ExtentChar;
     } else {
-      loIdx = eIdx; hiIdx = aIdx; loWord = sel.ExtentWord; hiWord = sel.AnchorWord;
+      loIdx = eIdx; hiIdx = aIdx; loChar = sel.ExtentChar; hiChar = sel.AnchorChar;
     }
     const lines: string[] = [];
     for (let i = loIdx; i <= hiIdx; i++) {
       const j = order[i];
       const anim = this._getAnimator(j);
-      if (!anim || anim.Words.length === 0) continue;
-      const sWord = i === loIdx ? loWord : 0;
-      const eWord = i === hiIdx ? hiWord : anim.Words.length - 1;
-      const lo = Math.max(0, Math.min(sWord, eWord));
-      const hi = Math.min(anim.Words.length - 1, Math.max(sWord, eWord));
-      const words: string[] = [];
-      for (let k = lo; k <= hi; k++) words.push(anim.Words[k].Content);
-      lines.push(words.join(' '));
+      if (!anim) continue;
+      const content = anim.Content;
+      const a = i === loIdx ? loChar : 0;
+      const b = i === hiIdx ? hiChar : content.length;
+      lines.push(content.slice(Math.max(0, Math.min(a, b)), Math.min(content.length, Math.max(a, b))));
     }
     return lines.join('\n');
   };
 
-  /** Map a canvas-space point to a word index within a text Jiv. Always
-   *  returns a valid index — the nearest word even if the point is far
-   *  outside the Jiv's bounds. Matches browser selection: drag past the
-   *  bottom edge and you keep selecting toward the end. */
-  WordIndexAt = (textJiv: Jiv, cssX: number, cssY: number): number | null => {
+  /** Map a canvas-space point to a CHAR INDEX in the text Jiv's source
+   *  content. Per-glyph hit-test: locate the line, then the nearest word
+   *  on that line, then walk char-by-char via measureText to pick the
+   *  glyph edge closest to the cursor. Always returns a valid index. */
+  CharIndexAt = (textJiv: Jiv, cssX: number, cssY: number): number | null => {
     const anim = this._getAnimator(textJiv);
     if (!anim || anim.Words.length === 0) return null;
 
@@ -245,10 +290,10 @@ export class SelectionManager implements Animatable {
     const localX = cssX - contentX;
     const localY = cssY - contentY - yOff;
 
-    let best = -1;
+    // Pick the closest WORD by (line distance, then horizontal distance).
+    let bestWord = anim.Words[0];
     let bestScore = Infinity;
-    for (let i = 0; i < anim.Words.length; i++) {
-      const w = anim.Words[i];
+    for (const w of anim.Words) {
       const lineTop = w.TargetY;
       const lineBot = w.TargetY + w.Height;
       const yInLine = localY >= lineTop && localY < lineBot;
@@ -259,9 +304,29 @@ export class SelectionManager implements Animatable {
           ? localX - (w.TargetX + w.Width)
           : 0;
       const score = dy * 1000 + dx;
-      if (score < bestScore) { bestScore = score; best = i; }
+      if (score < bestScore) { bestScore = score; bestWord = w; }
     }
-    return best >= 0 ? best : null;
+
+    // Past the right of the picked word's line — pin to its end.
+    if (localX >= bestWord.TargetX + bestWord.Width) return bestWord.CharEnd;
+    // Before the left of the picked word — pin to its start.
+    if (localX <= bestWord.TargetX) return bestWord.CharStart;
+
+    // Inside the word — walk glyph offsets to find the nearest edge.
+    const c = _getMeasureCtx();
+    ApplyTextStyle(c, bestWord.Style, 1);
+    const within = localX - bestWord.TargetX;
+    const text = bestWord.Content;
+    let prevW = 0;
+    for (let i = 1; i <= text.length; i++) {
+      const w = c.measureText(text.substring(0, i)).width;
+      if (w >= within) {
+        const pickRight = (w - within) <= (within - prevW);
+        return bestWord.CharStart + (pickRight ? i : i - 1);
+      }
+      prevW = w;
+    }
+    return bestWord.CharEnd;
   };
 
   /** Collect every text Jiv in document (render) order. DFS, top-down,
@@ -308,7 +373,7 @@ export class SelectionManager implements Animatable {
     this._animationManager.Kick();
   };
 
-  /** Compute the full set of (text-Jiv → word-slice) ranges covered by the
+  /** Compute the full set of (text-Jiv → char-slice) ranges covered by the
    *  current selection, then reconcile highlight children per Jiv. */
   private _rebuild = (sel: SelectionRange, root: Jiv): void => {
     const order = this._collectTextJivs(root);
@@ -318,26 +383,21 @@ export class SelectionManager implements Animatable {
     const aIdx = idxOf.get(sel.AnchorJiv);
     const eIdx = idxOf.get(sel.ExtentJiv);
     if (aIdx === undefined || eIdx === undefined) {
-      // Either endpoint's Jiv is no longer in the tree — clear everything.
       this._clearAll();
       return;
     }
 
-    // Normalize (lo, hi) by document order — anchor may be after extent
-    // when the user drags backward; we still store raw in _selection.
-    let loJiv: Jiv, hiJiv: Jiv, loWord: number, hiWord: number;
-    if (aIdx < eIdx || (aIdx === eIdx && sel.AnchorWord <= sel.ExtentWord)) {
-      loJiv = sel.AnchorJiv; loWord = sel.AnchorWord;
-      hiJiv = sel.ExtentJiv; hiWord = sel.ExtentWord;
+    let loJiv: Jiv, hiJiv: Jiv, loChar: number, hiChar: number;
+    if (aIdx < eIdx || (aIdx === eIdx && sel.AnchorChar <= sel.ExtentChar)) {
+      loJiv = sel.AnchorJiv; loChar = sel.AnchorChar;
+      hiJiv = sel.ExtentJiv; hiChar = sel.ExtentChar;
     } else {
-      loJiv = sel.ExtentJiv; loWord = sel.ExtentWord;
-      hiJiv = sel.AnchorJiv; hiWord = sel.AnchorWord;
+      loJiv = sel.ExtentJiv; loChar = sel.ExtentChar;
+      hiJiv = sel.AnchorJiv; hiChar = sel.AnchorChar;
     }
     const lo = idxOf.get(loJiv)!;
     const hi = idxOf.get(hiJiv)!;
 
-    // Walk every text Jiv in [lo..hi] and rebuild its per-line highlights.
-    // Jivs outside the range that still carry highlights get cleared below.
     const touched = new Set<Jiv>();
     for (let i = lo; i <= hi; i++) {
       const j = order[i];
@@ -346,51 +406,94 @@ export class SelectionManager implements Animatable {
         continue;
       }
       const anim = this._getAnimator(j);
-      if (!anim || anim.Words.length === 0) continue;
+      if (!anim) continue;
+      const len = anim.Content.length;
 
-      let sWord: number, eWord: number;
-      if (i === lo && i === hi) { sWord = loWord; eWord = hiWord; }
-      else if (i === lo) { sWord = loWord; eWord = anim.Words.length - 1; }
-      else if (i === hi) { sWord = 0; eWord = hiWord; }
-      else { sWord = 0; eWord = anim.Words.length - 1; }
+      let sChar: number, eChar: number;
+      if (i === lo && i === hi) { sChar = loChar; eChar = hiChar; }
+      else if (i === lo) { sChar = loChar; eChar = len; }
+      else if (i === hi) { sChar = 0; eChar = hiChar; }
+      else { sChar = 0; eChar = len; }
 
-      this._rebuildOne(j, sWord, eWord);
+      this._rebuildOne(j, sChar, eChar);
       touched.add(j);
     }
 
-    // Clear any previously-highlighted Jiv that's no longer in the range.
     for (const textJiv of Array.from(this._highlights.keys())) {
       if (!touched.has(textJiv)) this._clearHighlights(textJiv);
     }
   };
 
-  /** Build line-grouped highlight Jivs for one text Jiv covering words
-   *  [sWord..eWord] inclusive. Reuses existing highlight Jivs by index. */
-  private _rebuildOne = (textJiv: Jiv, sWord: number, eWord: number): void => {
+  /** Build line-grouped highlight Jivs for one text Jiv covering char
+   *  range [sChar..eChar]. Walks anim.Words, partitions any word whose
+   *  char range partially overlaps the selection by measuring the prefix
+   *  glyph widths so the highlight's left/right edges land at exact
+   *  character boundaries — not snapped to word boundaries. */
+  private _rebuildOne = (textJiv: Jiv, sChar: number, eChar: number): void => {
     const anim = this._getAnimator(textJiv);
     if (!anim || anim.Words.length === 0) {
       this._clearHighlights(textJiv);
       return;
     }
-    const lo = Math.max(0, Math.min(sWord, eWord));
-    const hi = Math.min(anim.Words.length - 1, Math.max(sWord, eWord));
+    const lo = Math.max(0, Math.min(sChar, eChar));
+    const hi = Math.max(0, Math.max(sChar, eChar));
+    if (hi <= lo) {
+      this._clearHighlights(textJiv);
+      return;
+    }
 
-    // Group selected words by line. AnimatedWord doesn't carry a line index,
-    // but TargetY uniquely identifies a line (same Y = same line). Round to
-    // handle minor spring drift during a rebuild mid-animation.
+    const c = _getMeasureCtx();
     const lineMap = new Map<number, { minX: number; maxX: number; y: number; h: number }>();
-    for (let i = lo; i <= hi; i++) {
-      const w = anim.Words[i];
+    for (const w of anim.Words) {
+      // Skip words entirely outside the selected char range.
+      if (w.CharEnd <= lo || w.CharStart >= hi) continue;
+
+      // Compute the X range INSIDE this word that's selected.
+      let leftOffset = 0;
+      let rightOffset = w.Width;
+      if (lo > w.CharStart || hi < w.CharEnd) {
+        ApplyTextStyle(c, w.Style, 1);
+        const charsBeforeStart = Math.max(0, lo - w.CharStart);
+        const charsBeforeEnd = Math.max(0, Math.min(hi, w.CharEnd) - w.CharStart);
+        leftOffset = charsBeforeStart > 0
+          ? c.measureText(w.Content.substring(0, charsBeforeStart)).width
+          : 0;
+        rightOffset = charsBeforeEnd > 0
+          ? c.measureText(w.Content.substring(0, charsBeforeEnd)).width
+          : 0;
+      }
+      const rx0 = w.TargetX + leftOffset;
+      const rx1 = w.TargetX + rightOffset;
+      // Whitespace gap between this word and the next is ALSO part of the
+      // selection when the selection extends past this word's end into the
+      // gap. Extend rx1 forward to the next-on-line word's TargetX in that
+      // case so the highlight reads continuously across the space.
+      let rx1Extended = rx1;
+      if (hi > w.CharEnd) {
+        const lineY = w.TargetY;
+        let nextOnLine: typeof w | null = null;
+        for (const w2 of anim.Words) {
+          if (w2 === w) continue;
+          if (Math.round(w2.TargetY) !== Math.round(lineY)) continue;
+          if (w2.CharStart <= w.CharEnd) continue;
+          if (!nextOnLine || w2.CharStart < nextOnLine.CharStart) nextOnLine = w2;
+        }
+        if (nextOnLine && nextOnLine.CharStart <= hi) {
+          rx1Extended = nextOnLine.TargetX;
+        }
+      }
       const lineKey = Math.round(w.TargetY);
       const entry = lineMap.get(lineKey);
-      const rx0 = w.TargetX;
-      const rx1 = w.TargetX + w.Width;
       if (entry) {
         if (rx0 < entry.minX) entry.minX = rx0;
-        if (rx1 > entry.maxX) entry.maxX = rx1;
+        if (rx1Extended > entry.maxX) entry.maxX = rx1Extended;
       } else {
-        lineMap.set(lineKey, { minX: rx0, maxX: rx1, y: w.TargetY, h: w.Height });
+        lineMap.set(lineKey, { minX: rx0, maxX: rx1Extended, y: w.TargetY, h: w.Height });
       }
+    }
+    if (lineMap.size === 0) {
+      this._clearHighlights(textJiv);
+      return;
     }
 
     // Content-origin offset — highlights are Placed (parent-relative) on the
@@ -425,40 +528,38 @@ export class SelectionManager implements Animatable {
 
       let jiv = existing[i];
       if (!jiv) {
-        // Born invisible (Opacity 0) so the first layout pass snaps the
-        // style animator's Opacity spring to 0. We then flip Style.Opacity
-        // to 1 on the next frame — the spring springs 0→1 and the highlight
-        // fades in. Matches "Everything animates" default.
         jiv = new this._Jiv({
-          // PointerEvents:'None' so the highlight never blocks the text Jiv
-          // beneath it from receiving subsequent pointerdowns / hits.
           Style: {
             PointerEvents: 'None',
             ...DEFAULT_SELECTION_STYLE,
             ...(userStyle ?? {}),
             Opacity: '0',
           } as Partial<JivStyle>,
-          // ChildLayout sizes are 'Auto' so the solver falls through to
-          // jiv.Width/Height — which we mutate every drag tick. Otherwise
-          // the solver would snap the highlight back to its original word
-          // bounds on the next layout pass.
-          ChildLayout: { Position: 'Placed', Width: 'Auto', Height: 'Auto' },
-          X: x, Y: y, Width: w, Height: h,
-          // Snap layout every frame — the highlight's position/size are
-          // driven imperatively on each pointermove. Spring-chasing would
-          // lag the highlight behind the cursor by a handful of frames.
+          // Position via ChildLayout.Left/Top — the solver writes Placed
+          // children to (offsetX + Left, offsetY + Top) and ignores the
+          // jiv's own X/Y (those are the animator's post-spring value).
+          // Mutating Left/Top each frame is how the inline childLayout
+          // pattern (jinput's selection rect) drives per-frame position.
+          ChildLayout: {
+            Position: 'Placed',
+            Left: x + 'px',
+            Top: y + 'px',
+            Width: w + 'px',
+            Height: h + 'px',
+          },
           SnapLayout: true,
         });
         textJiv.AddChild(jiv);
-        // After the first layout pass snaps the style animator to Opacity 0,
-        // raise the target to 1 so the spring eases in.
         const born = jiv;
         requestAnimationFrame(() => {
           born.Style.Opacity = '1';
           this._animationManager.Kick();
         });
       } else {
-        jiv.X = x; jiv.Y = y; jiv.Width = w; jiv.Height = h;
+        jiv.ChildLayout.Left = x + 'px';
+        jiv.ChildLayout.Top = y + 'px';
+        jiv.ChildLayout.Width = w + 'px';
+        jiv.ChildLayout.Height = h + 'px';
         jiv.MarkLayoutDirty();
       }
       out.push(jiv);
