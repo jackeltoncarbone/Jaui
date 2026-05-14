@@ -49,10 +49,13 @@ export interface SelectionRange {
 /** Matches jinput's selection rect (Jinput.jss → JinputSelectionRect) so
  *  general text selection and text-input selection read as the same
  *  primitive. Override per-text-Jiv via Jiv.TextSelectionStyle. */
+/** Background color of the rect. BorderRadius is set per-rect to
+ *  `rectHeight × SELECTION_RADIUS_RATIO` so the curve scales with the
+ *  text size — matches the same compute in Jinput.SelectionRects. */
 const DEFAULT_SELECTION_STYLE: Partial<JivStyle> = {
   Background: 'rgba(120, 170, 255, 0.32)',
-  BorderRadius: '8pt',
 };
+const SELECTION_RADIUS_RATIO = 0.4;
 
 /** Halo padding around each selected line. Mirrored in Jinput.SelectionRects
  *  so the same N-px breathing room shows up in both the input rect and the
@@ -531,11 +534,13 @@ export class SelectionManager implements Animatable {
       const h = r.h + padY * 2;
 
       let jiv = existing[i];
+      const radiusPx = h * SELECTION_RADIUS_RATIO;
       if (!jiv) {
         jiv = new this._Jiv({
           Style: {
             PointerEvents: 'None',
             ...DEFAULT_SELECTION_STYLE,
+            BorderRadius: radiusPx + 'px',
             ...(userStyle ?? {}),
             Opacity: '0',
           } as Partial<JivStyle>,
@@ -551,7 +556,9 @@ export class SelectionManager implements Animatable {
             Width: w + 'px',
             Height: h + 'px',
           },
-          SnapLayout: true,
+          // SnapLayout intentionally false — JivAnimator's default spring
+          // smooths the rect's Width / Height when the selection grows or
+          // shrinks, matching jinput's @Transition Width/Height feel.
         });
         textJiv.AddChild(jiv);
         const born = jiv;
@@ -564,6 +571,7 @@ export class SelectionManager implements Animatable {
         jiv.ChildLayout.Top = y + 'px';
         jiv.ChildLayout.Width = w + 'px';
         jiv.ChildLayout.Height = h + 'px';
+        jiv.Style.BorderRadius = radiusPx + 'px';
         jiv.MarkLayoutDirty();
       }
       out.push(jiv);

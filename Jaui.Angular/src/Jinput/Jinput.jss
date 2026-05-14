@@ -55,9 +55,11 @@ JinputCaret {
 // Visual matches Selection.Manager's DEFAULT_SELECTION_STYLE so plain-text
 // and input selection rects read as the same primitive. Per-line rect
 // position / size are mutated in TS each frame.
+// BorderRadius is set inline per-rect to height × 0.4, so the curve scales
+// with text size. Background + transitions live here; per-line position /
+// size / radius are mutated in TS each frame.
 JinputSelectionRect {
   Background: rgba(120, 170, 255, 0.32)
-  BorderRadius: 8pt
   @Transition Width  { Duration: 90ms }
   @Transition Height { Duration: 90ms }
 }

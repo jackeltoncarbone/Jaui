@@ -74,6 +74,7 @@ interface RenderedSegment extends LayoutSegmentInput {
           @for (rect of SelectionRects(); track $index) {
             <jiv
               class="JinputSelectionRect"
+              [style]="{ BorderRadius: (rect.height * 0.4) + 'px' }"
               [childLayout]="{
                 Position: 'Placed',
                 Left: rect.x + 'px',
