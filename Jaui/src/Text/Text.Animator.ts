@@ -60,14 +60,42 @@ export class TextAnimator implements Animatable {
   private _stiffness: number;
   private _damping: number;
 
+  /** Block-level FontWeight spring. All words share this — when JSS / inline
+   *  TextStyle resolves to a new weight, the spring lerps from the previous
+   *  weight to the new one. Per-tick, the animator re-measures word positions
+   *  at the snapped current weight so the atlas raster (which we fetch at the
+   *  same snapped weight) always agrees with layout. Atlas churn is bounded
+   *  by the 25-unit snap (12 entries max between 400..700). */
+  private _weightSpring: Spring;
+  /** Last weight at which positions were re-measured. Skip the re-measure
+   *  when the snapped value hasn't actually moved across a 25-step boundary. */
+  private _lastMeasuredWeight: number;
+
   constructor(style: ResolvedTextStyle, stiffness: number = 260, damping: number = 30) {
     this._style = _cloneStyle(style);
     this._stiffness = stiffness;
     this._damping = damping;
+    // Coerce in case the type contract slips and a string flows through —
+    // Spring math on a string poisons the value to NaN.
+    const w = Number(style.FontWeight);
+    const initial = Number.isFinite(w) ? w : 400;
+    this._weightSpring = new Spring(initial, stiffness, damping, 1);
+    this._lastMeasuredWeight = initial;
   }
 
   get Content(): string { return this._content; }
   get Style(): ResolvedTextStyle { return this._style; }
+  /** Current FontWeight to render at — the spring's value snapped to the
+   *  nearest 25-unit step. Renderer uses this for the atlas fetch so the
+   *  rasterized width agrees with each word's re-measured layout. Guards
+   *  against non-finite values (style.FontWeight has slipped through as a
+   *  string in some legacy code paths) by falling back to the style's
+   *  declared weight — never NaN, which would corrupt the font string. */
+  get EffectiveWeight(): number {
+    const v = this._weightSpring.Value;
+    if (!Number.isFinite(v)) return this._style.FontWeight;
+    return Math.round(v / 25) * 25;
+  }
 
   /**
    * Sync the animator to the current desired (content, style, maxWidth).
@@ -76,15 +104,20 @@ export class TextAnimator implements Animatable {
   Update = (content: string, style: ResolvedTextStyle, maxWidth: number | null): boolean => {
     const contentChanged = content !== this._content;
     const styleChanged = _stylesDiffer(style, this._style);
-    // Content-unchanged style change with a FontSize delta: take the smooth
-    // size-morph path even when Color / FontWeight / etc. also change. The
-    // Scale spring drives the visual size from old/new ratio → 1.0; the new
-    // raster (with whatever new color or weight) snaps in on frame 0. Color
-    // and weight still hard-cut today — animating those needs a shader-side
-    // tint pass, which the glyph atlas pipeline doesn't have yet.
     const sizeMorphPath = !contentChanged
       && styleChanged
       && this._style.FontSize !== style.FontSize;
+    // Weight-only morph path (no content change, no size delta): the
+    // _weightSpring lerps from the current weight to `style.FontWeight`.
+    // Word positions are NOT snapped here — the per-tick remeasure inside
+    // `Tick` updates positions to match the snapped current weight, so
+    // layout stays in sync with the atlas raster throughout the
+    // transition. Color changes still piggyback via the matched path's
+    // tint setter if both change at once.
+    const weightMorphPath = !contentChanged
+      && styleChanged
+      && !sizeMorphPath
+      && this._style.FontWeight !== style.FontWeight;
     const wrapChanged = maxWidth !== this._maxWidth;
 
     let needsKick = false;
@@ -93,11 +126,24 @@ export class TextAnimator implements Animatable {
       needsKick = this._retargetFontSize(content, style, maxWidth) || needsKick;
       this._style = _cloneStyle(style);
       this._maxWidth = maxWidth;
+    } else if (weightMorphPath) {
+      needsKick = this._retargetWeight(style) || needsKick;
+      this._style = _cloneStyle(style);
+      this._maxWidth = maxWidth;
     } else if (contentChanged || styleChanged) {
       needsKick = this._reconcileContent(content, style, maxWidth) || needsKick;
       this._content = content;
       this._style = _cloneStyle(style);
       this._maxWidth = maxWidth;
+      // Settling: reconcile owns measurement, so the weight spring's
+      // settled value tracks the new style's weight directly. Coerce
+      // defensively in case a stringly-typed weight slipped through.
+      const w = Number(style.FontWeight);
+      const safe = Number.isFinite(w) ? w : 400;
+      this._weightSpring.Value = safe;
+      this._weightSpring.Velocity = 0;
+      this._weightSpring.Set(safe);
+      this._lastMeasuredWeight = safe;
     } else if (wrapChanged) {
       needsKick = this._reflow(maxWidth) || needsKick;
       this._maxWidth = maxWidth;
@@ -129,6 +175,15 @@ export class TextAnimator implements Animatable {
 
   Tick = (dt: number): boolean => {
     let active = false;
+    // Advance the block-level weight spring first; if it crossed a 25-unit
+    // boundary we re-measure positions at the new effective weight so layout
+    // tracks the atlas raster the renderer is about to fetch.
+    if (this._weightSpring.Step(dt)) active = true;
+    const snapped = this.EffectiveWeight;
+    if (snapped !== this._lastMeasuredWeight) {
+      this._lastMeasuredWeight = snapped;
+      this._remeasureAtWeight(snapped);
+    }
     for (const w of this.Words) {
       if (w.SpringX.Step(dt)) active = true;
       if (w.SpringY.Step(dt)) active = true;
@@ -143,6 +198,63 @@ export class TextAnimator implements Animatable {
   };
 
   // ─── Internal ───
+
+  /** Style-only weight transition (no content change, no FontSize delta).
+   *  Springs the block-level weight from current to `newStyle.FontWeight`.
+   *  Word positions are not snapped — the per-tick `_remeasureAtWeight`
+   *  inside `Tick` updates positions to match each step's snapped weight,
+   *  keeping the atlas raster width and layout in sync throughout the
+   *  transition. If color also changed in the same style swap, each word's
+   *  Tint{R,G,B,A} spring is yanked the usual way so the color crossfade
+   *  rides alongside the weight morph. */
+  private _retargetWeight = (newStyle: ResolvedTextStyle): boolean => {
+    let needsKick = false;
+    const oldWeight = this._weightSpring.Value;
+    const targetRaw = Number(newStyle.FontWeight);
+    const target = Number.isFinite(targetRaw) ? targetRaw : oldWeight;
+    this._weightSpring.Value = oldWeight;
+    this._weightSpring.Velocity = 0;
+    if (this._weightSpring.Set(target)) needsKick = true;
+    // The renderer uses the snapped spring value; positions get re-measured
+    // on Tick when the snap crosses a 25-unit boundary.
+    for (const w of this.Words) {
+      const oldStyle = w.Style;
+      w.Style = _cloneStyle(newStyle);
+      if (_setTintForColorChange(w, oldStyle.Color, newStyle.Color)) needsKick = true;
+    }
+    return needsKick;
+  };
+
+  /** Re-run word layout at a specific FontWeight, used during a weight
+   *  morph to keep word positions in sync with the atlas. Caller is the
+   *  per-tick spring stepper; it gates on snapped-value change so this
+   *  isn't called every frame. Spring identity is preserved — only
+   *  Width / TargetX / TargetY are updated; SpringX/Y are snapped to the
+   *  new target so the smooth motion comes from the weight spring, not
+   *  from compounded position chase.
+   *
+   *  `maxWidth` is intentionally passed as `null` here — during a weight
+   *  transition the parent Jiv's allocated width often races the atlas
+   *  raster (the box shrinks at the new style's intrinsic before the
+   *  raster has settled), and wrapping inside `LayoutWords` against the
+   *  intermediate width briefly re-flows the span onto a new line. With
+   *  no wrap budget the words stay on one line regardless of weight; the
+   *  Jiv layout's eventual re-solve handles any actual overflow. */
+  private _remeasureAtWeight = (weight: number): void => {
+    const measureStyle: ResolvedTextStyle = { ...this._style, FontWeight: weight };
+    const positions = LayoutWords(this._content, measureStyle, null);
+    const visible = Math.min(this.Words.length, positions.length);
+    for (let i = 0; i < visible; i++) {
+      const w = this.Words[i];
+      const p = positions[i];
+      w.Width = p.Width;
+      w.Height = p.Height;
+      w.SpringX.Value = p.X; w.SpringX.Velocity = 0; w.SpringX.Set(p.X);
+      w.SpringY.Value = p.Y; w.SpringY.Velocity = 0; w.SpringY.Set(p.Y);
+      w.TargetX = p.X;
+      w.TargetY = p.Y;
+    }
+  };
 
   /** Retarget existing words for a content-unchanged style change that
    *  includes a FontSize delta. Raster snaps to the new style; each word's

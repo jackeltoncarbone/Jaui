@@ -1316,10 +1316,25 @@ export class Canvas implements DirtyTracker {
     }
     const yOffset = (contentH - cy * totalTextHeight) / 2;
 
+    // Pull the animator's effective FontWeight once (snapped to 25 in
+    // Text.Animator). All words in a block transition together, so we
+    // build the override style once outside the per-word loop. Loose
+    // equality on style weight handles the case where some legacy code
+    // path lets a string-typed weight reach this far.
+    const effectiveWeight = anim.EffectiveWeight;
+    const styleNeedsWeightOverride = effectiveWeight !== Number(anim.Style.FontWeight);
     for (const w of anim.Words) {
       const opacity = node.EffectiveOpacity * w.Opacity.Value;
       if (opacity <= 0.001) continue;
-      const entry = this._textCache.Get(w.Content, w.Style, null, this._dpr);
+      // During a `:GroupHover` / `:Hover` weight transition, the cache
+      // fetch uses the snapped current weight so the rasterized atlas
+      // entry width agrees with the per-tick re-measured layout. After
+      // the spring settles, `effectiveWeight === w.Style.FontWeight` and
+      // we fall back to the original style identity (cheap path).
+      const styleForCache = styleNeedsWeightOverride
+        ? { ...w.Style, FontWeight: effectiveWeight }
+        : w.Style;
+      const entry = this._textCache.Get(w.Content, styleForCache, null, this._dpr);
       const wx = contentX + cx * w.SpringX.Value;
       const wy = contentY + yOffset + cy * w.SpringY.Value;
       // Word-level Scale — used during a FontSize-only transition to make
