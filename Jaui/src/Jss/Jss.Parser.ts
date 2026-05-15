@@ -61,6 +61,8 @@ export interface Ruleset {
   ActiveStyle?: Partial<JivStyle>;
   FocusStyle?: Partial<JivStyle>;
   DisabledStyle?: Partial<JivStyle>;
+  // `Name:GroupHover { ... }` — applied when any Jiv sharing this class is hovered.
+  GroupHoverStyle?: Partial<JivStyle>;
   /** TextStyle declarations from a `:State` block — `Name:Hover { Color: red }`
    *  routes Color (a TextStyle prop per Jss.Routes) into HoverTextStyle so
    *  the runtime can layer it on top of the base TextStyle when the matching
@@ -69,6 +71,7 @@ export interface Ruleset {
   ActiveTextStyle?: Partial<TextStyle>;
   FocusTextStyle?: Partial<TextStyle>;
   DisabledTextStyle?: Partial<TextStyle>;
+  GroupHoverTextStyle?: Partial<TextStyle>;
   /** Per-property spring overrides authored via `@Spring Property { … }`
    *  or `@Transition Property { … }` (which translates to a critically-
    *  damped spring). The style animator reads this map when it builds
@@ -245,8 +248,8 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
   // Tight `:State` pseudo (no whitespace). `Foo:Hover { ... }` writes into
   // the existing Foo's HoverStyle slot. Must come before the extends check
   // so `Foo:Hover` isn't misread as `Foo extends Hover`.
-  let stateSlot: 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle' | null = null;
-  let stateTextSlot: 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle' | null = null;
+  let stateSlot: 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle' | 'GroupHoverStyle' | null = null;
+  let stateTextSlot: 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle' | 'GroupHoverTextStyle' | null = null;
   if (s.src[s.pos] === ':') {
     const next = s.src[s.pos + 1];
     if (next && next !== ' ' && next !== '\t' && next !== '\n') {
@@ -300,9 +303,10 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
   // then layer onto HoverTextStyle so the runtime can apply text-level
   // hover/active/focus/disabled overrides — not just visual JivStyle.
   if (stateSlot && stateTextSlot) {
-    const target = out[className];
+    let target = out[className];
     if (!target) {
-      throw new Error(`[Jaui] "${className}:${stateSlot}" declared before base "${className}" — declare the base ruleset first.`);
+      target = {};
+      out[className] = target;
     }
     if (own.Style)     target[stateSlot]     = { ...target[stateSlot],     ...own.Style };
     if (own.TextStyle) target[stateTextSlot] = { ...target[stateTextSlot], ...own.TextStyle };
@@ -838,10 +842,12 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
   ChildLayout:       { ...a.ChildLayout,       ...b.ChildLayout },
   TextStyle:         { ...a.TextStyle,         ...b.TextStyle },
   HoverStyle:        { ...a.HoverStyle,        ...b.HoverStyle },
+  GroupHoverStyle:   { ...a.GroupHoverStyle,   ...b.GroupHoverStyle },
   ActiveStyle:       { ...a.ActiveStyle,       ...b.ActiveStyle },
   FocusStyle:        { ...a.FocusStyle,        ...b.FocusStyle },
   DisabledStyle:     { ...a.DisabledStyle,     ...b.DisabledStyle },
-  HoverTextStyle:    { ...a.HoverTextStyle,    ...b.HoverTextStyle },
+  HoverTextStyle:        { ...a.HoverTextStyle,        ...b.HoverTextStyle },
+  GroupHoverTextStyle:   { ...a.GroupHoverTextStyle,   ...b.GroupHoverTextStyle },
   ActiveTextStyle:   { ...a.ActiveTextStyle,   ...b.ActiveTextStyle },
   FocusTextStyle:    { ...a.FocusTextStyle,    ...b.FocusTextStyle },
   DisabledTextStyle: { ...a.DisabledTextStyle, ...b.DisabledTextStyle },
@@ -855,18 +861,18 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
 
 /** Reserved pseudo-state names following the `:` in `Foo:State`. Maps to
  *  the matching slot on Ruleset. PascalCase to match Jaui authoring style. */
-const _STATE_TO_SLOT: Record<string, 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle'> = {
+const _STATE_TO_SLOT: Record<string, 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle' | 'GroupHoverStyle'> = {
   Hover: 'HoverStyle',
   Active: 'ActiveStyle',
   Focus: 'FocusStyle',
   Disabled: 'DisabledStyle',
+  GroupHover: 'GroupHoverStyle',
 };
 
-/** TextStyle counterpart to _STATE_TO_SLOT — TextStyle props in `:State`
- *  blocks land here so the runtime can layer them on top of base TextStyle. */
-const _STATE_TO_TEXT_SLOT: Record<string, 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle'> = {
+const _STATE_TO_TEXT_SLOT: Record<string, 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle' | 'GroupHoverTextStyle'> = {
   Hover: 'HoverTextStyle',
   Active: 'ActiveTextStyle',
   Focus: 'FocusTextStyle',
   Disabled: 'DisabledTextStyle',
+  GroupHover: 'GroupHoverTextStyle',
 };

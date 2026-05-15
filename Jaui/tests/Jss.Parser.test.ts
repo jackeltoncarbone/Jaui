@@ -113,6 +113,64 @@ describe('JSS — parser', () => {
     expect(() => ParseJss(`Toolbar { : value }`)).toThrow(/Expected identifier/);
   });
 
+  it('parses :GroupHover into GroupHoverStyle', () => {
+    const { Sheet: sheet } = ParseJss(`
+      TokenZoneWhat {
+        BorderRadius: 4
+      }
+      TokenZoneWhat:GroupHover {
+        BackgroundColor: rgba(245, 200, 80, 0.08)
+      }
+    `);
+    expect(sheet.TokenZoneWhat.Style?.BorderRadius).toBe('4');
+    expect(sheet.TokenZoneWhat.GroupHoverStyle?.BackgroundColor).toBe('rgba(245, 200, 80, 0.08)');
+    expect(sheet.TokenZoneWhat.HoverStyle).toBeUndefined();
+  });
+
+  it('routes Color in :GroupHover into GroupHoverTextStyle', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Pill {
+        BorderRadius: 2
+      }
+      Pill:GroupHover {
+        Color: rgb(255, 255, 255)
+      }
+    `);
+    expect(sheet.Pill.GroupHoverTextStyle?.Color).toBe('rgb(255, 255, 255)');
+  });
+
+  it('auto-creates the base ruleset when :State is declared first', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Pill:Hover { Color: rgb(255, 255, 255) }
+      Zone:GroupHover { BackgroundColor: rgba(10, 20, 30, 0.1) }
+    `);
+    expect(sheet.Pill).toBeDefined();
+    expect(sheet.Pill.HoverTextStyle?.Color).toBe('rgb(255, 255, 255)');
+    expect(sheet.Zone).toBeDefined();
+    expect(sheet.Zone.GroupHoverStyle?.BackgroundColor).toBe('rgba(10, 20, 30, 0.1)');
+  });
+
+  it('accepts empty rulesets as zone-documentation', () => {
+    const { Sheet: sheet } = ParseJss(`
+      ZoneA { }
+      ZoneB { }
+      ZoneA:GroupHover { BackgroundColor: rgba(1, 2, 3, 0.5) }
+    `);
+    expect(sheet.ZoneA).toBeDefined();
+    expect(sheet.ZoneB).toBeDefined();
+    expect(sheet.ZoneA.GroupHoverStyle?.BackgroundColor).toBe('rgba(1, 2, 3, 0.5)');
+  });
+
+  it('keeps :Hover and :GroupHover in distinct slots', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Tag { BorderRadius: 1 }
+      Tag:Hover { BackgroundColor: rgb(10, 10, 10) }
+      Tag:GroupHover { BackgroundColor: rgba(20, 20, 20, 0.5) }
+    `);
+    expect(sheet.Tag.HoverStyle?.BackgroundColor).toBe('rgb(10, 10, 10)');
+    expect(sheet.Tag.GroupHoverStyle?.BackgroundColor).toBe('rgba(20, 20, 20, 0.5)');
+  });
+
   it('tolerates whitespace and blank lines', () => {
     const { Sheet: sheet } = ParseJss(`
 

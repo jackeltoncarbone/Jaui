@@ -112,6 +112,16 @@ export class Jiv implements OnInit, OnDestroy {
     // the static host attribute so initial Springs see the right value.
     const name = this.className() ?? this._host.nativeElement.getAttribute('class') ?? undefined;
     const fromClass = this._registry?.Resolve(name) ?? null;
+    // Group-hover triggers: only classes that author a GroupHoverStyle/
+    // GroupHoverTextStyle rule are passed to the worker, so the hover
+    // dispatcher only fans `_groupHover` out for those (a shared base
+    // class with no GroupHover rule doesn't pull peers in).
+    const triggerClasses: string[] = [];
+    if (name && this._registry) {
+      for (const c of name.split(/\s+/).filter(Boolean)) {
+        if (this._registry.IsGroupTrigger(c)) triggerClasses.push(c);
+      }
+    }
     const text = this.text();
     const img = this.imageSrc();
 
@@ -149,14 +159,17 @@ export class Jiv implements OnInit, OnDestroy {
       Layout:        { ...fromClass?.Layout,        ...this.layout() } as Record<string, unknown>,
       ChildLayout:   childLayoutBag,
       TextStyle:     { ...fromClass?.TextStyle,     ...this.textStyle() } as Record<string, unknown>,
-      HoverStyle:        fromClass?.HoverStyle as Record<string, unknown> | undefined,
-      ActiveStyle:       fromClass?.ActiveStyle as Record<string, unknown> | undefined,
-      FocusStyle:        fromClass?.FocusStyle as Record<string, unknown> | undefined,
-      DisabledStyle:     fromClass?.DisabledStyle as Record<string, unknown> | undefined,
-      HoverTextStyle:    fromClass?.HoverTextStyle as Record<string, unknown> | undefined,
-      ActiveTextStyle:   fromClass?.ActiveTextStyle as Record<string, unknown> | undefined,
-      FocusTextStyle:    fromClass?.FocusTextStyle as Record<string, unknown> | undefined,
-      DisabledTextStyle: fromClass?.DisabledTextStyle as Record<string, unknown> | undefined,
+      HoverStyle:          fromClass?.HoverStyle as Record<string, unknown> | undefined,
+      ActiveStyle:         fromClass?.ActiveStyle as Record<string, unknown> | undefined,
+      FocusStyle:          fromClass?.FocusStyle as Record<string, unknown> | undefined,
+      DisabledStyle:       fromClass?.DisabledStyle as Record<string, unknown> | undefined,
+      GroupHoverStyle:     fromClass?.GroupHoverStyle as Record<string, unknown> | undefined,
+      HoverTextStyle:      fromClass?.HoverTextStyle as Record<string, unknown> | undefined,
+      ActiveTextStyle:     fromClass?.ActiveTextStyle as Record<string, unknown> | undefined,
+      FocusTextStyle:      fromClass?.FocusTextStyle as Record<string, unknown> | undefined,
+      DisabledTextStyle:   fromClass?.DisabledTextStyle as Record<string, unknown> | undefined,
+      GroupHoverTextStyle: fromClass?.GroupHoverTextStyle as Record<string, unknown> | undefined,
+      GroupTriggerClasses: triggerClasses.length > 0 ? triggerClasses : undefined,
       Springs:           fromClass?.Springs as Record<string, Record<string, unknown>> | undefined,
       Animations:        fromClass?.Animations as Array<Record<string, unknown>> | undefined,
       AnimationTable:    this._registry

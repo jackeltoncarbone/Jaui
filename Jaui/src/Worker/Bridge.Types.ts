@@ -192,10 +192,16 @@ export interface JivApplyOpts {
   ActiveStyle?: Record<string, unknown> | null;
   FocusStyle?: Record<string, unknown> | null;
   DisabledStyle?: Record<string, unknown> | null;
+  GroupHoverStyle?: Record<string, unknown> | null;
   HoverTextStyle?: Record<string, unknown> | null;
   ActiveTextStyle?: Record<string, unknown> | null;
   FocusTextStyle?: Record<string, unknown> | null;
   DisabledTextStyle?: Record<string, unknown> | null;
+  GroupHoverTextStyle?: Record<string, unknown> | null;
+  /** Class names this Jiv carries (parsed from `class="A B C"`). Worker
+   *  registers it under each entry that's a group-hover trigger so the
+   *  hover dispatcher can fan `_groupHover` out to peers. */
+  GroupTriggerClasses?: readonly string[];
   Springs?: Record<string, Record<string, unknown>>;
   /** `@Animation` applications declared on this Jiv's class. Each entry
    *  is either a `{ Kind: 'Named', Name }` reference resolved against

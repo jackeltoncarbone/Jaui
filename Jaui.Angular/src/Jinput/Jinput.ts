@@ -404,6 +404,7 @@ export class Jinput implements OnDestroy {
     // this listener long content stays wrapped to the old width after the
     // user resizes the window.
     window.addEventListener('resize', this._onWindowResize);
+    window.addEventListener('pointermove', this._onWindowHoverMove);
   }
 
   ngOnDestroy(): void {
@@ -412,6 +413,7 @@ export class Jinput implements OnDestroy {
     document.removeEventListener('pointerup', this._onDocPointerUp);
     document.removeEventListener('pointercancel', this._onDocPointerUp);
     window.removeEventListener('resize', this._onWindowResize);
+    window.removeEventListener('pointermove', this._onWindowHoverMove);
     if (this._blinkTimer) clearInterval(this._blinkTimer);
     this._clearLongPressTimer();
     if (this._wrapReadFrame !== null) cancelAnimationFrame(this._wrapReadFrame);
@@ -656,6 +658,52 @@ export class Jinput implements OnDestroy {
   };
 
   // ── Context menu ────────────────────────────────────────────────
+  // Global pointer tracker — fires for every real mouse / touch move
+  // anywhere on the page. We use this instead of an Angular `(pointermove)`
+  // binding on the JinputRoot because Jaui's worker dispatches its
+  // synthetic events on individual segment jext elements, and those
+  // don't reliably bubble through the JinputRoot host (`display: contents`
+  // host + Angular signal-input `[class]` aliasing leaves the bubbled
+  // path inconsistent). Window listener has 100% coverage: we resolve to
+  // canvas-local coords ourselves and emit PositionHovered with either
+  // the resolved char index OR `null` when the pointer is outside the
+  // text wrap. Tracking the previous "inside" state so we only emit on
+  // transitions / changes — keeps the bridge traffic flat under typical
+  // 60Hz mouse motion.
+  private _lastHoverIndex: number | null | undefined = undefined;
+  private _onWindowHoverMove = (e: PointerEvent): void => {
+    const wrap = this._wrap();
+    const canvasEl = this._jaui?.Canvas?.Element;
+    if (!wrap || !canvasEl) return;
+    const cRect = canvasEl.getBoundingClientRect();
+    // Outside the canvas at all → not in editor → emit null once.
+    if (e.clientX < cRect.left || e.clientX >= cRect.right ||
+        e.clientY < cRect.top  || e.clientY >= cRect.bottom) {
+      if (this._lastHoverIndex !== null) {
+        this._lastHoverIndex = null;
+        this.PositionHovered.emit({ index: null });
+      }
+      return;
+    }
+    const localX = e.clientX - cRect.left;
+    const localY = e.clientY - cRect.top;
+    const wx = wrap.Node.X, wy = wrap.Node.Y;
+    const ww = wrap.Node.Width, wh = wrap.Node.Height;
+    const inWrap = localX >= wx && localX < wx + ww && localY >= wy && localY < wy + wh;
+    if (!inWrap) {
+      if (this._lastHoverIndex !== null) {
+        this._lastHoverIndex = null;
+        this.PositionHovered.emit({ index: null });
+      }
+      return;
+    }
+    const idx = this._indexAtClient(e.clientX, e.clientY);
+    if (idx !== this._lastHoverIndex) {
+      this._lastHoverIndex = idx;
+      this.PositionHovered.emit({ index: idx });
+    }
+  };
+
   onRootContextMenu = (e: MouseEvent): void => {
     if (this.ReadOnly()) return;
     const input = this._hiddenInput()?.nativeElement;

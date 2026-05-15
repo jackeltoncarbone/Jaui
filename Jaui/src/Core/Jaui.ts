@@ -1719,6 +1719,15 @@ export class Canvas implements DirtyTracker {
    *  are O(1) per frame per pointer (two pointers = two state flips max). */
   private _hoveredJiv: Jiv | null = null;
   private _activeJiv: Jiv | null = null;
+  /** Set by worker boot — resolves a Jiv to all other Jivs sharing one of
+   *  its group-trigger classes. Used to fan `_groupHover` out on every
+   *  hover-target change. Null in test/headless contexts that don't wire
+   *  a JivRegistry; group-hover is a no-op there. */
+  private _resolveGroupPeers: ((jiv: Jiv) => Set<Jiv>) | null = null;
+
+  RegisterGroupPeersResolver = (fn: (jiv: Jiv) => Set<Jiv>): void => {
+    this._resolveGroupPeers = fn;
+  };
 
   private _listenForInteractionStates = (): void => {
     const topmostAt = (clientX: number, clientY: number): Jiv | null => {
@@ -1743,10 +1752,19 @@ export class Canvas implements DirtyTracker {
       newPath.forEach(n => { n[flag] = true; });
     };
 
+    const fanOutGroupHover = (newJiv: Jiv | null, oldJiv: Jiv | null): void => {
+      if (!this._resolveGroupPeers) return;
+      const newPeers = newJiv ? this._resolveGroupPeers(newJiv) : new Set<Jiv>();
+      const oldPeers = oldJiv ? this._resolveGroupPeers(oldJiv) : null;
+      if (oldPeers) oldPeers.forEach(p => { if (!newPeers.has(p)) p.GroupHover = false; });
+      newPeers.forEach(p => { p.GroupHover = true; });
+    };
+
     this._on('pointermove', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
       if (hit !== this._hoveredJiv) {
         setStateChain(hit, this._hoveredJiv, 'Hover');
+        fanOutGroupHover(hit, this._hoveredJiv);
         this._hoveredJiv = hit;
         this._setCursor(_resolveCursor(hit));
         this._animationManager.Kick();
@@ -1757,6 +1775,7 @@ export class Canvas implements DirtyTracker {
     this._on('pointerleave', () => {
       if (this._hoveredJiv) {
         setStateChain(null, this._hoveredJiv, 'Hover');
+        fanOutGroupHover(null, this._hoveredJiv);
         this._hoveredJiv = null;
         this._setCursor('');
         this._animationManager.Kick();

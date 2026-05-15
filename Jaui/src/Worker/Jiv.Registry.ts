@@ -43,6 +43,11 @@ const ROOT_ID = 0;
 export class JivRegistry {
   private _nodes = new Map<number, JivCore>();
   private _watchedRects = new Set<number>();
+  /** Group-hover index: class name → Set<Jiv> for class peers. Only
+   *  classes that author a GroupHoverStyle / GroupHoverTextStyle rule
+   *  end up here; the Angular side filters via `JssRegistry.IsGroupTrigger`
+   *  before passing `GroupTriggerClasses` through `JivApplyOpts`. */
+  private _byClass = new Map<string, Set<JivCore>>();
   /** Keyed by JivId — only Janvas nodes carry an entry. The registry
    *  routes incoming `M2W_JanvasInput` through this map and disposes
    *  on destroy. */
@@ -209,14 +214,17 @@ export class JivRegistry {
     }
     // State-style buckets: assigning the whole object is safe; engine
     // mixes the active state into EffectiveStyle on every read.
-    if (opts.HoverStyle !== undefined)        core.HoverStyle        = (opts.HoverStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.ActiveStyle !== undefined)       core.ActiveStyle       = (opts.ActiveStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.FocusStyle !== undefined)        core.FocusStyle        = (opts.FocusStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.DisabledStyle !== undefined)     core.DisabledStyle     = (opts.DisabledStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.HoverTextStyle !== undefined)    core.HoverTextStyle    = (opts.HoverTextStyle ?? null) as Partial<TextStyle> | null;
-    if (opts.ActiveTextStyle !== undefined)   core.ActiveTextStyle   = (opts.ActiveTextStyle ?? null) as Partial<TextStyle> | null;
-    if (opts.FocusTextStyle !== undefined)    core.FocusTextStyle    = (opts.FocusTextStyle ?? null) as Partial<TextStyle> | null;
-    if (opts.DisabledTextStyle !== undefined) core.DisabledTextStyle = (opts.DisabledTextStyle ?? null) as Partial<TextStyle> | null;
+    if (opts.HoverStyle !== undefined)          core.HoverStyle          = (opts.HoverStyle ?? null) as Partial<JivStyle> | null;
+    if (opts.ActiveStyle !== undefined)         core.ActiveStyle         = (opts.ActiveStyle ?? null) as Partial<JivStyle> | null;
+    if (opts.FocusStyle !== undefined)          core.FocusStyle          = (opts.FocusStyle ?? null) as Partial<JivStyle> | null;
+    if (opts.DisabledStyle !== undefined)       core.DisabledStyle       = (opts.DisabledStyle ?? null) as Partial<JivStyle> | null;
+    if (opts.GroupHoverStyle !== undefined)     core.GroupHoverStyle     = (opts.GroupHoverStyle ?? null) as Partial<JivStyle> | null;
+    if (opts.HoverTextStyle !== undefined)      core.HoverTextStyle      = (opts.HoverTextStyle ?? null) as Partial<TextStyle> | null;
+    if (opts.ActiveTextStyle !== undefined)     core.ActiveTextStyle     = (opts.ActiveTextStyle ?? null) as Partial<TextStyle> | null;
+    if (opts.FocusTextStyle !== undefined)      core.FocusTextStyle      = (opts.FocusTextStyle ?? null) as Partial<TextStyle> | null;
+    if (opts.DisabledTextStyle !== undefined)   core.DisabledTextStyle   = (opts.DisabledTextStyle ?? null) as Partial<TextStyle> | null;
+    if (opts.GroupHoverTextStyle !== undefined) core.GroupHoverTextStyle = (opts.GroupHoverTextStyle ?? null) as Partial<TextStyle> | null;
+    if (opts.GroupTriggerClasses !== undefined) this._updateGroupClasses(core, opts.GroupTriggerClasses);
     if ('Text' in opts || opts.TextStyle) {
       const nextText = 'Text' in opts ? (opts.Text ?? null) : core.Text;
       core.SetText(nextText, opts.TextStyle as Partial<TextStyle> | undefined);
@@ -287,8 +295,42 @@ export class JivRegistry {
       this._janvasRenderers.delete(id);
     }
     if (core.Parent) (core.Parent as JivCore).RemoveChild(core);
+    this._unregisterFromGroups(core);
     this._nodes.delete(id);
     this._watchedRects.delete(id);
+  };
+
+  /** Reapply this Jiv's group-trigger class membership. Removes from any
+   *  previous buckets, adds to the new set, updates `core.Classes`. */
+  private _updateGroupClasses = (core: JivCore, next: readonly string[]): void => {
+    this._unregisterFromGroups(core);
+    core.Classes = next;
+    for (const cls of next) {
+      let set = this._byClass.get(cls);
+      if (!set) { set = new Set(); this._byClass.set(cls, set); }
+      set.add(core);
+    }
+  };
+
+  private _unregisterFromGroups = (core: JivCore): void => {
+    for (const cls of core.Classes) {
+      const set = this._byClass.get(cls);
+      if (!set) continue;
+      set.delete(core);
+      if (set.size === 0) this._byClass.delete(cls);
+    }
+  };
+
+  /** All Jivs sharing at least one trigger class with `jiv` — used by the
+   *  hover dispatcher to fan `_groupHover` out across the group. */
+  GroupPeersOf = (jiv: JivCore): Set<JivCore> => {
+    const peers = new Set<JivCore>();
+    for (const cls of jiv.Classes) {
+      const set = this._byClass.get(cls);
+      if (!set) continue;
+      set.forEach(p => peers.add(p));
+    }
+    return peers;
   };
 
   private _watchRect = (id: number, watch: boolean): void => {

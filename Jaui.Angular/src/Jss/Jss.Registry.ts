@@ -43,6 +43,13 @@ export class JssRegistry {
   /** Class name → routed Ruleset. Lookup is O(1). */
   private _rules = new Map<string, Ruleset>();
 
+  /** Subset of class names whose Ruleset declares a `GroupHoverStyle` or
+   *  `GroupHoverTextStyle`. The canvas's hover dispatcher uses this to
+   *  decide which classes trigger group-hover fan-out — sharing a base
+   *  class like `Token` doesn't pull peers into a group state unless
+   *  that base class itself authors a GroupHover rule. */
+  private _groupTriggerClasses = new Set<string>();
+
   /** Globals tier — base classes the parser can fall through to when a
    *  scoped sheet's `: Base` lookup misses in the local sheet. Stored as
    *  a Stylesheet (not a Map) so it can be passed straight to ParseJss. */
@@ -101,6 +108,11 @@ export class JssRegistry {
       : {};
     for (const [name, ruleset] of Object.entries(sheet)) {
       this._rules.set(name, ruleset);
+      if (ruleset.GroupHoverStyle || ruleset.GroupHoverTextStyle) {
+        this._groupTriggerClasses.add(name);
+      } else {
+        this._groupTriggerClasses.delete(name);
+      }
     }
     for (const [name, value] of Object.entries(vars)) {
       this._vars.set(name, value);
@@ -150,6 +162,11 @@ export class JssRegistry {
     this.Merge(parsed);
   };
 
+  /** True if the named class authors a `GroupHoverStyle` / `GroupHoverTextStyle`
+   *  rule — i.e. hovering a Jiv with this class should fan `_groupHover` out
+   *  to all peers sharing it. */
+  IsGroupTrigger = (className: string): boolean => this._groupTriggerClasses.has(className);
+
   /** Resolve one or more space-separated class names to a merged Ruleset.
    *  Later classes win on field conflicts (CSS-like). Returns null if no
    *  classes match. */
@@ -165,14 +182,16 @@ export class JssRegistry {
       if (r.Layout)        out.Layout        = { ...out.Layout,        ...r.Layout };
       if (r.ChildLayout)   out.ChildLayout   = { ...out.ChildLayout,   ...r.ChildLayout };
       if (r.TextStyle)     out.TextStyle     = { ...out.TextStyle,     ...r.TextStyle };
-      if (r.HoverStyle)        out.HoverStyle        = { ...out.HoverStyle,        ...r.HoverStyle };
-      if (r.ActiveStyle)       out.ActiveStyle       = { ...out.ActiveStyle,       ...r.ActiveStyle };
-      if (r.FocusStyle)        out.FocusStyle        = { ...out.FocusStyle,        ...r.FocusStyle };
-      if (r.DisabledStyle)     out.DisabledStyle     = { ...out.DisabledStyle,     ...r.DisabledStyle };
-      if (r.HoverTextStyle)    out.HoverTextStyle    = { ...out.HoverTextStyle,    ...r.HoverTextStyle };
-      if (r.ActiveTextStyle)   out.ActiveTextStyle   = { ...out.ActiveTextStyle,   ...r.ActiveTextStyle };
-      if (r.FocusTextStyle)    out.FocusTextStyle    = { ...out.FocusTextStyle,    ...r.FocusTextStyle };
-      if (r.DisabledTextStyle) out.DisabledTextStyle = { ...out.DisabledTextStyle, ...r.DisabledTextStyle };
+      if (r.HoverStyle)          out.HoverStyle          = { ...out.HoverStyle,          ...r.HoverStyle };
+      if (r.ActiveStyle)         out.ActiveStyle         = { ...out.ActiveStyle,         ...r.ActiveStyle };
+      if (r.FocusStyle)          out.FocusStyle          = { ...out.FocusStyle,          ...r.FocusStyle };
+      if (r.DisabledStyle)       out.DisabledStyle       = { ...out.DisabledStyle,       ...r.DisabledStyle };
+      if (r.GroupHoverStyle)     out.GroupHoverStyle     = { ...out.GroupHoverStyle,     ...r.GroupHoverStyle };
+      if (r.HoverTextStyle)      out.HoverTextStyle      = { ...out.HoverTextStyle,      ...r.HoverTextStyle };
+      if (r.ActiveTextStyle)     out.ActiveTextStyle     = { ...out.ActiveTextStyle,     ...r.ActiveTextStyle };
+      if (r.FocusTextStyle)      out.FocusTextStyle      = { ...out.FocusTextStyle,      ...r.FocusTextStyle };
+      if (r.DisabledTextStyle)   out.DisabledTextStyle   = { ...out.DisabledTextStyle,   ...r.DisabledTextStyle };
+      if (r.GroupHoverTextStyle) out.GroupHoverTextStyle = { ...out.GroupHoverTextStyle, ...r.GroupHoverTextStyle };
       if (r.Springs)           out.Springs           = { ...out.Springs,           ...r.Springs };
       if (r.Animations)        out.Animations        = [...(out.Animations ?? []),  ...r.Animations];
     }

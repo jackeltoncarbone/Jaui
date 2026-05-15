@@ -116,6 +116,7 @@ export const BootJauiWorker = (): void => {
       // all current animations settle and a newly-applied looping
       // animation would never tick until something else nudged it.
       registry.SetAnimationKick(() => canvas.Animations.Kick());
+      canvas.RegisterGroupPeersResolver(jiv => registry.GroupPeersOf(jiv));
       bridge.AttachRegistry(registry);
 
       canvas.RegisterPostFrame(() => registry.EmitRectSnapshots());

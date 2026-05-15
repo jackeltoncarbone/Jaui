@@ -38,11 +38,13 @@ export class Jiv extends Element {
   private _active: boolean = false;
   private _focus: boolean = false;
   private _disabled: boolean = false;
+  private _groupHover: boolean = false;
 
   HoverStyle: Partial<JivStyle> | null = null;
   ActiveStyle: Partial<JivStyle> | null = null;
   FocusStyle: Partial<JivStyle> | null = null;
   DisabledStyle: Partial<JivStyle> | null = null;
+  GroupHoverStyle: Partial<JivStyle> | null = null;
   /** Text-level state overrides — `Foo:Hover { Color: red }` lands here.
    *  Layered on top of the base TextStyle by `EffectiveTextStyle()` when
    *  the matching state flag is set. */
@@ -50,6 +52,12 @@ export class Jiv extends Element {
   ActiveTextStyle: Partial<TextStyle> | null = null;
   FocusTextStyle: Partial<TextStyle> | null = null;
   DisabledTextStyle: Partial<TextStyle> | null = null;
+  GroupHoverTextStyle: Partial<TextStyle> | null = null;
+
+  /** Class names this Jiv carries, parsed from the `class="A B C"` attribute.
+   *  Used by the canvas's group-state registry to fan `_groupHover` out to
+   *  peers sharing a group-trigger class. */
+  Classes: readonly string[] = [];
 
   get Hover(): boolean { return this._hover; }
   set Hover(v: boolean) {
@@ -74,6 +82,12 @@ export class Jiv extends Element {
     if (this._disabled === v) return;
     this._disabled = v;
     if (this.DisabledTextStyle) this._invalidateText();
+  }
+  get GroupHover(): boolean { return this._groupHover; }
+  set GroupHover(v: boolean) {
+    if (this._groupHover === v) return;
+    this._groupHover = v;
+    if (this.GroupHoverTextStyle) this._invalidateText();
   }
 
   // Text-only invalidation — pushes a re-measure / re-paint without forcing
@@ -132,10 +146,13 @@ export class Jiv extends Element {
     ActiveStyle?: Partial<JivStyle>;
     FocusStyle?: Partial<JivStyle>;
     DisabledStyle?: Partial<JivStyle>;
+    GroupHoverStyle?: Partial<JivStyle>;
     HoverTextStyle?: Partial<TextStyle>;
     ActiveTextStyle?: Partial<TextStyle>;
     FocusTextStyle?: Partial<TextStyle>;
     DisabledTextStyle?: Partial<TextStyle>;
+    GroupHoverTextStyle?: Partial<TextStyle>;
+    Classes?: readonly string[];
     TextSelectionStyle?: Partial<JivStyle>;
     Springs?: Record<string, Partial<SpringConfig>>;
     Animations?: AnimationApplication[];
@@ -180,10 +197,13 @@ export class Jiv extends Element {
     this.ActiveStyle = options?.ActiveStyle ?? null;
     this.FocusStyle = options?.FocusStyle ?? null;
     this.DisabledStyle = options?.DisabledStyle ?? null;
+    this.GroupHoverStyle = options?.GroupHoverStyle ?? null;
     this.HoverTextStyle = options?.HoverTextStyle ?? null;
     this.ActiveTextStyle = options?.ActiveTextStyle ?? null;
     this.FocusTextStyle = options?.FocusTextStyle ?? null;
     this.DisabledTextStyle = options?.DisabledTextStyle ?? null;
+    this.GroupHoverTextStyle = options?.GroupHoverTextStyle ?? null;
+    this.Classes = options?.Classes ?? [];
     this.TextSelectionStyle = options?.TextSelectionStyle ?? null;
     this.Springs = options?.Springs ?? null;
     this.Animations = options?.Animations ?? null;
@@ -193,8 +213,9 @@ export class Jiv extends Element {
   /** Final render-time style: base + state overrides in priority order.
    *  Disabled beats Focus beats Active beats Hover. */
   EffectiveStyle = (): JivStyle => {
-    if (!this._hover && !this._active && !this._focus && !this._disabled) return this.Style;
+    if (!this._hover && !this._active && !this._focus && !this._disabled && !this._groupHover) return this.Style;
     const merged: JivStyle = { ...this.Style };
+    if (this._groupHover && this.GroupHoverStyle) Object.assign(merged, this.GroupHoverStyle);
     if (this._hover && this.HoverStyle) Object.assign(merged, this.HoverStyle);
     if (this._active && this.ActiveStyle) Object.assign(merged, this.ActiveStyle);
     if (this._focus && this.FocusStyle) Object.assign(merged, this.FocusStyle);
@@ -208,8 +229,9 @@ export class Jiv extends Element {
    *  HoverTextStyle and we layer it here when the matching state is set.
    *  Same priority order: Disabled > Focus > Active > Hover. */
   override EffectiveTextStyle = (): TextStyle => {
-    if (!this._hover && !this._active && !this._focus && !this._disabled) return this.TextStyle;
+    if (!this._hover && !this._active && !this._focus && !this._disabled && !this._groupHover) return this.TextStyle;
     const merged: TextStyle = { ...this.TextStyle };
+    if (this._groupHover && this.GroupHoverTextStyle) Object.assign(merged, this.GroupHoverTextStyle);
     if (this._hover && this.HoverTextStyle) Object.assign(merged, this.HoverTextStyle);
     if (this._active && this.ActiveTextStyle) Object.assign(merged, this.ActiveTextStyle);
     if (this._focus && this.FocusTextStyle) Object.assign(merged, this.FocusTextStyle);
