@@ -189,6 +189,7 @@ export class Canvas implements DirtyTracker {
     // loop self-sustains while any spring is unsettled.
     this._animationManager.Kick();
     this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv), this._animationManager);
+    this._selectionManager.OnSelectionTextChanged((text) => this._selectionTextRelay?.(text));
 
     // Defer the first _resize() to a rAF tick so layout is already settled
     // when clientWidth runs as a fallback. Direct construction-time reads
@@ -242,6 +243,29 @@ export class Canvas implements DirtyTracker {
     // wheel needs preventDefault synchronously; the engine handler can't
     // do it asynchronously.
     el.addEventListener('wheel', (e) => { e.preventDefault(); dispatch('wheel', e); }, { passive: false });
+
+    // Native clipboard for display-text selection (main-thread mode). The
+    // worker-mode equivalent lives in Bridge.Main — there the snapshot is
+    // mirrored across postMessage because user-gesture activation doesn't
+    // ride the bridge. Here we read the selection synchronously off the
+    // engine. Bail when a real DOM text input is focused so plain `<input>`
+    // / Jinput-style hidden textareas keep their native copy behavior.
+    const onClipboardCopy = (e: ClipboardEvent): void => {
+      if (typeof document !== 'undefined') {
+        const ae = document.activeElement as HTMLElement | null;
+        if (ae) {
+          const tag = ae.tagName;
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+          if (ae.isContentEditable) return;
+        }
+      }
+      const text = this._selectionManager.GetSelectedText(this.Root);
+      if (!text) return;
+      e.clipboardData?.setData('text/plain', text);
+      e.preventDefault();
+    };
+    document.addEventListener('copy', onClipboardCopy, { capture: true });
+    document.addEventListener('cut', onClipboardCopy, { capture: true });
   };
 
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
@@ -336,6 +360,7 @@ export class Canvas implements DirtyTracker {
   /** Bridge callbacks. Set by the worker entry once Canvas is constructed. */
   private _cursorRelay: ((cursor: string) => void) | null = null;
   private _captureRelay: ((action: 'set' | 'release', pointerId: number) => void) | null = null;
+  private _selectionTextRelay: ((text: string) => void) | null = null;
 
   /** Pointers we hold capture for. Mirrors what the proxy element on main
    *  has setPointerCapture'd, so `_hasCapture` answers synchronously. */
@@ -345,6 +370,14 @@ export class Canvas implements DirtyTracker {
   OnCursorChange = (cb: ((cursor: string) => void) | null): void => { this._cursorRelay = cb; };
   OnPointerCaptureRequest = (cb: ((action: 'set' | 'release', pointerId: number) => void) | null): void => {
     this._captureRelay = cb;
+  };
+  /** Bridge subscriber for plaintext-only selection mirrors. Main caches
+   *  the latest string so the native `copy` event can synthesize
+   *  `clipboardData` synchronously while the user gesture is still active —
+   *  `navigator.clipboard.writeText` from inside the worker silently fails
+   *  because transient activation doesn't survive postMessage. */
+  OnSelectionTextChange = (cb: ((text: string) => void) | null): void => {
+    this._selectionTextRelay = cb;
   };
 
   /** Bridge inbound: dispatch a normalized event to engine handlers.
@@ -2058,16 +2091,12 @@ export class Canvas implements DirtyTracker {
           this._animationManager.Kick();
           e.preventDefault();
         }
-      } else if (meta && (e.key === 'c' || e.key === 'C')) {
-        // Copy the current selection across any Jiv tree to the clipboard.
-        // Mirrors what jinput's hidden <textarea> gives focused text inputs;
-        // here we cover the case of selection across plain text Jivs that
-        // never had a textarea behind them.
-        const text = selMgr.GetSelectedText(this.Root);
-        if (text && typeof navigator !== 'undefined' && navigator.clipboard) {
-          navigator.clipboard.writeText(text).catch(() => {/* swallow */});
-          e.preventDefault();
-        }
+      // Cmd/Ctrl+C is handled on the main thread via the native `copy`
+      // event (see MainBridge), where the user-gesture activation is still
+      // alive. Calling `navigator.clipboard.writeText` from inside the worker
+      // silently fails because transient activation doesn't ride across
+      // postMessage. The worker mirrors selection text to main on every
+      // selection change via the `selection-text` W2M message instead.
       } else if (e.key === 'Escape') {
         if (selMgr.Current) {
           selMgr.Set(null, this.Root);

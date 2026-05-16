@@ -36,6 +36,20 @@ const _DEBUG: boolean =
   typeof window.location !== 'undefined' &&
   /[?&](debug|jdebug)\b/.test(window.location.search);
 
+/** True when the currently focused element is a real text input, so the
+ *  native browser clipboard handlers should take precedence over Jaui's
+ *  display-text mirror (e.g. Jinput's hidden `<textarea>`, plain `<input>` /
+ *  `<textarea>` outside the canvas, contenteditable surfaces). */
+const _isNativeTextInputFocused = (): boolean => {
+  if (typeof document === 'undefined') return false;
+  const ae = document.activeElement as HTMLElement | null;
+  if (!ae) return false;
+  const tag = ae.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (ae.isContentEditable) return true;
+  return false;
+};
+
 export interface BridgeOptions {
   /** Canvas DOM element that Angular created. The bridge transfers it
    *  to the worker (one-way) and keeps the element only as an event
@@ -217,8 +231,15 @@ export class MainBridge {
       case 'svg-rerasterize': return;
       case 'janvas-event':  return this._onJanvasEvent(m);
       case 'fps':           return this._onFps(m);
+      case 'selection-text': this._selectedText = m.Text; return;
     }
   };
+
+  /** Latest plaintext mirror of the worker's selection. Updated whenever
+   *  the worker posts a `selection-text` message. Read synchronously inside
+   *  the native `copy`/`cut` handlers so the clipboard write rides the
+   *  user-gesture activation that doesn't survive a postMessage round-trip. */
+  private _selectedText: string = '';
 
   /** Subscribers for worker-side FPS samples. Powers the `?fps` overlay's
    *  worker-FPS line — main rAF can run at the display refresh rate even
@@ -454,6 +475,27 @@ export class MainBridge {
     window.addEventListener('keydown', (e: KeyboardEvent) => {
       this.PostMessage({ T: 'keydown', Payload: this._keyPayload(e) });
     }, { capture: true });
+
+    // Native clipboard for display-text selection. The worker mirrors the
+    // current selected plaintext on every selection change via the
+    // `selection-text` W2M message; here we hand that string to the
+    // browser's `copy` event while the user-gesture activation is still
+    // alive. Listen at document-capture so a Ctrl+C / right-click → Copy
+    // works regardless of which element has focus (canvas, body, or a
+    // Jiv host). Bail when a real DOM text input is focused so we don't
+    // shadow Jinput's hidden textarea or any plain `<input>` on the page.
+    const onClipboardCopy = (e: ClipboardEvent): void => {
+      if (_isNativeTextInputFocused()) return;
+      const text = this._selectedText;
+      if (!text) return;
+      e.clipboardData?.setData('text/plain', text);
+      e.preventDefault();
+    };
+    document.addEventListener('copy', onClipboardCopy, { capture: true });
+    // Cut on display-text is copy-only — display text isn't editable, but
+    // suppressing the native default-behaviour avoids the browser silently
+    // dropping the selection without writing it to the clipboard.
+    document.addEventListener('cut', onClipboardCopy, { capture: true });
 
     // ResizeObserver pushes contentRect to the worker.
     const ro = new ResizeObserver((entries) => {

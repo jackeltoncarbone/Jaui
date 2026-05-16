@@ -112,6 +112,7 @@ export class WorkerBridge {
     canvas.OnPointerCaptureRequest((action, pointerId) =>
       this._post({ T: 'capture', Action: action, PointerId: pointerId }),
     );
+    canvas.OnSelectionTextChange((text) => this._post({ T: 'selection-text', Text: text }));
   };
 
   // ─── Inbound (M2W) ─────────────────────────────────────────────────────

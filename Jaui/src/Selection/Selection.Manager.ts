@@ -74,6 +74,13 @@ export class SelectionManager implements Animatable {
   private _Jiv: typeof import('../Jiv/Jiv').Jiv;
   private _getAnimator: (jiv: Jiv) => TextAnimator | undefined;
   private _animationManager: AnimationManager;
+  /** Last selection-text published. Suppresses redundant change posts when
+   *  the selection geometry rebuilds but the resolved plaintext is identical. */
+  private _lastEmittedText: string = '';
+  /** External subscriber for plaintext-only changes — wired by Canvas so
+   *  the bridge can mirror selection across to the main thread for native
+   *  clipboard copy. */
+  private _onSelectionTextChanged: ((text: string, root: Jiv) => void) | null = null;
 
   constructor(
     JivClass: typeof import('../Jiv/Jiv').Jiv,
@@ -85,6 +92,15 @@ export class SelectionManager implements Animatable {
     this._animationManager = animationManager;
     animationManager.Register(this);
   }
+
+  /** Register a plaintext-change subscriber. Fires once after each `Set`
+   *  with the concatenated selected text (empty string when cleared).
+   *  Used by the worker bridge to mirror selection to main for native
+   *  clipboard copy (`navigator.clipboard` writes inside the worker fail
+   *  silently because user-gesture activation doesn't survive postMessage). */
+  OnSelectionTextChanged = (cb: ((text: string, root: Jiv) => void) | null): void => {
+    this._onSelectionTextChanged = cb;
+  };
 
   get Current(): SelectionRange | null { return this._selection; }
 
@@ -112,9 +128,22 @@ export class SelectionManager implements Animatable {
     this._selection = sel;
     if (sel === null) {
       this._clearAll();
-      return;
+    } else {
+      this._rebuild(sel, root);
     }
-    this._rebuild(sel, root);
+    this._emitTextChanged(root);
+  };
+
+  /** Compute the current selected plaintext and notify the external
+   *  subscriber if it differs from the last emission. Called from `Set`
+   *  so any selection mutation (drag, shift-arrow, select-all, clear)
+   *  flows through this single chokepoint. */
+  private _emitTextChanged = (root: Jiv): void => {
+    if (!this._onSelectionTextChanged) return;
+    const text = this._selection ? this.GetSelectedText(root) : '';
+    if (text === this._lastEmittedText) return;
+    this._lastEmittedText = text;
+    this._onSelectionTextChanged(text, root);
   };
 
   /** Web-style user-select cascade — walk up from the candidate text Jiv;

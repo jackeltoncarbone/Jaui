@@ -440,6 +440,18 @@ export interface W2M_FpsSample {
   Frame: number;
 }
 
+/** Plain-text mirror of the worker's current text selection. Posted whenever
+ *  the SelectionManager's range changes (including cleared). Main caches the
+ *  string so the native `copy` event handler can write it to clipboardData
+ *  synchronously — `navigator.clipboard.writeText` from inside the worker
+ *  silently fails because transient activation doesn't survive postMessage. */
+export interface W2M_SelectionText {
+  T: 'selection-text';
+  /** Concatenated plaintext across all selected text Jivs, joined with
+   *  newlines across Jiv boundaries. Empty string when selection is cleared. */
+  Text: string;
+}
+
 export type W2M =
   | W2M_Ready
   | W2M_Cursor
@@ -449,7 +461,8 @@ export type W2M =
   | W2M_HudStats
   | W2M_SvgRerasterize
   | W2M_JanvasEvent
-  | W2M_FpsSample;
+  | W2M_FpsSample
+  | W2M_SelectionText;
 
 // ─── Helpers shared by both sides ─────────────────────────────────────────
 
