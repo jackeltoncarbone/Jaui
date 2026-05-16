@@ -23,10 +23,12 @@
  */
 
 import { Jiv as JivCore } from '../Jiv/Jiv';
+import { DefaultJivStyle } from '../Jiv/Jiv.Defaults';
 import { Janvas as JanvasCore } from '../Janvas/Janvas';
 import type { JanvasRenderer } from '../Janvas/Janvas.Renderer';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { TextStyle } from '../Text/Text.Types';
+import { DefaultLayoutConfig, DefaultChildLayout } from '../Layout/Layout.Types';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
 import type { SpringConfig } from '../Animation/Animation.Types';
 import type {
@@ -206,11 +208,31 @@ export class JivRegistry {
       return;
     }
     this._applyElementProps(core, opts);
-    if (opts.Style)        Object.assign(core.Style, opts.Style as Partial<JivStyle>);
-    if (opts.Layout)       Object.assign(core.Layout, opts.Layout as Partial<LayoutConfig>);
+    // Class-snapshot semantics: when a bag is present, callers are
+    // delivering the full state for that bag (resolved from a JSS class),
+    // so we reset to engine defaults before layering the new values.
+    // Plain merge would leak keys from the previous class on every class
+    // swap (e.g. AddDrawer wide ↔ narrow). Engine defaults must survive
+    // because the layout/render code reads keys like `Padding` directly
+    // and crashes on undefined.
+    if (opts.Style) {
+      _resetTo(core.Style as unknown as Record<string, unknown>, DefaultJivStyle as unknown as Record<string, unknown>);
+      Object.assign(core.Style, opts.Style as Partial<JivStyle>);
+    }
+    if (opts.Layout) {
+      _resetTo(core.Layout as unknown as Record<string, unknown>, DefaultLayoutConfig as unknown as Record<string, unknown>);
+      Object.assign(core.Layout, opts.Layout as Partial<LayoutConfig>);
+    }
     if (opts.ChildLayout) {
       const cl = this._resolveAttachTo(opts.ChildLayout);
-      Object.assign(core.ChildLayout, cl as Partial<ChildLayout>);
+      _resetTo(core.ChildLayout as unknown as Record<string, unknown>, DefaultChildLayout as unknown as Record<string, unknown>);
+      // Match Element.ts ctor: nested anchor objects must be cloned so
+      // mutating one Jiv's anchor doesn't bleed into DefaultChildLayout.
+      core.ChildLayout.AttachTargetAnchor = { ...DefaultChildLayout.AttachTargetAnchor, ...(cl['AttachTargetAnchor'] as object ?? {}) };
+      core.ChildLayout.AttachSelfAnchor   = { ...DefaultChildLayout.AttachSelfAnchor,   ...(cl['AttachSelfAnchor']   as object ?? {}) };
+      const { AttachTargetAnchor: _ta, AttachSelfAnchor: _sa, ...clRest } = cl;
+      void _ta; void _sa;
+      Object.assign(core.ChildLayout, clRest as Partial<ChildLayout>);
     }
     // State-style buckets: assigning the whole object is safe; engine
     // mixes the active state into EffectiveStyle on every read.
@@ -448,6 +470,11 @@ const _emptyPayload: PointerPayload = {
   Shift: false, Ctrl: false, Alt: false, Meta: false,
   TimeStamp: 0,
 };
+
+function _resetTo(target: Record<string, unknown>, defaults: Record<string, unknown>): void {
+  for (const k in target) if (!(k in defaults)) delete target[k];
+  for (const k in defaults) target[k] = defaults[k];
+}
 
 const _payloadFromPointerEvent = (e: {
   pointerId?: number; pointerType?: string;
