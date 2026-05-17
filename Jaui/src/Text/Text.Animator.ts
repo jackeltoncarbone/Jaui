@@ -70,19 +70,19 @@ export class TextAnimator implements Animatable {
   /** Last weight at which positions were re-measured. Skip the re-measure
    *  when the snapped value hasn't actually moved across a 25-step boundary. */
   private _lastMeasuredWeight: number;
-  /** Fired by `Tick` whenever the snapped weight crosses a 25-unit boundary
-   *  (the same condition that triggers `_remeasureAtWeight`). Lets the Jaui
+  /** Fired by `Tick` every frame the weight spring steps. Lets the Jaui
    *  core invalidate the owning node's TextMeasurement so the next layout
-   *  pass re-measures intrinsic width at the new snapped weight — keeping
-   *  the layout box's reported width in lockstep with the spring-animated
-   *  glyph metrics instead of snapping to the target weight on frame 0. */
-  private _onWeightSnapChange?: () => void;
+   *  pass re-measures intrinsic width at the new live weight — keeping
+   *  the layout box's reported width in lockstep with the animating glyph
+   *  metrics. Fired per-frame (not snap-gated) so layout reflows smoothly;
+   *  snap is a renderer concern (atlas reuse), not a layout concern. */
+  private _onWeightChange?: () => void;
 
   constructor(
     style: ResolvedTextStyle,
     stiffness: number = 260,
     damping: number = 30,
-    onWeightSnapChange?: () => void,
+    onWeightChange?: () => void,
   ) {
     this._style = _cloneStyle(style);
     this._stiffness = stiffness;
@@ -93,21 +93,36 @@ export class TextAnimator implements Animatable {
     const initial = Number.isFinite(w) ? w : 400;
     this._weightSpring = new Spring(initial, stiffness, damping, 1);
     this._lastMeasuredWeight = initial;
-    this._onWeightSnapChange = onWeightSnapChange;
+    this._onWeightChange = onWeightChange;
   }
 
   get Content(): string { return this._content; }
   get Style(): ResolvedTextStyle { return this._style; }
-  /** Current FontWeight to render at — the spring's value snapped to the
-   *  nearest 25-unit step. Renderer uses this for the atlas fetch so the
-   *  rasterized width agrees with each word's re-measured layout. Guards
-   *  against non-finite values (style.FontWeight has slipped through as a
-   *  string in some legacy code paths) by falling back to the style's
+  /** Current FontWeight to render at — the spring's value rounded to the
+   *  nearest integer. Renderer uses this for the atlas fetch. Integer is
+   *  the maximum granularity available (the canvas `font` shorthand parses
+   *  fractional weights to integers anyway), and atlas LRU eviction (256
+   *  entries cap) handles the transient churn during a transition (~18-30
+   *  entries per spring at 60fps over a typical 300ms duration). A coarser
+   *  snap produced perceptually discrete weight steps, which read as
+   *  "rigid stepping" against the smooth layout reflow.
+   *  Guards against non-finite values (style.FontWeight has slipped through
+   *  as a string in some legacy code paths) by falling back to the style's
    *  declared weight — never NaN, which would corrupt the font string. */
   get EffectiveWeight(): number {
     const v = this._weightSpring.Value;
     if (!Number.isFinite(v)) return this._style.FontWeight;
-    return Math.round(v / 25) * 25;
+    return Math.round(v);
+  }
+
+  /** Raw live spring value. Layout measurement reads this so the box's
+   *  intrinsic width evolves continuously with the spring. Sub-pixel
+   *  mismatch vs the integer-rounded raster width is well under a CSS
+   *  pixel at normal font sizes. */
+  get CurrentWeight(): number {
+    const v = this._weightSpring.Value;
+    if (!Number.isFinite(v)) return this._style.FontWeight;
+    return v;
   }
 
   /**
@@ -188,20 +203,22 @@ export class TextAnimator implements Animatable {
 
   Tick = (dt: number): boolean => {
     let active = false;
-    // Advance the block-level weight spring first; if it crossed a 25-unit
-    // boundary we re-measure positions at the new effective weight so layout
-    // tracks the atlas raster the renderer is about to fetch.
-    if (this._weightSpring.Step(dt)) active = true;
-    const snapped = this.EffectiveWeight;
-    if (snapped !== this._lastMeasuredWeight) {
-      this._lastMeasuredWeight = snapped;
-      this._remeasureAtWeight(snapped);
-      // Notify the host (Jaui core) so the next layout pass re-measures
-      // the owning Jiv's intrinsic width at the new snapped weight.
-      // Without this, the Jiv's TextMeasurement was captured at the
-      // target weight on frame 0 and surrounding boxes jump to their
-      // final positions while glyphs morph smoothly.
-      this._onWeightSnapChange?.();
+    // Advance the block-level weight spring. If it moved at all, re-measure
+    // internal word positions at the raw current weight (NOT the snapped
+    // `EffectiveWeight`) so word slots evolve smoothly — and notify the
+    // host so the owning Jiv's intrinsic width re-measures at the same
+    // raw weight on the next layout pass. Without this, surrounding boxes
+    // would jump in 25-unit chunks (or all at once, before this work, when
+    // they snapped straight to the target weight on frame 0).
+    const stepped = this._weightSpring.Step(dt);
+    if (stepped) {
+      active = true;
+      const raw = this._weightSpring.Value;
+      if (Number.isFinite(raw)) {
+        this._remeasureAtWeight(raw);
+        this._lastMeasuredWeight = raw;
+      }
+      this._onWeightChange?.();
     }
     for (const w of this.Words) {
       if (w.SpringX.Step(dt)) active = true;

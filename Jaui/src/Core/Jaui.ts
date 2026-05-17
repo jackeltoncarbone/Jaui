@@ -1434,13 +1434,7 @@ export class Canvas implements DirtyTracker {
     if (node.Text !== null) {
       let anim = this._textAnimators.get(node);
       if (!anim) {
-        // Capture `node` in the snap-change callback so each weight-spring
-        // step that crosses a 25-unit boundary marks the owner's text
-        // dirty — the next layout pass re-measures intrinsic width at the
-        // new effective weight, and surrounding boxes slide smoothly into
-        // the box's evolving width instead of snapping on frame 0.
-        const owner = node;
-        anim = new TextAnimator(resolvedStyle, undefined, undefined, () => owner.InvalidateText());
+        anim = new TextAnimator(resolvedStyle);
         this._textAnimators.set(node, anim);
         this._animationManager.Register(anim);
       }
@@ -1464,19 +1458,17 @@ export class Canvas implements DirtyTracker {
       // TextStyle holds Length fields (FontSize, LetterSpacing) — resolve against this Jiv's ctx.
       const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
       const resolved = ResolveTextStyle(node.EffectiveTextStyle(), ctx);
-      // If a TextAnimator already owns this node, its `EffectiveWeight` is
-      // the snapped current spring value — the same weight the atlas raster
-      // and word positions are computed at. Measuring the intrinsic width
-      // at that weight (instead of the resolved style's target) keeps the
-      // layout box's reported width in lockstep with the glyphs throughout
-      // a weight transition. Otherwise surrounding boxes snap to the final
-      // (target-weight) width on frame 0 while glyphs morph smoothly — the
-      // visible "weight springs, layout jolts" decoupling.
-      const anim = this._textAnimators.get(node);
-      const measureStyle = (anim && anim.EffectiveWeight !== resolved.FontWeight)
-        ? { ...resolved, FontWeight: anim.EffectiveWeight }
-        : resolved;
-      node.TextMeasurement = MeasureText(node.Text, measureStyle, null);
+      // Measure at the target weight (resolved style). A previous version
+      // measured at the animator's live spring weight so surrounding boxes
+      // reflowed smoothly with the transition — visually nicer in isolation,
+      // but in flex-wrap containers (tokenized input rows) the per-frame
+      // width deltas crossed the wrap threshold mid-spring, popping rows up
+      // and down repeatedly. Snapping to target width on frame 0 means
+      // wrap is decided once and stays stable; the glyph weight then morphs
+      // smoothly within the already-sized box (Text.Animator re-measures
+      // internal word positions per tick at the raw weight, so word slots
+      // inside the box still slide continuously).
+      node.TextMeasurement = MeasureText(node.Text, resolved, null);
     } else if (node.Text === null) {
       node.TextMeasurement = null;
       // Only clear intrinsics if they weren't set by an image source

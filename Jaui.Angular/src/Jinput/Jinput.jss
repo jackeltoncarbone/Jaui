@@ -41,6 +41,13 @@ JinputSegment {
   // Default text style — wrapper components override Color / FontFamily /
   // FontSize via their own JSS or by passing a textStyle.
   Color: rgba(255, 255, 255, 0.85)
+  // Match TextAnimator's FontWeight spring config (stiffness 260, damping 30
+  // in Text.Animator.ts). JivAnimator's defaults (170 / 26) settle slower
+  // than the weight spring, so the surrounding-text slide trailed the bold
+  // and read as a separate "snap" event rather than part of the same motion.
+  @Spring X     { Stiffness: 260, Damping: 30 }
+  @Spring Y     { Stiffness: 260, Damping: 30 }
+  @Spring Width { Stiffness: 260, Damping: 30 }
 }
 
 JinputPlaceholder {

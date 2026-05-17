@@ -409,13 +409,25 @@ export class Jinput implements OnDestroy {
       this._scheduleWrapRead();
     });
 
-    // Stamp SnapLayout on every segment Jiv as soon as it mounts. New
-    // jext instances appear when @for grows; reused ones already had the
-    // flag set from a prior tick (set is idempotent on the handle).
+    // Stamp SnapLayout on every segment Jiv as soon as it mounts, then
+    // clear it the next frame. Re-segmentation (paste / token-driven text
+    // mutation) re-runs this effect because the viewChildren list changes,
+    // so the new (and any retained) segments snap to their final positions
+    // for one frame — avoiding the previous-slot drift the comment below
+    // was added to prevent. Pure style updates that don't re-segment
+    // (FontWeight on hover, Color transitions) don't re-fire this effect,
+    // so segments retain SnapLayout = false and the JivAnimator springs
+    // their X/Width changes — the surrounding-text slide rides the same
+    // curve as the bold instead of snapping.
     effect(() => {
       for (const seg of this._segments()) {
-        if (!seg.Node.SnapLayout) seg.Node.SnapLayout = true;
+        seg.Node.SnapLayout = true;
       }
+      requestAnimationFrame(() => {
+        for (const seg of this._segments()) {
+          seg.Node.SnapLayout = false;
+        }
+      });
     });
 
     // Desktop only: pin the hidden textarea to the visual caret. Windows
