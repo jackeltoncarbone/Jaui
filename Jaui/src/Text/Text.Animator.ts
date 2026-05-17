@@ -70,8 +70,20 @@ export class TextAnimator implements Animatable {
   /** Last weight at which positions were re-measured. Skip the re-measure
    *  when the snapped value hasn't actually moved across a 25-step boundary. */
   private _lastMeasuredWeight: number;
+  /** Fired by `Tick` whenever the snapped weight crosses a 25-unit boundary
+   *  (the same condition that triggers `_remeasureAtWeight`). Lets the Jaui
+   *  core invalidate the owning node's TextMeasurement so the next layout
+   *  pass re-measures intrinsic width at the new snapped weight — keeping
+   *  the layout box's reported width in lockstep with the spring-animated
+   *  glyph metrics instead of snapping to the target weight on frame 0. */
+  private _onWeightSnapChange?: () => void;
 
-  constructor(style: ResolvedTextStyle, stiffness: number = 260, damping: number = 30) {
+  constructor(
+    style: ResolvedTextStyle,
+    stiffness: number = 260,
+    damping: number = 30,
+    onWeightSnapChange?: () => void,
+  ) {
     this._style = _cloneStyle(style);
     this._stiffness = stiffness;
     this._damping = damping;
@@ -81,6 +93,7 @@ export class TextAnimator implements Animatable {
     const initial = Number.isFinite(w) ? w : 400;
     this._weightSpring = new Spring(initial, stiffness, damping, 1);
     this._lastMeasuredWeight = initial;
+    this._onWeightSnapChange = onWeightSnapChange;
   }
 
   get Content(): string { return this._content; }
@@ -183,6 +196,12 @@ export class TextAnimator implements Animatable {
     if (snapped !== this._lastMeasuredWeight) {
       this._lastMeasuredWeight = snapped;
       this._remeasureAtWeight(snapped);
+      // Notify the host (Jaui core) so the next layout pass re-measures
+      // the owning Jiv's intrinsic width at the new snapped weight.
+      // Without this, the Jiv's TextMeasurement was captured at the
+      // target weight on frame 0 and surrounding boxes jump to their
+      // final positions while glyphs morph smoothly.
+      this._onWeightSnapChange?.();
     }
     for (const w of this.Words) {
       if (w.SpringX.Step(dt)) active = true;
