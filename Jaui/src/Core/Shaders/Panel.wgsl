@@ -540,7 +540,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let shadow_dist = shape_sdf(sp, panel_half_size, inst.radii, smoothness, mode);
   let shadow_alpha = smoothstep(shadow_blur, -shadow_blur, shadow_dist) * inst.shadow_color.a;
 
-  // Fill
+  // Fill — tint composited over backdrop, treated as one material.
+  //
+  // KEEP-IN-SYNC: Jiv/Shaders/Jiv.Panel.frag. The principle: Background
+  // tint is a material property, visible always at its authored alpha.
+  // Thickness only controls glass *volume* effects (refraction, Beer-
+  // Lambert absorption, fresnel rim, CA) — all of which fade to zero
+  // with `glassiness` (smoothstep on thickness). That way both shader
+  // variants produce identical pixels for identical inputs, by
+  // construction, regardless of where on the Thickness spring a Jiv
+  // sits. No variant-boundary seam when a Jiv presses/releases across
+  // the glass/non-glass divide. When this WebGPU shader becomes the
+  // active path, port the GLSL version's fill block + glassiness-gated
+  // Beer-Lambert.
   var fill_rgb: vec3f;
   var fill_a: f32;
   if (material_type == 1.0) {

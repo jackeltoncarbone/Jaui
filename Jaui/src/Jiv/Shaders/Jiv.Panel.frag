@@ -685,8 +685,13 @@ void main() {
 
     // ── Beer-Lambert tint (multiplicative absorption) ──
     // Tint.a scales absorption strength; path length grows toward center.
-    if (materialType == 1.0 && v_Tint.a > 0.001) {
-        float pathLength = mix(0.3, 1.0, smoothstep(0.0, bezelWidth * 2.0, edgeDist));
+    // Scaled by `glassiness` so a Thickness=0 panel (no physical thickness
+    // for light to pass through) gets no absorption — the surface tint
+    // composite below takes over instead. Together with that composite,
+    // the glass material treatment is visually continuous as Thickness
+    // springs to/from zero (no seam at the variant boundary).
+    if (materialType == 1.0 && v_Tint.a > 0.001 && glassiness > 0.001) {
+        float pathLength = mix(0.3, 1.0, smoothstep(0.0, bezelWidth * 2.0, edgeDist)) * glassiness;
         vec3 absorb = pow(max(v_Tint.rgb, vec3(0.0001)), vec3(pathLength * v_Tint.a));
         backdrop *= absorb;
     }
@@ -770,18 +775,20 @@ void main() {
         shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
     }
 
-    // ── Fill: interior is PURELY the refracted backdrop (LG) or the tint (SG/None).
-    // No internal haze, no rim ambient, no specular overlay. All rim brightness
-    // comes from the border glow, per Apple Liquid Glass design intent.
+    // ── Fill: tint composited over the (refracted, filtered, absorbed) backdrop.
+    //
+    // The material is treated as ONE continuous physical treatment, not as
+    // a glass / non-glass duality. The Background tint is a material
+    // property — authored once, visible always, at its full v_Tint.a.
+    // Thickness controls the GLASS VOLUME EFFECTS (refraction, Beer-Lambert
+    // absorption, edge fresnel, rim spec, CA) which all fade smoothly to
+    // zero with `glassiness`. So MATERIAL_GLASS at Thickness=0 produces the
+    // same pixels as MATERIAL_NONE for identical inputs — no seam when a
+    // Jiv springs across the variant boundary, no cross-fade hack, no two
+    // materials to reconcile.
     vec3 fillRgb;
     float fillA;
-    if (materialType == 1.0) {
-        fillRgb = backdrop;
-        fillA = fillAlpha;
-    } else if (hasBackdropFilter) {
-        // Flat panel with backdrop filter — tint paints OVER the filtered backdrop.
-        // Fill is fully opaque in shape so the filter replaces what was behind
-        // (CSS backdrop-filter semantics); tint composites over it by its alpha.
+    if (materialType == 1.0 || hasBackdropFilter) {
         float tA = v_Tint.a;
         fillRgb = v_Tint.rgb * tA + backdrop * (1.0 - tA);
         fillA = fillAlpha;
