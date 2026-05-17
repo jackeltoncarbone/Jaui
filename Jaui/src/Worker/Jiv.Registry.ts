@@ -434,6 +434,7 @@ export class JivRegistry {
       core.MarkLayoutDirty();
     }
     if (ep.FitMode !== undefined) core.FitMode = ep.FitMode;
+    if (ep.SnapLayout !== undefined) core.SnapLayout = ep.SnapLayout;
   };
 
   private _applyMaterialBits = (_core: JivCore, _opts: JivApplyOpts): void => {

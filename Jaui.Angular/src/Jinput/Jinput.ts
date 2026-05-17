@@ -47,12 +47,18 @@ export interface JinputSpan {
    *  per-span hover / focus / theme styling via JSS without per-span
    *  Angular components. */
   Class?: string;
+  /** Optional per-span font weight override. Inline on the segment's
+   *  textStyle — survives the class-merge order issue that prevents
+   *  JSS-driven `:Hover` weight rules from sticking (see segmentTextStyle
+   *  below). */
+  FontWeight?: number;
 }
 
 interface RenderedSegment extends LayoutSegmentInput {
   Color?: string;
   Background?: string;
   Class?: string;
+  FontWeight?: number;
 }
 
 @Component({
@@ -83,7 +89,7 @@ interface RenderedSegment extends LayoutSegmentInput {
                 Height: rect.height + 'px',
               }" />
           }
-          @for (segment of RenderedSegments(); track $index) {
+          @for (segment of RenderedSegments(); track segment.StartIndex) {
             <jext
               #segment
               [class]="segmentClass(segment)"
@@ -126,6 +132,13 @@ interface RenderedSegment extends LayoutSegmentInput {
   styles: [`
     :host { display: contents; }
     .HiddenInput {
+      /* Default: parked off-screen. iOS Safari has a long-standing carve-out
+         for off-screen inputs at -9999px that lets programmatic focus()
+         open the soft keyboard outside a strict user-gesture window. Moving
+         the textarea on-screen broke keyboard-on-tap. Desktop platforms
+         (where Windows TSF / Win+V cares about a real viewport-anchored
+         input) opt into caret-tracked positioning via the constructor
+         effect below; mobile leaves it parked here. */
       position: fixed;
       top: -9999px;
       left: -9999px;
@@ -136,6 +149,11 @@ interface RenderedSegment extends LayoutSegmentInput {
       padding: 0;
       margin: 0;
       pointer-events: none;
+      caret-color: transparent;
+      color: transparent;
+      background: transparent;
+      overflow: hidden;
+      resize: none;
     }
   `],
 })
@@ -238,6 +256,7 @@ export class Jinput implements OnDestroy {
         Color: span.Color,
         Background: span.Background,
         Class: span.Class,
+        FontWeight: span.FontWeight,
       });
       cursor = span.End;
     }
@@ -330,7 +349,7 @@ export class Jinput implements OnDestroy {
   } => ({
     FontFamily: this.FontFamily(),
     FontSize: `${this.FontSizePx()}px`,
-    FontWeight: this.FontWeight(),
+    FontWeight: s.FontWeight ?? this.FontWeight(),
     LineHeight: String(this.LineHeightRatio()),
     ...(s.Color ? { Color: s.Color } : {}),
   });
@@ -399,6 +418,51 @@ export class Jinput implements OnDestroy {
       }
     });
 
+    // Desktop only: pin the hidden textarea to the visual caret. Windows
+    // Text Services Framework (Win+V clipboard history) and IME candidate
+    // boxes on Chromium register their context against the focused input's
+    // bounding rect. An off-screen input registers in the DOM but TSF drops
+    // it as "not in viewport", which is why Win+V acted like no text input
+    // was focused. Mobile is gated OUT — iOS Safari has a long-standing
+    // carve-out for off-screen inputs that lets programmatic `focus()`
+    // open the soft keyboard outside a strict user-gesture window. Moving
+    // the textarea on-screen on mobile breaks keyboard-on-tap; the OS
+    // paste / IME UI on touch devices anchors to the visible selection
+    // rect anyway, so caret tracking buys nothing there.
+    //
+    // Track selection (not CaretRect), so the position doesn't jitter with
+    // the caret-blink cycle — CaretRect goes null on the off-phase of the
+    // blink and when the user has a selection range, both of which would
+    // bounce the textarea between the caret and the wrap top-left.
+    if (!Jinput._isMobileTouch()) {
+      effect(() => {
+        const inputEl = this._hiddenInput()?.nativeElement;
+        if (!inputEl) return;
+        const canvasEl = this._jaui?.Canvas?.Element;
+        const wrap = this._wrap();
+        if (!canvasEl || !wrap) return;
+        // Subscribe to caret position via the selection signals + laid-out
+        // segments so the effect re-runs on caret move / wrap / text change.
+        const laid = this._LaidOutSegments();
+        const metrics = this._Metrics();
+        const sel = this._selEnd();
+        const rect = canvasEl.getBoundingClientRect();
+        let viewportX = rect.left + wrap.Node.X;
+        let viewportY = rect.top + wrap.Node.Y;
+        if (laid.length > 0) {
+          const cp = CharPosition(laid, sel, metrics, this._measureWidth);
+          viewportX += cp.x;
+          viewportY += cp.y;
+        }
+        // Clamp to viewport so the textarea never lands off-screen — TSF
+        // ignores out-of-bounds inputs the same way it ignores top:-9999px.
+        const vx = Math.max(0, Math.min(viewportX, window.innerWidth - 1));
+        const vy = Math.max(0, Math.min(viewportY, window.innerHeight - 1));
+        inputEl.style.left = `${vx}px`;
+        inputEl.style.top = `${vy}px`;
+      });
+    }
+
     document.addEventListener('selectionchange', this._onSelectionChange);
     // Wrap re-flows on viewport resize even when text hasn't changed; without
     // this listener long content stays wrapped to the old width after the
@@ -447,12 +511,20 @@ export class Jinput implements OnDestroy {
    *  selection is active, makes the caret visible, and re-arms the blink
    *  cycle. Safe to call from any time after construction; if the hidden
    *  input element isn't in the DOM yet (very early lifecycle), the call
-   *  is a no-op rather than throwing. */
+   *  is a no-op rather than throwing.
+   *
+   *  Mobile keyboard quirk: on iOS Safari and Android Chrome, calling
+   *  `focus()` on an element that ALREADY has document focus is a no-op —
+   *  it doesn't fire a focus event, which means the on-screen keyboard
+   *  doesn't reopen. If the user dismissed the keyboard via tap-outside
+   *  or swipe-down, our hidden textarea is still focused in the DOM but
+   *  the keyboard is gone. To get it back, we have to blur first so the
+   *  subsequent focus() actually fires a fresh focus event. */
   Focus = (): void => {
     if (this.ReadOnly()) return;
     const input = this._hiddenInput()?.nativeElement;
     if (!input) return;
-    input.focus();
+    this._focusHidden(input);
     // Move caret to end if currently selectionless and the input has text.
     // Common case for "show placement bar with prefilled text and let the
     // user keep typing where they left off".
@@ -462,6 +534,35 @@ export class Jinput implements OnDestroy {
     }
     this.syncSelection();
   };
+
+  /** Focus the hidden textarea such that the on-screen keyboard reopens
+   *  reliably on mobile. The blur step is the linchpin: iOS Safari and
+   *  Android Chrome no-op a `focus()` call on an already-focused element,
+   *  which is exactly the state we're in when the user dismissed the
+   *  keyboard (via tap-outside or swipe-down) without giving up DOM focus.
+   *  Blur first → next focus() fires fresh and the keyboard reappears. */
+  private _focusHidden = (input: HTMLTextAreaElement): void => {
+    if (document.activeElement === input) input.blur();
+    input.focus();
+  };
+
+  /** Touch-primary mobile detection — used to gate the caret-tracked
+   *  textarea positioning effect. We rely on the same media-query signal
+   *  the rest of the app uses for mobile / desktop branching:
+   *  `(pointer: coarse)` is true on iOS Safari and Android Chrome (plus
+   *  any device whose primary pointer is a finger). Cached once because
+   *  the result doesn't change without a full page reload. */
+  private static _MobileTouchCached: boolean | null = null;
+  private static _isMobileTouch(): boolean {
+    if (Jinput._MobileTouchCached !== null) return Jinput._MobileTouchCached;
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      Jinput._MobileTouchCached = false;
+      return false;
+    }
+    const result = window.matchMedia('(pointer: coarse)').matches;
+    Jinput._MobileTouchCached = result;
+    return result;
+  }
 
   // ── Pointer handling ────────────────────────────────────────────
   private static readonly _BurstMs = 400;
@@ -504,7 +605,7 @@ export class Jinput implements OnDestroy {
       // editable surface — keep focus so subsequent typing lands here. Same
       // setTimeout(0) reason as the full-path focus below: browser default
       // pointerdown shifts focus away after our handler returns.
-      setTimeout(() => input.focus(), 0);
+      setTimeout(() => this._focusHidden(input), 0);
       return;
     }
 
@@ -575,15 +676,29 @@ export class Jinput implements OnDestroy {
       }, Jinput._LongPressMs);
     }
 
-    // Defer focus + selection: the browser's default pointerdown shifts
-    // focus away from any currently-focused element after our listener
-    // returns. setTimeout(0) lets default fire first; we re-take focus.
-    setTimeout(() => {
-      input.focus();
+    // Focus + select. On real browser pointerdown the default action
+    // shifts focus away from any currently-focused element after our
+    // listener returns, so we have to setTimeout(0) and re-take focus.
+    // But Jaui-bridged synthetic events are pure DOM-dispatched clones
+    // (no native default), so the defer is unnecessary AND on mobile
+    // it actively breaks: `setSelectionRange` called outside the user
+    // gesture window doesn't commit the caret position. Detect synthetic
+    // events via the `__jauiBridged` marker the bridge stamps and run
+    // the selection synchronously for those.
+    const isBridged = (e as PointerEvent & { __jauiBridged?: boolean }).__jauiBridged === true;
+    const applySelection = (): void => {
+      // Don't blur-then-focus when we're inside the same gesture — that
+      // sequence works for "reopen keyboard" (separate gesture) but
+      // breaks here because the blur clears the upcoming setSelectionRange
+      // on iOS Safari. Plain focus() is enough: if the element is already
+      // focused the call no-ops, and setSelectionRange still commits.
+      if (document.activeElement !== input) input.focus();
       input.setSelectionRange(selA, selB, dir);
       this.syncSelection();
       this._scrollCaretIntoView();
-    }, 0);
+    };
+    if (isBridged) applySelection();
+    else setTimeout(applySelection, 0);
   };
 
   private _clearLongPressTimer = (): void => {
@@ -607,7 +722,7 @@ export class Jinput implements OnDestroy {
     const w = WordRangeAt(text, idx);
     this._dragGranularity = 'word';
     this._dragAnchor = w.start;
-    input.focus();
+    this._focusHidden(input);
     input.setSelectionRange(w.start, w.end, 'forward');
     this.syncSelection();
     this._scrollCaretIntoView();
@@ -819,15 +934,17 @@ export class Jinput implements OnDestroy {
   }
 
   // ── Native input bridge ─────────────────────────────────────────
-  // IME composition (CJK, Korean, etc.) fires `input` events for each
-  // provisional commit. Forwarding those mid-composition recomputes
-  // downstream signals (tokenization, spans) on partial state and may
-  // flicker. Suppress during composition; emit one final Text.set on
-  // compositionend.
+  // Composition tracking — preserved for CJK IME edge cases that might
+  // need it later, but `onInput` no longer gates on it. On Android Chrome
+  // (and most other mobile soft keyboards) regular English typing fires
+  // compositionstart/end pairs around every word as part of autocomplete
+  // and prediction, which meant Text.set never fired per-keystroke and
+  // the user saw nothing on screen until they tapped away to dismiss
+  // composition. Forwarding every input event accepts the small flicker
+  // risk on CJK input in exchange for live feedback everywhere else.
   private _composing = false;
 
   onInput = (event: Event): void => {
-    if (this._composing) return;
     const target = event.target as HTMLTextAreaElement;
     let value = target.value;
     if (!this.MultiLine() && /[\n\r]/.test(value)) {

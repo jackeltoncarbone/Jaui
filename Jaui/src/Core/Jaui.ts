@@ -1039,7 +1039,16 @@ export class Canvas implements DirtyTracker {
         // = smoothstep(thickness)) so MATERIAL_GLASS at Thickness=0 produces
         // the same output MATERIAL_NONE would have. The cost of this on
         // flat-with-filter panels is one extra cheap branch in the shader.
-        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, true, sceneSnap);
+        // Use MATERIAL_GLASS only for real glass. Plain-Jiv panels with just a
+        // backdrop filter (BackdropFrostBlur / Brightness / Saturation / Contrast)
+        // need MATERIAL_NONE so the shader's `else if (hasBackdropFilter)` fill
+        // branch runs — that branch composites the Jiv's Background tint over
+        // the filtered backdrop. The MATERIAL_GLASS variant constant-folds
+        // materialType=1.0 and always takes `fillRgb = backdrop`, silently
+        // discarding the tint. (The Thickness=0 stability argument above only
+        // applies to elements whose Material flips between LiquidGlass and None;
+        // for plain Jivs the material is statically 'None', no flip to protect.)
+        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap);
         if (_isGlass(material)) this._counts.Glass++;
         else this._counts.Panels++;
         // Reset the shared panel buffer so this glass instance isn't picked
@@ -1162,6 +1171,17 @@ export class Canvas implements DirtyTracker {
     this._textBuffer.Begin();
     this._clipBuffer.Begin();
     this._panelBuffer.Begin();
+    // Populate _maxFrostBlur from the live tree before the render walk. It
+    // sizes the Gaussian mip chain GenerateBlurMipmap builds (Jaui.ts ~1020
+    // `glassMaxLod = log2(_maxFrostBlur) + 2`). If left at 0, glassMaxLod
+    // caps at 2 and only mips 1..3 get the proper Dual-Filter Gaussian —
+    // any sample at deeper LOD falls through to the GL driver's box-filter
+    // mipmap, which collapses high-frequency content (UI chrome layered into
+    // the scene FBO) to a flat mean. That's why plain-Jiv BackdropFrostBlur
+    // panels at high Layer values rendered as a uniform color regardless of
+    // the authored blur radius.
+    this._maxFrostBlur = 0;
+    this._scanFrostBlur(this.Root);
     renderNode(this.Root, 1, 1, 0, 0, EmptyClipStack);
     // Trailing flushes — catch anything deferred since the last category
     // boundary. Order: panels first (they were pushed earlier in tree
@@ -1414,7 +1434,13 @@ export class Canvas implements DirtyTracker {
     if (node.Text !== null) {
       let anim = this._textAnimators.get(node);
       if (!anim) {
-        anim = new TextAnimator(resolvedStyle);
+        // Capture `node` in the snap-change callback so each weight-spring
+        // step that crosses a 25-unit boundary marks the owner's text
+        // dirty — the next layout pass re-measures intrinsic width at the
+        // new effective weight, and surrounding boxes slide smoothly into
+        // the box's evolving width instead of snapping on frame 0.
+        const owner = node;
+        anim = new TextAnimator(resolvedStyle, undefined, undefined, () => owner.InvalidateText());
         this._textAnimators.set(node, anim);
         this._animationManager.Register(anim);
       }
@@ -1438,7 +1464,19 @@ export class Canvas implements DirtyTracker {
       // TextStyle holds Length fields (FontSize, LetterSpacing) — resolve against this Jiv's ctx.
       const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
       const resolved = ResolveTextStyle(node.EffectiveTextStyle(), ctx);
-      node.TextMeasurement = MeasureText(node.Text, resolved, null);
+      // If a TextAnimator already owns this node, its `EffectiveWeight` is
+      // the snapped current spring value — the same weight the atlas raster
+      // and word positions are computed at. Measuring the intrinsic width
+      // at that weight (instead of the resolved style's target) keeps the
+      // layout box's reported width in lockstep with the glyphs throughout
+      // a weight transition. Otherwise surrounding boxes snap to the final
+      // (target-weight) width on frame 0 while glyphs morph smoothly — the
+      // visible "weight springs, layout jolts" decoupling.
+      const anim = this._textAnimators.get(node);
+      const measureStyle = (anim && anim.EffectiveWeight !== resolved.FontWeight)
+        ? { ...resolved, FontWeight: anim.EffectiveWeight }
+        : resolved;
+      node.TextMeasurement = MeasureText(node.Text, measureStyle, null);
     } else if (node.Text === null) {
       node.TextMeasurement = null;
       // Only clear intrinsics if they weren't set by an image source

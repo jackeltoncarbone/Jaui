@@ -226,6 +226,11 @@ export interface JivApplyOpts {
     UserSelect?: 'Auto' | 'None';
     PointScale?: string;
     FitMode?: 'Contain' | 'Cover';
+    /** When true, the next layout commit snaps to the resolved rect with no
+     *  spring animation. Set on jinput text segments so paste / token-driven
+     *  re-segmentation lands at the final X/Y instantly instead of drifting
+     *  between rows from the previous slot. */
+    SnapLayout?: boolean;
   };
 }
 

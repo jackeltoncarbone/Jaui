@@ -436,12 +436,52 @@ export class MainBridge {
         this.PostMessage({ T: 'pointer', Kind: kind, Payload: payload, Coalesced: coalesced });
       };
 
-    c.addEventListener('pointermove', fwdPointer('pointermove'));
-    c.addEventListener('pointerdown', fwdPointer('pointerdown'));
-    c.addEventListener('pointerup', fwdPointer('pointerup'));
-    c.addEventListener('pointercancel', fwdPointer('pointercancel'));
-    c.addEventListener('pointerleave', fwdPointer('pointerleave'));
-    c.addEventListener('pointerenter', fwdPointer('pointerenter'));
+    // For touch input, forward via the explicit touch-event path below
+    // instead of the PointerEvent path. iOS Safari only synthesizes
+    // PointerEvents for the PRIMARY finger in a multi-touch gesture, so
+    // relying on pointer events alone makes pinch impossible. The touch
+    // path below walks `changedTouches` and emits one synthetic pointer
+    // message per finger.
+    const fwdNonTouchPointer = (kind: Parameters<typeof fwdPointer>[0]) =>
+      (e: PointerEvent): void => {
+        if (e.pointerType === 'touch') return;
+        fwdPointer(kind)(e);
+      };
+
+    c.addEventListener('pointermove', fwdNonTouchPointer('pointermove'));
+    c.addEventListener('pointerdown', fwdNonTouchPointer('pointerdown'));
+    c.addEventListener('pointerup', fwdNonTouchPointer('pointerup'));
+    c.addEventListener('pointercancel', fwdNonTouchPointer('pointercancel'));
+    c.addEventListener('pointerleave', fwdNonTouchPointer('pointerleave'));
+    c.addEventListener('pointerenter', fwdNonTouchPointer('pointerenter'));
+
+    // Multi-touch path — synthesize a PointerPayload per touch and forward
+    // through the same worker pipeline. The browser delivers all fingers
+    // here on every touch event (touches / changedTouches), so multi-touch
+    // is reliable regardless of WebKit's PointerEvent synthesis quirks.
+    const touchPayload = (t: Touch, timeStamp: number): PointerPayload => {
+      const local = this._toCanvasLocal(t.clientX, t.clientY);
+      return {
+        // Offset identifier so it can't collide with mouse pointerId=1.
+        PointerId: t.identifier + 2,
+        PointerType: 'touch',
+        X: local.X, Y: local.Y,
+        ClientX: t.clientX, ClientY: t.clientY,
+        Buttons: 1, Button: 0,
+        Shift: false, Ctrl: false, Alt: false, Meta: false,
+        TimeStamp: timeStamp,
+      };
+    };
+    const fwdTouches = (kind: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel') =>
+      (e: TouchEvent): void => {
+        for (let i = 0; i < e.changedTouches.length; i++) {
+          const t = e.changedTouches[i];
+          this.PostMessage({ T: 'pointer', Kind: kind, Payload: touchPayload(t, e.timeStamp) });
+        }
+      };
+    c.addEventListener('touchmove',   fwdTouches('pointermove'),   { passive: false });
+    c.addEventListener('touchend',    fwdTouches('pointerup'),     { passive: false });
+    c.addEventListener('touchcancel', fwdTouches('pointercancel'), { passive: false });
 
     c.addEventListener('wheel', (e: WheelEvent) => {
       // preventDefault on main BEFORE forwarding — worker can't decide
@@ -451,8 +491,17 @@ export class MainBridge {
     }, { passive: false });
 
     c.addEventListener('touchstart', (e: TouchEvent) => {
+      // Always preventDefault — `touch-action: none` should already kill
+      // browser scroll/zoom but redundant guard doesn't hurt, and we're
+      // taking over the gesture lifecycle entirely. We forward each finger
+      // through the touch-derived pointer pipeline below, so the worker
+      // sees correct multi-touch regardless of WebKit's PointerEvent
+      // synthesis quirks (the original preventDefault was suppressing
+      // synthesis of pointer events for fingers 2+ on iOS Safari).
       e.preventDefault();
       this.PostMessage({ T: 'touchstart' });
+      // Synthesize pointerdown for every new touch in this event.
+      fwdTouches('pointerdown')(e);
     }, { passive: false });
 
     c.addEventListener('contextmenu', (e: MouseEvent) => {

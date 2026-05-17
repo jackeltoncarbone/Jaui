@@ -404,6 +404,7 @@ export class JivHandle {
       UserSelect: this._userSelect,
       Overflow: this._overflow,
       FitMode: this._fitMode,
+      SnapLayout: this._snapLayout,
     };
     if (this._pointScale) ep.PointScale = this._pointScale;
     const opts: JivApplyOpts = {
