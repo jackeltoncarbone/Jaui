@@ -1,6 +1,6 @@
 import {
   ChangeDetectionStrategy, Component, ElementRef, OnDestroy,
-  computed, effect, inject, input, model, output, signal, viewChild, viewChildren,
+  computed, effect, inject, input, model, output, signal, viewChild,
 } from '@angular/core';
 import { Jaui } from '../Jaui/Jaui';
 import { Jiv } from '../Jiv/Jiv';
@@ -91,7 +91,6 @@ interface RenderedSegment extends LayoutSegmentInput {
           }
           @for (segment of RenderedSegments(); track segment.StartIndex) {
             <jext
-              #segment
               [class]="segmentClass(segment)"
               [text]="segment.Text"
               [textStyle]="segmentTextStyle(segment)" />
@@ -206,13 +205,6 @@ export class Jinput implements OnDestroy {
   private readonly _jaui = inject(Jaui, { optional: true });
   private readonly _hiddenInput = viewChild<ElementRef<HTMLTextAreaElement>>('hiddenInput');
   private readonly _wrap = viewChild<Jiv>('wrap');
-  // Text segments need SnapLayout = true so that paste / token-driven
-  // re-segmentation lands at the final X/Y instantly. Without this, each
-  // segment Jiv's JivAnimator springs from its previous layout slot to its
-  // new one over ~0.5s, making segments visibly drift between rows
-  // (Reconcile content is already a snap at the per-word level; the segment
-  // Jiv container itself must snap too).
-  private readonly _segments = viewChildren<Jiv>('segment');
 
   // ── Internal state ──────────────────────────────────────────────
   private readonly _selStart = signal(0);
@@ -409,26 +401,14 @@ export class Jinput implements OnDestroy {
       this._scheduleWrapRead();
     });
 
-    // Stamp SnapLayout on every segment Jiv as soon as it mounts, then
-    // clear it the next frame. Re-segmentation (paste / token-driven text
-    // mutation) re-runs this effect because the viewChildren list changes,
-    // so the new (and any retained) segments snap to their final positions
-    // for one frame — avoiding the previous-slot drift the comment below
-    // was added to prevent. Pure style updates that don't re-segment
-    // (FontWeight on hover, Color transitions) don't re-fire this effect,
-    // so segments retain SnapLayout = false and the JivAnimator springs
-    // their X/Width changes — the surrounding-text slide rides the same
-    // curve as the bold instead of snapping.
-    effect(() => {
-      for (const seg of this._segments()) {
-        seg.Node.SnapLayout = true;
-      }
-      requestAnimationFrame(() => {
-        for (const seg of this._segments()) {
-          seg.Node.SnapLayout = false;
-        }
-      });
-    });
+    // (Previously: a SnapLayout=true / next-frame=false dance ran here on
+    // every viewChildren change to paper over a layout leak — the worker's
+    // subtree solver was reading parent Width/Height from the animator's
+    // mid-spring values, which made paste / token-driven re-segmentation
+    // sometimes resolve a segment to a Y that fell within Spring.Set's
+    // 0.1px deadband on the next solve and stuck there. The leak is now
+    // closed at the source in Element.LayoutX/Y/Width/Height — segments
+    // spring to their correct target naturally, no snap dance needed.)
 
     // Desktop only: pin the hidden textarea to the visual caret. Windows
     // Text Services Framework (Win+V clipboard history) and IME candidate

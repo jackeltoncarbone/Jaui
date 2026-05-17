@@ -1419,15 +1419,12 @@ export class Canvas implements DirtyTracker {
   private _processTextTransitions = (node: Jiv): void => {
     const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
     const [, padR, , padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
-    // Use the JivAnimator's target Width when one exists — node.Width is
-    // the live spring value, which means a parent whose Width is springing
-    // toward a new target would re-trigger text wrap every frame as its
-    // children's solved widths animate. Reading the target instead pins
-    // the wrap budget to the final dimension so word positions are stable
-    // from the first frame after content/layout changes.
-    const widthAnim = this._animators.get(node);
-    const targetWidth = widthAnim?.Springs.Width.Target ?? node.Width;
-    const contentW = targetWidth - padL - padR;
+    // LayoutWidth is the solver's last-computed target. node.Width is the
+    // animator's mid-spring value, which would re-trigger text wrap every
+    // frame as it animates. Reading the layout plane pins the wrap budget
+    // to the final dimension so word positions are stable from the first
+    // frame after content/layout changes.
+    const contentW = node.LayoutWidth - padL - padR;
     const maxWidth = contentW > 0 ? contentW : null;
     const resolvedStyle = ResolveTextStyle(node.EffectiveTextStyle(), ctx);
 
@@ -1564,11 +1561,17 @@ export class Canvas implements DirtyTracker {
     if (subtreeRoot === this.Root) {
       // Root fills the canvas (only meaningful on full-tree solves; in
       // subtree mode the box is fixed by the prior frame's solve and
-      // SolveLayout reads it from root.Width/Height directly).
+      // SolveLayout reads it from root.LayoutWidth/Height directly).
       this.Root.Width = this._width;
       this.Root.Height = this._height;
+      this.Root.LayoutWidth = this._width;
+      this.Root.LayoutHeight = this._height;
     }
 
+    // SolveLayout itself stamps the layout plane (LayoutX/Y/Width/Height)
+    // on every solved node before returning — see Layout.Solver.ts. The
+    // animator updates below still drive the render plane (node.X/Y/
+    // Width/Height) so visuals continue to spring as before.
     const results = SolveLayout(subtreeRoot, this._viewport(), this._jssVars);
 
     for (const [node, result] of results) {

@@ -368,13 +368,17 @@ const _textWrapBudget = (
   ctx: ResolveContext,
 ): number => {
   // Fast path: if the immediate parent has been solved (i.e. has a
-  // non-zero Width from a previous frame), its content area is the
+  // non-zero LayoutWidth from a previous frame), its content area is the
   // authoritative budget for any text living inside it. This already
   // accounts for every flex/percentage/padding decision the solver made
-  // upstream, so we don't need to re-derive it from the spec.
+  // upstream, so we don't need to re-derive it from the spec. We read
+  // the layout plane rather than the render plane so a parent whose
+  // Width is mid-spring doesn't re-trigger text wrap every tick — the
+  // text wrap budget should track the final dimension, not the
+  // animator's transient value.
   const parent = node.Parent ?? null;
   if (parent) {
-    const parentSolved = horiz ? parent.Width : parent.Height;
+    const parentSolved = horiz ? parent.LayoutWidth : parent.LayoutHeight;
     if (parentSolved > 0) {
       const childCtx = parent.ResolveCtx ?? ctx;
       const [pPt, pPr, pPb, pPl] = ResolveLengthTuple4(parent.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);

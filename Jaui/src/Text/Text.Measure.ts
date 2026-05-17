@@ -75,9 +75,20 @@ export const MeasureText = (
 
   const minWidth = _measureLongestWord(content, c);
 
+  // Trailing-newline trim: a span carrying "abc\n" or "abc\n\n" should
+  // measure as 1 visible line. A trailing \n is a separator with no
+  // paragraph after it — counting it would size the box for a phantom
+  // line and LayoutWords (which renders) wouldn't fill it, leaving the
+  // text renderer's vertical-centering pushing glyphs down by half a
+  // line. Embedded \n between content (e.g. "Line 1\nLine 2") still
+  // produces two lines, matching the documented behavior.
+  let rawLines = content.split('\n');
+  while (rawLines.length > 1 && rawLines[rawLines.length - 1] === '') {
+    rawLines.pop();
+  }
+
   // No wrap — single line (preserves explicit \n split)
   if (maxWidth === null || maxWidth === Infinity) {
-    const rawLines = content.split('\n');
     const lines = _applyMaxLines(rawLines, style, c);
     let width = 0;
     for (const line of lines) {
@@ -89,7 +100,7 @@ export const MeasureText = (
 
   // Word wrap
   const lines: string[] = [];
-  for (const paragraph of content.split('\n')) {
+  for (const paragraph of rawLines) {
     _wrapParagraph(paragraph, maxWidth, c, lines);
   }
 

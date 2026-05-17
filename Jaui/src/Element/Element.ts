@@ -57,10 +57,28 @@ export interface ElementOptions {
 
 export class Element {
   // ── Computed layout position (set by layout solver or manually) ──
+  //
+  // These are the RENDER plane — JivAnimator's per-frame Tick writes the
+  // spring's current value here, so renderers + hit tests see whatever the
+  // element is visually at *right now*. During a spring animation they
+  // diverge from the layout target, which is exactly what the eye expects.
   X: number = 0;
   Y: number = 0;
   Width: number = 0;
   Height: number = 0;
+
+  // The LAYOUT plane — what the solver most recently computed. Jaui copies
+  // every solve result into these fields before kicking the animator.
+  // Subsequent layout passes (subtree seeds, text wrap budgets, attach
+  // fallbacks, flex keyword fallbacks) read the *target* instead of the
+  // mid-spring render value, so descendants of a mid-spring ancestor get
+  // stable targets rather than transient ones that can land within the
+  // spring deadband and stick. See `Jaui._solveAndAnimate` for the write
+  // site and `Layout.Solver`/`Layout.Intrinsic` for the read sites.
+  LayoutX: number = 0;
+  LayoutY: number = 0;
+  LayoutWidth: number = 0;
+  LayoutHeight: number = 0;
 
   // ── Tree ──
   Parent: Element | null = null;
@@ -209,6 +227,14 @@ export class Element {
     this.Y = options?.Y ?? 0;
     this.Width = options?.Width ?? 0;
     this.Height = options?.Height ?? 0;
+    // Seed the layout plane to match the render plane at construction —
+    // explicit options are stating the element's *target* geometry, which
+    // is what callers like tests (and ad-hoc SolveLayout users) rely on
+    // before any solve has actually run.
+    this.LayoutX = this.X;
+    this.LayoutY = this.Y;
+    this.LayoutWidth = this.Width;
+    this.LayoutHeight = this.Height;
     this.SnapLayout = options?.SnapLayout ?? false;
     this.PointScale = options?.PointScale ?? '1pt';
     if (options?.FitMode !== undefined) this.FitMode = options.FitMode;

@@ -99,8 +99,18 @@ export const LayoutWords = (
   const spaceWidth = rawSpace > 0 && Number.isFinite(rawSpace)
     ? rawSpace
     : style.FontSize * 0.25;
-  const words = TokenizeWithOffsets(content);
-  if (words.length === 0) return [];
+  // Walk paragraphs (split on \n) so explicit newlines force a line break,
+  // matching MeasureText. Without this, a span whose text carried a
+  // trailing or embedded \n laid out as one rendered line while the layout
+  // box was sized for two — the gap then got eaten by the text renderer's
+  // vertical-centering, pushing glyphs visibly down ("132 counts"
+  // half-row-down bug from tokenized inputs).
+  const paragraphs = content.split('\n');
+  // Bail when there's no rendered content at all (e.g. an empty string,
+  // or a single trailing \n with nothing before it).
+  let anyWord = false;
+  for (const p of paragraphs) { if (/\S/.test(p)) { anyWord = true; break; } }
+  if (!anyWord) return [];
 
   // Pass 1: lay out flush-left, recording word metrics + line groupings
   const positions: WordPosition[] = [];
@@ -109,38 +119,66 @@ export const LayoutWords = (
   let currentX = 0;
   let currentY = 0;
   let currentLine = 0;
+  let charBase = 0; // running offset into the original content
+  let maxLinesHit = false;
+  for (let p = 0; p < paragraphs.length; p++) {
+    if (maxLinesHit) break;
+    const paragraph = paragraphs[p];
+    const words = TokenizeWithOffsets(paragraph);
 
-  for (let i = 0; i < words.length; i++) {
-    const tok = words[i];
-    const word = tok.Content;
-    const w = c.measureText(word).width;
+    for (let i = 0; i < words.length; i++) {
+      const tok = words[i];
+      const word = tok.Content;
+      const w = c.measureText(word).width;
 
-    if (maxWidth !== null && currentX > 0 && currentX + w > maxWidth) {
-      lineRanges.push({ start: lineStart, end: i - 1, width: currentX - spaceWidth });
-      lineStart = i;
-      currentX = 0;
-      currentY += lineHeight;
-      currentLine++;
+      if (maxWidth !== null && currentX > 0 && currentX + w > maxWidth) {
+        lineRanges.push({ start: lineStart, end: positions.length - 1, width: currentX - spaceWidth });
+        lineStart = positions.length;
+        currentX = 0;
+        currentY += lineHeight;
+        currentLine++;
+      }
+
+      if (style.MaxLines !== null && currentLine >= style.MaxLines) { maxLinesHit = true; break; }
+
+      positions.push({
+        Content: word,
+        X: currentX,
+        Y: currentY,
+        Width: w,
+        Height: lineHeight,
+        Line: currentLine,
+        CharStart: charBase + tok.CharStart,
+        CharEnd: charBase + tok.CharEnd,
+      });
+
+      currentX += w + spaceWidth;
     }
 
-    if (style.MaxLines !== null && currentLine >= style.MaxLines) break;
-
-    positions.push({
-      Content: word,
-      X: currentX,
-      Y: currentY,
-      Width: w,
-      Height: lineHeight,
-      Line: currentLine,
-      CharStart: tok.CharStart,
-      CharEnd: tok.CharEnd,
-    });
-
-    currentX += w + spaceWidth;
+    // Close out this paragraph's last line. The `+ 1` on charBase accounts
+    // for the consumed '\n' separator between paragraphs. If this isn't
+    // the trailing empty paragraph (i.e. the content didn't end with \n),
+    // force a line break for the next paragraph; a trailing empty
+    // paragraph contributes nothing rendered.
+    if (p < paragraphs.length - 1) {
+      const nextHasContent = paragraphs.slice(p + 1).some(s => /\S/.test(s));
+      if (positions.length > lineStart) {
+        lineRanges.push({ start: lineStart, end: positions.length - 1, width: currentX - spaceWidth });
+        lineStart = positions.length;
+      }
+      if (nextHasContent) {
+        if (style.MaxLines !== null && currentLine + 1 >= style.MaxLines) { maxLinesHit = true; }
+        currentX = 0;
+        currentY += lineHeight;
+        currentLine++;
+      }
+      charBase += paragraph.length + 1;
+    }
   }
-  // Final line — only emit if any positions were laid out (MaxLines may have
-  // clipped before any words landed, leaving an empty positions list).
-  if (positions.length > 0) {
+  // Final line — only emit if any positions were laid out and the last
+  // emitted lineRange doesn't already cover them (e.g. when the loop
+  // closed it at a paragraph boundary).
+  if (positions.length > lineStart) {
     lineRanges.push({ start: lineStart, end: positions.length - 1, width: currentX - spaceWidth });
   }
 

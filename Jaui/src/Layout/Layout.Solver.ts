@@ -66,8 +66,12 @@ export const SolveLayout = (
     const parent = root.Parent!;
     const parentCtx = parent.ResolveCtx!;
     const [pPt, pPr, pPb, pPl] = ResolveLengthTuple4(parent.Layout.Padding, parentCtx, ['H', 'W', 'H', 'W']);
-    const parentContentW = Math.max(0, parent.Width - pPl - pPr);
-    const parentContentH = Math.max(0, parent.Height - pPt - pPb);
+    // Read the LAYOUT plane (last-solved target) for box dimensions. The
+    // render plane (parent.Width / Height) is the animator's mid-spring
+    // value, which would feed a transient box dimension into a subtree
+    // solve and corrupt descendant targets when a parent is animating.
+    const parentContentW = Math.max(0, parent.LayoutWidth - pPl - pPr);
+    const parentContentH = Math.max(0, parent.LayoutHeight - pPt - pPb);
 
     const priorCtx = root.ResolveCtx!;
     rootCtx = {
@@ -82,10 +86,10 @@ export const SolveLayout = (
     };
     root.ResolveCtx = rootCtx;
     rootPointScale = rootCtx.RootPointScale;
-    offsetX = root.X;
-    offsetY = root.Y;
-    boxWidth = root.Width;
-    boxHeight = root.Height;
+    offsetX = root.LayoutX;
+    offsetY = root.LayoutY;
+    boxWidth = root.LayoutWidth;
+    boxHeight = root.LayoutHeight;
   } else {
     // Full-tree path. Root's ResolveCtx: no parent, so ParentWidth/Height =
     // viewport, ParentPointScale = DEFAULT_POINT_SCALE, RootPointScale =
@@ -116,12 +120,27 @@ export const SolveLayout = (
     root.ResolveCtx = rootCtx;
     offsetX = 0;
     offsetY = 0;
-    boxWidth = root.Width;
-    boxHeight = root.Height;
+    // Full-tree mode: Jaui has just stamped root.LayoutWidth/Height to the
+    // canvas pixel dims (alongside root.Width/Height). Read the layout
+    // plane for symmetry with subtree mode.
+    boxWidth = root.LayoutWidth;
+    boxHeight = root.LayoutHeight;
   }
 
   _solveNode(root, boxWidth, boxHeight, offsetX, offsetY, results, rootCtx, viewport, rootPointScale, vars);
   _resolveAttachPass(root, results, viewport, rootPointScale, vars);
+  // Stamp the LAYOUT plane (LayoutX/Y/Width/Height) on every solved node.
+  // This is what subsequent subtree solves, attach fallbacks, flex keyword
+  // fallbacks, and text-wrap budgets read — they MUST see the most recent
+  // layout target, not the JivAnimator's mid-spring render values
+  // (Element.X/Y/Width/Height), or descendants of a mid-spring ancestor
+  // can get corrupted targets and stick within the spring deadband.
+  for (const [node, r] of results) {
+    node.LayoutX = r.X;
+    node.LayoutY = r.Y;
+    node.LayoutWidth = r.Width;
+    node.LayoutHeight = r.Height;
+  }
   return results;
 };
 
@@ -226,8 +245,10 @@ const _computeAttachRect = (node: Element, target: LayoutResult): LayoutResult =
     };
   }
 
-  const w = _resolveAttachSize(cl.Width, target.Width, node.Width, ctx, 'W');
-  const h = _resolveAttachSize(cl.Height, target.Height, node.Height, ctx, 'H');
+  // Fall back to the layout plane (last-solved size), not the render
+  // plane (mid-spring) — see Element.ts header for the rationale.
+  const w = _resolveAttachSize(cl.Width, target.Width, node.LayoutWidth, ctx, 'W');
+  const h = _resolveAttachSize(cl.Height, target.Height, node.LayoutHeight, ctx, 'H');
 
   const targetAX = target.X + target.Width * cl.AttachTargetAnchor.X;
   const targetAY = target.Y + target.Height * cl.AttachTargetAnchor.Y;
@@ -305,8 +326,8 @@ const _solveNode = (
         if (v === 'MinContent') return intrinsicMin ?? intrinsic ?? fallback;
         return intrinsic ?? fallback;   // Auto + MaxContent → max-content intrinsic
       };
-      const w = resolveKeyword(declW, child.IntrinsicWidth, child.IntrinsicMinWidth, child.Width);
-      const h = resolveKeyword(declH, child.IntrinsicHeight, child.IntrinsicMinHeight, child.Height);
+      const w = resolveKeyword(declW, child.IntrinsicWidth, child.IntrinsicMinWidth, child.LayoutWidth);
+      const h = resolveKeyword(declH, child.IntrinsicHeight, child.IntrinsicMinHeight, child.LayoutHeight);
 
       // Fixed: cl.Left/Top are viewport-absolute. Placed/Sticky: relative
       // to the parent's box. Falling back to child.X/Y would feed the
