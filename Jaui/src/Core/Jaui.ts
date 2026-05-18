@@ -1864,9 +1864,16 @@ export class Canvas implements DirtyTracker {
     });
 
     // Click gesture — remember the down-hit Jiv and fire OnClick on
-    // pointerup only when the release lands on the SAME Jiv (or a
-    // descendant in the same tap target). Matches DOM click semantics.
+    // pointerup only when the release lands on the SAME Jiv AND the
+    // pointer hasn't traveled past TAP_SLOP since pointerdown. The slop
+    // check is what stops a scroll-drag from firing a phantom click: on
+    // mobile the user's finger always moves a little, and content under
+    // the lift-off point is often still the same card, so identity alone
+    // is not enough. 10 px matches Chromium's mobile tap slop.
     let _clickDownJiv: Jiv | null = null;
+    let _clickDownX = 0;
+    let _clickDownY = 0;
+    const TAP_SLOP = 10;
 
     // Touch: kill the browser's own long-press detector (haptic + OS
     // selection callout / context menu) at the actual source. On Chrome
@@ -1884,6 +1891,8 @@ export class Canvas implements DirtyTracker {
     this._on('pointerdown', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
       _clickDownJiv = hit;
+      _clickDownX = e.clientX;
+      _clickDownY = e.clientY;
       if (!hit) return;
       setStateChain(hit, this._activeJiv, 'Active');
       this._activeJiv = hit;
@@ -1898,6 +1907,20 @@ export class Canvas implements DirtyTracker {
         this._animationManager.Kick();
       }
     };
+
+    // Promote press → drag once travel exceeds slop: drop the pending
+    // click and release the Active visual so the user doesn't see a
+    // stuck press state while scrolling.
+    this._on('pointermove', (e: PointerEvent) => {
+      if (!_clickDownJiv) return;
+      const dx = e.clientX - _clickDownX;
+      const dy = e.clientY - _clickDownY;
+      if (dx * dx + dy * dy > TAP_SLOP * TAP_SLOP) {
+        _clickDownJiv = null;
+        clearActive();
+      }
+    });
+
     this._on('pointerup', (e: PointerEvent) => {
       const upHit = topmostAt(e.clientX, e.clientY);
       if (upHit && _clickDownJiv === upHit && upHit.OnClick) {
