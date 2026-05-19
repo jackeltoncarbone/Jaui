@@ -18,6 +18,18 @@
  * UI springs (ω < 20) take one step; only ultra-short transitions pay
  * the subdivision tax.
  */
+
+/** Settle thresholds. Must be tight enough that springs with sub-unit
+ *  deltas (VisualScale 1→1.03, Opacity 0→0.5) don't trip the check on
+ *  their first frame and snap before the integrator can run — at a soft
+ *  spring (ω=10) a 0.03 delta yields first-frame velocity ≈ 0.05, so
+ *  a 0.1 threshold would treat the spring as already settled. 0.001 is
+ *  comfortably invisible across every animatable property (sub-pixel,
+ *  sub-percent) while still letting the spring park within a frame or
+ *  two of the visible settle time. */
+const SETTLE_VALUE_EPSILON = 0.001;
+const SETTLE_VELOCITY_EPSILON = 0.001;
+
 export class Spring {
   Value: number;
   Velocity: number = 0;
@@ -69,7 +81,7 @@ export class Spring {
     }
 
     // Settled?
-    if (Math.abs(this.Velocity) < 0.1 && Math.abs(this.Value - this.Target) < 0.1) {
+    if (Math.abs(this.Velocity) < SETTLE_VELOCITY_EPSILON && Math.abs(this.Value - this.Target) < SETTLE_VALUE_EPSILON) {
       this.Value = this.Target;
       this.Velocity = 0;
       return false; // no longer active
@@ -87,10 +99,10 @@ export class Spring {
   /** Set a new target. Returns true if the spring needs to animate. */
   Set = (target: number): boolean => {
     this.Target = target;
-    return Math.abs(this.Value - this.Target) > 0.1 || Math.abs(this.Velocity) > 0.1;
+    return Math.abs(this.Value - this.Target) > SETTLE_VALUE_EPSILON || Math.abs(this.Velocity) > SETTLE_VELOCITY_EPSILON;
   };
 
   get IsSettled(): boolean {
-    return Math.abs(this.Velocity) < 0.1 && Math.abs(this.Value - this.Target) < 0.1;
+    return Math.abs(this.Velocity) < SETTLE_VELOCITY_EPSILON && Math.abs(this.Value - this.Target) < SETTLE_VALUE_EPSILON;
   }
 }

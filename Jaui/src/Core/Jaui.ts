@@ -241,8 +241,14 @@ export class Canvas implements DirtyTracker {
     // the browser honors the call.
     el.addEventListener('touchstart', (e) => { e.preventDefault(); dispatch('touchstart', e); }, { passive: false });
     // wheel needs preventDefault synchronously; the engine handler can't
-    // do it asynchronously.
-    el.addEventListener('wheel', (e) => { e.preventDefault(); dispatch('wheel', e); }, { passive: false });
+    // do it asynchronously. Browser zoom (Ctrl + wheel, plus Chrome's
+    // synthetic pinch-zoom-as-wheel+ctrlKey) is a browser-owned gesture —
+    // bail before preventDefault so the page can zoom.
+    el.addEventListener('wheel', (e) => {
+      if (e.ctrlKey) return;
+      e.preventDefault();
+      dispatch('wheel', e);
+    }, { passive: false });
 
     // Native clipboard for display-text selection (main-thread mode). The
     // worker-mode equivalent lives in Bridge.Main — there the snapshot is

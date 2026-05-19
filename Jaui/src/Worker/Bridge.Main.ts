@@ -484,6 +484,11 @@ export class MainBridge {
     c.addEventListener('touchcancel', fwdTouches('pointercancel'), { passive: false });
 
     c.addEventListener('wheel', (e: WheelEvent) => {
+      // Browser zoom (Ctrl + wheel, or pinch-zoom which Chrome delivers as
+      // wheel + ctrlKey) is a browser-owned gesture — bail before
+      // preventDefault so the page can zoom. Worker can't decide this
+      // synchronously, so the call has to happen here on main.
+      if (e.ctrlKey) return;
       // preventDefault on main BEFORE forwarding — worker can't decide
       // synchronously and Chrome/Safari ignore async preventDefault.
       e.preventDefault();
