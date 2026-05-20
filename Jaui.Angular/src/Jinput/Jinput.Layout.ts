@@ -25,9 +25,20 @@ export interface LaidOutSegment {
   Seg: LayoutSegmentInput;
   /** Pixel X within the wrap, on its row. */
   X: number;
+  /** Pixel Y of the top of this row in wrap-local pixels. Matches what
+   *  Text.WordLayout positions inside the rendered `<jext>` plus the
+   *  flex-row's start-Y, so click hit-testing lines up with glyphs
+   *  whether the row break came from a hard `\n` inside one segment
+   *  (paragraph break — no RowGap) or a soft flex-wrap split between
+   *  segments (LineHeight + RowGap). */
+  Y: number;
   /** Pixel width as measured. */
   Width: number;
-  /** Row index, 0-based. */
+  /** Glyph row height (= LayoutMetrics.LineHeightPx). Same for every row;
+   *  carried per-segment so callers don't need to re-look-up the metrics
+   *  on every CharPosition / RangeRects call. */
+  Height: number;
+  /** Row index, 0-based. Two segments share a Row iff they share a Y. */
   Row: number;
 }
 
@@ -58,6 +69,24 @@ export type MeasureFn = (text: string) => number;
  *     ("token" + ".") on the same row, avoiding orphan punctuation at the
  *     start of a line. Atom boundaries are the only soft-break points; a
  *     single atom wider than `WrapWidth` still gets its own row.
+ *
+ * Row spacing tracks two distinct cases so click hit-testing lines up with
+ * the rendered glyphs:
+ *  - Paragraph break (within-segment `\n`, also folded into tokenizer
+ *    spans by TokenizedTextInput.ComputedSpans): the rendered text uses
+ *    Text.WordLayout, which advances paragraphs by `lineHeight` ONLY.
+ *    So when LayoutSegments emits a new Line because of a `\n`, the next
+ *    Y advance is `LineHeightPx` — no RowGap.
+ *  - Soft flex-wrap break (atom overflow on a single Line): rendered by
+ *    Jaui's flex-row wrap, which inserts the JinputWrap RowGap between
+ *    rows. So when atom-wrap promotes to a new row inside a Line, the Y
+ *    advance is `RowPitchPx` (= `LineHeightPx + RowGapPx`).
+ *
+ *  Mixing those two rules into a single `Row * RowPitchPx` formula put
+ *  intra-segment paragraph splits ~5px below their true glyph row, so
+ *  taps in any visual row past the first inside a multi-paragraph
+ *  segment resolved up to the previous row and the caret snapped back to
+ *  line 1.
  */
 export const LayoutSegments = (
   segs: readonly LayoutSegmentInput[],
@@ -94,20 +123,26 @@ export const LayoutSegments = (
     }
   }
 
-  // Step 2: atom-group + row-fit each line.
+  // Step 2: atom-group + row-fit each line. Track Y explicitly so the two
+  // row-spacing rules (paragraph break vs soft wrap break) can coexist.
   interface Atom { segs: LayoutSegmentInput[]; widths: number[]; total: number; }
   const out: LaidOutSegment[] = [];
   let row = 0;
-  for (const line of lines) {
+  let y = 0;
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    if (lineIdx > 0) {
+      // Hard paragraph break — matches Text.WordLayout's per-paragraph
+      // Y advance (no RowGap).
+      y += metrics.LineHeightPx;
+      row++;
+    }
+    const line = lines[lineIdx];
     if (line.segs.length === 0) {
       // Empty row — anchor for caret positioning.
       out.push({
         Seg: { Text: '', StartIndex: line.startIdx, EndIndex: line.startIdx },
-        X: 0,
-        Width: 0,
-        Row: row,
+        X: 0, Y: y, Width: 0, Height: metrics.LineHeightPx, Row: row,
       });
-      row++;
       continue;
     }
     const atoms: Atom[] = [];
@@ -126,20 +161,23 @@ export const LayoutSegments = (
       }
     }
     let x = 0;
-    let lineRow = row;
     for (const atom of atoms) {
       if (x > 0 && x + atom.total > metrics.WrapWidth) {
-        lineRow++;
+        // Soft flex-wrap break — JinputWrap inserts a RowGap between rows.
+        y += metrics.RowPitchPx;
+        row++;
         x = 0;
       }
       let segX = x;
       for (let i = 0; i < atom.segs.length; i++) {
-        out.push({ Seg: atom.segs[i], X: segX, Width: atom.widths[i], Row: lineRow });
+        out.push({
+          Seg: atom.segs[i], X: segX, Y: y,
+          Width: atom.widths[i], Height: metrics.LineHeightPx, Row: row,
+        });
         segX += atom.widths[i];
       }
       x += atom.total;
     }
-    row = lineRow + 1;
   }
   return out;
 };
@@ -173,19 +211,11 @@ export const CharPosition = (
     const s = item.Seg.StartIndex;
     const e = item.Seg.EndIndex;
     if (s === e && idx === s) {
-      return {
-        x: item.X,
-        y: item.Row * metrics.RowPitchPx,
-        height: metrics.LineHeightPx,
-      };
+      return { x: item.X, y: item.Y, height: item.Height };
     }
     if (idx >= s && idx < e) {
       const within = item.Seg.Text.substring(0, idx - s);
-      return {
-        x: item.X + measure(within),
-        y: item.Row * metrics.RowPitchPx,
-        height: metrics.LineHeightPx,
-      };
+      return { x: item.X + measure(within), y: item.Y, height: item.Height };
     }
     if (idx === e) {
       // Boundary at end of this segment. If the next segment is adjacent
@@ -193,20 +223,12 @@ export const CharPosition = (
       // Otherwise (gap from \n or end of list) pin to right edge of this.
       const next = laid[k + 1];
       if (next && next.Seg.StartIndex === e) continue;
-      return {
-        x: item.X + item.Width,
-        y: item.Row * metrics.RowPitchPx,
-        height: metrics.LineHeightPx,
-      };
+      return { x: item.X + item.Width, y: item.Y, height: item.Height };
     }
   }
   // idx past everything — pin to last segment's right edge.
   const last = laid[laid.length - 1];
-  return {
-    x: last.X + last.Width,
-    y: last.Row * metrics.RowPitchPx,
-    height: metrics.LineHeightPx,
-  };
+  return { x: last.X + last.Width, y: last.Y, height: last.Height };
 };
 
 /**
@@ -232,13 +254,27 @@ export const IndexAtPoint = (
 ): number => {
   if (laid.length === 0) return 0;
 
-  // Clamp row to the [0, lastRow] range.
-  const lastRow = laid[laid.length - 1].Row;
-  let row = Math.floor(y / metrics.RowPitchPx);
-  if (row < 0) row = 0;
-  if (row > lastRow) row = lastRow;
-
-  const onRow = laid.filter(s => s.Row === row);
+  // Pick the row whose vertical span [Y, Y+Height) contains y. Above the
+  // first row collapses to row 0; below the last row collapses to it.
+  // Tie-break to the nearest row by Y midpoint for the inter-row gap
+  // (matches DOM <input> behavior: clicks in the gap snap to the closer
+  // row). Rows are listed in document order in `laid`, so the first row
+  // we find covering y wins — no need to scan all segments.
+  let chosen = laid[0];
+  let bestDist = Math.abs(y - (chosen.Y + chosen.Height / 2));
+  for (const item of laid) {
+    if (y >= item.Y && y < item.Y + item.Height) {
+      chosen = item;
+      bestDist = 0;
+      break;
+    }
+    const d = Math.abs(y - (item.Y + item.Height / 2));
+    if (d < bestDist) {
+      chosen = item;
+      bestDist = d;
+    }
+  }
+  const onRow = laid.filter(s => s.Row === chosen.Row);
   if (onRow.length === 0) return 0;
 
   // Left of the row's first segment → start of that segment.
@@ -305,7 +341,9 @@ export const RangeRects = (
   measure: MeasureFn,
 ): SelRect[] => {
   if (laid.length === 0 || a >= b) return [];
-  const perRow = new Map<number, { minX: number; maxX: number }>();
+  // Track Y + Height per row so paragraph-broken rows (no RowGap) and
+  // flex-wrapped rows (with RowGap) both highlight at the right pixel.
+  const perRow = new Map<number, { minX: number; maxX: number; y: number; height: number }>();
   for (const item of laid) {
     const s = item.Seg.StartIndex;
     const e = item.Seg.EndIndex;
@@ -317,19 +355,19 @@ export const RangeRects = (
     const endX = item.X + measure(text.substring(0, segB - s));
     const cur = perRow.get(item.Row);
     if (!cur) {
-      perRow.set(item.Row, { minX: startX, maxX: endX });
+      perRow.set(item.Row, { minX: startX, maxX: endX, y: item.Y, height: item.Height });
     } else {
       cur.minX = Math.min(cur.minX, startX);
       cur.maxX = Math.max(cur.maxX, endX);
     }
   }
   const out: SelRect[] = [];
-  for (const [row, { minX, maxX }] of perRow) {
+  for (const { minX, maxX, y, height } of perRow.values()) {
     out.push({
       x: minX,
-      y: row * metrics.RowPitchPx,
+      y,
       width: Math.max(1, maxX - minX),
-      height: metrics.LineHeightPx,
+      height,
     });
   }
   return out;

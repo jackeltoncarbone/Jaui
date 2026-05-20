@@ -869,11 +869,22 @@ export class Jinput implements OnDestroy {
       ? (isBackward ? this._selStart() : this._selEnd())
       : (delta === -1 ? this._selStart() : this._selEnd());
     const cur = CharPosition(laid, activeIdx, metrics, this._measureWidth);
-    const curRow = Math.round(cur.y / metrics.RowPitchPx);
+    // Resolve cur's Row by finding the laid segment whose Y matches —
+    // Y is no longer a simple row-pitch multiple (paragraph-break rows
+    // are spaced by LineHeight only, soft-wrap rows by LineHeight +
+    // RowGap), so we can't divide.
+    let curRow = 0;
+    for (const item of laid) {
+      if (item.Y === cur.y) { curRow = item.Row; break; }
+    }
     const targetRow = curRow + delta;
     if (targetRow < 0 || targetRow > lastRow) return false;
 
-    const targetY = targetRow * metrics.RowPitchPx + metrics.LineHeightPx / 2;
+    // Find the actual Y of the target row from the laid output.
+    let targetY = 0;
+    for (const item of laid) {
+      if (item.Row === targetRow) { targetY = item.Y + item.Height / 2; break; }
+    }
     const targetIdx = IndexAtPoint(laid, cur.x, targetY, metrics, this._measureWidth);
 
     if (shiftExtend) {
