@@ -213,6 +213,14 @@ export class Jinput implements OnDestroy {
   private readonly _caretBright = signal(true);
   private _blinkTimer: ReturnType<typeof setInterval> | null = null;
   private readonly _wrapWidth = signal(600);
+  // Bumped when a font that affects measurement finishes loading, so
+  // computed signals that depend on _measureWidth re-run with the now-
+  // correct glyph metrics. measureText falls back to system-ui until
+  // the @font-face Inter lands in the canvas2d font registry; system-ui
+  // is wider than Inter, so lines wrap earlier than Jaui's renderer
+  // (which has Inter primed in the worker's OffscreenCanvas) and leave
+  // a visible right-margin gap on every row.
+  private readonly _fontGen = signal(0);
 
   // ── Computed: derived metrics, segments, layout ─────────────────
   readonly showPlaceholder = computed(() =>
@@ -293,9 +301,12 @@ export class Jinput implements OnDestroy {
     return this._measureCtx.measureText(text).width;
   };
 
-  private readonly _LaidOutSegments = computed<LaidOutSegment[]>(() =>
-    LayoutSegments(this._SegmentsForLayout(), this._Metrics(), this._measureWidth),
-  );
+  private readonly _LaidOutSegments = computed<LaidOutSegment[]>(() => {
+    // Track _fontGen so a font-load completion re-runs this with
+    // measurement values reflecting the loaded font.
+    this._fontGen();
+    return LayoutSegments(this._SegmentsForLayout(), this._Metrics(), this._measureWidth);
+  });
 
   readonly CaretRect = computed(() => {
     if (!this._focused() || !this._caretBright()) return null;
@@ -395,8 +406,12 @@ export class Jinput implements OnDestroy {
       this.RenderedSegments();
       const wrap = this._wrap();
       if (wrap && !this._wrapWatched) {
+        // Watch the wrap so its X/Y/Width/Height stay fresh for click
+        // hit-testing in worker mode. (We don't drive _wrapWidth off
+        // this Width — see _pollLayoutWidth below.)
         wrap.Node.WatchRect(true);
         this._wrapWatched = true;
+        this._startLayoutWidthPoll();
       }
       this._scheduleWrapRead();
     });
@@ -461,6 +476,19 @@ export class Jinput implements OnDestroy {
     // user resizes the window.
     window.addEventListener('resize', this._onWindowResize);
     window.addEventListener('pointermove', this._onWindowHoverMove);
+
+    // Re-run layout once the @font-face font lands in the canvas2d font
+    // registry — measureText falls back to a wider system font until
+    // then, which makes lines wrap earlier than Jaui's renderer (whose
+    // OffscreenCanvas has the font primed earlier) and leaves a visible
+    // right-edge gap on every row. document.fonts.ready resolves when
+    // every pending @font-face has loaded; calling .load() for our
+    // specific font kicks the browser to fetch it if it hasn't already.
+    if (typeof document !== 'undefined' && document.fonts) {
+      const fontSpec = `${this.FontWeight()} ${this.FontSizePx()}px ${this.FontFamily()}`;
+      document.fonts.load(fontSpec).finally(() => this._fontGen.update(v => v + 1));
+      document.fonts.ready.then(() => this._fontGen.update(v => v + 1));
+    }
   }
 
   ngOnDestroy(): void {
@@ -473,19 +501,68 @@ export class Jinput implements OnDestroy {
     if (this._blinkTimer) clearInterval(this._blinkTimer);
     this._clearLongPressTimer();
     if (this._wrapReadFrame !== null) cancelAnimationFrame(this._wrapReadFrame);
+    if (this._layoutPollFrame !== null) {
+      cancelAnimationFrame(this._layoutPollFrame);
+      this._layoutPollFrame = null;
+    }
     if (this._wrapWatched) {
-      this._wrap()?.Node.WatchRect(false);
+      const wrap = this._wrap()?.Node;
+      wrap?.WatchRect(false);
+      const parent = (wrap?.Parent ?? null) as { WatchRect?: (b: boolean) => void; Parent?: { WatchRect?: (b: boolean) => void } } | null;
+      parent?.WatchRect?.(false);
+      parent?.Parent?.WatchRect?.(false);
       this._wrapWatched = false;
+      this._parentWatched = false;
+      this._grandWatched = false;
     }
   }
 
   private _wrapReadFrame: number | null = null;
   private _wrapWatched = false;
+  private _layoutPollFrame: number | null = null;
+  private _startLayoutWidthPoll = (): void => {
+    if (this._layoutPollFrame !== null) return;
+    const tick = (): void => {
+      this._layoutPollFrame = requestAnimationFrame(tick);
+      const wrap = this._wrap()?.Node;
+      if (!wrap) return;
+      // WatchRect each candidate so the worker keeps emitting snapshots
+      // (own cache stays fresh). LARGEST of the chain wins — the wrap
+      // itself is `Wrap: Wrap` and its Width sticks at wrapped-content
+      // width once text ever wraps, but its parent JinputRoot tracks
+      // its own parent (Width: 100%) and grows back. We can't predict
+      // which ancestor is reliably monotonic, so take the max across
+      // the closest ancestors we can reach.
+      type NodeLike = { Width: number; WatchRect: (b: boolean) => void; Parent?: NodeLike | null };
+      const parent = (wrap.Parent ?? null) as NodeLike | null;
+      const grand = (parent?.Parent ?? null) as NodeLike | null;
+      if (parent && !this._parentWatched) {
+        parent.WatchRect(true);
+        this._parentWatched = true;
+      }
+      if (grand && !this._grandWatched) {
+        grand.WatchRect(true);
+        this._grandWatched = true;
+      }
+      let best = wrap.Width ?? 0;
+      if (parent && parent.Width > best) best = parent.Width;
+      if (grand && grand.Width > best) best = grand.Width;
+      if (best > 0 && best !== this._wrapWidth()) this._wrapWidth.set(best);
+    };
+    tick();
+  };
+  private _parentWatched = false;
+  private _grandWatched = false;
+
   private _scheduleWrapRead = (attempt: number = 0): void => {
     if (this._wrapReadFrame !== null) return;
     this._wrapReadFrame = requestAnimationFrame(() => {
       this._wrapReadFrame = null;
-      const w = this._wrap()?.Node.Width;
+      // Read from the wrap's parent for the same monotonic-tracking
+      // reason as the OnRectSnapshot hookup above.
+      const wrap = this._wrap()?.Node;
+      const src = wrap?.Parent ?? wrap;
+      const w = src?.Width;
       if (typeof w === 'number' && w > 0) {
         if (w !== this._wrapWidth()) this._wrapWidth.set(w);
         return;

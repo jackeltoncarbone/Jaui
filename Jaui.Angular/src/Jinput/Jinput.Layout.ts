@@ -123,9 +123,20 @@ export const LayoutSegments = (
     }
   }
 
-  // Step 2: atom-group + row-fit each line. Track Y explicitly so the two
-  // row-spacing rules (paragraph break vs soft wrap break) can coexist.
-  interface Atom { segs: LayoutSegmentInput[]; widths: number[]; total: number; }
+  // Step 2: word-wrap each line. Walks every (word + trailing-whitespace)
+  // "atom" through one consistent break-point check, so a single long
+  // segment with no token spans still breaks at word boundaries — Jaui's
+  // <jext> renderer internally word-wraps each segment using its own
+  // LayoutWidth as maxWidth (see Jaui.ts _processTextTransitions), so
+  // without intra-segment wrap here, the rendered text occupies multiple
+  // visual rows while LaidOutSegments thinks everything is on row 0 — and
+  // every selection rect / caret / click hit-test collapses to row 0.
+  //
+  // Pieces accumulate per (segment × current row): when an atom-step
+  // forces a wrap, the in-flight piece is flushed at its row, and a new
+  // piece begins on the next row for the remaining characters of the same
+  // segment. This produces one LaidOutSegment per visual row a segment
+  // occupies — RangeRects and IndexAtPoint then see the true row count.
   const out: LaidOutSegment[] = [];
   let row = 0;
   let y = 0;
@@ -138,45 +149,78 @@ export const LayoutSegments = (
     }
     const line = lines[lineIdx];
     if (line.segs.length === 0) {
-      // Empty row — anchor for caret positioning.
       out.push({
         Seg: { Text: '', StartIndex: line.startIdx, EndIndex: line.startIdx },
         X: 0, Y: y, Width: 0, Height: metrics.LineHeightPx, Row: row,
       });
       continue;
     }
-    const atoms: Atom[] = [];
-    let current: Atom | null = null;
-    for (const seg of line.segs) {
-      const w = measure(seg.Text);
-      const prevText = current ? current.segs[current.segs.length - 1].Text : '';
-      const prevEndsWithSpace = prevText.length > 0 && /\s$/.test(prevText);
-      if (!current || prevEndsWithSpace) {
-        current = { segs: [seg], widths: [w], total: w };
-        atoms.push(current);
-      } else {
-        current.segs.push(seg);
-        current.widths.push(w);
-        current.total += w;
-      }
+
+    interface Piece {
+      seg: LayoutSegmentInput;
+      startInSeg: number;
+      endInSeg: number;
+      x: number;
+      width: number;
+      row: number;
+      y: number;
     }
+    let cur: Piece | null = null;
     let x = 0;
-    for (const atom of atoms) {
-      if (x > 0 && x + atom.total > metrics.WrapWidth) {
-        // Soft flex-wrap break — JinputWrap inserts a RowGap between rows.
-        y += metrics.RowPitchPx;
-        row++;
-        x = 0;
-      }
-      let segX = x;
-      for (let i = 0; i < atom.segs.length; i++) {
+    const flush = (): void => {
+      if (!cur) return;
+      if (cur.endInSeg > cur.startInSeg) {
         out.push({
-          Seg: atom.segs[i], X: segX, Y: y,
-          Width: atom.widths[i], Height: metrics.LineHeightPx, Row: row,
+          Seg: {
+            Text: cur.seg.Text.substring(cur.startInSeg, cur.endInSeg),
+            StartIndex: cur.seg.StartIndex + cur.startInSeg,
+            EndIndex: cur.seg.StartIndex + cur.endInSeg,
+          },
+          X: cur.x, Y: cur.y,
+          Width: cur.width, Height: metrics.LineHeightPx,
+          Row: cur.row,
         });
-        segX += atom.widths[i];
       }
-      x += atom.total;
+      cur = null;
+    };
+
+    for (const seg of line.segs) {
+      const text = seg.Text;
+      let i = 0;
+      while (i < text.length) {
+        // Atom = maximal non-whitespace run + adjacent trailing whitespace.
+        // Either part may be empty (the segment can start with whitespace).
+        let j = i;
+        while (j < text.length && !/\s/.test(text[j])) j++;
+        let k = j;
+        while (k < text.length && /\s/.test(text[k])) k++;
+        if (k === i) {
+          // Defensive: should not happen, but avoid an infinite loop.
+          i++;
+          continue;
+        }
+        const atomText = text.substring(i, k);
+        const atomWidth = measure(atomText);
+        if (x > 0 && x + atomWidth > metrics.WrapWidth) {
+          // Soft flex-wrap break — JinputWrap inserts a RowGap between rows.
+          flush();
+          y += metrics.RowPitchPx;
+          row++;
+          x = 0;
+        }
+        if (!cur || cur.seg !== seg || cur.row !== row) {
+          flush();
+          cur = { seg, startInSeg: i, endInSeg: k, x, width: atomWidth, row, y };
+        } else {
+          cur.endInSeg = k;
+          cur.width += atomWidth;
+        }
+        x += atomWidth;
+        i = k;
+      }
+      // End of segment — flush so a subsequent segment on the same row
+      // starts as its own piece (preserves per-segment styling slices).
+      flush();
     }
   }
   return out;

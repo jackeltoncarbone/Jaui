@@ -121,12 +121,26 @@ const _compute = (node: Element): void => {
         const resolvedStyle = ResolveTextStyle(node.EffectiveTextStyle(), ctx);
         const wrapped = MeasureText(node.Text, resolvedStyle, textMaxWidth);
         mainHeight = wrapped.Height + pt + pb;
-        // Persist the wrapped measurement on the node so downstream code
-        // (including the renderer's word layout pass) sees the correct
-        // line count, not the unbounded single-line measurement.
-        node.TextMeasurement = wrapped;
+        // DO NOT persist `wrapped` into `node.TextMeasurement`. Overwriting
+        // permanently shrinks the cached max-content width to the
+        // currently-narrow wrap, so the very next intrinsic pass sees
+        // `unboundedW = wrapped.Width` and the `wrapBudget < unboundedW`
+        // gate fails forever — even when the ancestor budget grows back.
+        // That stranded the text node's IntrinsicWidth at the narrow value,
+        // so the flex solver allocated only that narrow main-size to the
+        // <jext> even though its container had grown wide again (drawer
+        // close, window resize-larger, etc.). The wrapped measurement is
+        // only needed locally to compute `mainHeight` for THIS frame —
+        // `TextMeasurement` itself should keep the unbounded width that
+        // _measureDirtyText originally produced, so max-content sizing
+        // stays stable across reflows.
       }
     }
+    // IntrinsicWidth = max-content (the unbounded measurement). The flex
+    // solver clamps this against the container's actual budget per frame,
+    // so a wide container that shrinks doesn't need a stale narrow
+    // intrinsic to "remember" the previous wrap — the solver does that
+    // calculation freshly each time.
     node.IntrinsicWidth = node.TextMeasurement.Width + pl + pr;
     node.IntrinsicHeight = mainHeight;
     node.IntrinsicMinWidth = node.TextMeasurement.MinWidth + pl + pr;
