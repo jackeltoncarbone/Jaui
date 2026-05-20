@@ -72,7 +72,8 @@ interface RenderedSegment extends LayoutSegmentInput {
     <jiv [class]="ReadOnly() ? 'JinputRoot JinputReadOnly' : 'JinputRoot'"
       (pointerdown)="onRootPointerDown($event)"
       (contextmenu)="onRootContextMenu($event)">
-      <jiv #wrap class="JinputWrap">
+      <jiv #wrap class="JinputWrap"
+        [childLayout]="{ Height: LaidOutHeight() + 'px' }">
         @if (showPlaceholder()) {
           <jext class="JinputPlaceholder" [text]="Placeholder()" [textStyle]="placeholderTextStyle()" />
         } @else {
@@ -89,11 +90,18 @@ interface RenderedSegment extends LayoutSegmentInput {
                 Height: rect.height + 'px',
               }" />
           }
-          @for (segment of RenderedSegments(); track segment.StartIndex) {
+          @for (laid of LaidOutSegments(); track laid.Seg.StartIndex + ':' + laid.Row) {
             <jext
-              [class]="segmentClass(segment)"
-              [text]="segment.Text"
-              [textStyle]="segmentTextStyle(segment)" />
+              [class]="segmentClass(laid.Seg)"
+              [text]="laid.Seg.Text"
+              [textStyle]="segmentTextStyle(laid.Seg)"
+              [childLayout]="{
+                Position: 'Placed',
+                Left: laid.X + 'px',
+                Top: laid.Y + 'px',
+                Width: laid.Width + 'px',
+                Height: laid.Height + 'px',
+              }" />
           }
           @if (CaretRect(); as cr) {
             <jiv
@@ -284,8 +292,28 @@ export class Jinput implements OnDestroy {
       Text: s.Text,
       StartIndex: s.StartIndex,
       EndIndex: s.EndIndex,
+      Color: s.Color,
+      Background: s.Background,
+      Class: s.Class,
+      FontWeight: s.FontWeight,
     })),
   );
+
+  /** Total laid-out height in CSS px — used to size the wrap container so
+   *  Position:Placed children don't collapse to zero height. Computed as
+   *  bottom of the last laid-out row + a one-line buffer for the trailing
+   *  caret position when text ends with `\n`. */
+  readonly LaidOutHeight = computed<number>(() => {
+    const laid = this.LaidOutSegments();
+    const m = this._Metrics();
+    if (laid.length === 0) return m.LineHeightPx;
+    let maxBottom = 0;
+    for (const s of laid) {
+      const b = s.Y + s.Height;
+      if (b > maxBottom) maxBottom = b;
+    }
+    return maxBottom;
+  });
 
   /** Per-component canvas context for measureText. Allocated once; font
    *  string updated when font config inputs change. */
@@ -301,7 +329,7 @@ export class Jinput implements OnDestroy {
     return this._measureCtx.measureText(text).width;
   };
 
-  private readonly _LaidOutSegments = computed<LaidOutSegment[]>(() => {
+  readonly LaidOutSegments = computed<LaidOutSegment[]>(() => {
     // Track _fontGen so a font-load completion re-runs this with
     // measurement values reflecting the loaded font.
     this._fontGen();
@@ -311,7 +339,7 @@ export class Jinput implements OnDestroy {
   readonly CaretRect = computed(() => {
     if (!this._focused() || !this._caretBright()) return null;
     if (this._selStart() !== this._selEnd()) return null;
-    return CharPosition(this._LaidOutSegments(), this._selStart(), this._Metrics(), this._measureWidth);
+    return CharPosition(this.LaidOutSegments(), this._selStart(), this._Metrics(), this._measureWidth);
   });
 
   // Small halo around each selection line. Shared with Selection.Manager
@@ -323,7 +351,7 @@ export class Jinput implements OnDestroy {
   readonly SelectionRects = computed(() => {
     const a = Math.min(this._selStart(), this._selEnd());
     const b = Math.max(this._selStart(), this._selEnd());
-    const raw = RangeRects(this._LaidOutSegments(), a, b, this._Metrics(), this._measureWidth);
+    const raw = RangeRects(this.LaidOutSegments(), a, b, this._Metrics(), this._measureWidth);
     const px = this._SELECTION_PAD_X;
     const py = this._SELECTION_PAD_Y;
     return raw.map(r => ({
@@ -450,7 +478,7 @@ export class Jinput implements OnDestroy {
         if (!canvasEl || !wrap) return;
         // Subscribe to caret position via the selection signals + laid-out
         // segments so the effect re-runs on caret move / wrap / text change.
-        const laid = this._LaidOutSegments();
+        const laid = this.LaidOutSegments();
         const metrics = this._Metrics();
         const sel = this._selEnd();
         const rect = canvasEl.getBoundingClientRect();
@@ -909,7 +937,7 @@ export class Jinput implements OnDestroy {
   private _scrollCaretIntoView(): void {
     const w = this._wrap();
     if (!w) return;
-    const rect = CharPosition(this._LaidOutSegments(), this._selEnd(), this._Metrics(), this._measureWidth);
+    const rect = CharPosition(this.LaidOutSegments(), this._selEnd(), this._Metrics(), this._measureWidth);
     if (!rect) return;
     let p: any = w.Node.Parent;
     while (p && p.Overflow !== 'Scroll') p = p.Parent;
@@ -933,7 +961,7 @@ export class Jinput implements OnDestroy {
   // there's no row to move into (already on top row going up, or last row
   // going down), returns false so the native input keeps its no-op behavior.
   private _moveCaretByVisualRow(delta: -1 | 1, shiftExtend: boolean): boolean {
-    const laid = this._LaidOutSegments();
+    const laid = this.LaidOutSegments();
     if (laid.length === 0) return false;
     const lastRow = laid[laid.length - 1].Row;
     if (lastRow === 0) return false;
@@ -984,7 +1012,7 @@ export class Jinput implements OnDestroy {
   // Falls back to whole-text when idx is past the end on an empty trailing
   // row, and to [0, 0] for empty input.
   private _rowRangeAt(idx: number): { start: number; end: number } {
-    const laid = this._LaidOutSegments();
+    const laid = this.LaidOutSegments();
     const text = this.Text();
     if (laid.length === 0) return { start: 0, end: text.length };
     let row = laid[laid.length - 1].Row;
@@ -1010,7 +1038,7 @@ export class Jinput implements OnDestroy {
     const cRect = canvasEl.getBoundingClientRect();
     const localX = clientX - cRect.left - w.Node.X;
     const localY = clientY - cRect.top - w.Node.Y;
-    return IndexAtPoint(this._LaidOutSegments(), localX, localY, this._Metrics(), this._measureWidth);
+    return IndexAtPoint(this.LaidOutSegments(), localX, localY, this._Metrics(), this._measureWidth);
   }
 
   // ── Native input bridge ─────────────────────────────────────────

@@ -19,6 +19,16 @@ export interface LayoutSegmentInput {
   StartIndex: number;
   /** End index (exclusive) into the original Text. */
   EndIndex: number;
+  /** Optional per-span foreground color. Flows through layout unchanged
+   *  so the renderer can place styled fragments at their computed (X, Y)
+   *  without an extra Seg → Span lookup pass. */
+  Color?: string;
+  /** Optional per-span background color. */
+  Background?: string;
+  /** Optional per-span class. */
+  Class?: string;
+  /** Optional per-span font weight override. */
+  FontWeight?: number;
 }
 
 export interface LaidOutSegment {
@@ -175,6 +185,10 @@ export const LayoutSegments = (
             Text: cur.seg.Text.substring(cur.startInSeg, cur.endInSeg),
             StartIndex: cur.seg.StartIndex + cur.startInSeg,
             EndIndex: cur.seg.StartIndex + cur.endInSeg,
+            Color: cur.seg.Color,
+            Background: cur.seg.Background,
+            Class: cur.seg.Class,
+            FontWeight: cur.seg.FontWeight,
           },
           X: cur.x, Y: cur.y,
           Width: cur.width, Height: metrics.LineHeightPx,
