@@ -5,6 +5,8 @@ import {
   type Stylesheet,
   type Ruleset,
   type AnimationDefinition,
+  type PredicateExpr,
+  type PredicateStyle,
 } from 'jaui';
 
 /**
@@ -108,7 +110,12 @@ export class JssRegistry {
       : {};
     for (const [name, ruleset] of Object.entries(sheet)) {
       this._rules.set(name, ruleset);
-      if (ruleset.GroupHoverStyle || ruleset.GroupHoverTextStyle) {
+      // A class is a group-hover trigger iff any of its PredicateStyle
+      // entries references the `GroupHover` state name anywhere in its
+      // predicate AST (deep walk handles `:GroupHover`, `:(GroupHover &&
+      // !Disabled)`, etc.). Without this the hover dispatcher wouldn't
+      // know to fan _groupHover out to peers for the new compound forms.
+      if (_anyPredicateReferences(ruleset.PredicateStyles, 'GroupHover')) {
         this._groupTriggerClasses.add(name);
       } else {
         this._groupTriggerClasses.delete(name);
@@ -182,25 +189,13 @@ export class JssRegistry {
       if (r.Layout)        out.Layout        = { ...out.Layout,        ...r.Layout };
       if (r.ChildLayout)   out.ChildLayout   = { ...out.ChildLayout,   ...r.ChildLayout };
       if (r.TextStyle)     out.TextStyle     = { ...out.TextStyle,     ...r.TextStyle };
-      if (r.HoverStyle)          out.HoverStyle          = { ...out.HoverStyle,          ...r.HoverStyle };
-      if (r.ActiveStyle)         out.ActiveStyle         = { ...out.ActiveStyle,         ...r.ActiveStyle };
-      if (r.FocusStyle)          out.FocusStyle          = { ...out.FocusStyle,          ...r.FocusStyle };
-      if (r.DisabledStyle)       out.DisabledStyle       = { ...out.DisabledStyle,       ...r.DisabledStyle };
-      if (r.GroupHoverStyle)     out.GroupHoverStyle     = { ...out.GroupHoverStyle,     ...r.GroupHoverStyle };
-      if (r.HoverTextStyle)      out.HoverTextStyle      = { ...out.HoverTextStyle,      ...r.HoverTextStyle };
-      if (r.ActiveTextStyle)     out.ActiveTextStyle     = { ...out.ActiveTextStyle,     ...r.ActiveTextStyle };
-      if (r.FocusTextStyle)      out.FocusTextStyle      = { ...out.FocusTextStyle,      ...r.FocusTextStyle };
-      if (r.DisabledTextStyle)   out.DisabledTextStyle   = { ...out.DisabledTextStyle,   ...r.DisabledTextStyle };
-      if (r.GroupHoverTextStyle) out.GroupHoverTextStyle = { ...out.GroupHoverTextStyle, ...r.GroupHoverTextStyle };
-      if (r.Springs)           out.Springs           = { ...out.Springs,           ...r.Springs };
-      if (r.Animations)        out.Animations        = [...(out.Animations ?? []),  ...r.Animations];
-      // PredicateStyles concatenate base-first like Animations. Without
-      // this merge, single-class `<jiv class="Foo">` still got 0 predicate
-      // rules in the resolved ruleset — Resolve produces a NEW out ruleset,
-      // and any field it doesn't carry over is silently lost on the way
-      // to JivApplyOpts. Multi-class strings (`class="Foo Bar"`) layer
-      // predicates from each component class in declaration order.
-      if (r.PredicateStyles)   out.PredicateStyles   = [...(out.PredicateStyles ?? []), ...r.PredicateStyles];
+      if (r.Springs)       out.Springs       = { ...out.Springs,       ...r.Springs };
+      if (r.Animations)    out.Animations    = [...(out.Animations ?? []),  ...r.Animations];
+      // Pseudo-selector rules — both tight `:Foo` and compound `:(expr)`
+      // — live in PredicateStyles. Concatenate base-first so a multi-
+      // class `<jiv class="Foo Bar">` layers predicates from each class
+      // in declaration order.
+      if (r.PredicateStyles)  out.PredicateStyles  = [...(out.PredicateStyles ?? []), ...r.PredicateStyles];
     }
     return matched ? out : null;
   };
@@ -215,3 +210,32 @@ export const JSS_REGISTRY = new InjectionToken<JssRegistry>('JSS_REGISTRY');
  *   const Styles = CompileJss(jssText);
  */
 export const CompileJss = (source: string): ParsedJss => ParseJss(source);
+
+/** True iff any PredicateStyle entry's predicate references `stateName`
+ *  anywhere in its boolean tree. Used by Merge() to detect classes that
+ *  should be group-hover triggers — the canvas's hover dispatcher needs
+ *  the set of classes that participate in `:GroupHover` rules, and that
+ *  set now has to be computed from predicate ASTs instead of the retired
+ *  `GroupHoverStyle` slot. */
+const _anyPredicateReferences = (
+  entries: PredicateStyle[] | undefined,
+  stateName: string,
+): boolean => {
+  if (!entries) return false;
+  for (const e of entries) {
+    if (_exprReferences(e.Predicate, stateName)) return true;
+  }
+  return false;
+};
+
+const _exprReferences = (expr: PredicateExpr, stateName: string): boolean => {
+  switch (expr.Kind) {
+    case 'State': return expr.Name === stateName;
+    case 'Not':   return _exprReferences(expr.Expr, stateName);
+    case 'And':
+    case 'Or': {
+      for (const e of expr.Exprs) if (_exprReferences(e, stateName)) return true;
+      return false;
+    }
+  }
+};

@@ -113,7 +113,7 @@ describe('JSS — parser', () => {
     expect(() => ParseJss(`Toolbar { : value }`)).toThrow(/Expected identifier/);
   });
 
-  it('parses :GroupHover into GroupHoverStyle', () => {
+  it('parses :GroupHover into a PredicateStyles entry', () => {
     const { Sheet: sheet } = ParseJss(`
       TokenZoneWhat {
         BorderRadius: 4
@@ -123,11 +123,13 @@ describe('JSS — parser', () => {
       }
     `);
     expect(sheet.TokenZoneWhat.Style?.BorderRadius).toBe('4');
-    expect(sheet.TokenZoneWhat.GroupHoverStyle?.BackgroundColor).toBe('rgba(245, 200, 80, 0.08)');
-    expect(sheet.TokenZoneWhat.HoverStyle).toBeUndefined();
+    expect(sheet.TokenZoneWhat.PredicateStyles?.length).toBe(1);
+    const e = sheet.TokenZoneWhat.PredicateStyles![0];
+    expect(e.Predicate).toEqual({ Kind: 'State', Name: 'GroupHover' });
+    expect(e.Style?.BackgroundColor).toBe('rgba(245, 200, 80, 0.08)');
   });
 
-  it('routes Color in :GroupHover into GroupHoverTextStyle', () => {
+  it('routes Color in :GroupHover into the predicate entry TextStyle', () => {
     const { Sheet: sheet } = ParseJss(`
       Pill {
         BorderRadius: 2
@@ -136,7 +138,7 @@ describe('JSS — parser', () => {
         Color: rgb(255, 255, 255)
       }
     `);
-    expect(sheet.Pill.GroupHoverTextStyle?.Color).toBe('rgb(255, 255, 255)');
+    expect(sheet.Pill.PredicateStyles![0].TextStyle?.Color).toBe('rgb(255, 255, 255)');
   });
 
   it('auto-creates the base ruleset when :State is declared first', () => {
@@ -145,9 +147,11 @@ describe('JSS — parser', () => {
       Zone:GroupHover { BackgroundColor: rgba(10, 20, 30, 0.1) }
     `);
     expect(sheet.Pill).toBeDefined();
-    expect(sheet.Pill.HoverTextStyle?.Color).toBe('rgb(255, 255, 255)');
+    expect(sheet.Pill.PredicateStyles![0].Predicate).toEqual({ Kind: 'State', Name: 'Hover' });
+    expect(sheet.Pill.PredicateStyles![0].TextStyle?.Color).toBe('rgb(255, 255, 255)');
     expect(sheet.Zone).toBeDefined();
-    expect(sheet.Zone.GroupHoverStyle?.BackgroundColor).toBe('rgba(10, 20, 30, 0.1)');
+    expect(sheet.Zone.PredicateStyles![0].Predicate).toEqual({ Kind: 'State', Name: 'GroupHover' });
+    expect(sheet.Zone.PredicateStyles![0].Style?.BackgroundColor).toBe('rgba(10, 20, 30, 0.1)');
   });
 
   it('accepts empty rulesets as zone-documentation', () => {
@@ -158,17 +162,20 @@ describe('JSS — parser', () => {
     `);
     expect(sheet.ZoneA).toBeDefined();
     expect(sheet.ZoneB).toBeDefined();
-    expect(sheet.ZoneA.GroupHoverStyle?.BackgroundColor).toBe('rgba(1, 2, 3, 0.5)');
+    expect(sheet.ZoneA.PredicateStyles![0].Style?.BackgroundColor).toBe('rgba(1, 2, 3, 0.5)');
   });
 
-  it('keeps :Hover and :GroupHover in distinct slots', () => {
+  it('keeps :Hover and :GroupHover as distinct predicate entries', () => {
     const { Sheet: sheet } = ParseJss(`
       Tag { BorderRadius: 1 }
       Tag:Hover { BackgroundColor: rgb(10, 10, 10) }
       Tag:GroupHover { BackgroundColor: rgba(20, 20, 20, 0.5) }
     `);
-    expect(sheet.Tag.HoverStyle?.BackgroundColor).toBe('rgb(10, 10, 10)');
-    expect(sheet.Tag.GroupHoverStyle?.BackgroundColor).toBe('rgba(20, 20, 20, 0.5)');
+    expect(sheet.Tag.PredicateStyles?.length).toBe(2);
+    expect(sheet.Tag.PredicateStyles![0].Predicate).toEqual({ Kind: 'State', Name: 'Hover' });
+    expect(sheet.Tag.PredicateStyles![0].Style?.BackgroundColor).toBe('rgb(10, 10, 10)');
+    expect(sheet.Tag.PredicateStyles![1].Predicate).toEqual({ Kind: 'State', Name: 'GroupHover' });
+    expect(sheet.Tag.PredicateStyles![1].Style?.BackgroundColor).toBe('rgba(20, 20, 20, 0.5)');
   });
 
   it('tolerates whitespace and blank lines', () => {
@@ -201,21 +208,15 @@ describe('JSS — parser', () => {
 // produces the expected AST shape and routes styles into the right slot.
 
 describe('JSS — compound pseudo predicates', () => {
-  it('routes :(Single) the same as :Single semantically (own predicate entry)', () => {
-    const { Sheet: sheet } = ParseJss(`
-      Btn {
-        Background: rgba(0, 0, 0, 1)
-      }
-      Btn:(Hover) {
-        BackdropBrightness: 1.85
-      }
-    `);
-    expect(sheet.Btn.PredicateStyles?.length).toBe(1);
-    const entry = sheet.Btn.PredicateStyles![0];
+  it(':Hover and :(Hover) produce equivalent PredicateStyles entries', () => {
+    // Both forms parse to a single-state predicate `{ Kind: 'State', Name: 'Hover' }`.
+    // The tight `:Hover` form is just authoring sugar for `:(Hover)`.
+    const a = ParseJss(`Btn:Hover { BackdropBrightness: 1.85 }`).Sheet;
+    const b = ParseJss(`Btn:(Hover) { BackdropBrightness: 1.85 }`).Sheet;
+    expect(a.Btn.PredicateStyles).toEqual(b.Btn.PredicateStyles);
+    const entry = a.Btn.PredicateStyles![0];
     expect(entry.Predicate).toEqual({ Kind: 'State', Name: 'Hover' });
     expect(entry.Style?.BackdropBrightness).toBe('1.85');
-    // Legacy slot stays untouched — :(Single) routes ONLY to PredicateStyles.
-    expect(sheet.Btn.HoverStyle).toBeUndefined();
   });
 
   it('parses && into an And node', () => {
@@ -289,7 +290,7 @@ describe('JSS — compound pseudo predicates', () => {
     });
   });
 
-  it('preserves source order across multiple predicate rules on one class', () => {
+  it('preserves source order across multiple pseudo rules on one class', () => {
     const { Sheet: sheet } = ParseJss(`
       Btn {
         Background: rgba(0, 0, 0, 1)
@@ -304,11 +305,14 @@ describe('JSS — compound pseudo predicates', () => {
         Opacity: 0.35
       }
     `);
-    expect(sheet.Btn.PredicateStyles?.length).toBe(2);
+    // All three pseudo rules — both compound and tight :Disabled — land
+    // in PredicateStyles in source order. The runtime evaluates them
+    // against the live state set and merges matches in declaration order.
+    expect(sheet.Btn.PredicateStyles?.length).toBe(3);
     expect(sheet.Btn.PredicateStyles![0].Style?.BackdropBrightness).toBe('1.85');
     expect(sheet.Btn.PredicateStyles![1].Style?.VisualScale).toBe('0.92');
-    // Legacy :Disabled still routes to the legacy slot.
-    expect(sheet.Btn.DisabledStyle?.Opacity).toBe('0.35');
+    expect(sheet.Btn.PredicateStyles![2].Predicate).toEqual({ Kind: 'State', Name: 'Disabled' });
+    expect(sheet.Btn.PredicateStyles![2].Style?.Opacity).toBe('0.35');
   });
 
   it('compound predicates inherit through extends', () => {

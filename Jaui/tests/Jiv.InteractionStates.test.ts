@@ -12,20 +12,27 @@ describe('Jiv interaction states', () => {
   it('Hover overrides specific props when Hover=true', () => {
     const j = new Jiv({
       Style: { Opacity: 1.0 },
-      HoverStyle: { Opacity: 0.7 },
+      PredicateStyles: [
+        { Predicate: { Kind: 'State', Name: 'Hover' }, Style: { Opacity: 0.7 } },
+      ],
     });
     expect(j.EffectiveStyle().Opacity).toBe(1.0);
     j.Hover = true;
     expect(j.EffectiveStyle().Opacity).toBe(0.7);
   });
 
-  it('priority order: Disabled > Focus > Active > Hover', () => {
+  it('source-order last-wins reproduces the legacy Disabled > Focus > Active > Hover priority', () => {
+    // The pre-predicate engine had a hard-coded merge order; today it's just
+    // source-order last-wins. Declaring the entries in Hover→Active→Focus→
+    // Disabled order reproduces the exact precedence chain.
     const j = new Jiv({
       Style: { Opacity: 1.0 },
-      HoverStyle: { Opacity: 0.9 },
-      ActiveStyle: { Opacity: 0.8 },
-      FocusStyle: { Opacity: 0.7 },
-      DisabledStyle: { Opacity: 0.3 },
+      PredicateStyles: [
+        { Predicate: { Kind: 'State', Name: 'Hover' },    Style: { Opacity: 0.9 } },
+        { Predicate: { Kind: 'State', Name: 'Active' },   Style: { Opacity: 0.8 } },
+        { Predicate: { Kind: 'State', Name: 'Focus' },    Style: { Opacity: 0.7 } },
+        { Predicate: { Kind: 'State', Name: 'Disabled' }, Style: { Opacity: 0.3 } },
+      ],
     });
 
     j.Hover = true;
@@ -41,16 +48,18 @@ describe('Jiv interaction states', () => {
     expect(j.EffectiveStyle().Opacity).toBe(0.3); // Disabled wins all
   });
 
-  it('missing state style → falls through to base', () => {
+  it('missing predicate match → falls through to base by reference', () => {
     const j = new Jiv({ Style: { Opacity: 0.5 } });
-    j.Hover = true; // no HoverStyle
-    expect(j.EffectiveStyle().Opacity).toBe(0.5);
+    j.Hover = true; // no PredicateStyles attached
+    expect(j.EffectiveStyle()).toBe(j.Style); // zero-alloc fast path
   });
 
   it('base unchanged after merge — does not mutate', () => {
     const j = new Jiv({
       Style: { Opacity: 1.0 },
-      HoverStyle: { Opacity: 0.5 },
+      PredicateStyles: [
+        { Predicate: { Kind: 'State', Name: 'Hover' }, Style: { Opacity: 0.5 } },
+      ],
     });
     j.Hover = true;
     j.EffectiveStyle();

@@ -56,17 +56,22 @@ for (const c of cards) {
       ShadowBlur: '32',
       ShadowOffsetY: '14',
     },
-    HoverStyle: {
-      BorderColor: 'rgba(255, 255, 255, 0.95)',
-      BorderWidth: '2',
-      ShadowColor: 'rgba(255, 255, 255, 0.28)',
-      ShadowBlur: '40',
-      ShadowOffsetY: '0',
-    },
-    ActiveStyle: {
-      BorderColor: 'rgba(255, 255, 255, 0.35)',
-      BorderWidth: '1',
-    },
+    PredicateStyles: [
+      {
+        Predicate: { Kind: 'State', Name: 'Hover' },
+        Style: {
+          BorderColor: 'rgba(255, 255, 255, 0.95)',
+          BorderWidth: '2',
+          ShadowColor: 'rgba(255, 255, 255, 0.28)',
+          ShadowBlur: '40',
+          ShadowOffsetY: '0',
+        },
+      },
+      {
+        Predicate: { Kind: 'State', Name: 'Active' },
+        Style: { BorderColor: 'rgba(255, 255, 255, 0.35)', BorderWidth: '1' },
+      },
+    ],
     ChildLayout: { FlexGrow: 0, FlexShrink: 0, Height: String(c.Height) },
   });
   card.AddChild(new Jiv({

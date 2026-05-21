@@ -77,15 +77,8 @@ export class JivHandle {
   private _styleState: Record<string, unknown> = {};
   private _layoutState: Record<string, unknown> = {};
   private _childLayoutState: Record<string, unknown> = {};
-  private _hoverStyle: Record<string, unknown> | null = null;
-  private _activeStyle: Record<string, unknown> | null = null;
-  private _focusStyle: Record<string, unknown> | null = null;
-  private _disabledStyle: Record<string, unknown> | null = null;
-  private _hoverTextStyle: Record<string, unknown> | null = null;
-  private _activeTextStyle: Record<string, unknown> | null = null;
-  private _focusTextStyle: Record<string, unknown> | null = null;
-  private _disabledTextStyle: Record<string, unknown> | null = null;
-  /** Compound-pseudo predicate rules from JSS `:(expr)` blocks. */
+  /** Pseudo-selector rules from JSS — both tight `:Foo` and compound
+   *  `:(expr)` forms compile to PredicateStyle entries during parse. */
   private _predicateStyles: ReadonlyArray<Record<string, unknown>> | null = null;
   /** User-driven state set mirror. Keys are PascalCase state names
    *  (Disabled, Loading, Recording, etc.); values are always `true` (entries
@@ -178,24 +171,6 @@ export class JivHandle {
 
   get ImageSrc(): string | null { return this._imageSrc; }
   set ImageSrc(v: string | null) { if (this._imageSrc !== v) { this._imageSrc = v; this._markDirty(); } }
-
-  // State styles — assignable as whole-object replacements.
-  get HoverStyle(): Record<string, unknown> | null { return this._hoverStyle; }
-  set HoverStyle(v: Record<string, unknown> | null | undefined) { this._hoverStyle = v ?? null; this._markDirty(); }
-  get ActiveStyle(): Record<string, unknown> | null { return this._activeStyle; }
-  set ActiveStyle(v: Record<string, unknown> | null | undefined) { this._activeStyle = v ?? null; this._markDirty(); }
-  get FocusStyle(): Record<string, unknown> | null { return this._focusStyle; }
-  set FocusStyle(v: Record<string, unknown> | null | undefined) { this._focusStyle = v ?? null; this._markDirty(); }
-  get DisabledStyle(): Record<string, unknown> | null { return this._disabledStyle; }
-  set DisabledStyle(v: Record<string, unknown> | null | undefined) { this._disabledStyle = v ?? null; this._markDirty(); }
-  get HoverTextStyle(): Record<string, unknown> | null { return this._hoverTextStyle; }
-  set HoverTextStyle(v: Record<string, unknown> | null | undefined) { this._hoverTextStyle = v ?? null; this._markDirty(); }
-  get ActiveTextStyle(): Record<string, unknown> | null { return this._activeTextStyle; }
-  set ActiveTextStyle(v: Record<string, unknown> | null | undefined) { this._activeTextStyle = v ?? null; this._markDirty(); }
-  get FocusTextStyle(): Record<string, unknown> | null { return this._focusTextStyle; }
-  set FocusTextStyle(v: Record<string, unknown> | null | undefined) { this._focusTextStyle = v ?? null; this._markDirty(); }
-  get DisabledTextStyle(): Record<string, unknown> | null { return this._disabledTextStyle; }
-  set DisabledTextStyle(v: Record<string, unknown> | null | undefined) { this._disabledTextStyle = v ?? null; this._markDirty(); }
 
   // Compound-pseudo predicate list. Set as a whole-list replacement
   // (typically once per class application by JssRegistry). Each entry
@@ -378,14 +353,6 @@ export class JivHandle {
     if (opts.Layout) Object.assign(this._layoutState, opts.Layout);
     if (opts.ChildLayout) Object.assign(this._childLayoutState, opts.ChildLayout);
     if (opts.TextStyle) Object.assign(this._textStyleState, opts.TextStyle);
-    if (opts.HoverStyle !== undefined) this._hoverStyle = opts.HoverStyle ?? null;
-    if (opts.ActiveStyle !== undefined) this._activeStyle = opts.ActiveStyle ?? null;
-    if (opts.FocusStyle !== undefined) this._focusStyle = opts.FocusStyle ?? null;
-    if (opts.DisabledStyle !== undefined) this._disabledStyle = opts.DisabledStyle ?? null;
-    if (opts.HoverTextStyle !== undefined) this._hoverTextStyle = opts.HoverTextStyle ?? null;
-    if (opts.ActiveTextStyle !== undefined) this._activeTextStyle = opts.ActiveTextStyle ?? null;
-    if (opts.FocusTextStyle !== undefined) this._focusTextStyle = opts.FocusTextStyle ?? null;
-    if (opts.DisabledTextStyle !== undefined) this._disabledTextStyle = opts.DisabledTextStyle ?? null;
     if (opts.PredicateStyles !== undefined) this._predicateStyles = opts.PredicateStyles ?? null;
     if (opts.States !== undefined) {
       // Replace-style apply: merge each entry into our mirror. Keys absent
@@ -460,14 +427,6 @@ export class JivHandle {
       Layout: { ...this._layoutState },
       ChildLayout: { ...this._childLayoutState },
       TextStyle: { ...this._textStyleState },
-      HoverStyle: this._hoverStyle,
-      ActiveStyle: this._activeStyle,
-      FocusStyle: this._focusStyle,
-      DisabledStyle: this._disabledStyle,
-      HoverTextStyle: this._hoverTextStyle,
-      ActiveTextStyle: this._activeTextStyle,
-      FocusTextStyle: this._focusTextStyle,
-      DisabledTextStyle: this._disabledTextStyle,
       PredicateStyles: this._predicateStyles,
       States: { ...this._states },
       Text: this._text,

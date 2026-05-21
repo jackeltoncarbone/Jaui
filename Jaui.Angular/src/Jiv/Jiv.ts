@@ -166,19 +166,10 @@ export class Jiv implements OnInit, OnDestroy {
       Layout:        { ...fromClass?.Layout,        ...this.layout() } as Record<string, unknown>,
       ChildLayout:   childLayoutBag,
       TextStyle:     { ...fromClass?.TextStyle,     ...this.textStyle() } as Record<string, unknown>,
-      HoverStyle:          fromClass?.HoverStyle as Record<string, unknown> | undefined,
-      ActiveStyle:         fromClass?.ActiveStyle as Record<string, unknown> | undefined,
-      FocusStyle:          fromClass?.FocusStyle as Record<string, unknown> | undefined,
-      DisabledStyle:       fromClass?.DisabledStyle as Record<string, unknown> | undefined,
-      GroupHoverStyle:     fromClass?.GroupHoverStyle as Record<string, unknown> | undefined,
-      HoverTextStyle:      fromClass?.HoverTextStyle as Record<string, unknown> | undefined,
-      ActiveTextStyle:     fromClass?.ActiveTextStyle as Record<string, unknown> | undefined,
-      FocusTextStyle:      fromClass?.FocusTextStyle as Record<string, unknown> | undefined,
-      DisabledTextStyle:   fromClass?.DisabledTextStyle as Record<string, unknown> | undefined,
-      GroupHoverTextStyle: fromClass?.GroupHoverTextStyle as Record<string, unknown> | undefined,
       GroupTriggerClasses: triggerClasses.length > 0 ? triggerClasses : undefined,
-      // Compound `:(expr)` rules — resolved at JSS-parse time on main,
-      // shipped to the worker as plain-data `PredicateStyle` entries.
+      // Pseudo-selector rules — both `:Foo` and `:(expr)` — resolved at
+      // JSS-parse time on main, shipped to the worker as plain-data
+      // PredicateStyle entries.
       PredicateStyles:     fromClass?.PredicateStyles as ReadonlyArray<Record<string, unknown>> | undefined,
       Springs:           fromClass?.Springs as Record<string, Record<string, unknown>> | undefined,
       Animations:        fromClass?.Animations as Array<Record<string, unknown>> | undefined,

@@ -235,18 +235,9 @@ export class JivRegistry {
       void _ta; void _sa;
       Object.assign(core.ChildLayout, clRest as Partial<ChildLayout>);
     }
-    // State-style buckets: assigning the whole object is safe; engine
-    // mixes the active state into EffectiveStyle on every read.
-    if (opts.HoverStyle !== undefined)          core.HoverStyle          = (opts.HoverStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.ActiveStyle !== undefined)         core.ActiveStyle         = (opts.ActiveStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.FocusStyle !== undefined)          core.FocusStyle          = (opts.FocusStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.DisabledStyle !== undefined)       core.DisabledStyle       = (opts.DisabledStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.GroupHoverStyle !== undefined)     core.GroupHoverStyle     = (opts.GroupHoverStyle ?? null) as Partial<JivStyle> | null;
-    if (opts.HoverTextStyle !== undefined)      core.HoverTextStyle      = (opts.HoverTextStyle ?? null) as Partial<TextStyle> | null;
-    if (opts.ActiveTextStyle !== undefined)     core.ActiveTextStyle     = (opts.ActiveTextStyle ?? null) as Partial<TextStyle> | null;
-    if (opts.FocusTextStyle !== undefined)      core.FocusTextStyle      = (opts.FocusTextStyle ?? null) as Partial<TextStyle> | null;
-    if (opts.DisabledTextStyle !== undefined)   core.DisabledTextStyle   = (opts.DisabledTextStyle ?? null) as Partial<TextStyle> | null;
-    if (opts.GroupHoverTextStyle !== undefined) core.GroupHoverTextStyle = (opts.GroupHoverTextStyle ?? null) as Partial<TextStyle> | null;
+    // All pseudo-selector state styling — both single-state and compound
+    // predicate forms — rides PredicateStyles. _applyStateBits routes
+    // them onto the JivCore.
     this._applyStateBits(core, opts);
     if (opts.GroupTriggerClasses !== undefined) this._updateGroupClasses(core, opts.GroupTriggerClasses);
     if ('Text' in opts || opts.TextStyle) {
@@ -389,14 +380,6 @@ export class JivRegistry {
     Layout?: Partial<LayoutConfig>;
     ChildLayout?: Partial<ChildLayout>;
     TextStyle?: Partial<TextStyle>;
-    HoverStyle?: Partial<JivStyle>;
-    ActiveStyle?: Partial<JivStyle>;
-    FocusStyle?: Partial<JivStyle>;
-    DisabledStyle?: Partial<JivStyle>;
-    HoverTextStyle?: Partial<TextStyle>;
-    ActiveTextStyle?: Partial<TextStyle>;
-    FocusTextStyle?: Partial<TextStyle>;
-    DisabledTextStyle?: Partial<TextStyle>;
     PredicateStyles?: readonly import('../Jss/Jss.Parser').PredicateStyle[];
     Springs?: Record<string, Partial<SpringConfig>>;
     Animations?: import('../Animation/Animation.Types').AnimationApplication[];
@@ -407,14 +390,6 @@ export class JivRegistry {
     Layout: opts.Layout as Partial<LayoutConfig> | undefined,
     ChildLayout: opts.ChildLayout ? this._resolveAttachTo(opts.ChildLayout) as Partial<ChildLayout> : undefined,
     TextStyle: opts.TextStyle as Partial<TextStyle> | undefined,
-    HoverStyle: opts.HoverStyle as Partial<JivStyle> | undefined ?? undefined,
-    ActiveStyle: opts.ActiveStyle as Partial<JivStyle> | undefined ?? undefined,
-    FocusStyle: opts.FocusStyle as Partial<JivStyle> | undefined ?? undefined,
-    DisabledStyle: opts.DisabledStyle as Partial<JivStyle> | undefined ?? undefined,
-    HoverTextStyle: opts.HoverTextStyle as Partial<TextStyle> | undefined ?? undefined,
-    ActiveTextStyle: opts.ActiveTextStyle as Partial<TextStyle> | undefined ?? undefined,
-    FocusTextStyle: opts.FocusTextStyle as Partial<TextStyle> | undefined ?? undefined,
-    DisabledTextStyle: opts.DisabledTextStyle as Partial<TextStyle> | undefined ?? undefined,
     PredicateStyles: opts.PredicateStyles as readonly import('../Jss/Jss.Parser').PredicateStyle[] | undefined,
     Springs: opts.Springs as Record<string, Partial<SpringConfig>> | undefined,
     Animations: opts.Animations as import('../Animation/Animation.Types').AnimationApplication[] | undefined,

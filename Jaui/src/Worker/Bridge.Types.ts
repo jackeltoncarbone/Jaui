@@ -188,16 +188,6 @@ export interface JivApplyOpts {
   Layout?: Record<string, unknown>;
   ChildLayout?: Record<string, unknown>;
   TextStyle?: Record<string, unknown>;
-  HoverStyle?: Record<string, unknown> | null;
-  ActiveStyle?: Record<string, unknown> | null;
-  FocusStyle?: Record<string, unknown> | null;
-  DisabledStyle?: Record<string, unknown> | null;
-  GroupHoverStyle?: Record<string, unknown> | null;
-  HoverTextStyle?: Record<string, unknown> | null;
-  ActiveTextStyle?: Record<string, unknown> | null;
-  FocusTextStyle?: Record<string, unknown> | null;
-  DisabledTextStyle?: Record<string, unknown> | null;
-  GroupHoverTextStyle?: Record<string, unknown> | null;
   /** Compound pseudo-predicate rules — `Name:(expr) { ... }` from JSS.
    *  Each entry's Predicate is a JSON-safe boolean AST (State / Not /
    *  And / Or) the worker evaluates against the Jiv's live state set

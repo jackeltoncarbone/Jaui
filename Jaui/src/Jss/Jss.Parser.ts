@@ -79,33 +79,13 @@ export interface Ruleset {
   Layout?: Partial<LayoutConfig>;
   ChildLayout?: Partial<ChildLayout>;
   TextStyle?: Partial<TextStyle>;
-  /** Authored via `Name:Hover { ... }`. Merged on top of base Style when
-   *  the Jiv's `Hover` flag is set (pointer hit-test, focus, disabled).
-   *  Inherited by subclasses through the same extends chain as Style. */
-  HoverStyle?: Partial<JivStyle>;
-  ActiveStyle?: Partial<JivStyle>;
-  FocusStyle?: Partial<JivStyle>;
-  DisabledStyle?: Partial<JivStyle>;
-  // `Name:GroupHover { ... }` — applied when any Jiv sharing this class is hovered.
-  GroupHoverStyle?: Partial<JivStyle>;
-  /** TextStyle declarations from a `:State` block — `Name:Hover { Color: red }`
-   *  routes Color (a TextStyle prop per Jss.Routes) into HoverTextStyle so
-   *  the runtime can layer it on top of the base TextStyle when the matching
-   *  state is active. Plumbed through Jaui core Jiv. */
-  HoverTextStyle?: Partial<TextStyle>;
-  ActiveTextStyle?: Partial<TextStyle>;
-  FocusTextStyle?: Partial<TextStyle>;
-  DisabledTextStyle?: Partial<TextStyle>;
-  GroupHoverTextStyle?: Partial<TextStyle>;
-  /** Compound pseudo-selector entries — `Name:(Hover && !Disabled) { ... }`.
-   *  Evaluated by the runtime against the Jiv's live state set. Source
-   *  order is preserved so the cascade can apply last-wins within this
-   *  tier. Inherited through `extends` (concatenated, base first).
-   *
-   *  Single-state pseudos (`Name:Hover`, etc) continue to populate the
-   *  legacy slot above so existing runtime code paths keep working
-   *  bit-exact. Authors who want suppression (e.g. hover that doesn't
-   *  fire when disabled) opt in by writing the compound form. */
+  /** Pseudo-selector entries. Both tight single-state syntax
+   *  `Name:Hover { ... }` and compound predicates
+   *  `Name:(Hover && !Disabled) { ... }` route here — the tight form
+   *  compiles to a single-state predicate `{ Kind: 'State', Name: 'Hover' }`
+   *  so the runtime has ONE evaluation path. Source order is preserved
+   *  (last-wins within this tier). Inherited through `extends`
+   *  (concatenated, base first). */
   PredicateStyles?: PredicateStyle[];
   /** Per-property spring overrides authored via `@Spring Property { … }`
    *  or `@Transition Property { … }` (which translates to a critically-
@@ -281,43 +261,38 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
   const className = _readIdent(s);
 
   // Tight `:State` / `:(expr)` pseudo (no whitespace). Three legal shapes:
-  //   `Foo:Hover { ... }`           — single-state pseudo, legacy slot
+  //   `Foo:Hover { ... }`           — single-state pseudo (compiles to a
+  //                                   one-atom PredicateStyle below)
   //   `Foo:(Hover && !Disabled){…}` — compound predicate, PredicateStyles
   //   `Foo : Base1, Base2 { ... }`  — extends list (loose colon, has space)
-  // Compound predicates and single-state pseudos must come BEFORE the
-  // extends check so `Foo:Hover` isn't misread as `Foo extends Hover`.
-  let stateSlot: 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle' | 'GroupHoverStyle' | null = null;
-  let stateTextSlot: 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle' | 'GroupHoverTextStyle' | null = null;
+  // Both pseudo forms must come BEFORE the extends check so `Foo:Hover`
+  // isn't misread as `Foo extends Hover`. Both forms route to the same
+  // PredicateStyles slot so there's ONE evaluation path at runtime.
   let predicate: PredicateExpr | null = null;
   if (s.src[s.pos] === ':') {
     const next = s.src[s.pos + 1];
     if (next === '(') {
-      // Compound predicate form — `:(expr)`. Consume the `:`, then parse
-      // the parenthesized boolean expression. Routes to PredicateStyles
-      // rather than a fixed legacy slot, so author can combine any
-      // number of states with &&, ||, !, parens. Backwards-compatible
-      // with `:Foo` (kept as the tight non-paren single-ident path below).
+      // Compound predicate — `:(expr)` with &&, ||, !, parens.
       s.pos++; // consume ':'
       predicate = _parseParenPredicate(s, className);
     } else if (next && next !== ' ' && next !== '\t' && next !== '\n') {
-      // Tight colon — single-state pseudo-state form.
+      // Tight colon — single-state pseudo. Compiles to a one-atom
+      // predicate `{ Kind: 'State', Name: stateName }` so the runtime
+      // never needs special-cased Hover/Active/Focus/Disabled/GroupHover
+      // slots. Any PascalCase identifier works — authors can declare
+      // their own states (Loading, Recording, ...).
       s.pos++;
       const stateName = _readIdent(s);
-      const slot = _STATE_TO_SLOT[stateName];
-      if (!slot) {
-        throw new Error(`[Jaui] "${className}:${stateName}" — unknown state. Use Hover, Active, Focus, Disabled, GroupHover, or the compound form ":(${stateName} && OtherState)".`);
-      }
-      stateSlot = slot;
-      stateTextSlot = _STATE_TO_TEXT_SLOT[stateName];
+      predicate = { Kind: 'State', Name: stateName };
     }
   }
 
   _skipWs(s);
 
   // Optional `: Base1, Base2` extends list (only valid on the base form —
-  // not after a pseudo, single-state or compound).
+  // not after a pseudo).
   const bases: string[] = [];
-  if (!stateSlot && !predicate && s.src[s.pos] === ':') {
+  if (!predicate && s.src[s.pos] === ':') {
     s.pos++;
     while (true) {
       _skipWs(s);
@@ -336,7 +311,7 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
     _skipWs(s);
     if (s.src[s.pos] === '}') { s.pos++; break; }
     if (s.pos >= s.src.length) {
-      const label = stateSlot ? `:${stateSlot}` : predicate ? ':(...)' : '';
+      const label = predicate ? ':(...)' : '';
       throw new Error(`[Jaui] Unterminated ruleset "${className}${label}" — missing "}"`);
     }
     if (s.src[s.pos] === '@') {
@@ -346,10 +321,9 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
     }
   }
 
-  // Compound-predicate ruleset — `Foo:(Hover && !Disabled) { ... }`. Push
-  // a PredicateStyle entry onto the existing class's PredicateStyles list.
-  // Source order is preserved so the runtime can apply last-wins within
-  // this tier (matches the cascade rule for the rest of the parser).
+  // Pseudo-selector ruleset — both `Foo:Hover` and `Foo:(Hover && !Disabled)`
+  // arrive here. Push a PredicateStyle entry onto the class's PredicateStyles
+  // list in source order. Last-wins within the tier.
   if (predicate) {
     let target = out[className];
     if (!target) {
@@ -362,22 +336,6 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
       Style: own.Style,
       TextStyle: own.TextStyle,
     });
-    return;
-  }
-
-  // Pseudo-state ruleset — copy own.Style into the matching state slot AND
-  // own.TextStyle into the matching state-text slot (e.g. `Foo:Hover {
-  // Color: red }` routes Color via Jss.Routes to TextStyle, which we
-  // then layer onto HoverTextStyle so the runtime can apply text-level
-  // hover/active/focus/disabled overrides — not just visual JivStyle.
-  if (stateSlot && stateTextSlot) {
-    let target = out[className];
-    if (!target) {
-      target = {};
-      out[className] = target;
-    }
-    if (own.Style)     target[stateSlot]     = { ...target[stateSlot],     ...own.Style };
-    if (own.TextStyle) target[stateTextSlot] = { ...target[stateTextSlot], ...own.TextStyle };
     return;
   }
 
@@ -909,16 +867,6 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
   Layout:            { ...a.Layout,            ...b.Layout },
   ChildLayout:       { ...a.ChildLayout,       ...b.ChildLayout },
   TextStyle:         { ...a.TextStyle,         ...b.TextStyle },
-  HoverStyle:        { ...a.HoverStyle,        ...b.HoverStyle },
-  GroupHoverStyle:   { ...a.GroupHoverStyle,   ...b.GroupHoverStyle },
-  ActiveStyle:       { ...a.ActiveStyle,       ...b.ActiveStyle },
-  FocusStyle:        { ...a.FocusStyle,        ...b.FocusStyle },
-  DisabledStyle:     { ...a.DisabledStyle,     ...b.DisabledStyle },
-  HoverTextStyle:        { ...a.HoverTextStyle,        ...b.HoverTextStyle },
-  GroupHoverTextStyle:   { ...a.GroupHoverTextStyle,   ...b.GroupHoverTextStyle },
-  ActiveTextStyle:   { ...a.ActiveTextStyle,   ...b.ActiveTextStyle },
-  FocusTextStyle:    { ...a.FocusTextStyle,    ...b.FocusTextStyle },
-  DisabledTextStyle: { ...a.DisabledTextStyle, ...b.DisabledTextStyle },
   Springs:           { ...a.Springs,           ...b.Springs },
   // Animations concatenate (base first, then own). Source-order is
   // preserved so the cascade can apply last-wins within a tier.
@@ -927,8 +875,9 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
     : undefined,
   // PredicateStyles concatenate the same way Animations do — base
   // entries come first, then own entries layered on top. Subclasses
-  // can author their own `:(...)` rules without losing the base's,
-  // and last-source-order-wins resolves conflicts within the tier.
+  // can author their own pseudo rules (single-state OR compound)
+  // without losing the base's, and last-source-order-wins resolves
+  // conflicts within the tier.
   PredicateStyles: (a.PredicateStyles || b.PredicateStyles)
     ? [...(a.PredicateStyles ?? []), ...(b.PredicateStyles ?? [])]
     : undefined,
@@ -1033,20 +982,3 @@ const _parsePredAtom = (s: _ScanState, className: string): PredicateExpr => {
   return { Kind: 'State', Name: name };
 };
 
-/** Reserved pseudo-state names following the `:` in `Foo:State`. Maps to
- *  the matching slot on Ruleset. PascalCase to match Jaui authoring style. */
-const _STATE_TO_SLOT: Record<string, 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle' | 'GroupHoverStyle'> = {
-  Hover: 'HoverStyle',
-  Active: 'ActiveStyle',
-  Focus: 'FocusStyle',
-  Disabled: 'DisabledStyle',
-  GroupHover: 'GroupHoverStyle',
-};
-
-const _STATE_TO_TEXT_SLOT: Record<string, 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle' | 'GroupHoverTextStyle'> = {
-  Hover: 'HoverTextStyle',
-  Active: 'ActiveTextStyle',
-  Focus: 'FocusTextStyle',
-  Disabled: 'DisabledTextStyle',
-  GroupHover: 'GroupHoverTextStyle',
-};
