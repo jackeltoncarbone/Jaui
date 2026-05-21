@@ -6,6 +6,8 @@ import type { TextStyle } from '../Text/Text.Types';
 import type { SpringConfig, AnimationApplication, AnimationDefinition } from '../Animation/Animation.Types';
 import { Element, type CursorStyle } from '../Element/Element';
 import { DirtyFlag } from '../Core/Types';
+import type { PredicateStyle } from '../Jss/Jss.Parser';
+import { EvaluatePredicate } from '../Jss/Jss.Predicate';
 
 /**
  * Jiv — a visual panel element. Extends Element with material, style,
@@ -45,6 +47,23 @@ export class Jiv extends Element {
   FocusStyle: Partial<JivStyle> | null = null;
   DisabledStyle: Partial<JivStyle> | null = null;
   GroupHoverStyle: Partial<JivStyle> | null = null;
+
+  /** Compound pseudo-predicate rules. Each entry has a JSON-safe Predicate
+   *  AST and a Style/TextStyle patch. EffectiveStyle walks the list AFTER
+   *  the legacy state slots, evaluating each predicate against the Jiv's
+   *  live state set (`_states`) and Object.assigning matching entries' Style
+   *  in source order. Last-wins within the tier; predicate rules win over
+   *  legacy state rules they share a property with because they merge last.
+   *  Populated from JSS `Name:(expr) { ... }` at class-apply time. */
+  PredicateStyles: readonly PredicateStyle[] | null = null;
+
+  /** Live state set — the source of truth for predicate evaluation.
+   *  Pointer-driven states (Hover, Active, Focus, GroupHover) are kept in
+   *  sync by the typed setters below. Disabled mirrors the same pattern.
+   *  Custom states (Loading, Recording, anything author-named) are set via
+   *  `SetState(name, on)` — Phase 2 framework hook for the Angular
+   *  `[disabled]` input and any future state inputs. */
+  private readonly _states: Set<string> = new Set();
   /** Text-level state overrides — `Foo:Hover { Color: red }` lands here.
    *  Layered on top of the base TextStyle by `EffectiveTextStyle()` when
    *  the matching state flag is set. */
@@ -63,32 +82,100 @@ export class Jiv extends Element {
   set Hover(v: boolean) {
     if (this._hover === v) return;
     this._hover = v;
-    if (this.HoverTextStyle) this._invalidateText();
+    this._syncState('Hover', v);
+    if (this.HoverTextStyle || this._hasTextPredicates) this._invalidateText();
   }
   get Active(): boolean { return this._active; }
   set Active(v: boolean) {
     if (this._active === v) return;
     this._active = v;
-    if (this.ActiveTextStyle) this._invalidateText();
+    this._syncState('Active', v);
+    // 'Pressed' is the canonical PascalCase state name in the predicate
+    // grammar; mirror Active onto it so authors can write either
+    // `:Active` (legacy) or `:(Pressed && !Disabled)` (new) and get the
+    // same pointer-driven trigger without confusion.
+    this._syncState('Pressed', v);
+    if (this.ActiveTextStyle || this._hasTextPredicates) this._invalidateText();
   }
   get Focus(): boolean { return this._focus; }
   set Focus(v: boolean) {
     if (this._focus === v) return;
     this._focus = v;
-    if (this.FocusTextStyle) this._invalidateText();
+    this._syncState('Focus', v);
+    if (this.FocusTextStyle || this._hasTextPredicates) this._invalidateText();
   }
   get Disabled(): boolean { return this._disabled; }
   set Disabled(v: boolean) {
     if (this._disabled === v) return;
     this._disabled = v;
-    if (this.DisabledTextStyle) this._invalidateText();
+    this._syncState('Disabled', v);
+    // Reserved-Disabled defaults: when Disabled flips on, the framework
+    // suppresses pointer-event dispatch and forces the cursor to Default
+    // unless an explicit author rule overrides it. Stash the pre-disabled
+    // values so we restore exactly what was authored when Disabled flips
+    // off again. Author rules that write Interactive / Cursor inside a
+    // `:Disabled { ... }` or `:(Disabled && ...) { ... }` block still win
+    // via EffectiveStyle's merge order (compound predicate styles layer
+    // ON TOP of these implicit defaults).
+    if (v) {
+      this._preDisabledInteractive = this.Interactive;
+      this._preDisabledCursor = this.Cursor;
+      this.Interactive = false;
+      this.Cursor = 'Default';
+    } else {
+      if (this._preDisabledInteractive !== null) {
+        this.Interactive = this._preDisabledInteractive;
+        this._preDisabledInteractive = null;
+      }
+      if (this._preDisabledCursor !== null) {
+        this.Cursor = this._preDisabledCursor;
+        this._preDisabledCursor = null;
+      }
+    }
+    if (this.DisabledTextStyle || this._hasTextPredicates) this._invalidateText();
   }
   get GroupHover(): boolean { return this._groupHover; }
   set GroupHover(v: boolean) {
     if (this._groupHover === v) return;
     this._groupHover = v;
-    if (this.GroupHoverTextStyle) this._invalidateText();
+    this._syncState('GroupHover', v);
+    if (this.GroupHoverTextStyle || this._hasTextPredicates) this._invalidateText();
   }
+
+  /** Imperative state setter for predicates beyond the five pointer-driven
+   *  ones. Authors can declare any state name in JSS (`Foo:(Loading) { … }`,
+   *  `Foo:(Recording && !Disabled) { … }`); the framework toggles them
+   *  here. Idempotent — flipping a state to its current value is a no-op
+   *  and doesn't trigger a re-render.
+   *
+   *  Pointer-driven states (Hover/Active/Focus/Disabled/GroupHover) round-
+   *  trip through this same path via their typed setters above; calling
+   *  SetState('Hover', true) directly would skip the typed setter's text-
+   *  invalidation, so author code should prefer the typed setters when
+   *  one exists. The Angular `[disabled]` input plumbs through the typed
+   *  Disabled setter, not SetState, for the same reason. */
+  SetState = (name: string, on: boolean): void => {
+    const has = this._states.has(name);
+    if (has === on) return;
+    if (on) this._states.add(name); else this._states.delete(name);
+    if (this._hasTextPredicates) this._invalidateText();
+  };
+
+  /** Cached check — does any PredicateStyle entry write into TextStyle?
+   *  Computed once when PredicateStyles is assigned. Drives whether state
+   *  changes need to invalidate text. Visual-only predicates don't need
+   *  a text re-measure on every pointer move, so the gate stays cheap. */
+  private _hasTextPredicates: boolean = false;
+
+  private _syncState = (name: string, on: boolean): void => {
+    if (on) this._states.add(name); else this._states.delete(name);
+  };
+
+  /** Captured Interactive/Cursor values from BEFORE Disabled was set, so
+   *  flipping Disabled off restores exactly what the author originally
+   *  declared (rather than baking in the framework's implicit defaults). */
+  private _preDisabledInteractive: boolean | null = null;
+  private _preDisabledCursor: CursorStyle | null = null;
 
   // Text-only invalidation — pushes a re-measure / re-paint without forcing
   // a layout pass when the new TextStyle would only change Color or other
@@ -153,6 +240,7 @@ export class Jiv extends Element {
     DisabledTextStyle?: Partial<TextStyle>;
     GroupHoverTextStyle?: Partial<TextStyle>;
     Classes?: readonly string[];
+    PredicateStyles?: readonly PredicateStyle[];
     TextSelectionStyle?: Partial<JivStyle>;
     Springs?: Record<string, Partial<SpringConfig>>;
     Animations?: AnimationApplication[];
@@ -208,18 +296,65 @@ export class Jiv extends Element {
     this.Springs = options?.Springs ?? null;
     this.Animations = options?.Animations ?? null;
     this.AnimationTable = options?.AnimationTable ?? null;
+    if (options?.PredicateStyles) this._setPredicateStylesInternal(options.PredicateStyles);
   }
 
-  /** Final render-time style: base + state overrides in priority order.
-   *  Disabled beats Focus beats Active beats Hover. */
+  /** Replace the PredicateStyles list. Used by the worker registry on
+   *  class-swap so the new class's compound-pseudo rules take effect. The
+   *  internal setter also recomputes _hasTextPredicates so the cheap-path
+   *  gate in state setters stays in sync. */
+  SetPredicateStyles = (list: readonly PredicateStyle[] | null): void => {
+    this._setPredicateStylesInternal(list);
+  };
+
+  private _setPredicateStylesInternal = (list: readonly PredicateStyle[] | null): void => {
+    this.PredicateStyles = list;
+    let hasText = false;
+    if (list) {
+      for (const entry of list) {
+        if (entry.TextStyle && Object.keys(entry.TextStyle).length > 0) {
+          hasText = true;
+          break;
+        }
+      }
+    }
+    this._hasTextPredicates = hasText;
+  };
+
+  /** Final render-time style. Two tiers, both source-order last-wins:
+   *
+   *    1. Legacy state slots — Hover/Active/Focus/Disabled/GroupHover —
+   *       applied in fixed priority (GroupHover → Hover → Active →
+   *       Focus → Disabled). These are still here so existing JSS that
+   *       uses `Foo:Hover { ... }` (no parens) keeps painting bit-exact.
+   *    2. Compound predicate entries — `Foo:(Hover && !Disabled) { ... }` —
+   *       applied in source order. Each predicate evaluates against the
+   *       live `_states` set; matches Object.assign onto the merged style.
+   *
+   *  Predicate entries layer ON TOP of legacy slots by design — the new
+   *  authoring path supersedes the old when authors mix both. Practical
+   *  example: `Foo:Hover { BackdropBrightness: 1.85 }` (legacy) plus
+   *  `Foo:(Hover && !Disabled) { BackdropBrightness: 1.85 }` and
+   *  `Foo:Disabled { ... }` work together because when Disabled is set,
+   *  the compound predicate matches `false` (NOT Disabled fails) so it
+   *  doesn't fire, leaving the legacy disabled style to dominate. */
   EffectiveStyle = (): JivStyle => {
-    if (!this._hover && !this._active && !this._focus && !this._disabled && !this._groupHover) return this.Style;
+    const hasLegacyState = this._hover || this._active || this._focus || this._disabled || this._groupHover;
+    const hasPredicates = this.PredicateStyles && this.PredicateStyles.length > 0;
+    if (!hasLegacyState && !hasPredicates) return this.Style;
     const merged: JivStyle = { ...this.Style };
     if (this._groupHover && this.GroupHoverStyle) Object.assign(merged, this.GroupHoverStyle);
     if (this._hover && this.HoverStyle) Object.assign(merged, this.HoverStyle);
     if (this._active && this.ActiveStyle) Object.assign(merged, this.ActiveStyle);
     if (this._focus && this.FocusStyle) Object.assign(merged, this.FocusStyle);
     if (this._disabled && this.DisabledStyle) Object.assign(merged, this.DisabledStyle);
+    if (hasPredicates) {
+      for (const entry of this.PredicateStyles!) {
+        if (entry.Style && EvaluatePredicate(entry.Predicate, this._states)) {
+          Object.assign(merged, entry.Style);
+        }
+      }
+    }
     return merged;
   };
 
@@ -227,15 +362,24 @@ export class Jiv extends Element {
    *  read this instead of `node.TextStyle` directly so JSS `Foo:Hover {
    *  Color: red }` actually paints — the parser routes Color into
    *  HoverTextStyle and we layer it here when the matching state is set.
-   *  Same priority order: Disabled > Focus > Active > Hover. */
+   *  Same two-tier model as EffectiveStyle. */
   override EffectiveTextStyle = (): TextStyle => {
-    if (!this._hover && !this._active && !this._focus && !this._disabled && !this._groupHover) return this.TextStyle;
+    const hasLegacyState = this._hover || this._active || this._focus || this._disabled || this._groupHover;
+    const hasPredicates = this._hasTextPredicates;
+    if (!hasLegacyState && !hasPredicates) return this.TextStyle;
     const merged: TextStyle = { ...this.TextStyle };
     if (this._groupHover && this.GroupHoverTextStyle) Object.assign(merged, this.GroupHoverTextStyle);
     if (this._hover && this.HoverTextStyle) Object.assign(merged, this.HoverTextStyle);
     if (this._active && this.ActiveTextStyle) Object.assign(merged, this.ActiveTextStyle);
     if (this._focus && this.FocusTextStyle) Object.assign(merged, this.FocusTextStyle);
     if (this._disabled && this.DisabledTextStyle) Object.assign(merged, this.DisabledTextStyle);
+    if (hasPredicates && this.PredicateStyles) {
+      for (const entry of this.PredicateStyles) {
+        if (entry.TextStyle && EvaluatePredicate(entry.Predicate, this._states)) {
+          Object.assign(merged, entry.TextStyle);
+        }
+      }
+    }
     return merged;
   };
 }

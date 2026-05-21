@@ -58,8 +58,9 @@ export class JivHandle {
   Active = false;
   /** True while this Jiv has focus. */
   Focus = false;
-  /** True when this Jiv is rendering as disabled (Style.Disabled). */
-  Disabled = false;
+  // `Disabled` lives below as a get/set pair on the _states mirror — it
+  // drives compound predicate rules and the reserved-defaults setter on
+  // the worker side, rather than being a passive field.
 
   // ─── Element-level props ───────────────────────────────────────────────
   private _visible = true;
@@ -84,6 +85,13 @@ export class JivHandle {
   private _activeTextStyle: Record<string, unknown> | null = null;
   private _focusTextStyle: Record<string, unknown> | null = null;
   private _disabledTextStyle: Record<string, unknown> | null = null;
+  /** Compound-pseudo predicate rules from JSS `:(expr)` blocks. */
+  private _predicateStyles: ReadonlyArray<Record<string, unknown>> | null = null;
+  /** User-driven state set mirror. Keys are PascalCase state names
+   *  (Disabled, Loading, Recording, etc.); values are always `true` (entries
+   *  are deleted when a state turns off). Pointer-driven states live on
+   *  the worker, not here. */
+  private _states: Record<string, boolean> = {};
   private _textStyleState: Record<string, unknown> = {};
   private _text: string | null = null;
   private _imageSrc: string | null = null;
@@ -188,6 +196,36 @@ export class JivHandle {
   set FocusTextStyle(v: Record<string, unknown> | null | undefined) { this._focusTextStyle = v ?? null; this._markDirty(); }
   get DisabledTextStyle(): Record<string, unknown> | null { return this._disabledTextStyle; }
   set DisabledTextStyle(v: Record<string, unknown> | null | undefined) { this._disabledTextStyle = v ?? null; this._markDirty(); }
+
+  // Compound-pseudo predicate list. Set as a whole-list replacement
+  // (typically once per class application by JssRegistry). Each entry
+  // is { Predicate, Style?, TextStyle? } as plain data — the worker
+  // evaluates predicates against the live state set.
+  get PredicateStyles(): ReadonlyArray<Record<string, unknown>> | null { return this._predicateStyles; }
+  set PredicateStyles(v: ReadonlyArray<Record<string, unknown>> | null | undefined) {
+    this._predicateStyles = v ?? null;
+    this._markDirty();
+  }
+
+  // Live user-driven state set on the main thread. Predicate evaluation
+  // happens on the worker, but the main side mirrors the latest values
+  // so subsequent flushes ship the full set in one op. Pointer-driven
+  // states (Hover/Active/Focus/GroupHover) don't ride this map — they
+  // live entirely on the worker, driven by hit events.
+  get Disabled(): boolean { return !!this._states['Disabled']; }
+  set Disabled(v: boolean) { this.SetState('Disabled', v); }
+
+  /** Toggle a user-driven state. Used by Angular `[disabled]` and any
+   *  future `[loading]` / `[recording]` style inputs. Pointer-driven
+   *  states (Hover/Active/Focus/GroupHover) should not be set through
+   *  here — they're managed on the worker side. Idempotent: setting a
+   *  state to its current value is a no-op (no flush). */
+  SetState = (name: string, on: boolean): void => {
+    const has = !!this._states[name];
+    if (has === on) return;
+    if (on) this._states[name] = true; else delete this._states[name];
+    this._markDirty();
+  };
 
   // ─── Hit-handler setters (each refreshes the bridge's hit map) ─────────
 
@@ -348,6 +386,16 @@ export class JivHandle {
     if (opts.ActiveTextStyle !== undefined) this._activeTextStyle = opts.ActiveTextStyle ?? null;
     if (opts.FocusTextStyle !== undefined) this._focusTextStyle = opts.FocusTextStyle ?? null;
     if (opts.DisabledTextStyle !== undefined) this._disabledTextStyle = opts.DisabledTextStyle ?? null;
+    if (opts.PredicateStyles !== undefined) this._predicateStyles = opts.PredicateStyles ?? null;
+    if (opts.States !== undefined) {
+      // Replace-style apply: merge each entry into our mirror. Keys absent
+      // from the incoming map are left as-is (not cleared) — class-swap
+      // applies don't reset user-driven states.
+      for (const name of Object.keys(opts.States)) {
+        const on = !!opts.States[name];
+        if (on) this._states[name] = true; else delete this._states[name];
+      }
+    }
     if (opts.Text !== undefined) this._text = opts.Text ?? null;
     if (opts.ImageSrc !== undefined) this._imageSrc = opts.ImageSrc ?? null;
     if (opts.ElementProps) {
@@ -420,6 +468,8 @@ export class JivHandle {
       ActiveTextStyle: this._activeTextStyle,
       FocusTextStyle: this._focusTextStyle,
       DisabledTextStyle: this._disabledTextStyle,
+      PredicateStyles: this._predicateStyles,
+      States: { ...this._states },
       Text: this._text,
       ImageSrc: this._imageSrc,
       ElementProps: ep,

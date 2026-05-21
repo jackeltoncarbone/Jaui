@@ -188,6 +188,7 @@ export class JivRegistry {
     this._wireHitHandlers(id, core);
     this._applyElementProps(core, opts);
     this._applyMaterialBits(core, opts);
+    this._applyStateBits(core, opts);
     this._nodes.set(id, core);
   };
 
@@ -246,6 +247,7 @@ export class JivRegistry {
     if (opts.FocusTextStyle !== undefined)      core.FocusTextStyle      = (opts.FocusTextStyle ?? null) as Partial<TextStyle> | null;
     if (opts.DisabledTextStyle !== undefined)   core.DisabledTextStyle   = (opts.DisabledTextStyle ?? null) as Partial<TextStyle> | null;
     if (opts.GroupHoverTextStyle !== undefined) core.GroupHoverTextStyle = (opts.GroupHoverTextStyle ?? null) as Partial<TextStyle> | null;
+    this._applyStateBits(core, opts);
     if (opts.GroupTriggerClasses !== undefined) this._updateGroupClasses(core, opts.GroupTriggerClasses);
     if ('Text' in opts || opts.TextStyle) {
       const nextText = 'Text' in opts ? (opts.Text ?? null) : core.Text;
@@ -395,6 +397,7 @@ export class JivRegistry {
     ActiveTextStyle?: Partial<TextStyle>;
     FocusTextStyle?: Partial<TextStyle>;
     DisabledTextStyle?: Partial<TextStyle>;
+    PredicateStyles?: readonly import('../Jss/Jss.Parser').PredicateStyle[];
     Springs?: Record<string, Partial<SpringConfig>>;
     Animations?: import('../Animation/Animation.Types').AnimationApplication[];
     AnimationTable?: Record<string, import('../Animation/Animation.Types').AnimationDefinition>;
@@ -412,6 +415,7 @@ export class JivRegistry {
     ActiveTextStyle: opts.ActiveTextStyle as Partial<TextStyle> | undefined ?? undefined,
     FocusTextStyle: opts.FocusTextStyle as Partial<TextStyle> | undefined ?? undefined,
     DisabledTextStyle: opts.DisabledTextStyle as Partial<TextStyle> | undefined ?? undefined,
+    PredicateStyles: opts.PredicateStyles as readonly import('../Jss/Jss.Parser').PredicateStyle[] | undefined,
     Springs: opts.Springs as Record<string, Partial<SpringConfig>> | undefined,
     Animations: opts.Animations as import('../Animation/Animation.Types').AnimationApplication[] | undefined,
     AnimationTable: opts.AnimationTable as Record<string, import('../Animation/Animation.Types').AnimationDefinition> | undefined,
@@ -441,6 +445,37 @@ export class JivRegistry {
     // Reserved for material/glass/blur fields if/when those move into
     // `JivApplyOpts`. Today the JivCore constructor handles them via the
     // Style bag; nothing extra needed here.
+  };
+
+  /** Apply boolean state toggles + compound-pseudo predicate list. Both
+   *  ride the bridge as plain data:
+   *
+   *    PredicateStyles  — list of { Predicate, Style?, TextStyle? }. The
+   *      Predicate is a JSON-safe AST (State / Not / And / Or) the engine-
+   *      side EvaluatePredicate walks against the live state set on every
+   *      EffectiveStyle read.
+   *    States           — Record<string, boolean>. Reserved `Disabled`
+   *      routes through the typed setter so the framework's implicit
+   *      Interactive:false + Cursor:Default defaults fire. Other names
+   *      flow through SetState directly.
+   *
+   *  Pointer-driven states (Hover/Active/Focus/GroupHover) are NOT in
+   *  the States map — the worker owns pointer events and updates those
+   *  flags from hit-tests, not from main-thread inputs. */
+  private _applyStateBits = (core: JivCore, opts: JivApplyOpts): void => {
+    if (opts.PredicateStyles !== undefined) {
+      core.SetPredicateStyles(opts.PredicateStyles as unknown as JivCore['PredicateStyles']);
+    }
+    if (opts.States !== undefined) {
+      for (const name of Object.keys(opts.States)) {
+        const on = !!opts.States[name];
+        if (name === 'Disabled') {
+          core.Disabled = on;
+        } else {
+          core.SetState(name, on);
+        }
+      }
+    }
   };
 
   private _wireHitHandlers = (id: number, core: JivCore): void => {

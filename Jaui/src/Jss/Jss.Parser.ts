@@ -49,6 +49,31 @@ import {
  * sees already-routed objects and spends zero time parsing JSS.
  */
 
+/** Boolean-expression AST for compound pseudo-selectors authored as
+ *  `Name:(expr) { ... }`. `expr` is built from state-name atoms combined
+ *  with `&&`, `||`, `!`, and parens. JSON-serializable by design — the
+ *  worker bridge ships these across the main-thread/worker boundary
+ *  alongside Style. Evaluation is `(states: Set<string>) => boolean`,
+ *  implemented in the runtime (Phase 2). */
+export type PredicateExpr =
+  | { Kind: 'State'; Name: string }
+  | { Kind: 'Not'; Expr: PredicateExpr }
+  | { Kind: 'And'; Exprs: readonly PredicateExpr[] }
+  | { Kind: 'Or';  Exprs: readonly PredicateExpr[] };
+
+/** A `Name:(expr) { ... }` ruleset compiled into a predicate + the styles
+ *  to merge when it matches. Source order is preserved (entries authored
+ *  later in the sheet override earlier ones on conflicting properties via
+ *  Object.assign at apply time, matching the cascade rule used elsewhere).
+ *  TextStyle entries carry text-routed declarations (`Color: red` inside
+ *  a `:(...)` block) so the runtime can layer them onto EffectiveTextStyle
+ *  just like the legacy `*TextStyle` slots. */
+export interface PredicateStyle {
+  Predicate: PredicateExpr;
+  Style?: Partial<JivStyle>;
+  TextStyle?: Partial<TextStyle>;
+}
+
 export interface Ruleset {
   Style?: Partial<JivStyle>;
   Layout?: Partial<LayoutConfig>;
@@ -72,6 +97,16 @@ export interface Ruleset {
   FocusTextStyle?: Partial<TextStyle>;
   DisabledTextStyle?: Partial<TextStyle>;
   GroupHoverTextStyle?: Partial<TextStyle>;
+  /** Compound pseudo-selector entries — `Name:(Hover && !Disabled) { ... }`.
+   *  Evaluated by the runtime against the Jiv's live state set. Source
+   *  order is preserved so the cascade can apply last-wins within this
+   *  tier. Inherited through `extends` (concatenated, base first).
+   *
+   *  Single-state pseudos (`Name:Hover`, etc) continue to populate the
+   *  legacy slot above so existing runtime code paths keep working
+   *  bit-exact. Authors who want suppression (e.g. hover that doesn't
+   *  fire when disabled) opt in by writing the compound form. */
+  PredicateStyles?: PredicateStyle[];
   /** Per-property spring overrides authored via `@Spring Property { … }`
    *  or `@Transition Property { … }` (which translates to a critically-
    *  damped spring). The style animator reads this map when it builds
@@ -245,20 +280,32 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
   // combinators. JSS uses class-only selectors by design.
   const className = _readIdent(s);
 
-  // Tight `:State` pseudo (no whitespace). `Foo:Hover { ... }` writes into
-  // the existing Foo's HoverStyle slot. Must come before the extends check
-  // so `Foo:Hover` isn't misread as `Foo extends Hover`.
+  // Tight `:State` / `:(expr)` pseudo (no whitespace). Three legal shapes:
+  //   `Foo:Hover { ... }`           — single-state pseudo, legacy slot
+  //   `Foo:(Hover && !Disabled){…}` — compound predicate, PredicateStyles
+  //   `Foo : Base1, Base2 { ... }`  — extends list (loose colon, has space)
+  // Compound predicates and single-state pseudos must come BEFORE the
+  // extends check so `Foo:Hover` isn't misread as `Foo extends Hover`.
   let stateSlot: 'HoverStyle' | 'ActiveStyle' | 'FocusStyle' | 'DisabledStyle' | 'GroupHoverStyle' | null = null;
   let stateTextSlot: 'HoverTextStyle' | 'ActiveTextStyle' | 'FocusTextStyle' | 'DisabledTextStyle' | 'GroupHoverTextStyle' | null = null;
+  let predicate: PredicateExpr | null = null;
   if (s.src[s.pos] === ':') {
     const next = s.src[s.pos + 1];
-    if (next && next !== ' ' && next !== '\t' && next !== '\n') {
-      // Tight colon — pseudo-state form.
+    if (next === '(') {
+      // Compound predicate form — `:(expr)`. Consume the `:`, then parse
+      // the parenthesized boolean expression. Routes to PredicateStyles
+      // rather than a fixed legacy slot, so author can combine any
+      // number of states with &&, ||, !, parens. Backwards-compatible
+      // with `:Foo` (kept as the tight non-paren single-ident path below).
+      s.pos++; // consume ':'
+      predicate = _parseParenPredicate(s, className);
+    } else if (next && next !== ' ' && next !== '\t' && next !== '\n') {
+      // Tight colon — single-state pseudo-state form.
       s.pos++;
       const stateName = _readIdent(s);
       const slot = _STATE_TO_SLOT[stateName];
       if (!slot) {
-        throw new Error(`[Jaui] "${className}:${stateName}" — unknown state. Use Hover, Active, Focus, or Disabled.`);
+        throw new Error(`[Jaui] "${className}:${stateName}" — unknown state. Use Hover, Active, Focus, Disabled, GroupHover, or the compound form ":(${stateName} && OtherState)".`);
       }
       stateSlot = slot;
       stateTextSlot = _STATE_TO_TEXT_SLOT[stateName];
@@ -267,9 +314,10 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
 
   _skipWs(s);
 
-  // Optional `: Base1, Base2` extends list (only valid on the base form).
+  // Optional `: Base1, Base2` extends list (only valid on the base form —
+  // not after a pseudo, single-state or compound).
   const bases: string[] = [];
-  if (!stateSlot && s.src[s.pos] === ':') {
+  if (!stateSlot && !predicate && s.src[s.pos] === ':') {
     s.pos++;
     while (true) {
       _skipWs(s);
@@ -288,13 +336,33 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
     _skipWs(s);
     if (s.src[s.pos] === '}') { s.pos++; break; }
     if (s.pos >= s.src.length) {
-      throw new Error(`[Jaui] Unterminated ruleset "${className}${stateSlot ? `:${stateSlot}` : ''}" — missing "}"`);
+      const label = stateSlot ? `:${stateSlot}` : predicate ? ':(...)' : '';
+      throw new Error(`[Jaui] Unterminated ruleset "${className}${label}" — missing "}"`);
     }
     if (s.src[s.pos] === '@') {
       _parseRulesetAt(s, own, className);
     } else {
       _parseDeclaration(s, own);
     }
+  }
+
+  // Compound-predicate ruleset — `Foo:(Hover && !Disabled) { ... }`. Push
+  // a PredicateStyle entry onto the existing class's PredicateStyles list.
+  // Source order is preserved so the runtime can apply last-wins within
+  // this tier (matches the cascade rule for the rest of the parser).
+  if (predicate) {
+    let target = out[className];
+    if (!target) {
+      target = {};
+      out[className] = target;
+    }
+    target.PredicateStyles ??= [];
+    target.PredicateStyles.push({
+      Predicate: predicate,
+      Style: own.Style,
+      TextStyle: own.TextStyle,
+    });
+    return;
   }
 
   // Pseudo-state ruleset — copy own.Style into the matching state slot AND
@@ -857,7 +925,113 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
   Animations: (a.Animations || b.Animations)
     ? [...(a.Animations ?? []), ...(b.Animations ?? [])]
     : undefined,
+  // PredicateStyles concatenate the same way Animations do — base
+  // entries come first, then own entries layered on top. Subclasses
+  // can author their own `:(...)` rules without losing the base's,
+  // and last-source-order-wins resolves conflicts within the tier.
+  PredicateStyles: (a.PredicateStyles || b.PredicateStyles)
+    ? [...(a.PredicateStyles ?? []), ...(b.PredicateStyles ?? [])]
+    : undefined,
 });
+
+// ─── Compound predicate parser ──────────────────────────────────────────
+//
+// Grammar for the parenthesized boolean expression in `Foo:(expr) { ... }`:
+//
+//   ParenExpr = '(' OrExpr ')'
+//   OrExpr    = AndExpr ('||' AndExpr)*
+//   AndExpr   = NotExpr ('&&' NotExpr)*
+//   NotExpr   = '!'* Atom
+//   Atom      = Ident | '(' OrExpr ')'
+//
+// Standard boolean precedence: `!` > `&&` > `||`. Atoms are PascalCase
+// state names (Hover, Disabled, Loading, ...) — the parser doesn't
+// validate against a closed list; the runtime evaluator looks each name
+// up in the live state set on the Jiv, so unknown names simply never
+// match. `(` opens a nested sub-expression for explicit grouping.
+//
+// All whitespace is skipped between tokens. The outer `:(...)` parens
+// are consumed by the caller's open-paren detection + this function's
+// closing `)` match.
+
+const _parseParenPredicate = (s: _ScanState, className: string): PredicateExpr => {
+  _expect(s, '(');
+  _skipWs(s);
+  const expr = _parsePredOr(s, className);
+  _skipWs(s);
+  if (s.src[s.pos] !== ')') {
+    throw new Error(`[Jaui] "${className}:(...)" — expected ")" at position ${s.pos}, got "${s.src[s.pos] ?? 'EOF'}". Compound predicates must close their outer paren before "{".`);
+  }
+  s.pos++; // consume ')'
+  return expr;
+};
+
+const _parsePredOr = (s: _ScanState, className: string): PredicateExpr => {
+  const left = _parsePredAnd(s, className);
+  const operands: PredicateExpr[] = [left];
+  while (true) {
+    _skipWs(s);
+    if (s.src[s.pos] === '|' && s.src[s.pos + 1] === '|') {
+      s.pos += 2;
+      _skipWs(s);
+      operands.push(_parsePredAnd(s, className));
+      continue;
+    }
+    break;
+  }
+  return operands.length === 1 ? operands[0] : { Kind: 'Or', Exprs: operands };
+};
+
+const _parsePredAnd = (s: _ScanState, className: string): PredicateExpr => {
+  const left = _parsePredNot(s, className);
+  const operands: PredicateExpr[] = [left];
+  while (true) {
+    _skipWs(s);
+    if (s.src[s.pos] === '&' && s.src[s.pos + 1] === '&') {
+      s.pos += 2;
+      _skipWs(s);
+      operands.push(_parsePredNot(s, className));
+      continue;
+    }
+    break;
+  }
+  return operands.length === 1 ? operands[0] : { Kind: 'And', Exprs: operands };
+};
+
+const _parsePredNot = (s: _ScanState, className: string): PredicateExpr => {
+  _skipWs(s);
+  if (s.src[s.pos] === '!') {
+    s.pos++;
+    _skipWs(s);
+    return { Kind: 'Not', Expr: _parsePredNot(s, className) };
+  }
+  return _parsePredAtom(s, className);
+};
+
+const _parsePredAtom = (s: _ScanState, className: string): PredicateExpr => {
+  _skipWs(s);
+  // Nested group — `(expr)` inside the outer predicate.
+  if (s.src[s.pos] === '(') {
+    s.pos++;
+    _skipWs(s);
+    const inner = _parsePredOr(s, className);
+    _skipWs(s);
+    if (s.src[s.pos] !== ')') {
+      throw new Error(`[Jaui] "${className}:(...)" — unbalanced parens in predicate at position ${s.pos}`);
+    }
+    s.pos++;
+    return inner;
+  }
+  // State-name atom. Identifier rules match `_readIdent` (PascalCase
+  // alpha-numeric + underscore). No validation against a closed list —
+  // any name the author wants becomes a state, and the runtime evaluator
+  // returns false for names that aren't currently set on the element.
+  if (!/[A-Za-z_]/.test(s.src[s.pos] ?? '')) {
+    throw new Error(`[Jaui] "${className}:(...)" — expected state name at position ${s.pos}, got "${s.src[s.pos] ?? 'EOF'}"`);
+  }
+  const name = _readIdent(s);
+  return { Kind: 'State', Name: name };
+};
 
 /** Reserved pseudo-state names following the `:` in `Foo:State`. Maps to
  *  the matching slot on Ruleset. PascalCase to match Jaui authoring style. */

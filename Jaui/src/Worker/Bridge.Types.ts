@@ -198,6 +198,20 @@ export interface JivApplyOpts {
   FocusTextStyle?: Record<string, unknown> | null;
   DisabledTextStyle?: Record<string, unknown> | null;
   GroupHoverTextStyle?: Record<string, unknown> | null;
+  /** Compound pseudo-predicate rules — `Name:(expr) { ... }` from JSS.
+   *  Each entry's Predicate is a JSON-safe boolean AST (State / Not /
+   *  And / Or) the worker evaluates against the Jiv's live state set
+   *  via EvaluatePredicate. Plain data — structured-clones unchanged.
+   *  Pass `null` to clear the list (used on class-swap when the new
+   *  class has no predicate rules). */
+  PredicateStyles?: ReadonlyArray<Record<string, unknown>> | null;
+  /** Boolean state toggles applied to the Jiv. Keys are PascalCase state
+   *  names (Disabled, Loading, Recording, anything author-named); values
+   *  are the desired on/off. Pointer-driven states (Hover/Active/Focus/
+   *  GroupHover) ride their own typed setters on the engine side — they
+   *  are NOT exposed through this map, because their value is derived
+   *  from pointer events the worker already owns. */
+  States?: Record<string, boolean>;
   /** Class names this Jiv carries (parsed from `class="A B C"`). Worker
    *  registers it under each entry that's a group-hover trigger so the
    *  hover dispatcher can fan `_groupHover` out to peers. */

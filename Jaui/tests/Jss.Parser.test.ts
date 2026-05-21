@@ -191,3 +191,166 @@ describe('JSS — parser', () => {
     expect(sheet.Card.ChildLayout?.Width).toBe('100');
   });
 });
+
+// ─── Compound pseudo predicates (Phase 1) ────────────────────────────────
+//
+// `:Foo` (single-state pseudo) continues to populate the legacy *Style
+// slots — these tests guard that path. New `:(expr)` syntax compiles to
+// a PredicateStyles entry whose Predicate is a JSON-safe boolean AST.
+// Runtime evaluation lands in Phase 2; here we only verify the parser
+// produces the expected AST shape and routes styles into the right slot.
+
+describe('JSS — compound pseudo predicates', () => {
+  it('routes :(Single) the same as :Single semantically (own predicate entry)', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Btn {
+        Background: rgba(0, 0, 0, 1)
+      }
+      Btn:(Hover) {
+        BackdropBrightness: 1.85
+      }
+    `);
+    expect(sheet.Btn.PredicateStyles?.length).toBe(1);
+    const entry = sheet.Btn.PredicateStyles![0];
+    expect(entry.Predicate).toEqual({ Kind: 'State', Name: 'Hover' });
+    expect(entry.Style?.BackdropBrightness).toBe('1.85');
+    // Legacy slot stays untouched — :(Single) routes ONLY to PredicateStyles.
+    expect(sheet.Btn.HoverStyle).toBeUndefined();
+  });
+
+  it('parses && into an And node', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Btn:(Hover && !Disabled) {
+        BackdropBrightness: 1.85
+      }
+    `);
+    const entry = sheet.Btn.PredicateStyles![0];
+    expect(entry.Predicate).toEqual({
+      Kind: 'And',
+      Exprs: [
+        { Kind: 'State', Name: 'Hover' },
+        { Kind: 'Not', Expr: { Kind: 'State', Name: 'Disabled' } },
+      ],
+    });
+  });
+
+  it('parses || into an Or node', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Btn:(Loading || Recording) {
+        Opacity: 0.6
+      }
+    `);
+    expect(sheet.Btn.PredicateStyles![0].Predicate).toEqual({
+      Kind: 'Or',
+      Exprs: [
+        { Kind: 'State', Name: 'Loading' },
+        { Kind: 'State', Name: 'Recording' },
+      ],
+    });
+  });
+
+  it('honors !> && > || precedence', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Btn:(!Disabled && Hover || Pressed) {
+        VisualScale: 1
+      }
+    `);
+    // (!Disabled && Hover) || Pressed
+    expect(sheet.Btn.PredicateStyles![0].Predicate).toEqual({
+      Kind: 'Or',
+      Exprs: [
+        {
+          Kind: 'And',
+          Exprs: [
+            { Kind: 'Not', Expr: { Kind: 'State', Name: 'Disabled' } },
+            { Kind: 'State', Name: 'Hover' },
+          ],
+        },
+        { Kind: 'State', Name: 'Pressed' },
+      ],
+    });
+  });
+
+  it('honors explicit grouping with inner parens', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Btn:(!(Disabled || Loading)) {
+        Opacity: 1
+      }
+    `);
+    expect(sheet.Btn.PredicateStyles![0].Predicate).toEqual({
+      Kind: 'Not',
+      Expr: {
+        Kind: 'Or',
+        Exprs: [
+          { Kind: 'State', Name: 'Disabled' },
+          { Kind: 'State', Name: 'Loading' },
+        ],
+      },
+    });
+  });
+
+  it('preserves source order across multiple predicate rules on one class', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Btn {
+        Background: rgba(0, 0, 0, 1)
+      }
+      Btn:(Hover && !Disabled) {
+        BackdropBrightness: 1.85
+      }
+      Btn:(Pressed && !Disabled) {
+        VisualScale: 0.92
+      }
+      Btn:Disabled {
+        Opacity: 0.35
+      }
+    `);
+    expect(sheet.Btn.PredicateStyles?.length).toBe(2);
+    expect(sheet.Btn.PredicateStyles![0].Style?.BackdropBrightness).toBe('1.85');
+    expect(sheet.Btn.PredicateStyles![1].Style?.VisualScale).toBe('0.92');
+    // Legacy :Disabled still routes to the legacy slot.
+    expect(sheet.Btn.DisabledStyle?.Opacity).toBe('0.35');
+  });
+
+  it('compound predicates inherit through extends', () => {
+    const { Sheet: sheet } = ParseJss(`
+      BaseBtn {
+        Background: rgba(0, 0, 0, 1)
+      }
+      BaseBtn:(Hover && !Disabled) {
+        BackdropBrightness: 1.85
+      }
+      LargeBtn : BaseBtn {
+        Width: 56pt
+      }
+    `);
+    // LargeBtn inherits BaseBtn's predicate rule.
+    expect(sheet.LargeBtn.PredicateStyles?.length).toBe(1);
+    expect(sheet.LargeBtn.PredicateStyles![0].Style?.BackdropBrightness).toBe('1.85');
+  });
+
+  it('routes TextStyle declarations inside :(...) blocks', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Label:(Hover && !Disabled) {
+        Color: rgba(255, 255, 255, 1)
+      }
+    `);
+    const entry = sheet.Label.PredicateStyles![0];
+    expect(entry.TextStyle?.Color).toBe('rgba(255, 255, 255, 1)');
+    expect(entry.Style?.Color).toBeUndefined();
+  });
+
+  it('throws on unbalanced parens', () => {
+    expect(() => ParseJss(`Btn:(Hover && Disabled { Opacity: 1 }`))
+      .toThrowError(/expected "\)"/);
+  });
+
+  it('throws on bare !operand without identifier', () => {
+    expect(() => ParseJss(`Btn:(!) { Opacity: 1 }`))
+      .toThrowError(/expected state name/);
+  });
+
+  it('throws on empty parens', () => {
+    expect(() => ParseJss(`Btn:() { Opacity: 1 }`))
+      .toThrowError(/expected state name/);
+  });
+});

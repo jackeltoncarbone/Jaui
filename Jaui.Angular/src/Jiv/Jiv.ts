@@ -48,6 +48,13 @@ export class Jiv implements OnInit, OnDestroy {
   readonly text = input<string | null | undefined>(undefined);
   readonly textStyle = input<Partial<TextStyle> | undefined>(undefined);
   readonly imageSrc = input<string | null | undefined>(undefined, { alias: 'image' });
+  /** Toggle the reserved `Disabled` state. Triggers compound predicate
+   *  rules that reference `:Disabled` / `:(... && !Disabled)`, and
+   *  framework defaults Interactive:false + Cursor:Default kick in on
+   *  the worker side (overridable by explicit `:Disabled { ... }` rules).
+   *  Pointer-driven states (Hover/Active/Focus/GroupHover) come from
+   *  pointer events on the worker and don't need an input. */
+  readonly disabled = input<boolean | undefined>(undefined);
 
   /** Worker-side Jiv handle. Property writes buffer ops + flush per microtask. */
   readonly Node: JivHandle;
@@ -170,6 +177,9 @@ export class Jiv implements OnInit, OnDestroy {
       DisabledTextStyle:   fromClass?.DisabledTextStyle as Record<string, unknown> | undefined,
       GroupHoverTextStyle: fromClass?.GroupHoverTextStyle as Record<string, unknown> | undefined,
       GroupTriggerClasses: triggerClasses.length > 0 ? triggerClasses : undefined,
+      // Compound `:(expr)` rules — resolved at JSS-parse time on main,
+      // shipped to the worker as plain-data `PredicateStyle` entries.
+      PredicateStyles:     fromClass?.PredicateStyles as ReadonlyArray<Record<string, unknown>> | undefined,
       Springs:           fromClass?.Springs as Record<string, Record<string, unknown>> | undefined,
       Animations:        fromClass?.Animations as Array<Record<string, unknown>> | undefined,
       AnimationTable:    this._registry
@@ -177,6 +187,11 @@ export class Jiv implements OnInit, OnDestroy {
         : undefined,
       ElementProps:      Object.keys(elementProps).length > 0 ? elementProps : undefined,
     };
+    // User-driven boolean state inputs map to the States bag. Only
+    // Disabled is plumbed today; future state inputs (Loading, Recording,
+    // etc.) follow the same pattern.
+    const disabled = this.disabled();
+    if (disabled !== undefined) opts.States = { Disabled: !!disabled };
     if (text !== undefined) opts.Text = text;
     if (img !== undefined) opts.ImageSrc = img;
     return opts;

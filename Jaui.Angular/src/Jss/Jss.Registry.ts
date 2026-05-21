@@ -194,6 +194,13 @@ export class JssRegistry {
       if (r.GroupHoverTextStyle) out.GroupHoverTextStyle = { ...out.GroupHoverTextStyle, ...r.GroupHoverTextStyle };
       if (r.Springs)           out.Springs           = { ...out.Springs,           ...r.Springs };
       if (r.Animations)        out.Animations        = [...(out.Animations ?? []),  ...r.Animations];
+      // PredicateStyles concatenate base-first like Animations. Without
+      // this merge, single-class `<jiv class="Foo">` still got 0 predicate
+      // rules in the resolved ruleset — Resolve produces a NEW out ruleset,
+      // and any field it doesn't carry over is silently lost on the way
+      // to JivApplyOpts. Multi-class strings (`class="Foo Bar"`) layer
+      // predicates from each component class in declaration order.
+      if (r.PredicateStyles)   out.PredicateStyles   = [...(out.PredicateStyles ?? []), ...r.PredicateStyles];
     }
     return matched ? out : null;
   };

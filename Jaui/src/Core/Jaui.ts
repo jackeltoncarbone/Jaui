@@ -2772,7 +2772,8 @@ export type { AccessibilityConfig } from '../Accessibility/Accessibility.Types';
 
 // JSS
 export { ParseJss } from '../Jss/Jss.Parser';
-export type { Stylesheet, Ruleset, ParsedJss, VarTable, AnimationTable } from '../Jss/Jss.Parser';
+export type { Stylesheet, Ruleset, ParsedJss, VarTable, AnimationTable, PredicateExpr, PredicateStyle } from '../Jss/Jss.Parser';
+export { EvaluatePredicate } from '../Jss/Jss.Predicate';
 export { SlotFor, type Slot } from '../Jss/Jss.Routes';
 
 // Worker boot — apps call CheckBrowserSupport() before mounting Angular.
