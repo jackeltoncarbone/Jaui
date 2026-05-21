@@ -179,9 +179,23 @@ export class JssRegistry {
    *  classes match. */
   Resolve = (classNames: string | null | undefined): Ruleset | null => {
     if (!classNames) return null;
+    const names = classNames.split(/\s+/).filter(Boolean);
+    if (names.length === 0) return null;
+    // Single-class fast path — return the cached Ruleset by reference.
+    // The hot case for `<jiv class="X">`. Consumers (`_buildOptions` in
+    // Jaui.Angular Jiv, JivHost._buildOpts in Jwift) already spread
+    // every sub-bag into their own JivApplyOpts mirror, so they treat
+    // the returned ruleset as read-only — no mutation risk. Saves one
+    // outer-object alloc + N sub-bag spreads per Jiv per class apply,
+    // which on a busy page (hundreds of jivs, frequent class swaps)
+    // is the largest single allocation source on this path.
+    if (names.length === 1) {
+      return this._rules.get(names[0]) ?? null;
+    }
+    // Multi-class merge path — allocate a new merged ruleset.
     const out: Ruleset = {};
     let matched = false;
-    for (const name of classNames.split(/\s+/).filter(Boolean)) {
+    for (const name of names) {
       const r = this._rules.get(name);
       if (!r) continue;
       matched = true;
