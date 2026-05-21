@@ -1,6 +1,6 @@
 import {
   AfterViewInit, ChangeDetectionStrategy, Component, ElementRef,
-  OnDestroy, computed, input, signal, viewChild,
+  OnDestroy, input, signal, viewChild,
 } from '@angular/core';
 import { Jiv } from '../Jiv/Jiv';
 
@@ -12,10 +12,9 @@ import { Jiv } from '../Jiv/Jiv';
  * Angular treats as a real SVG subtree — `[attr.fill]`, `[attr.d]`, struct-
  * directives, anything an Angular template can do. A MutationObserver
  * watches that subtree; on any change (attribute write from a binding,
- * structural change from `@if` / `@for`) it serializes the SVG to a string,
- * wraps it as a `data:image/svg+xml;utf8,...` URL, and feeds it to a
- * sibling `<jiv [image]>` which renders it through Jaui's GPU image
- * pipeline.
+ * structural change from `@if` / `@for`) it re-rasterizes the SVG to a
+ * PNG data URL on the main thread and feeds that to a sibling
+ * `<jiv [image]>` for GPU upload.
  *
  * Usage:
  *
@@ -33,15 +32,12 @@ import { Jiv } from '../Jiv/Jiv';
  *                the wrapper class). Default 100.
  *   svgHeight  — root <svg> height. Same role as svgWidth. Default 100.
  *
- * Notes:
- * - Browser handles SVG-to-bitmap rasterization, Jaui uploads the bitmap
- *   to the GPU.
- * - Each unique data URL is cached by Jaui's ImageCache, so re-rasterization
- *   only fires when an attribute actually changes.
- * - For DPR-aware sharp rendering at higher zoom, swap to Jaui core's
- *   `LoadSvg(key, source, w, h)` API in a future revision — it stores the
- *   source string and re-rasterizes when `devicePixelRatio` changes.
- *   Data URLs are simpler and good enough for small icons.
+ * Why PNG rather than feeding the SVG data URL straight through:
+ * Chrome's `createImageBitmap` cannot decode SVG blobs (workers or main
+ * thread). The Jaui worker's image pipeline uses createImageBitmap, so
+ * SVG data URLs fail to decode. The browser CAN decode SVG into an
+ * `<img>` element — we rasterize through that, then `toDataURL('image/png')`
+ * yields a PNG the worker accepts.
  */
 @Component({
   selector: 'svg-jiv',
@@ -57,7 +53,7 @@ import { Jiv } from '../Jiv/Jiv';
         <ng-content/>
       </svg>
     </div>
-    <jiv [class]="className()" [image]="dataUrl()"/>
+    <jiv [class]="className()" [image]="pngDataUrl()"/>
   `,
   styles: [':host { display: contents; }'],
 })
@@ -68,19 +64,14 @@ export class SvgJiv implements AfterViewInit, OnDestroy {
   readonly svgHeight = input<number | string>(100);
 
   private readonly _svgRef = viewChild.required<ElementRef<SVGSVGElement>>('hidden');
-  private readonly _serialized = signal<string | null>(null);
+  readonly pngDataUrl = signal<string | undefined>(undefined);
   private _observer: MutationObserver | null = null;
-
-  readonly dataUrl = computed<string | undefined>(() => {
-    const s = this._serialized();
-    return s ? `data:image/svg+xml;utf8,${encodeURIComponent(s)}` : undefined;
-  });
+  private _rasterGen = 0;
+  private _destroyed = false;
 
   ngAfterViewInit(): void {
     const el = this._svgRef().nativeElement;
-    const update = (): void => {
-      this._serialized.set(new XMLSerializer().serializeToString(el));
-    };
+    const update = (): void => this._rasterize(new XMLSerializer().serializeToString(el));
     update();
     // Subtree + attributes + childList + characterData covers every
     // mutation Angular's binding system can produce inside the SVG —
@@ -96,7 +87,30 @@ export class SvgJiv implements AfterViewInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this._destroyed = true;
     this._observer?.disconnect();
     this._observer = null;
+  }
+
+  private _rasterize(svg: string): void {
+    const gen = ++this._rasterGen;
+    const w = Math.max(1, Number(this.svgWidth()) || 0);
+    const h = Math.max(1, Number(this.svgHeight()) || 0);
+    const img = new Image();
+    img.onload = (): void => {
+      if (this._destroyed || gen !== this._rasterGen) return;
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0, w, h);
+      this.pngDataUrl.set(canvas.toDataURL('image/png'));
+    };
+    img.onerror = (): void => {
+      if (this._destroyed || gen !== this._rasterGen) return;
+      console.warn('[SvgJiv] SVG failed to load for rasterization');
+    };
+    img.src = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
   }
 }
