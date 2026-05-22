@@ -107,6 +107,16 @@ export class Canvas implements DirtyTracker {
   private _hudIdx: number = 0;
   private _hudCount: number = 0;
   private _hudLastWrite: number = 0;
+  /** When true (set by `?wkr-jaui-prof` URL param), capture per-frame phase
+   *  timings AND emit a per-second console summary. Decouples the
+   *  instrumentation from the DOM HUD — that only mounts in main-thread
+   *  Canvas instances; the same engine code runs in the Jaui worker where
+   *  there's no DOM, but we still want phase data printed to console for
+   *  optimization passes. */
+  private _consoleProfilingEnabled: boolean = false;
+  private _profLastDumpMs: number = 0;
+  private _profSum = { Dirty: 0, Layout: 0, Text: 0, Render: 0, Total: 0 };
+  private _profN = 0;
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -594,10 +604,10 @@ export class Canvas implements DirtyTracker {
     const dt = this._lastTime === 0 ? 0.016 : Math.min((time - this._lastTime) / 1000, 0.033);
     this._lastTime = time;
 
-    // Phase timing — only active when the debug HUD is on. Gate reads at
-    // each boundary rather than branching inside hot loops; performance.now()
-    // is cheap but we skip it entirely in release.
-    const hud = this._debugHud !== null;
+    // Phase timing — active when the debug HUD is on OR `?wkr-jaui-prof` was
+    // set. Gate reads at each boundary rather than branching inside hot loops;
+    // performance.now() is cheap but we skip it entirely in release.
+    const hud = this._debugHud !== null || this._consoleProfilingEnabled;
     let t0 = 0, tDirtyEnd = 0, tLayoutEnd = 0, tTextEnd = 0;
     if (hud) t0 = performance.now();
 
@@ -668,10 +678,14 @@ export class Canvas implements DirtyTracker {
     if (hud) {
       const tEnd = performance.now();
       const i = this._frameIdx;
-      this._phaseDirty[i]  = tDirtyEnd  - t0;
-      this._phaseLayout[i] = tLayoutEnd - tDirtyEnd;
-      this._phaseText[i]   = tTextEnd   - tLayoutEnd;
-      this._phaseRender[i] = tEnd       - tTextEnd;
+      const phaseDirty  = tDirtyEnd  - t0;
+      const phaseLayout = tLayoutEnd - tDirtyEnd;
+      const phaseText   = tTextEnd   - tLayoutEnd;
+      const phaseRender = tEnd       - tTextEnd;
+      this._phaseDirty[i]  = phaseDirty;
+      this._phaseLayout[i] = phaseLayout;
+      this._phaseText[i]   = phaseText;
+      this._phaseRender[i] = phaseRender;
       this._countsRolling.Panels = this._counts.Panels;
       this._countsRolling.Glass  = this._counts.Glass;
       this._countsRolling.Text   = this._counts.Text;
@@ -688,6 +702,33 @@ export class Canvas implements DirtyTracker {
       }
       this._frameIdx = (i + 1) % this._phaseDirty.length;
       if (this._frameCount < this._phaseDirty.length) this._frameCount++;
+
+      // Per-second console summary — only when `?wkr-jaui-prof` is set.
+      // Independent of HUD rendering so it works in the worker (no DOM).
+      if (this._consoleProfilingEnabled) {
+        this._profSum.Dirty  += phaseDirty;
+        this._profSum.Layout += phaseLayout;
+        this._profSum.Text   += phaseText;
+        this._profSum.Render += phaseRender;
+        this._profSum.Total  += tEnd - t0;
+        this._profN++;
+        if (this._profLastDumpMs === 0) this._profLastDumpMs = tEnd;
+        if (tEnd - this._profLastDumpMs >= 1000 && this._profN > 0) {
+          const n = this._profN;
+          const avg = (v: number) => (v / n).toFixed(1);
+          // eslint-disable-next-line no-console
+          console.log(
+            `[Jaui] ${n}f over ${(tEnd - this._profLastDumpMs).toFixed(0)}ms — avg total ${avg(this._profSum.Total)}ms;` +
+            ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
+            ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)}` +
+            ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur}`
+          );
+          this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
+          this._profSum.Render = this._profSum.Total = 0;
+          this._profN = 0;
+          this._profLastDumpMs = tEnd;
+        }
+      }
     }
   };
 
@@ -2440,6 +2481,12 @@ export class Canvas implements DirtyTracker {
 
     if (debug) this._enableDebugHud();
     if (params.has('debug-layout') || hash.includes('debug-layout')) this._enableDebugLayout();
+    // Console-only frame-phase profiling. `?wkr-jaui-prof` works in the
+    // worker (where there's no DOM HUD) and in main-thread Canvas alike;
+    // the per-second log dumps Dirty/Layout/Text/Render averages.
+    if (params.has('wkr-jaui-prof') || hash.includes('wkr-jaui-prof')) {
+      this._consoleProfilingEnabled = true;
+    }
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────
