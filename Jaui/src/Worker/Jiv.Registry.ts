@@ -244,7 +244,6 @@ export class JivRegistry {
       const nextText = 'Text' in opts ? (opts.Text ?? null) : core.Text;
       core.SetText(nextText, opts.TextStyle as Partial<TextStyle> | undefined);
     }
-    if (opts.ImageSrc !== undefined) core.ImageSrc = opts.ImageSrc;
     // Animation / Spring re-apply on class swap. The Angular Jiv directive
     // re-emits these every time `className()` changes — until this branch
     // landed they were silently dropped after construction, so a class
@@ -412,7 +411,6 @@ export class JivRegistry {
       core.PointScale = ep.PointScale;
       core.MarkLayoutDirty();
     }
-    if (ep.FitMode !== undefined) core.FitMode = ep.FitMode;
     if (ep.SnapLayout !== undefined) core.SnapLayout = ep.SnapLayout;
   };
 

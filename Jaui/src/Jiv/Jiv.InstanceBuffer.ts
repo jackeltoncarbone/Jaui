@@ -106,10 +106,10 @@ export class JivInstanceBuffer {
     data[offset + 10] = style.BorderRadius[2] * avgScale * d;
     data[offset + 11] = style.BorderRadius[3] * avgScale * d;
 
-    data[offset + 12] = style.Background.R;
-    data[offset + 13] = style.Background.G;
-    data[offset + 14] = style.Background.B;
-    data[offset + 15] = style.Background.A;
+    data[offset + 12] = style.Background.Color.R;
+    data[offset + 13] = style.Background.Color.G;
+    data[offset + 14] = style.Background.Color.B;
+    data[offset + 15] = style.Background.Color.A;
 
     data[offset + 16] = style.BorderColor.R;
     data[offset + 17] = style.BorderColor.G;

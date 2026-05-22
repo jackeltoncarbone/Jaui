@@ -1,7 +1,41 @@
 import type { Color } from '../Core/Types';
 import type { Transform } from '../Transform/Transform.Types';
+import type { FitMode } from '../Element/Element';
 
 export type CornerShape = 'Round' | 'Squircle' | 'Bevel' | 'Scoop' | 'Notch' | number;
+
+/**
+ * Resolved Background value — a tagged union covering every fill the
+ * renderer can paint into a Jiv's silhouette. Background is always
+ * present; the renderer branches on `Kind` to decide whether to paint
+ * a flat tint, sample a texture, or evaluate a gradient.
+ *
+ * Every variant carries a `Color` channel: the solid tint for Color,
+ * the load-time placeholder for Image, the "fallback" if the gradient
+ * shader can't run (and during kind-change cross-fades). The style
+ * animator springs the Color channel uniformly — interpolation
+ * between *kinds* is handled by a separate Background interpolator
+ * because a Color↔Image swap can't be a per-channel lerp.
+ *
+ * Gradient stops are normalized positions in [0, 1] with a parsed
+ * Color. The CPU passes up to `MAX_GRADIENT_STOPS` per draw to the
+ * shader as uniform arrays — beyond that, stops are evenly resampled
+ * down to the cap.
+ */
+export interface GradientStop {
+  Position: number;
+  Color: Color;
+}
+
+export type BackgroundValue =
+  | { Kind: 'Color',          Color: Color }
+  | { Kind: 'Image',          Color: Color, Url: string, Fit: FitMode }
+  | { Kind: 'LinearGradient', Color: Color, AngleRad: number, Stops: GradientStop[] }
+  | { Kind: 'RadialGradient', Color: Color, CenterX: number, CenterY: number, Radius: number, Stops: GradientStop[] };
+
+/** Maximum gradient stops shipped to the shader per draw. Stops beyond
+ *  this are evenly resampled in the parser before being uploaded. */
+export const MAX_GRADIENT_STOPS = 8;
 
 /** Derived at resolve time from which props the author set. Not authorable —
  *  Jiv infers the render pipeline from what you're actually using:
@@ -185,7 +219,7 @@ export interface JivRenderStyle {
   CornerShape: [CornerShape, CornerShape, CornerShape, CornerShape];
   BorderRadiusSmoothness: number;
 
-  Background: Color;
+  Background: BackgroundValue;
   BlendMode: BlendMode;
 
   Frost: number;

@@ -69,7 +69,6 @@ export class JivHandle {
   private _cursor: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None' = 'Default';
   private _userSelect: 'Auto' | 'None' = 'Auto';
   private _overflow: 'Visible' | 'Hidden' | 'Scroll' = 'Visible';
-  private _fitMode: 'Contain' | 'Cover' = 'Contain';
   private _pointScale = '';
   private _snapLayout = false;
 
@@ -87,7 +86,6 @@ export class JivHandle {
   private _states: Record<string, boolean> = {};
   private _textStyleState: Record<string, unknown> = {};
   private _text: string | null = null;
-  private _imageSrc: string | null = null;
 
   // Strongly-typed proxies — matches the engine `Jiv` surface so consumer
   // code that does `Node.ChildLayout.Width = '50%'` compiles cleanly.
@@ -157,9 +155,6 @@ export class JivHandle {
   get Overflow(): 'Visible' | 'Hidden' | 'Scroll' { return this._overflow; }
   set Overflow(v: 'Visible' | 'Hidden' | 'Scroll') { if (this._overflow !== v) { this._overflow = v; this._markDirty(); } }
 
-  get FitMode(): 'Contain' | 'Cover' { return this._fitMode; }
-  set FitMode(v: 'Contain' | 'Cover') { if (this._fitMode !== v) { this._fitMode = v; this._markDirty(); } }
-
   get PointScale(): string { return this._pointScale; }
   set PointScale(v: string) { if (this._pointScale !== v) { this._pointScale = v; this._markDirty(); } }
 
@@ -168,9 +163,6 @@ export class JivHandle {
 
   get Text(): string | null { return this._text; }
   set Text(v: string | null) { if (this._text !== v) { this._text = v; this._markDirty(); } }
-
-  get ImageSrc(): string | null { return this._imageSrc; }
-  set ImageSrc(v: string | null) { if (this._imageSrc !== v) { this._imageSrc = v; this._markDirty(); } }
 
   // Compound-pseudo predicate list. Set as a whole-list replacement
   // (typically once per class application by JssRegistry). Each entry
@@ -364,7 +356,6 @@ export class JivHandle {
       }
     }
     if (opts.Text !== undefined) this._text = opts.Text ?? null;
-    if (opts.ImageSrc !== undefined) this._imageSrc = opts.ImageSrc ?? null;
     if (opts.ElementProps) {
       const ep = opts.ElementProps;
       if (ep.Visible !== undefined) this._visible = ep.Visible;
@@ -373,7 +364,6 @@ export class JivHandle {
       if (ep.Cursor !== undefined) this._cursor = ep.Cursor;
       if (ep.UserSelect !== undefined) this._userSelect = ep.UserSelect;
       if (ep.Overflow !== undefined) this._overflow = ep.Overflow;
-      if (ep.FitMode !== undefined) this._fitMode = ep.FitMode;
       if (ep.PointScale !== undefined) this._pointScale = ep.PointScale;
     }
     this._bridge.Enqueue({ K: 'apply', Id: this.Id, Opts: opts });
@@ -418,7 +408,6 @@ export class JivHandle {
       Cursor: this._cursor,
       UserSelect: this._userSelect,
       Overflow: this._overflow,
-      FitMode: this._fitMode,
       SnapLayout: this._snapLayout,
     };
     if (this._pointScale) ep.PointScale = this._pointScale;
@@ -430,7 +419,6 @@ export class JivHandle {
       PredicateStyles: this._predicateStyles,
       States: { ...this._states },
       Text: this._text,
-      ImageSrc: this._imageSrc,
       ElementProps: ep,
     };
     this._bridge.Enqueue({ K: 'apply', Id: this.Id, Opts: opts });

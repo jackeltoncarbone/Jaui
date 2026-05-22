@@ -40,6 +40,25 @@ export class ImageCache {
   private _rasterCtx: OffscreenCanvasRenderingContext2D | null = null;
 
   private _onLoad: (() => void) | null = null;
+  private _onLoadStart: ((url: string) => void) | null = null;
+  private _onLoadFinish: ((url: string) => void) | null = null;
+  private _onLoadFail: ((url: string) => void) | null = null;
+
+  /** Concurrency cap on fetch+decode+upload. A homepage gallery of 30
+   *  cards entering viewport at once would otherwise:
+   *    1. Fire 30 simultaneous `fetch` requests (~6 in-flight max anyway
+   *       per HTTP/2 host, so the rest queue at the network layer).
+   *    2. Run 30 concurrent `createImageBitmap` decodes on Chrome's
+   *       image-decoder pool — saturates CPU.
+   *    3. Land 30 sequential `gl.texImage2D` calls on the worker's GL
+   *       context, each stealing a frame's worth of budget — drops the
+   *       worker to single-digit FPS until the queue digests.
+   *  Capping to 6 keeps the worker GL queue moving at a sane pace while
+   *  letting the network layer parallelize where it can. Queued URLs
+   *  resume in FIFO order as slots free up. */
+  private static readonly _CONCURRENCY_CAP = 6;
+  private _inFlight = 0;
+  private readonly _queue: Array<{ url: string; dpr: number }> = [];
 
   constructor(renderer: Renderer) {
     this._renderer = renderer;
@@ -48,6 +67,22 @@ export class ImageCache {
   /** Called when any image finishes loading. Canvas uses this to trigger
    *  a layout re-solve (image intrinsic sizes may have become available). */
   set OnLoad(callback: (() => void) | null) { this._onLoad = callback; }
+
+  /** Called when a URL starts loading — fires when the network fetch
+   *  actually kicks off (so a queued URL doesn't fire until a slot opens).
+   *  Consumers use this to flip the Loading framework state on every Jiv
+   *  whose ImageSrc matches. Idempotent on repeat-loads of an already-
+   *  cached URL — the cache short-circuits before this fires. */
+  set OnLoadStart(callback: ((url: string) => void) | null) { this._onLoadStart = callback; }
+
+  /** Called when a URL has successfully bound to a GPU texture and the
+   *  cache entry is Ready. Counterpart to OnLoadStart; toggles Loading
+   *  off and Loaded on. */
+  set OnLoadFinish(callback: ((url: string) => void) | null) { this._onLoadFinish = callback; }
+
+  /** Called when a URL fails to fetch / decode. Stays in `_failed` so the
+   *  per-frame auto-load doesn't retry. Consumers flip Failed state. */
+  set OnLoadFail(callback: ((url: string) => void) | null) { this._onLoadFail = callback; }
 
   /** Get a cached image entry. Returns null if not cached yet.
    *  Call `Load()` first to trigger async loading. */
@@ -63,13 +98,38 @@ export class ImageCache {
    *  `new Image()`. ImageBitmap is a TexImageSource the renderer uploads
    *  directly (no rasterCanvas round-trip), and it works in workers.
    *  `mode:'cors'` matches the previous `crossOrigin = 'anonymous'`. */
-  LoadUrl = (url: string, _dpr: number = 1): void => {
-    const isDataUrl = url.startsWith('data:');
+  LoadUrl = (url: string, dpr: number = 1): void => {
     if (this._cache.has(url)) return;
     if (this._loading.has(url)) return;
     if (this._failed.has(url)) return;
+    // Mark the URL as loading immediately so subsequent LoadUrl calls
+    // for the same URL coalesce — even if the actual fetch is sitting
+    // in the queue, repeat consumers shouldn't double-enqueue.
     this._loading.add(url);
+    if (this._inFlight < ImageCache._CONCURRENCY_CAP) {
+      this._startFetch(url, dpr);
+    } else {
+      this._queue.push({ url, dpr });
+    }
+  };
 
+  /** Pull the next queued URL (FIFO) and start its fetch. Called whenever
+   *  an in-flight load resolves (success OR failure). */
+  private _drainQueue = (): void => {
+    while (this._inFlight < ImageCache._CONCURRENCY_CAP && this._queue.length > 0) {
+      const next = this._queue.shift()!;
+      this._startFetch(next.url, next.dpr);
+    }
+  };
+
+  private _startFetch = (url: string, _dpr: number): void => {
+    this._inFlight++;
+    // Fire the lifecycle start callback now — engine wants the Loading
+    // state to flip when the fetch ACTUALLY kicks (not when the URL was
+    // queued), so a card waiting behind a 5-slot backlog stays in its
+    // unloaded styling until its turn comes up.
+    this._onLoadStart?.(url);
+    const isDataUrl = url.startsWith('data:');
     const init: RequestInit = isDataUrl ? {} : { mode: 'cors', credentials: 'omit' };
     fetch(url, init)
       .then(r => {
@@ -85,12 +145,18 @@ export class ImageCache {
         this._renderer.UploadSubTexture(tex, 0, 0, bmp);
         bmp.close();
         this._cache.set(url, { Texture: tex, Width: w, Height: h, Ready: true });
+        this._inFlight--;
+        this._onLoadFinish?.(url);
         this._onLoad?.();
+        this._drainQueue();
       })
       .catch(err => {
         this._loading.delete(url);
         this._failed.add(url);
+        this._inFlight--;
         console.warn(`[Jaui] Failed to load image: ${url.slice(0, 80)} (${(err as Error).message})`);
+        this._onLoadFail?.(url);
+        this._drainQueue();
       });
   };
 

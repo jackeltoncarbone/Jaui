@@ -43,7 +43,96 @@ uniform sampler2D u_ClipTex;
 // "sun" for the rest of the material.
 uniform vec2 u_SpecularTilt;
 
+// ── Background fill mode ────────────────────────────────────────────────
+// Per-draw uniforms that select what kind of fill paints inside this
+// panel's silhouette. The CPU groups panels into batches by mode + bound
+// texture / gradient; this uniform tells the fragment which branch to
+// take and where to source pixels from.
+//
+//   0 = Color    — v_Tint solid fill (the default, no texture or stops)
+//   1 = Image    — sample u_BgTexture using u_BgUv (Cover/Contain CPU-
+//                  baked transform: panelLocal·xy + zw → uv)
+//   2 = LinearGradient — angle in u_BgGradParams.x; t = dot(panelLocal, dir)
+//   3 = RadialGradient — center in u_BgGradParams.xy, radius in .z; t = dist
+//
+// Stops live in u_BgGradColor[i] (rgba) + u_BgGradPos[i] (position 0..1).
+// MAX_BG_GRAD_STOPS matches Jiv.Types.MAX_GRADIENT_STOPS on the CPU side.
+#define MAX_BG_GRAD_STOPS 8
+uniform int       u_BgMode;
+uniform sampler2D u_BgTexture;
+uniform vec4      u_BgUv;            // scale.xy, offset.zw
+uniform float     u_BgImageAlpha;    // [0..1] cross-fade between v_Tint
+                                     // (placeholder) and the sampled image
+uniform vec4      u_BgGradParams;    // LinearGradient: cos(angle), sin(angle), _, _
+                                     // RadialGradient: centerX, centerY, radius, _
+uniform int       u_BgGradStopCount;
+uniform vec4      u_BgGradColor[MAX_BG_GRAD_STOPS];
+uniform float     u_BgGradPos[MAX_BG_GRAD_STOPS];
+
 out vec4 fragColor;
+
+vec4 sampleBgGradient(float t) {
+    // Sample the gradient at parameter t (clamped to [0, 1] by caller).
+    // Stops are sorted ascending by position. With at least 2 stops, we
+    // find the bracketing pair and lerp; edges return endpoint colors.
+    if (u_BgGradStopCount <= 0) return vec4(0.0);
+    if (u_BgGradStopCount == 1) return u_BgGradColor[0];
+    if (t <= u_BgGradPos[0]) return u_BgGradColor[0];
+    int last = u_BgGradStopCount - 1;
+    for (int i = 1; i < MAX_BG_GRAD_STOPS; i++) {
+        if (i > last) break;
+        float pNext = u_BgGradPos[i];
+        if (t <= pNext) {
+            float pPrev = u_BgGradPos[i - 1];
+            float span = max(pNext - pPrev, 0.0001);
+            float u = clamp((t - pPrev) / span, 0.0, 1.0);
+            return mix(u_BgGradColor[i - 1], u_BgGradColor[i], u);
+        }
+    }
+    return u_BgGradColor[last];
+}
+
+// Resolve the fill source color for a fragment based on u_BgMode. Returns
+// premul-unaware RGBA — the composite below scales by alpha as needed.
+//
+// `panelLocal` is [0..1] across the panel's bounding box (origin at the
+// top-left corner of the panel rect, not the center). Computed once per
+// fragment and passed in so radial/linear gradients and image UV share
+// the same coordinate space.
+vec4 resolveBgFill(vec2 panelLocal) {
+    if (u_BgMode == 1) {
+        // Image — UV pre-baked on CPU for Cover/Contain. Default identity
+        // when not bound (u_BgUv = (1, 1, 0, 0)).
+        vec2 uv = panelLocal * u_BgUv.xy + u_BgUv.zw;
+        // Contain bars: out-of-range UV falls back to the placeholder
+        // (v_Tint) — the same color we'd be painting if no image were
+        // bound, so transparent bars get the right material treatment.
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return v_Tint;
+        vec4 img = texture(u_BgTexture, uv);
+        // Cross-fade between placeholder and texture over u_BgImageAlpha.
+        // First frame an image is bound: alpha=0 → pure v_Tint; one
+        // Duration later alpha=1 → pure texture. v_Tint is the placeholder
+        // color baked into the `Url(...)` expression, so swapping `[src]`
+        // on a card cross-fades through that placeholder instead of
+        // popping pixel-for-pixel from old image to new.
+        return mix(v_Tint, img, clamp(u_BgImageAlpha, 0.0, 1.0));
+    } else if (u_BgMode == 2) {
+        // Linear gradient — t = dot(panelLocal − 0.5, direction) + 0.5,
+        // clamped to [0, 1]. Direction unit vector is in u_BgGradParams.xy.
+        vec2 dir = u_BgGradParams.xy;
+        float t = dot(panelLocal - 0.5, dir) + 0.5;
+        return sampleBgGradient(clamp(t, 0.0, 1.0));
+    } else if (u_BgMode == 3) {
+        // Radial gradient — t = dist(panelLocal, center) / radius,
+        // clamped to [0, 1]. Center is normalized [0..1], radius too.
+        vec2 center = u_BgGradParams.xy;
+        float radius = max(u_BgGradParams.z, 0.0001);
+        float d = length(panelLocal - center) / radius;
+        return sampleBgGradient(clamp(d, 0.0, 1.0));
+    }
+    // Mode 0 (Color): fall through to v_Tint at the call site.
+    return v_Tint;
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 //  MASTER JIV SDF
@@ -775,26 +864,29 @@ void main() {
         shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
     }
 
-    // ── Fill: tint composited over the (refracted, filtered, absorbed) backdrop.
+    // ── Fill: source composited over the (refracted, filtered, absorbed) backdrop.
     //
-    // The material is treated as ONE continuous physical treatment, not as
-    // a glass / non-glass duality. The Background tint is a material
-    // property — authored once, visible always, at its full v_Tint.a.
-    // Thickness controls the GLASS VOLUME EFFECTS (refraction, Beer-Lambert
-    // absorption, edge fresnel, rim spec, CA) which all fade smoothly to
-    // zero with `glassiness`. So MATERIAL_GLASS at Thickness=0 produces the
-    // same pixels as MATERIAL_NONE for identical inputs — no seam when a
-    // Jiv springs across the variant boundary, no cross-fade hack, no two
-    // materials to reconcile.
+    // The fill source is selected by u_BgMode:
+    //   • Color   → v_Tint (the legacy solid-fill path; no texture / no stops)
+    //   • Image   → sampled u_BgTexture with CPU-baked Cover/Contain UV
+    //   • Linear/RadialGradient → evaluated against u_BgGradColor[]/Pos[]
+    //
+    // Once we have the source, the same glass / non-glass composite below
+    // applies. Image-Background panels reuse the entire material treatment
+    // (border, shadow, refraction, frost, rim-spec) for free — there is no
+    // separate "image draw" pipeline, image is just one of many fill modes.
+    vec2 panelLocal = (v_PixelPos - (panelCenter - panelHalfSize))
+                    / max(panelHalfSize * 2.0, vec2(1.0));
+    vec4 fillSrc = resolveBgFill(panelLocal);
     vec3 fillRgb;
     float fillA;
     if (materialType == 1.0 || hasBackdropFilter) {
-        float tA = v_Tint.a;
-        fillRgb = v_Tint.rgb * tA + backdrop * (1.0 - tA);
+        float tA = fillSrc.a;
+        fillRgb = fillSrc.rgb * tA + backdrop * (1.0 - tA);
         fillA = fillAlpha;
     } else {
-        fillRgb = v_Tint.rgb;
-        fillA = fillAlpha * v_Tint.a;
+        fillRgb = fillSrc.rgb;
+        fillA = fillAlpha * fillSrc.a;
     }
 
     // ── Composite: fill OVER shadow (straight-alpha "over" operator) ──

@@ -9,6 +9,7 @@
 export * from './Jaui/Jaui';
 export * from './Janvas/Janvas';
 export * from './Jiv/Jiv';
+export * from './Jimage/Jimage';
 export * from './Jext/Jext';
 export * from './Jyle/Jyle';
 export * from './SvgJiv/SvgJiv';

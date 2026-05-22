@@ -27,6 +27,18 @@ export interface GpuBufferHandle {
 
 // ─── Progressive Blur Params ───────────────────────────────────────────────
 
+/**
+ * Per-draw background paint selection for `PanelDrawBatch`. Tagged-union
+ * shape mirrors `BackgroundValue` on the data side, but flattened to the
+ * raw GPU inputs the renderer needs: a texture handle, a UV transform,
+ * a gradient direction / center / radius, and a stop list.
+ */
+export type BgPaint =
+  | { Mode: 'Color' }
+  | { Mode: 'Image',          Texture: GpuTextureHandle, UvScaleX: number, UvScaleY: number, UvOffsetX: number, UvOffsetY: number, FadeAlpha: number }
+  | { Mode: 'LinearGradient', DirX: number, DirY: number, Stops: ReadonlyArray<{ Position: number; R: number; G: number; B: number; A: number }> }
+  | { Mode: 'RadialGradient', CenterX: number, CenterY: number, Radius: number, Stops: ReadonlyArray<{ Position: number; R: number; G: number; B: number; A: number }> };
+
 export interface ProgressiveBlurParams {
   /** Screen rect in device pixels. */
   Rect: { X: number; Y: number; W: number; H: number };
@@ -111,7 +123,17 @@ export interface Renderer {
    *  to when the effective LOD resolves to 0 — keeps plain-brightness
    *  filters sharp instead of picking up the pyramid's baked-in ~1px
    *  base Gaussian. Pass null for batched flat panels that don't sample
-   *  the backdrop at all. */
+   *  the backdrop at all.
+   *
+   *  `bgPaint` selects the panel fill mode per-draw:
+   *    • undefined / Color → solid v_Tint (every panel uses its instance tint)
+   *    • Image            → bind `Texture` and sample with `Uv` transform
+   *    • LinearGradient   → evaluate stops against `GradParams.xy` direction
+   *    • RadialGradient   → evaluate stops against `GradParams.xy` center + .z radius
+   *
+   *  Image / gradient batches typically contain a SINGLE panel (one texture
+   *  or one stop set per draw call); the renderer batches Color panels
+   *  together as before. */
   PanelDrawBatch(
     canvasWidth: number,
     canvasHeight: number,
@@ -121,6 +143,7 @@ export interface Renderer {
     specTiltY: number,
     useGlassShader?: boolean,
     scene?: GpuTextureHandle | null,
+    bgPaint?: BgPaint,
   ): void;
 
   // ── Text Rendering (instanced) ──

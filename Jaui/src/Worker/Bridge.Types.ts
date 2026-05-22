@@ -220,7 +220,6 @@ export interface JivApplyOpts {
    *  separate channel and reference by id. */
   AnimationTable?: Record<string, Record<string, unknown>>;
   Text?: string | null;
-  ImageSrc?: string | null;
   ElementProps?: {
     Overflow?: 'Visible' | 'Hidden' | 'Scroll';
     Visible?: boolean;
@@ -229,7 +228,6 @@ export interface JivApplyOpts {
     Cursor?: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
     UserSelect?: 'Auto' | 'None';
     PointScale?: string;
-    FitMode?: 'Contain' | 'Cover';
     /** When true, the next layout commit snaps to the resolved rect with no
      *  spring animation. Set on jinput text segments so paste / token-driven
      *  re-segmentation lands at the final X/Y instantly instead of drifting

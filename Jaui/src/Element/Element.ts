@@ -52,7 +52,6 @@ export interface ElementOptions {
   PointerEvents?: 'Auto' | 'None';
   Cursor?: CursorStyle;
   UserSelect?: 'Auto' | 'None';
-  FitMode?: FitMode;
 }
 
 export class Element {
@@ -193,13 +192,6 @@ export class Element {
   Cursor: CursorStyle = 'Default';
   UserSelect: 'Auto' | 'None' = 'Auto';
 
-  // ── Image ──
-  /** Image source key — matches the key used with ImageCache.LoadUrl/LoadSvg.
-   *  When set, the renderer draws the cached image texture inside this element. */
-  ImageSrc: string | null = null;
-  /** How the image fills the element's box. Default `'Contain'`. */
-  FitMode: FitMode = 'Contain';
-
   // ── Presence ──
   /** Spring-driven existence value in [0, 1]. Rises 0→1 on mount, falls 1→0
    *  on `RequestLeave`. The renderer multiplies this into the final opacity,
@@ -237,7 +229,6 @@ export class Element {
     this.LayoutHeight = this.Height;
     this.SnapLayout = options?.SnapLayout ?? false;
     this.PointScale = options?.PointScale ?? '1pt';
-    if (options?.FitMode !== undefined) this.FitMode = options.FitMode;
 
     this.Visible = options?.Visible ?? true;
     this.Overflow = options?.Overflow ?? 'Visible';

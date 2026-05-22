@@ -16,7 +16,7 @@ import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
-import type { Renderer, GpuTextureHandle } from './Renderer';
+import type { Renderer, GpuTextureHandle, BgPaint } from './Renderer';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
 // `Renderer.Factory.ts` and handed in. Canvas has no opinion about
@@ -162,23 +162,66 @@ export class Canvas implements DirtyTracker {
     this._textCache = new TextCache(renderer);
     this._imageCache = new ImageCache(renderer);
     this._imageCache.OnLoad = () => {
-      // Walk tree and set IntrinsicWidth/Height on nodes whose ImageSrc
-      // matches a now-loaded cache entry. This must happen BEFORE layout
-      // so the solver sees the intrinsics on the next tick.
+      // Walk tree and set IntrinsicWidth/Height on nodes whose Background
+      // is an Image kind referencing a now-loaded cache entry. This must
+      // happen BEFORE layout so the solver sees the intrinsics on the
+      // next tick.
       const setIntrinsics = (node: JauiElement): void => {
-        if (node.ImageSrc && node.IntrinsicWidth === null) {
-          const entry = this._imageCache.Get(node.ImageSrc);
-          if (entry && entry.Ready) {
-            const d = Math.max(1, this._dpr);
-            node.IntrinsicWidth = entry.Width / d;
-            node.IntrinsicHeight = entry.Height / d;
-            node.MarkLayoutDirty();
+        if (node instanceof Jiv && node.IntrinsicWidth === null) {
+          const bg = node.RenderStyle.Background;
+          if (bg.Kind === 'Image') {
+            const entry = this._imageCache.Get(bg.Url);
+            if (entry && entry.Ready) {
+              const d = Math.max(1, this._dpr);
+              node.IntrinsicWidth = entry.Width / d;
+              node.IntrinsicHeight = entry.Height / d;
+              node.MarkLayoutDirty();
+            }
           }
         }
         for (const child of node.Children) setIntrinsics(child);
       };
       setIntrinsics(this.Root);
     };
+
+    // Image-lifecycle → framework state plumbing.
+    //
+    // Three states flip on every Jiv whose Background is an Image kind
+    // referencing the URL:
+    //   - 'Loading' — fetch+decode has started (or is queued behind the
+    //     concurrency cap; the cache only fires this when the fetch is
+    //     actually in-flight, so styled placeholders stay clean for
+    //     queued items).
+    //   - 'Loaded'  — texture bound and Ready; Loading flips off, Loaded
+    //     flips on. Author transitions like `@Transition Opacity` fire
+    //     against this transition automatically.
+    //   - 'Failed'  — fetch threw or HTTP non-2xx. Loading flips off.
+    //
+    // Same tree walk as setIntrinsics — a single pass per cache event.
+    // Cheap enough for the kind of bursts a viewport scroll triggers.
+    const _walkForUrl = (url: string, fn: (j: Jiv) => void): void => {
+      const visit = (node: JauiElement): void => {
+        if (node instanceof Jiv) {
+          const bg = node.RenderStyle.Background;
+          if (bg.Kind === 'Image' && bg.Url === url) fn(node);
+        }
+        for (const child of node.Children) visit(child);
+      };
+      visit(this.Root);
+    };
+    this._imageCache.OnLoadStart = (url) => _walkForUrl(url, (j) => {
+      j.SetState('Loading', true);
+      j.SetState('Loaded', false);
+      j.SetState('Failed', false);
+    });
+    this._imageCache.OnLoadFinish = (url) => _walkForUrl(url, (j) => {
+      j.SetState('Loading', false);
+      j.SetState('Loaded', true);
+    });
+    this._imageCache.OnLoadFail = (url) => _walkForUrl(url, (j) => {
+      j.SetState('Loading', false);
+      j.SetState('Failed', true);
+    });
 
     this._animationManager.OnFrame(() => this.RequestFrame());
     this._scrollManager = new ScrollManager(this.Root);
@@ -818,13 +861,6 @@ export class Canvas implements DirtyTracker {
       this._textBuffer.Begin();
     };
 
-    // Scratch buffer for single-instance image draws. Images borrow the
-    // text shader pipeline (both sample a texture quad) but logically they
-    // are NOT text — they pack their own 16 floats and use their own
-    // texture (the image) rather than the text atlas. Keeping a tiny
-    // dedicated array here means we don't clobber the text batch.
-    const imageScratch = new Float32Array(TEXT_FLOATS_PER_INSTANCE);
-
     // Order children by Layer (stable — tree order breaks ties). Fast-path
     // when every child has Layer 0 (the common case): return the original
     // array so we don't allocate or sort. Sort is only triggered when an
@@ -871,8 +907,12 @@ export class Canvas implements DirtyTracker {
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
       // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
       // the loaded image. Without this, the node stays at 0 height forever.
-      if (node.ImageSrc && node.IntrinsicWidth === null) {
-        const imgEntry = this._imageCache.Get(node.ImageSrc);
+      // The image URL is sourced from the Background tagged union (Image kind);
+      // ImageSrc no longer exists as a separate property.
+      const bg = node.RenderStyle.Background;
+      const bgImageUrl = bg.Kind === 'Image' ? bg.Url : null;
+      if (bgImageUrl && node.IntrinsicWidth === null) {
+        const imgEntry = this._imageCache.Get(bgImageUrl);
         if (imgEntry && imgEntry.Ready) {
           node.IntrinsicWidth = imgEntry.Width / this._dpr;
           node.IntrinsicHeight = imgEntry.Height / this._dpr;
@@ -935,7 +975,7 @@ export class Canvas implements DirtyTracker {
         // margin — for a tall content-area pblur with a 120pt feather,
         // that's ~15× less blur fill per frame.
         const feather = node.RenderStyle.ProgressiveBlurFeather * d;
-        const bgOpaque = node.RenderStyle.Background.A >= 0.999;
+        const bgOpaque = node.RenderStyle.Background.Color.A >= 0.999;
         const dir = node.RenderStyle.ProgressiveBlurDirection;
         let fx = px, fy = py, fw = pw, fh = ph;
         if (feather > 0 && bgOpaque) {
@@ -976,7 +1016,7 @@ export class Canvas implements DirtyTracker {
           Feather: node.RenderStyle.ProgressiveBlurFeather * d,
           Easing: Math.max(0.001, node.RenderStyle.ProgressiveBlurEasing),
           Opacity: node.EffectiveOpacity,
-          Background: node.RenderStyle.Background,
+          Background: node.RenderStyle.Background.Color,
           Grading: {
             Brightness: node.RenderStyle.BackdropBrightness,
             Saturation: node.RenderStyle.BackdropSaturation,
@@ -1065,9 +1105,16 @@ export class Canvas implements DirtyTracker {
         // discarding the tint. (The Thickness=0 stability argument above only
         // applies to elements whose Material flips between LiquidGlass and None;
         // for plain Jivs the material is statically 'None', no flip to protect.)
-        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap);
+        // Glass panels with a non-Color Background (Image / Gradient) flow
+        // through the same single-instance draw — the panel shader's fill
+        // composite reads from the bound texture / gradient stops instead
+        // of v_Tint when u_BgMode != 0. Border, refraction, frost, rim
+        // spec all keep working.
+        const glassBgPaint = this._computeBgPaint(node);
+        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
         if (_isGlass(material)) this._counts.Glass++;
         else this._counts.Panels++;
+        if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
         // Reset the shared panel buffer so this glass instance isn't picked
         // up by the next flushPanels() and drawn AGAIN as a non-glass panel
         // (null backdrop → dummy black texture → glass goes solid gray).
@@ -1076,90 +1123,30 @@ export class Canvas implements DirtyTracker {
         this._panelBuffer.Begin();
 
       } else {
-        // Non-glass panel: DEFER. Flush any pending TEXT first so text
-        // drawn earlier in tree order sits behind this new panel (though
-        // in practice panels and text don't overlap spatially for
-        // correctly-laid-out UI — flushing here keeps the invariant
-        // regardless). Then push into the shared panel buffer; an
-        // upcoming flushPanels() will drain it as one instanced draw call
-        // along with every other pending non-glass panel in the tier.
+        // Non-glass panel. Background.Kind decides batching:
+        //   • Color   → accumulate into the shared batch with everyone else
+        //                (one draw call per coherent run of Color panels).
+        //   • Image / Gradient → flush the current Color batch, draw THIS
+        //                panel as a single-instance batch with bgPaint
+        //                bound, then keep accumulating. The panel shader
+        //                still does border/shadow/clip — image is just
+        //                another fill mode, not a separate draw pipeline.
         flushText();
-        this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
-      }
-
-      // Render this node's image (if any — after panel, before text)
-      if (node.ImageSrc) {
-        let imgEntry = this._imageCache.Get(node.ImageSrc);
-        // Auto-load on first sight — ImageSrc accepts any real src (URL,
-        // path, data URI). If it's not in the cache yet, kick off LoadUrl
-        // now; the cache's OnLoad will fire a relayout when it finishes.
-        // Pre-rasterized SVGs are inserted via LoadSvg under a chosen key
-        // and will be found here on the first lookup, skipping this branch.
-        if (!imgEntry) {
-          this._imageCache.LoadUrl(node.ImageSrc, this._dpr);
-          imgEntry = this._imageCache.Get(node.ImageSrc);
-        }
-        // The panel shader self-clips to its own rounded rect (its SDF is
-        // the painted silhouette) but the image pipeline draws a plain
-        // rectangle — without appending the node's own box clip here, a
-        // Cover-fit image overflows the node's rounded corners. Mirror
-        // the panel's self-clip by encoding stack+boxClip for this draw.
-        const imgStack = node.Overflow !== 'Visible'
-          ? [...stack, this._boxClip(node, effCx, effCy, effOx, effOy)]
-          : stack;
-        const imgClipMeta = imgStack === stack ? clipMeta : this._clipBuffer.Encode(imgStack, this._dpr);
-        if (imgEntry && imgEntry.Ready) {
-          // Set intrinsic sizes from image so layout can auto-size
-          if (node.IntrinsicWidth === null) {
-            node.IntrinsicWidth = imgEntry.Width / this._dpr;
-            node.IntrinsicHeight = imgEntry.Height / this._dpr;
-            node.MarkLayoutDirty();
-          }
-
-          const d = this._dpr;
-          const elemW = effCx * node.Width * d;
-          const elemH = effCy * node.Height * d;
-          const imgAspect = imgEntry.Width / imgEntry.Height;
-          const elemAspect = elemW / elemH;
-          // Cover inverts Contain's branch: pick the dim whose scale fills the
-          // box (the other overflows and gets clipped by the node's Overflow).
-          const fit = node.FitMode;
-          const fillLong = fit === 'Cover' ? imgAspect < elemAspect : imgAspect > elemAspect;
-
-          let drawW: number, drawH: number, drawX: number, drawY: number;
-          if (fillLong) {
-            // Scale so image width = element width; height follows aspect.
-            drawW = elemW;
-            drawH = elemW / imgAspect;
-            drawX = (effOx + effCx * node.X) * d;
-            drawY = (effOy + effCy * node.Y) * d + (elemH - drawH) / 2;
-          } else {
-            // Scale so image height = element height; width follows aspect.
-            drawH = elemH;
-            drawW = elemH * imgAspect;
-            drawX = (effOx + effCx * node.X) * d + (elemW - drawW) / 2;
-            drawY = (effOy + effCy * node.Y) * d;
-          }
-
-          // Image draws through the text pipeline (same shader, different
-          // texture). Flush both pending batches so this image draws in
-          // correct tree order between what came before and what comes
-          // after. Use `imageScratch` so the text buffer's accumulated
-          // glyphs aren't clobbered.
+        const flatBgPaint = this._computeBgPaint(node);
+        if (flatBgPaint !== undefined) {
           flushPanels();
-          flushText();
-          const data = imageScratch;
-          data[0] = drawX; data[1] = drawY; data[2] = drawW; data[3] = drawH;
-          data[4] = 0; data[5] = 0; data[6] = 1; data[7] = 1;
-          data[8] = node.EffectiveOpacity;
-          data[9] = imgClipMeta.Offset; data[10] = imgClipMeta.Count; data[11] = 0;
-          // Tint passthrough — images don't want a color multiplier.
-          data[12] = 1; data[13] = 1; data[14] = 1; data[15] = 1;
-          r.TextBeginBatch();
+          this._panelBuffer.Begin();
+          this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
+          r.EnableBlend();
+          r.PanelBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
-          r.TextAddInstance(data, 0, TEXT_FLOATS_PER_INSTANCE);
-          r.TextDrawBatch(w, h, imgEntry.Texture);
-          this._counts.Image++;
+          r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+          r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, flatBgPaint);
+          this._counts.Panels++;
+          if (flatBgPaint.Mode === 'Image') this._counts.Image++;
+          this._panelBuffer.Begin();
+        } else {
+          this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
         }
       }
 
@@ -1255,6 +1242,88 @@ export class Canvas implements DirtyTracker {
     const eff = node === this.Root ? 1 : parentOp * node.RenderStyle.Opacity;
     node.EffectiveOpacity = eff;
     for (const child of node.Children) this._cascadeOpacity(child as Jiv, eff);
+  };
+
+  /** Resolve a Jiv's Background to a BgPaint the renderer can consume.
+   *  Returns `undefined` for Color kinds (the default path — the instance
+   *  buffer's per-panel tint carries the color). Returns a non-undefined
+   *  BgPaint for Image (texture handle + Cover/Contain UV transform) and
+   *  for LinearGradient / RadialGradient (direction / center + stops).
+   *
+   *  Side effects: kicks `ImageCache.LoadUrl` for Image kinds whose
+   *  texture isn't yet in cache. While the bitmap is in flight this
+   *  returns `undefined`, so the panel renders with v_Tint
+   *  (Background.Color = the placeholder baked into the `Url(...)`
+   *  expression) — frame paints solid placeholder, no missing-texture
+   *  artifact. When the cache fires `OnLoadFinish` the engine kicks a
+   *  relayout / re-render and this helper returns the Image BgPaint. */
+  /** Cross-fade duration when an Image-Background texture first becomes
+   *  Ready, or when a Jiv's image URL swaps to a new Ready texture. The
+   *  panel paints `mix(placeholderColor, sampledImage, alpha)` where alpha
+   *  ramps linearly from 0 to 1 over this many milliseconds. */
+  private static readonly _BG_IMAGE_FADE_MS = 260;
+
+  private _computeBgPaint = (node: Jiv): BgPaint | undefined => {
+    const bg = node.RenderStyle.Background;
+    if (bg.Kind === 'Color') return undefined;
+    if (bg.Kind === 'Image') {
+      let entry = this._imageCache.Get(bg.Url);
+      if (!entry) {
+        this._imageCache.LoadUrl(bg.Url, this._dpr);
+        entry = this._imageCache.Get(bg.Url);
+      }
+      if (!entry || !entry.Ready) {
+        // Texture in flight (or never queued, or failed). Reset the
+        // fade-in tracker so the next Ready transition starts a fresh
+        // cross-fade from the placeholder color.
+        node.BgImageFadeUrl = null;
+        return undefined;
+      }
+      // Cover/Contain UV transform — panelLocal [0..1] × scale + offset → image UV.
+      // Cover scales so the image fully covers the panel (excess cropped);
+      // Contain scales so the image fits inside (excess panel shows v_Tint).
+      const panelAspect = node.Width / Math.max(node.Height, 0.0001);
+      const imgAspect = entry.Width / Math.max(entry.Height, 1);
+      let scaleX = 1, scaleY = 1;
+      if (bg.Fit === 'Cover') {
+        if (imgAspect > panelAspect) scaleX = panelAspect / imgAspect;
+        else                          scaleY = imgAspect / panelAspect;
+      } else {
+        if (imgAspect > panelAspect) scaleY = imgAspect / panelAspect;
+        else                          scaleX = panelAspect / imgAspect;
+      }
+      // Cross-fade alpha. First sight of a Ready entry for this URL kicks
+      // off a fresh fade window; subsequent frames ramp `alpha` toward 1
+      // and request another frame if the fade hasn't settled. URL swap
+      // (Card `[image]` change) resets the fade start so the new image
+      // also fades in over the previous one's placeholder color.
+      const now = performance.now();
+      if (node.BgImageFadeUrl !== bg.Url) {
+        node.BgImageFadeUrl = bg.Url;
+        node.BgImageFadeStartMs = now;
+      }
+      const elapsed = now - node.BgImageFadeStartMs;
+      const alpha = Math.min(1, elapsed / Canvas._BG_IMAGE_FADE_MS);
+      if (alpha < 1) this.RequestFrame();
+      return {
+        Mode: 'Image',
+        Texture: entry.Texture,
+        UvScaleX: scaleX,
+        UvScaleY: scaleY,
+        UvOffsetX: (1 - scaleX) * 0.5,
+        UvOffsetY: (1 - scaleY) * 0.5,
+        FadeAlpha: alpha,
+      };
+    }
+    // Gradient — flatten the resolved stops into the renderer's plain shape.
+    const stops = bg.Stops.map((s) => ({
+      Position: s.Position,
+      R: s.Color.R, G: s.Color.G, B: s.Color.B, A: s.Color.A,
+    }));
+    if (bg.Kind === 'LinearGradient') {
+      return { Mode: 'LinearGradient', DirX: Math.cos(bg.AngleRad), DirY: Math.sin(bg.AngleRad), Stops: stops };
+    }
+    return { Mode: 'RadialGradient', CenterX: bg.CenterX, CenterY: bg.CenterY, Radius: bg.Radius, Stops: stops };
   };
 
   /** Compute the offset descendants see when descending past a scroll container. */
@@ -1485,8 +1554,9 @@ export class Canvas implements DirtyTracker {
       node.TextMeasurement = MeasureText(node.Text, resolved, null);
     } else if (node.Text === null) {
       node.TextMeasurement = null;
-      // Only clear intrinsics if they weren't set by an image source
-      if (!node.ImageSrc) {
+      // Only clear intrinsics if they weren't set by an image background.
+      const bg = node.RenderStyle.Background;
+      if (bg.Kind !== 'Image') {
         node.IntrinsicWidth = null;
         node.IntrinsicHeight = null;
       }
@@ -2729,7 +2799,8 @@ export { WebGL2Renderer } from './WebGL2.Renderer';
 export { WebGPURenderer } from './WebGPU.Renderer';
 
 // Jiv
-export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
+export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection, BackgroundValue, GradientStop } from '../Jiv/Jiv.Types';
+export type { FitMode } from '../Element/Element';
 export { DefaultJivStyle } from '../Jiv/Jiv.Defaults';
 
 // Glass presets

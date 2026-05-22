@@ -47,7 +47,13 @@ export class Jiv implements OnInit, OnDestroy {
   readonly childLayout = input<Partial<ChildLayout> | undefined>(undefined);
   readonly text = input<string | null | undefined>(undefined);
   readonly textStyle = input<Partial<TextStyle> | undefined>(undefined);
-  readonly imageSrc = input<string | null | undefined>(undefined, { alias: 'image' });
+  /** Convenience: when set, this Jiv paints with `Background: Url(value, Cover)`
+   *  — the engine resolves the URL through ImageCache, kicks LoadUrl, and
+   *  flips :Loading/:Loaded states as the texture moves through fetch + decode.
+   *  Equivalent to writing `Background: Url("...")` in JSS; consumer-side
+   *  sugar for the common image-fill case. Explicit Background in `[style]`
+   *  takes precedence — `[image]` only writes if Background isn't already set. */
+  readonly image = input<string | null | undefined>(undefined);
   /** Toggle the reserved `Disabled` state. Triggers compound predicate
    *  rules that reference `:Disabled` / `:(... && !Disabled)`, and
    *  framework defaults Interactive:false + Cursor:Default kick in on
@@ -130,13 +136,19 @@ export class Jiv implements OnInit, OnDestroy {
       }
     }
     const text = this.text();
-    const img = this.imageSrc();
 
     const styleBag = { ...fromClass?.Style, ...this.style() } as Record<string, unknown>;
+    // `[image]` sugar — when set and Background wasn't authored explicitly,
+    // write a `Url(...)` Background value. The engine's Style.Resolver +
+    // ImageCache handle fetch / decode / texture binding on the worker side.
+    const img = this.image();
+    if (img !== undefined && styleBag['Background'] === undefined) {
+      styleBag['Background'] = img ? `Url("${img}", Cover)` : 'transparent';
+    }
     const elementProps: JivApplyOpts['ElementProps'] = {};
     for (const key of [
       'Overflow', 'Visible', 'Interactive', 'PointerEvents',
-      'Cursor', 'UserSelect', 'PointScale', 'FitMode',
+      'Cursor', 'UserSelect', 'PointScale',
     ]) {
       if (key in styleBag) {
         const v = styleBag[key];
@@ -184,7 +196,6 @@ export class Jiv implements OnInit, OnDestroy {
     const disabled = this.disabled();
     if (disabled !== undefined) opts.States = { Disabled: !!disabled };
     if (text !== undefined) opts.Text = text;
-    if (img !== undefined) opts.ImageSrc = img;
     return opts;
   }
 }

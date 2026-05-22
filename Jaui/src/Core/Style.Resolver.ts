@@ -3,6 +3,7 @@ import type { ResolveContext } from './Length';
 import { Resolve } from './Length';
 import { ResolveLengthTuple4 } from './Length.Tuple';
 import { ParseColor } from './Color.Parse';
+import { ParseBackground } from './Background.Parse';
 import { ResolveTransform } from '../Transform/Transform.Parse';
 
 /**
@@ -100,7 +101,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     CornerShape: _parseCornerShape(s.CornerShape),
     BorderRadiusSmoothness: Resolve(s.BorderRadiusSmoothness, ctx, 'W'),
 
-    Background: ParseColor(s.Background),
+    Background: ParseBackground(s.Background),
     BlendMode: s.BlendMode,
 
     Frost: Resolve(s.Frost, ctx, 'W'),

@@ -44,10 +44,10 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BorderRadius',           s => s.BorderRadius[3],              (s, v) => { s.BorderRadius[3] = v; }],
 
   // Fill — Background color (per-channel)
-  ['Background',             s => s.Background.R,                 (s, v) => { s.Background.R = v; }],
-  ['Background',             s => s.Background.G,                 (s, v) => { s.Background.G = v; }],
-  ['Background',             s => s.Background.B,                 (s, v) => { s.Background.B = v; }],
-  ['Background',             s => s.Background.A,                 (s, v) => { s.Background.A = v; }],
+  ['Background',             s => s.Background.Color.R,           (s, v) => { s.Background.Color.R = v; }],
+  ['Background',             s => s.Background.Color.G,           (s, v) => { s.Background.Color.G = v; }],
+  ['Background',             s => s.Background.Color.B,           (s, v) => { s.Background.Color.B = v; }],
+  ['Background',             s => s.Background.Color.A,           (s, v) => { s.Background.Color.A = v; }],
 
   // Physical material
   ['Frost',                  s => s.Frost,                        (s, v) => { s.Frost = v; }],

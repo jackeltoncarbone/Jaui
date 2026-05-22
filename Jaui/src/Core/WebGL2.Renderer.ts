@@ -7,7 +7,7 @@
  * backend — works on every browser, every GPU, every driver.
  */
 
-import type { Renderer, GpuTextureHandle, ProgressiveBlurParams } from './Renderer';
+import type { Renderer, GpuTextureHandle, ProgressiveBlurParams, BgPaint } from './Renderer';
 import { ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { Framebuffer } from './Framebuffer';
 import { BlurPass } from './BlurPass';
@@ -31,6 +31,15 @@ interface _PanelLocs {
   baseFrostLod: WebGLUniformLocation | null;
   specTilt:     WebGLUniformLocation | null;
   clipTex:      WebGLUniformLocation | null;
+  // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
+  bgMode:           WebGLUniformLocation | null;
+  bgTexture:        WebGLUniformLocation | null;
+  bgUv:             WebGLUniformLocation | null;
+  bgImageAlpha:     WebGLUniformLocation | null;
+  bgGradParams:     WebGLUniformLocation | null;
+  bgGradStopCount:  WebGLUniformLocation | null;
+  bgGradColor:      WebGLUniformLocation | null;
+  bgGradPos:        WebGLUniformLocation | null;
 }
 
 const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelLocs => ({
@@ -40,7 +49,23 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
   specTilt:     gl.getUniformLocation(p, 'u_SpecularTilt'),
   clipTex:      gl.getUniformLocation(p, 'u_ClipTex'),
+  bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
+  bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
+  bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
+  bgImageAlpha:     gl.getUniformLocation(p, 'u_BgImageAlpha'),
+  bgGradParams:     gl.getUniformLocation(p, 'u_BgGradParams'),
+  bgGradStopCount:  gl.getUniformLocation(p, 'u_BgGradStopCount'),
+  // Uniform arrays: GLSL exposes one location for the whole array via the
+  // base name; `uniform1fv`/`uniform4fv` updates all elements from a
+  // contiguous Float32Array.
+  bgGradColor:      gl.getUniformLocation(p, 'u_BgGradColor[0]'),
+  bgGradPos:        gl.getUniformLocation(p, 'u_BgGradPos[0]'),
 });
+
+const _MAX_BG_GRAD_STOPS = 8;
+const _BG_GRAD_COLOR_SCRATCH = new Float32Array(_MAX_BG_GRAD_STOPS * 4);
+const _BG_GRAD_POS_SCRATCH   = new Float32Array(_MAX_BG_GRAD_STOPS);
+const _BG_UV_IDENTITY = [1, 1, 0, 0];
 
 // ─── Opaque handle wrapping ─────────────────────────────────────────────────
 
@@ -472,6 +497,7 @@ export class WebGL2Renderer implements Renderer {
     specTiltX: number, specTiltY: number,
     useGlassShader: boolean = backdrop !== null,
     scene: GpuTextureHandle | null = null,
+    bgPaint?: BgPaint,
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
@@ -510,8 +536,59 @@ export class WebGL2Renderer implements Renderer {
     // pyramid's baked-in 1px base Gaussian on plain-brightness filters.
     gl.bindTexture(gl.TEXTURE_2D, scene ? _unwrap(scene) : this._dummyTex);
 
+    // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
+    // Tex unit 3 is reserved for the background image texture; bound to a
+    // dummy when bgPaint is undefined or non-Image so the sampler is always
+    // a valid 2D texture (sampling an unbound unit is undefined in WebGL2).
+    gl.uniform1i(locs.bgTexture, 3);
+    gl.activeTexture(gl.TEXTURE3);
+    this._bindBgPaint(locs, bgPaint);
+
     gl.bindVertexArray(this._panelVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
+  };
+
+  private _bindBgPaint = (locs: _PanelLocs, bgPaint: BgPaint | undefined): void => {
+    const gl = this._gl;
+    if (!bgPaint || bgPaint.Mode === 'Color') {
+      gl.uniform1i(locs.bgMode, 0);
+      gl.bindTexture(gl.TEXTURE_2D, this._dummyTex);
+      // Reset gradient stop count so a stale prior gradient doesn't
+      // leak into a subsequent Color batch.
+      gl.uniform1i(locs.bgGradStopCount, 0);
+      return;
+    }
+    if (bgPaint.Mode === 'Image') {
+      gl.uniform1i(locs.bgMode, 1);
+      gl.uniform4f(locs.bgUv, bgPaint.UvScaleX, bgPaint.UvScaleY, bgPaint.UvOffsetX, bgPaint.UvOffsetY);
+      gl.uniform1f(locs.bgImageAlpha, bgPaint.FadeAlpha);
+      gl.bindTexture(gl.TEXTURE_2D, _unwrap(bgPaint.Texture));
+      gl.uniform1i(locs.bgGradStopCount, 0);
+      return;
+    }
+    // Gradient path — pack stops into the scratch arrays then upload.
+    const stops = bgPaint.Stops;
+    const n = Math.min(stops.length, _MAX_BG_GRAD_STOPS);
+    for (let i = 0; i < n; i++) {
+      const s = stops[i];
+      _BG_GRAD_COLOR_SCRATCH[i * 4 + 0] = s.R;
+      _BG_GRAD_COLOR_SCRATCH[i * 4 + 1] = s.G;
+      _BG_GRAD_COLOR_SCRATCH[i * 4 + 2] = s.B;
+      _BG_GRAD_COLOR_SCRATCH[i * 4 + 3] = s.A;
+      _BG_GRAD_POS_SCRATCH[i] = s.Position;
+    }
+    gl.uniform1i(locs.bgGradStopCount, n);
+    gl.uniform4fv(locs.bgGradColor, _BG_GRAD_COLOR_SCRATCH);
+    gl.uniform1fv(locs.bgGradPos, _BG_GRAD_POS_SCRATCH);
+    if (bgPaint.Mode === 'LinearGradient') {
+      gl.uniform1i(locs.bgMode, 2);
+      gl.uniform4f(locs.bgGradParams, bgPaint.DirX, bgPaint.DirY, 0, 0);
+    } else {
+      gl.uniform1i(locs.bgMode, 3);
+      gl.uniform4f(locs.bgGradParams, bgPaint.CenterX, bgPaint.CenterY, bgPaint.Radius, 0);
+    }
+    // Bind dummy for image sampler so the slot is always a valid 2D texture.
+    gl.bindTexture(gl.TEXTURE_2D, this._dummyTex);
   };
 
   // ── Text Rendering ──
