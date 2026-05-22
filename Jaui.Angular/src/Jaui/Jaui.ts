@@ -79,24 +79,28 @@ export class Jaui implements OnInit, OnDestroy {
   private _canvasEl: HTMLCanvasElement;
 
   constructor() {
-    // Build the proxy <canvas>. This element captures DOM events and
-    // hosts the OffscreenCanvas (transferred to the worker). Inline
-    // styles bypass Angular's view encapsulation.
-    this._canvasEl = document.createElement('canvas');
-    this._canvasEl.style.display = 'block';
-    this._canvasEl.style.width = '100%';
-    this._canvasEl.style.height = '100%';
+    // Optional fast-path: a host application can pre-construct MainBridge
+    // in its main entry (before Angular bootstrap) and stash it on
+    // `globalThis.__JAUI_PREBUILT_BRIDGE__`. Adopting it here means the
+    // worker `init` message ships at boot — processed the instant the
+    // worker bundle finishes parsing instead of waiting for Angular to
+    // instantiate <jaui> deep in the component tree (5s+ on cold load).
+    // Fallback path constructs the bridge here as before.
+    const slot = globalThis as { __JAUI_PREBUILT_BRIDGE__?: MainBridge };
+    const prebuilt = slot.__JAUI_PREBUILT_BRIDGE__;
+    if (prebuilt) {
+      this.Bridge = prebuilt;
+      this._canvasEl = prebuilt.Canvas;
+      slot.__JAUI_PREBUILT_BRIDGE__ = undefined;
+    } else {
+      this._canvasEl = document.createElement('canvas');
+      this._canvasEl.style.display = 'block';
+      this._canvasEl.style.width = '100%';
+      this._canvasEl.style.height = '100%';
+      const worker = inject(JAUI_WORKER);
+      this.Bridge = new MainBridge({ Canvas: this._canvasEl, Worker: worker });
+    }
     this._host.nativeElement.appendChild(this._canvasEl);
-
-    // Wire bridge to the consumer-supplied worker injected via JAUI_WORKER.
-    // Required because the worker is responsible for registering Janvas
-    // renderer factories synchronously before BootJauiWorker — no default
-    // makes sense.
-    const worker = inject(JAUI_WORKER);
-    this.Bridge = new MainBridge({
-      Canvas: this._canvasEl,
-      Worker: worker,
-    });
     this.Canvas = new CanvasProxy(this.Bridge);
     (window as { __jaui?: { canvas: CanvasProxy } }).__jaui = { canvas: this.Canvas };
 
