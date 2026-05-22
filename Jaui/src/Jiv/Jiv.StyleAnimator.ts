@@ -134,7 +134,18 @@ const DEFAULT_DAMPING = 32;
 const DEFAULT_MASS = 1;
 
 /** Copy all non-animated fields from target into render. These snap without
- *  a spring: booleans, enums, and identity-shared nested structures. */
+ *  a spring: booleans, enums, and identity-shared nested structures.
+ *
+ *  Background is special: its Color channel (RGBA) is sprung per-binding, but
+ *  the Kind / Url / Fit / gradient stops snap. We assign the whole target
+ *  Background reference into render so the structural fields update — the
+ *  springs in BINDINGS overwrite the Color channels in-place immediately
+ *  after this call, so the final render.Background carries (target Kind/
+ *  Url/Fit/Stops) + (spring-interpolated Color). The assignment is a
+ *  reference share, but ResolveStyle returns a freshly-cloned BackgroundValue
+ *  per call (ParseBackground._clone allocates a new Color object), so the
+ *  cache stays clean and previous render.Background is GC'd.
+ */
 const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void => {
   render.Material = target.Material;
   render.ProgressiveBlurDirection = target.ProgressiveBlurDirection;
@@ -145,6 +156,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.ContainBorder = target.ContainBorder;
   render.InnerShadow = target.InnerShadow;
   render.Layer = target.Layer;
+  render.Background = target.Background;
 };
 
 export class JivStyleAnimator implements Animatable {
