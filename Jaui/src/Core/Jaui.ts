@@ -531,6 +531,17 @@ export class Canvas implements DirtyTracker {
   };
 
   private _tickInner = (time: number): void => {
+    // Boot-time zero-size gate. Until the worker bridge has delivered a
+    // real resize (ResizeFromBridge → _pendingResize → _resize sets
+    // _width/_height), the OffscreenCanvas backing store is 0×0 and any
+    // GL op that touches the default framebuffer fails with
+    // GL_INVALID_FRAMEBUFFER_OPERATION (error 1286). That used to spam
+    // the console for ~30ms during boot, with both glClear/glBlit AND
+    // texSubImage2D (whose upload path implicitly checks the current
+    // framebuffer's completeness). Skip the entire frame at zero size —
+    // the next rAF after the first resize delivery picks up cleanly.
+    if (this._width === 0 || this._height === 0) return;
+
     // Feed the HUD BEFORE we overwrite _lastTime — the HUD uses it to derive
     // the rAF-to-rAF delta (which, on iOS, includes time the main thread spent
     // blocked — a better signal than render-only dt for "is the browser

@@ -712,7 +712,14 @@ export class MainBridge {
             }
           }
         } else if (sheet.href) {
-          if (corsBlocked && _DEBUG) console.log(`[FontScan] CORS-blocked, fetching: ${sheet.href}`);
+          // Log gated by the dedup state so re-scans of an already-fetched
+          // CORS sheet don't print a misleading "fetching" line — the
+          // actual fetch ran once on the first scan. fetchAndParse's
+          // own no-op short-circuit on cache hit keeps the network cost
+          // at one request per sheet across the lifetime of the page.
+          if (corsBlocked && _DEBUG && !fetchedSheets.has(sheet.href)) {
+            console.log(`[FontScan] CORS-blocked, fetching: ${sheet.href}`);
+          }
           fetchAndParse(sheet.href);
         }
       };
