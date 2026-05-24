@@ -118,19 +118,19 @@ function _withAlpha(color: string, alpha: number): string {
         @if (showPlaceholder()) {
           <jext class="JinputPlaceholder" [text]="Placeholder()" [textStyle]="placeholderTextStyle()" />
         } @else {
-          <!-- Selection rects FIRST so segment text paints on top.
-               We render LastSelectionRects (held last non-empty snapshot)
-               rather than the live SelectionRects so a deselect animates
-               via the class's @Transition Opacity instead of yanking the
-               DOM nodes immediately. SelectionVisible drives the
-               opacity binding 1 ↔ 0. -->
-          @for (rect of LastSelectionRects(); track $index) {
+          <!-- Selection rects FIRST so segment text paints on top. Live
+               SelectionRects() (not a snapshot): the engine's implicit
+               Opacity:Presence binding handles BOTH fade-in (mount) and
+               fade-out (RequestLeave on ngOnDestroy via the Presence
+               spec). An inline Opacity here would override that binding
+               and break the exit fade — leaving rects would render at
+               full opacity for the entire spring settle and then pop.
+               Track by rect position so a fresh selection mounts fresh
+               jivs at the new position instead of recycling stale ones. -->
+          @for (rect of SelectionRects(); track rect.y + ':' + rect.x) {
             <jiv
               class="JinputSelectionRect"
-              [style]="{
-                BorderRadius: (rect.height * 0.4) + 'px',
-                Opacity: SelectionVisible() ? '1' : '0'
-              }"
+              [style]="{ BorderRadius: (rect.height * 0.4) + 'px' }"
               [childLayout]="{
                 Position: 'Placed',
                 Left: rect.x + 'px',
@@ -179,13 +179,12 @@ function _withAlpha(color: string, alpha: number): string {
                parent's Presence-driven opacity at render time. -->
           @for (peer of PeerCaretRects(); track peer.Key) {
             <jiv class="JinputPeerGroup">
-              @for (rect of peer.Ranges; track $index) {
+              @for (rect of peer.Ranges; track rect.y + ':' + rect.x) {
                 <jiv
                   class="JinputPeerSelectionRect"
                   [style]="{
                     Background: peer.SelectionColor,
-                    BorderRadius: (rect.height * 0.4) + 'px',
-                    Opacity: peer.RangesVisible ? '1' : '0'
+                    BorderRadius: (rect.height * 0.4) + 'px'
                   }"
                   [childLayout]="{
                     Position: 'Placed',
@@ -488,28 +487,6 @@ export class Jinput implements OnDestroy {
     }));
   });
 
-  /** Last non-empty SelectionRects snapshot. Kept so the template can
-   *  render the same rects at Opacity:0 after a deselect, which gives
-   *  the JSS @Transition Opacity on `JinputSelectionRect` something
-   *  to animate AGAINST — without this, removing the rects from the
-   *  @for would tear the DOM nodes down before any transition could
-   *  run, producing the instant-disappear the user flagged. */
-  private readonly _lastSelectionRectsSig = signal<ReadonlyArray<{ x: number; y: number; width: number; height: number }>>([]);
-  private readonly _captureLastSelectionRects = effect(() => {
-    const cur = this.SelectionRects();
-    if (cur.length > 0) this._lastSelectionRectsSig.set(cur);
-  });
-  readonly LastSelectionRects = computed(() => this._lastSelectionRectsSig());
-  readonly SelectionVisible = computed(() => this.SelectionRects().length > 0);
-
-  /** Last non-empty Ranges per peer key — retains the previous selection
-   *  rects after the peer deselects so the JSS @Transition Opacity on
-   *  `JinputPeerSelectionRect` has something to animate against (same
-   *  rationale as `_lastSelectionRectsSig` for the local user). Updated
-   *  inside `PeerCaretRects` whenever a peer's current Ranges is
-   *  non-empty. */
-  private readonly _lastPeerRanges = new Map<string, ReadonlyArray<{ x: number; y: number; width: number; height: number }>>();
-
   /** Per-peer caret + selection rects in the same coordinate space as the
    *  local caret. Selection rects are returned even for collapsed peers
    *  (empty array) so the template can iterate uniformly. The caret rect
@@ -537,21 +514,12 @@ export class Jinput implements OnDestroy {
               height: r.height + py * 2,
             }));
       const renderCaret = p.Focused === false ? null : caret;
-      // Snapshot the last non-empty Ranges so a peer's deselect fades
-      // via Opacity transition instead of yanking DOM nodes.
-      const hasRanges = ranges.length > 0;
-      if (hasRanges) this._lastPeerRanges.set(p.Key, ranges);
-      const displayRanges = hasRanges
-        ? ranges
-        : (this._lastPeerRanges.get(p.Key) ?? []);
       // Anchor for the floating name pill. Prefer the caret when one
       // exists (gives the pill a tight reference point); otherwise
-      // anchor to the top-left of the first displayed rect (which
-      // may be a fading-out snapshot during deselect). Without this
-      // the pill had nowhere to live for range-only peers.
+      // anchor to the top-left of the first selection rect.
       const labelAnchor = renderCaret
         ? { x: renderCaret.x, y: renderCaret.y }
-        : (displayRanges[0] ? { x: displayRanges[0].x, y: displayRanges[0].y } : null);
+        : (ranges[0] ? { x: ranges[0].x, y: ranges[0].y } : null);
       return {
         Key: p.Key,
         Color: p.Color,
@@ -566,8 +534,7 @@ export class Jinput implements OnDestroy {
         // halo (Ranges) keeps rendering regardless because it
         // represents content the peer selected on purpose.
         Caret: renderCaret,
-        Ranges: displayRanges,
-        RangesVisible: hasRanges,
+        Ranges: ranges,
         LabelAnchor: labelAnchor,
       };
     });

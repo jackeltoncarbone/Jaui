@@ -65,11 +65,18 @@ JinputCaret {
 // BorderRadius is set inline per-rect to height × 0.4, so the curve scales
 // with text size. Background + transitions live here; per-line position /
 // size / radius are mutated in TS each frame.
+// Opacity is left at the engine default of `Presence` so mount fades in
+// and ngOnDestroy (→ RequestLeave → spring 1→0) fades out without any
+// inline override. Setting Opacity explicitly here OR in the template
+// would lock the rect at the chosen value for the entire ~400ms
+// Presence settle, making leaving rects "stack" at full opacity and
+// then pop. Override Presence's spring tuning instead — a stiffer
+// 600/30 settles in ~140ms which feels right for selection halos.
 JinputSelectionRect {
   Background: rgba(120, 170, 255, 0.32)
+  @Spring Presence { Stiffness: 600, Damping: 30 }
   @Transition Width   { Duration: 90ms }
   @Transition Height  { Duration: 90ms }
-  @Transition Opacity { Duration: 140ms }
 }
 
 // Remote peer's selection halo. Higher Layer than the local
@@ -80,11 +87,14 @@ JinputSelectionRect {
 // peer Start/End in `_onWindowHoverMove`). Leaving Interactive off
 // preserves click-through so the local user can drop their own caret
 // inside a peer's highlighted range.
+// Same Presence-driven fade as the local JinputSelectionRect — no
+// inline Opacity in the template, just the engine's implicit
+// `Opacity: Presence`. Tuned to the same 600/30 spring for parity.
 JinputPeerSelectionRect {
   Layer: 5
+  @Spring Presence { Stiffness: 600, Damping: 30 }
   @Transition Width   { Duration: 90ms }
   @Transition Height  { Duration: 90ms }
-  @Transition Opacity { Duration: 140ms }
 }
 
 // Per-peer wrapper holding that peer's selection rects, caret hit,
