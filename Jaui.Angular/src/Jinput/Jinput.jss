@@ -87,6 +87,17 @@ JinputPeerSelectionRect {
   @Transition Opacity { Duration: 140ms }
 }
 
+// Per-peer wrapper holding that peer's selection rects, caret hit,
+// and name pill. Exists ONLY so that the engine's default
+// `Opacity: Presence` binding fires on the wrapper when the peer
+// leaves the room — the Presence spring then cascades visually
+// through to every child via the renderer's opacity multiply (per
+// Presence.md nested-exit semantics). Without this wrapper a peer
+// disappearing from the room would pop instantly because the
+// individual rects override Opacity for in-place state animation.
+// No layout footprint of its own — children are all Position:Placed.
+JinputPeerGroup {}
+
 // 16pt-wide region centered on the 2pt peer caret line. Used to be an
 // invisible hit-target for Angular pointer-enter/leave handlers, but
 // Jaui jivs are `display:contents` so Angular host-bound pointer events

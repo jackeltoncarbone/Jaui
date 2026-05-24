@@ -168,66 +168,69 @@ function _withAlpha(color: string, alpha: number): string {
                use the peer's accent color at low opacity so overlapping
                regions don't go opaque. Non-blinking — only the local
                caret blinks. -->
+          <!-- Per-peer group jiv. The default Opacity:Presence binding
+               lives on this wrapper so when a peer leaves the room
+               entirely (@for removes the group → ngOnDestroy →
+               RequestLeave), the Presence spring fades from 1→0 over
+               ~400ms and cascades through to all children visually
+               (per Presence.md "nested exits"). Children still set
+               their own Opacity overrides for in-place state changes
+               (selection toggle, hover) — those compose with the
+               parent's Presence-driven opacity at render time. -->
           @for (peer of PeerCaretRects(); track peer.Key) {
-            <!-- Selection halos (display-only). Hover detection runs
-                 upstream via _onWindowHoverMove → char-index → peer
-                 range test; no per-rect handlers (Jaui jivs are
-                 display:contents so Angular host events never fire on
-                 them anyway). -->
-            @for (rect of peer.Ranges; track $index) {
-              <jiv
-                class="JinputPeerSelectionRect"
-                [style]="{
-                  Background: peer.SelectionColor,
-                  BorderRadius: (rect.height * 0.4) + 'px',
-                  Opacity: peer.RangesVisible ? '1' : '0'
-                }"
-                [childLayout]="{
-                  Position: 'Placed',
-                  Left: rect.x + 'px',
-                  Top: rect.y + 'px',
-                  Width: rect.width + 'px',
-                  Height: rect.height + 'px',
-                }" />
-            }
-            @if (peer.Caret; as cr) {
-              <jiv
-                class="JinputPeerCaretHit"
-                [childLayout]="{
-                  Position: 'Placed',
-                  Left: (cr.x - 7) + 'px',
-                  Top: cr.y + 'px',
-                  Width: '16px',
-                  Height: cr.height + 'px',
-                }">
-                <jiv class="JinputPeerCaretLine"
-                  [style]="{ Background: peer.Color }"
+            <jiv class="JinputPeerGroup">
+              @for (rect of peer.Ranges; track $index) {
+                <jiv
+                  class="JinputPeerSelectionRect"
+                  [style]="{
+                    Background: peer.SelectionColor,
+                    BorderRadius: (rect.height * 0.4) + 'px',
+                    Opacity: peer.RangesVisible ? '1' : '0'
+                  }"
                   [childLayout]="{
                     Position: 'Placed',
-                    Left: '7px',
-                    Top: '0px',
-                    Width: '2px',
-                    Height: cr.height + 'px',
+                    Left: rect.x + 'px',
+                    Top: rect.y + 'px',
+                    Width: rect.width + 'px',
+                    Height: rect.height + 'px',
                   }" />
-              </jiv>
-            }
-            <!-- One name pill per peer at the caret or first range.
-                 Always rendered (so the fade transition has a stable
-                 host); Opacity gates visibility per hover state. -->
-            @if (peer.LabelAnchor; as la) {
-              <jext
-                class="JinputPeerCaretLabel"
-                [text]="peer.Name"
-                [style]="{
-                  Background: peer.Color,
-                  Opacity: _hoveredPeerKey() === peer.Key ? '1' : '0'
-                }"
-                [childLayout]="{
-                  Position: 'Placed',
-                  Left: la.x + 'px',
-                  Top: (la.y - 20) + 'px'
-                }" />
-            }
+              }
+              @if (peer.Caret; as cr) {
+                <jiv
+                  class="JinputPeerCaretHit"
+                  [childLayout]="{
+                    Position: 'Placed',
+                    Left: (cr.x - 7) + 'px',
+                    Top: cr.y + 'px',
+                    Width: '16px',
+                    Height: cr.height + 'px',
+                  }">
+                  <jiv class="JinputPeerCaretLine"
+                    [style]="{ Background: peer.Color }"
+                    [childLayout]="{
+                      Position: 'Placed',
+                      Left: '7px',
+                      Top: '0px',
+                      Width: '2px',
+                      Height: cr.height + 'px',
+                    }" />
+                </jiv>
+              }
+              @if (peer.LabelAnchor; as la) {
+                <jext
+                  class="JinputPeerCaretLabel"
+                  [text]="peer.Name"
+                  [style]="{
+                    Background: peer.Color,
+                    Opacity: _hoveredPeerKey() === peer.Key ? '1' : '0'
+                  }"
+                  [childLayout]="{
+                    Position: 'Placed',
+                    Left: la.x + 'px',
+                    Top: (la.y - 20) + 'px'
+                  }" />
+              }
+            </jiv>
           }
         }
       </jiv>
