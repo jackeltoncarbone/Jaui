@@ -70,3 +70,50 @@ JinputSelectionRect {
   @Transition Width  { Duration: 90ms }
   @Transition Height { Duration: 90ms }
 }
+
+// Remote peer's selection halo. Higher Layer than the local
+// JinputSelectionRect so the peer's accent halo stays visible when the
+// local user's selection overlaps. NOT Interactive — hover is detected
+// upstream via char-index (Jinput tracks the pointer at the window level
+// and resolves it to a char position; that index is then matched against
+// peer Start/End in `_onWindowHoverMove`). Leaving Interactive off
+// preserves click-through so the local user can drop their own caret
+// inside a peer's highlighted range.
+JinputPeerSelectionRect {
+  Layer: 5
+  @Transition Width  { Duration: 90ms }
+  @Transition Height { Duration: 90ms }
+}
+
+// 16pt-wide region centered on the 2pt peer caret line. Used to be an
+// invisible hit-target for Angular pointer-enter/leave handlers, but
+// Jaui jivs are `display:contents` so Angular host-bound pointer events
+// never fired — hover now flows through `_onWindowHoverMove` →
+// `_hoveredPeerKey`. This wrapper is kept only as a positioning anchor
+// for the caret line.
+JinputPeerCaretHit {}
+
+// The 2pt vertical caret line. Background is set inline per-peer from
+// the awareness accent color.
+JinputPeerCaretLine {
+}
+
+// Name pill floated above the caret/selection. Filled with the peer's
+// accent color (set inline), small Apple-style label. Display-only —
+// no Interactive flag so it never captures pointer events and the
+// user can always drop their cursor "through" it. Opacity is driven
+// from the host signal via inline style; the transition lives here so
+// the fade matches across hover in/out at the same cadence. Layer
+// pushes it above text segments so the pill never hides behind
+// rendered glyphs.
+JinputPeerCaretLabel {
+  Layer: 21
+  FontFamily: Inter
+  FontSize: 10pt
+  FontWeight: 600
+  Color: rgba(255, 255, 255, 0.98)
+  Padding: 2pt 7pt
+  BorderRadius: 999pt
+  WhiteSpace: NoWrap
+  @Transition Opacity { Duration: 140ms }
+}

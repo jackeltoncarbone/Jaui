@@ -54,11 +54,52 @@ export interface JinputSpan {
   FontWeight?: number;
 }
 
+/** A remote collaborator's caret/selection rendered as a non-blinking
+ *  overlay inside this input. Used by Yjs-awareness-driven live editing
+ *  (Drill page presence) — Jinput just paints what it's told. */
+export interface JinputPeerCaret {
+  /** Stable key for `@for track` so a tab moving the caret animates
+   *  position rather than swapping DOM. */
+  Key: string;
+  Start: number;
+  End: number;
+  /** CSS color for both the 2px caret line and the rgba selection halo
+   *  (Jinput drops opacity to ~28% for the halo so multiple peers'
+   *  selections layer without becoming opaque mud). */
+  Color: string;
+  /** Display name shown on hover in a small pill above the caret. */
+  Name?: string;
+  /** Whether the peer's editor currently has focus. When false the
+   *  caret line is suppressed (a stale blinking artifact); selection
+   *  halo always renders. Defaults to true if absent. */
+  Focused?: boolean;
+}
+
 interface RenderedSegment extends LayoutSegmentInput {
   Color?: string;
   Background?: string;
   Class?: string;
   FontWeight?: number;
+}
+
+/** Convert any CSS color string (#rgb / #rrggbb / hsl(...) / rgb(...)) to
+ *  an rgba(...) value at the supplied alpha. Used for peer selection
+ *  halos — same hue as their accent caret, just translucent so overlapping
+ *  peers layer rather than going opaque. */
+function _withAlpha(color: string, alpha: number): string {
+  const c = color.trim();
+  if (c.startsWith('#')) {
+    const hex = c.slice(1);
+    const full = hex.length === 3 ? hex.split('').map(x => x + x).join('') : hex;
+    if (full.length !== 6) return c;
+    const r = parseInt(full.slice(0, 2), 16);
+    const g = parseInt(full.slice(2, 4), 16);
+    const b = parseInt(full.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  if (c.startsWith('hsl(')) return c.replace(/^hsl\(/, 'hsla(').replace(/\)$/, `, ${alpha})`);
+  if (c.startsWith('rgb(')) return c.replace(/^rgb\(/, 'rgba(').replace(/\)$/, `, ${alpha})`);
+  return c;
 }
 
 @Component({
@@ -113,6 +154,71 @@ interface RenderedSegment extends LayoutSegmentInput {
                 Width: '2px',
                 Height: cr.height + 'px',
               }" />
+          }
+          <!-- Peer carets + selection halos. Painted AFTER the local
+               caret so multiple peers stack visibly; selection halos
+               use the peer's accent color at low opacity so overlapping
+               regions don't go opaque. Non-blinking — only the local
+               caret blinks. -->
+          @for (peer of PeerCaretRects(); track peer.Key) {
+            <!-- Selection halos (display-only). Hover detection runs
+                 upstream via _onWindowHoverMove → char-index → peer
+                 range test; no per-rect handlers (Jaui jivs are
+                 display:contents so Angular host events never fire on
+                 them anyway). -->
+            @for (rect of peer.Ranges; track $index) {
+              <jiv
+                class="JinputPeerSelectionRect"
+                [style]="{
+                  Background: peer.SelectionColor,
+                  BorderRadius: (rect.height * 0.4) + 'px'
+                }"
+                [childLayout]="{
+                  Position: 'Placed',
+                  Left: rect.x + 'px',
+                  Top: rect.y + 'px',
+                  Width: rect.width + 'px',
+                  Height: rect.height + 'px',
+                }" />
+            }
+            @if (peer.Caret; as cr) {
+              <jiv
+                class="JinputPeerCaretHit"
+                [childLayout]="{
+                  Position: 'Placed',
+                  Left: (cr.x - 7) + 'px',
+                  Top: cr.y + 'px',
+                  Width: '16px',
+                  Height: cr.height + 'px',
+                }">
+                <jiv class="JinputPeerCaretLine"
+                  [style]="{ Background: peer.Color }"
+                  [childLayout]="{
+                    Position: 'Placed',
+                    Left: '7px',
+                    Top: '0px',
+                    Width: '2px',
+                    Height: cr.height + 'px',
+                  }" />
+              </jiv>
+            }
+            <!-- One name pill per peer at the caret or first range.
+                 Always rendered (so the fade transition has a stable
+                 host); Opacity gates visibility per hover state. -->
+            @if (peer.LabelAnchor; as la) {
+              <jext
+                class="JinputPeerCaretLabel"
+                [text]="peer.Name"
+                [style]="{
+                  Background: peer.Color,
+                  Opacity: _hoveredPeerKey() === peer.Key ? '1' : '0'
+                }"
+                [childLayout]="{
+                  Position: 'Placed',
+                  Left: la.x + 'px',
+                  Top: (la.y - 20) + 'px'
+                }" />
+            }
           }
         }
       </jiv>
@@ -170,6 +276,9 @@ export class Jinput implements OnDestroy {
   // ── Inputs ──────────────────────────────────────────────────────
   readonly Text = model('');
   readonly Spans = input<readonly JinputSpan[]>([]);
+  /** Remote collaborators' carets/selections overlaid on this input.
+   *  Painted alongside the local caret using the same layout primitives. */
+  readonly PeerCarets = input<readonly JinputPeerCaret[]>([]);
   readonly Placeholder = input('');
   readonly ReadOnly = input(false);
   /** Allow newline characters in the model. When false (default), Enter
@@ -204,6 +313,11 @@ export class Jinput implements OnDestroy {
   /** Enter (without Shift) when not in multi-line mode. Consumer is expected
    *  to use this to commit / submit. Shift+Enter is always ignored — leave
    *  Shift for newline insertion in MultiLine consumers. */
+  /** Local selection changed — fires on caret move / drag-extend / keyboard
+   *  navigation. Consumers use this to broadcast the selection over a
+   *  collaboration channel (Yjs awareness etc.) so remote users see live
+   *  cursors. The two indices are equal for a collapsed caret. */
+  readonly SelectionChanged = output<{ start: number; end: number }>();
   readonly Submitted = output<KeyboardEvent>();
   /** Esc — consumer is expected to dismiss / cancel / revert. The default
    *  action (preventing default to swallow Esc) is the consumer's call. */
@@ -360,6 +474,62 @@ export class Jinput implements OnDestroy {
       width: r.width + px * 2,
       height: r.height + py * 2,
     }));
+  });
+
+  /** Per-peer caret + selection rects in the same coordinate space as the
+   *  local caret. Selection rects are returned even for collapsed peers
+   *  (empty array) so the template can iterate uniformly. The caret rect
+   *  is computed via the existing CharPosition helper so peer carets land
+   *  on the exact same pixel a local caret would for that index. */
+  readonly PeerCaretRects = computed(() => {
+    const peers = this.PeerCarets();
+    if (peers.length === 0) return [];
+    const laid = this.LaidOutSegments();
+    const m = this._Metrics();
+    const px = this._SELECTION_PAD_X;
+    const py = this._SELECTION_PAD_Y;
+    return peers.map((p) => {
+      const collapsed = p.Start === p.End;
+      const caret = collapsed
+        ? CharPosition(laid, p.Start, m, this._measureWidth)
+        : null;
+      const ranges = collapsed
+        ? []
+        : RangeRects(laid, Math.min(p.Start, p.End), Math.max(p.Start, p.End), m, this._measureWidth)
+            .map(r => ({
+              x: r.x - px,
+              y: r.y - py,
+              width: r.width + px * 2,
+              height: r.height + py * 2,
+            }));
+      const renderCaret = p.Focused === false ? null : caret;
+      // Anchor for the floating name pill. Prefer the caret when one
+      // exists (gives the pill a tight reference point); otherwise
+      // anchor to the top-left of the first selection rect so it
+      // hovers right above the highlighted range. Without this the
+      // pill had nowhere to live for range-only peers (focused-and-
+      // selecting, or recently-blurred-with-selection-persisting).
+      const labelAnchor = renderCaret
+        ? { x: renderCaret.x, y: renderCaret.y }
+        : (ranges[0] ? { x: ranges[0].x, y: ranges[0].y } : null);
+      return {
+        Key: p.Key,
+        Color: p.Color,
+        Name: p.Name && p.Name.length > 0 ? p.Name : 'Editor',
+        // Selection halo: peer accent at 0.32 alpha — matches the
+        // native local-selection class exactly (rgba(_, _, _, 0.32)
+        // in JinputSelectionRect) so peer selections read as the
+        // same primitive, just colored for identity.
+        SelectionColor: _withAlpha(p.Color, 0.32),
+        // Caret line only renders when the peer's editor is focused —
+        // a blinking line at a stale position is noise. The selection
+        // halo (Ranges) keeps rendering regardless because it
+        // represents content the peer selected on purpose.
+        Caret: renderCaret,
+        Ranges: ranges,
+        LabelAnchor: labelAnchor,
+      };
+    });
   });
 
   // Inline TextStyle on every rendered segment so the visual `<jext>`
@@ -895,6 +1065,7 @@ export class Jinput implements OnDestroy {
         this._lastHoverIndex = null;
         this.PositionHovered.emit({ index: null });
       }
+      if (this._hoveredPeerKey() !== null) this._hoveredPeerKey.set(null);
       return;
     }
     const localX = e.clientX - cRect.left;
@@ -907,6 +1078,7 @@ export class Jinput implements OnDestroy {
         this._lastHoverIndex = null;
         this.PositionHovered.emit({ index: null });
       }
+      if (this._hoveredPeerKey() !== null) this._hoveredPeerKey.set(null);
       return;
     }
     const idx = this._indexAtClient(e.clientX, e.clientY);
@@ -914,6 +1086,32 @@ export class Jinput implements OnDestroy {
       this._lastHoverIndex = idx;
       this.PositionHovered.emit({ index: idx });
     }
+    this._updateHoveredPeer(idx);
+  };
+
+  /** Match a hover index against every peer's selection range or caret.
+   *  Mouse hover events don't fire per-jiv on Jaui (`display:contents`
+   *  hosts → no Angular target), so we drive the peer hover signal
+   *  entirely from the char-index resolved upstream. Collapsed carets
+   *  get a ±2-char forgiveness window so a 2px line is actually
+   *  catchable; range selections match strictly inside [start, end). */
+  private _updateHoveredPeer = (idx: number | null): void => {
+    if (idx === null) {
+      if (this._hoveredPeerKey() !== null) this._hoveredPeerKey.set(null);
+      return;
+    }
+    let next: string | null = null;
+    for (const p of this.PeerCarets()) {
+      const lo = Math.min(p.Start, p.End);
+      const hi = Math.max(p.Start, p.End);
+      const isRange = lo !== hi;
+      if (isRange) {
+        if (idx >= lo && idx < hi) { next = p.Key; break; }
+      } else {
+        if (idx >= lo - 2 && idx <= lo + 2) { next = p.Key; break; }
+      }
+    }
+    if (next !== this._hoveredPeerKey()) this._hoveredPeerKey.set(next);
   };
 
   onRootContextMenu = (e: MouseEvent): void => {
@@ -1143,13 +1341,28 @@ export class Jinput implements OnDestroy {
     this.FocusChanged.emit(false);
   };
 
+  // ── Peer caret hover ─────────────────────────────────────────────
+  // Tracks which peer's caret/selection the user is currently hovering
+  // — drives the per-peer name pill's Opacity binding. Driven from
+  // `_updateHoveredPeer` (char-index → peer Start/End match) because
+  // Angular host events (pointerenter/leave) never fire on Jaui jivs
+  // (their host elements are `display:contents` — nothing for the DOM
+  // listener to attach to).
+  protected readonly _hoveredPeerKey = signal<string | null>(null);
+
   syncSelection = (): void => {
     const el = this._hiddenInput()?.nativeElement;
     if (!el) return;
-    this._selStart.set(el.selectionStart ?? 0);
-    this._selEnd.set(el.selectionEnd ?? 0);
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    this._selStart.set(start);
+    this._selEnd.set(end);
     this._caretBright.set(true);
     this._restartBlink();
+    // Always emit — caller may be focus/blur where indices didn't move
+    // but listeners need to know the selection is "live" again so they
+    // can republish over collaboration channels (e.g. Yjs awareness).
+    this.SelectionChanged.emit({ start, end });
   };
 
   private _onSelectionChange = (): void => {
