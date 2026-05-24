@@ -116,8 +116,16 @@ export class Jiv implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    // Per Presence.md framework-binding contract: ngOnDestroy ONLY calls
+    // RequestLeave. The engine's PresenceManager hard-removes the node
+    // automatically once the spring settles at 0 — calling Destroy()
+    // here too (as we used to) enqueued a follow-on 'destroy' op that
+    // the worker processed before the spring could fire, defeating the
+    // entire fade. The cost of not calling Destroy is that the worker
+    // keeps the registry entry alive for ~400ms (one spring settle)
+    // after Angular tears the component down; PresenceManager cleans
+    // up bridge hit handlers + registry slots on its settle callback.
     this.Node.RequestLeave();
-    this.Node.Destroy();
   }
 
   private _buildOptions(): JivApplyOpts {
