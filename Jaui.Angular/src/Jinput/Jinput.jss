@@ -67,8 +67,9 @@ JinputCaret {
 // size / radius are mutated in TS each frame.
 JinputSelectionRect {
   Background: rgba(120, 170, 255, 0.32)
-  @Transition Width  { Duration: 90ms }
-  @Transition Height { Duration: 90ms }
+  @Transition Width   { Duration: 90ms }
+  @Transition Height  { Duration: 90ms }
+  @Transition Opacity { Duration: 140ms }
 }
 
 // Remote peer's selection halo. Higher Layer than the local
@@ -81,8 +82,9 @@ JinputSelectionRect {
 // inside a peer's highlighted range.
 JinputPeerSelectionRect {
   Layer: 5
-  @Transition Width  { Duration: 90ms }
-  @Transition Height { Duration: 90ms }
+  @Transition Width   { Duration: 90ms }
+  @Transition Height  { Duration: 90ms }
+  @Transition Opacity { Duration: 140ms }
 }
 
 // 16pt-wide region centered on the 2pt peer caret line. Used to be an
