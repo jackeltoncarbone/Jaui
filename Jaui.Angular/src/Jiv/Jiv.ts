@@ -18,6 +18,7 @@ import {
   type TextStyle,
   type SpringConfig,
   type PointerPayload,
+  type WheelPayload,
 } from 'jaui';
 import { Jaui } from '../Jaui/Jaui';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
@@ -96,6 +97,7 @@ export class Jiv implements OnInit, OnDestroy {
       OnPointerDown: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerdown', src)),
       OnPointerMove: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointermove', src)),
       OnPointerUp: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerup', src)),
+      OnWheel: (src) => this._host.nativeElement.dispatchEvent(_cloneWheelEvent(src)),
     });
 
     // Initial create — sends construction-time options. Attach fires
@@ -224,6 +226,27 @@ function _clonePointerEvent(type: string, src: PointerPayload): PointerEvent {
     metaKey: src.Meta,
   });
   (evt as PointerEvent & { __jauiBridged?: boolean }).__jauiBridged = true;
+  return evt;
+}
+
+/** Rebuild a bubbling DOM `wheel` event from the worker's hit payload so
+ *  consumer `(wheel)` bindings on a `<jiv>` (e.g. the drill field's
+ *  `<reality-view>`) fire — and only when this Jiv was the topmost hit. */
+function _cloneWheelEvent(src: WheelPayload): WheelEvent {
+  const evt = new WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
+    clientX: src.ClientX,
+    clientY: src.ClientY,
+    deltaX: src.DeltaX,
+    deltaY: src.DeltaY,
+    deltaMode: src.DeltaMode,
+    shiftKey: src.Shift,
+    ctrlKey: src.Ctrl,
+    altKey: src.Alt,
+    metaKey: src.Meta,
+  });
+  (evt as WheelEvent & { __jauiBridged?: boolean }).__jauiBridged = true;
   return evt;
 }
 

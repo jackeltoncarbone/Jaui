@@ -1938,11 +1938,16 @@ export class Canvas implements DirtyTracker {
     this._resolveGroupPeers = fn;
   };
 
+  /** Z-ordered topmost-hit at a client point. Shared by interaction-state
+   *  tracking (hover/active), the pointer-hit dispatch, and the wheel handler
+   *  so `(wheel)` consumers receive the event only when actually on top. */
+  private _topmostAt = (clientX: number, clientY: number): Jiv | null => {
+    const rect = this._pageRect();
+    return this._scrollManager.HitTopmost(clientX - rect.left, clientY - rect.top);
+  };
+
   private _listenForInteractionStates = (): void => {
-    const topmostAt = (clientX: number, clientY: number): Jiv | null => {
-      const rect = this._pageRect();
-      return this._scrollManager.HitTopmost(clientX - rect.left, clientY - rect.top);
-    };
+    const topmostAt = this._topmostAt;
 
     // CSS-like Hover/Active: the flag propagates up the ancestor chain so
     // hovering/pressing a child also counts as hovering/pressing the parent.
@@ -2301,6 +2306,14 @@ export class Canvas implements DirtyTracker {
       // as wheel + ctrlKey) is a browser-owned gesture — we must NOT consume
       // it as scroll. Let it bubble to the browser's zoom handler.
       if (e.ctrlKey) return;
+
+      // Route to the topmost Jiv's OnWheel first (z-ordered) so a consumer
+      // that binds `(wheel)` — e.g. the drill field — only gets the wheel
+      // when it's genuinely on top, never through an overlay/chrome above it.
+      // Independent of scroll: scroll containers below still handle their own
+      // wheel via ResolveScrollTarget, and non-scroll consumers use OnWheel.
+      const wheelHit = this._topmostAt(e.clientX, e.clientY);
+      if (wheelHit?.OnWheel) wheelHit.OnWheel(e);
 
       this._measureScrollContents(this.Root);
 
@@ -2918,4 +2931,4 @@ export {
   type JanvasRendererFactory,
 } from '../Worker/Worker.RendererRegistry';
 export type { JanvasFactoryContext } from '../Janvas/Janvas.Renderer';
-export type { JivApplyOpts, JivOp, M2W, W2M, PointerPayload } from '../Worker/Bridge.Types';
+export type { JivApplyOpts, JivOp, M2W, W2M, PointerPayload, WheelPayload } from '../Worker/Bridge.Types';

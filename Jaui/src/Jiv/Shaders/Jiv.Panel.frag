@@ -8,7 +8,7 @@ flat in vec4 v_Tint;
 flat in vec4 v_BorderColor;
 flat in vec4 v_ShadowColor;
 flat in vec4 v_ShadowParams;   // shadowOffX, shadowOffY, shadowBlur, borderWidth
-flat in vec4 v_StyleParams;    // borderEdgeAa, smoothness, opacity, materialType
+flat in vec4 v_StyleParams;    // borderEdgeAa, smoothness, opacity, brightness (fg)
                                // borderEdgeAa: half-width of border/silhouette feather (physical px)
 flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
 flat in vec4 v_Refraction;     // thickness, bezelWidth, refractionStrength, bezelScale
@@ -609,7 +609,10 @@ void main() {
     #elif defined(MATERIAL_NONE)
     const float materialType = 0.0;
     #else
-    float materialType = v_StyleParams.w;
+    // v_StyleParams.w now carries the foreground Brightness multiplier (applied
+    // at the end of main), not materialType — so undefined-variant test builds
+    // fall back to non-glass rather than reading brightness as a material flag.
+    const float materialType = 0.0;
     #endif
 
     float brightness = v_Grading.x;
@@ -1064,5 +1067,11 @@ void main() {
     }
 
     result.a *= opacity * clipAlpha;
+
+    // Foreground brightness — multiplies the whole element's final rgb (fill,
+    // image, border). Carried in v_StyleParams.w (the repurposed materialType
+    // lane). Default 1.0 = no-op for every element that doesn't set Brightness.
+    result.rgb *= v_StyleParams.w;
+
     fragColor = result;
 }

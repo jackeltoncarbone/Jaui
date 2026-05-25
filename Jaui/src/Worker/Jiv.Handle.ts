@@ -25,7 +25,7 @@
  */
 
 import type { MainBridge, JivHitHandlers } from './Bridge.Main';
-import type { JivApplyOpts, PointerPayload } from './Bridge.Types';
+import type { JivApplyOpts, PointerPayload, WheelPayload } from './Bridge.Types';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { ChildLayout, LayoutConfig } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
@@ -214,6 +214,10 @@ export class JivHandle {
   }
   set OnPointerUp(cb: ((src: PointerPayload) => void) | null | undefined) {
     this._hit.OnPointerUp = cb ?? undefined;
+    this._refreshHit();
+  }
+  set OnWheel(cb: ((src: WheelPayload) => void) | null | undefined) {
+    this._hit.OnWheel = cb ?? undefined;
     this._refreshHit();
   }
 

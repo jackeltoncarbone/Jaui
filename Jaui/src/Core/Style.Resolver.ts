@@ -113,6 +113,9 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BackdropSaturation: Resolve(s.BackdropSaturation, ctx, 'W'),
     BackdropContrast: Resolve(s.BackdropContrast, ctx, 'W'),
 
+    // Foreground brightness — multiplies the element's final rgb at paint time.
+    Brightness: Resolve(s.Brightness, ctx, 'W'),
+
     BezelWidth: Resolve(s.BezelWidth, ctx, 'W'),
     BezelScale: Resolve(s.BezelScale, ctx, 'W'),
 

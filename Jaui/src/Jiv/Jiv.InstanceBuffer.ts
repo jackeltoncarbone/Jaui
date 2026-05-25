@@ -8,7 +8,9 @@ import type { Jiv } from './Jiv';
 //   loc  5: a_BorderColor  (R, G, B, A)
 //   loc  6: a_ShadowColor  (R, G, B, A)
 //   loc  7: a_ShadowParams (offsetX, offsetY, blur, borderWidth)
-//   loc  8: a_StyleParams  (borderEdgeAa, smoothness, opacity, materialType)
+//   loc  8: a_StyleParams  (borderEdgeAa, smoothness, opacity, brightness)
+//          .w was materialType (now a compile-time shader-variant const);
+//          repurposed to the foreground Brightness multiplier.
 //   loc  9: a_Grading      (brightness, saturation, contrast, frostLod)
 //   loc 10: a_Refraction   (thickness, bezelWidth, refractionStrength, bezelScale)
 //   loc 11: a_Lighting     (lightDirX, lightDirY, lightIntensity, fresnelStrength)
@@ -133,7 +135,13 @@ export class JivInstanceBuffer {
     // spring value. Authors override via `Opacity: 1` for no fade or
     // `Opacity: <expr>` for a custom curve.
     data[offset + 30] = jiv.EffectiveOpacity;
-    data[offset + 31] = style.Material === 'LiquidGlass' ? 1 : 0;
+    // offset+31 (a_StyleParams.w) was the materialType flag, but in production
+    // the shader picks the glass/non-glass variant at compile time (the
+    // renderer's `useGlassShader`), so this lane is dead there. Repurposed to
+    // carry the foreground Brightness multiplier (multiplies the element's
+    // final rgb in the frag; default 1 = no-op). Guarded so a non-finite style
+    // value can never write NaN and black out the panel.
+    data[offset + 31] = Number.isFinite(style.Brightness) ? style.Brightness : 1;
 
     data[offset + 32] = style.BackdropBrightness;
     data[offset + 33] = style.BackdropSaturation;

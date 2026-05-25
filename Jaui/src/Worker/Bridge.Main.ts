@@ -69,6 +69,9 @@ export interface JivHitHandlers {
   OnPointerDown?: (src: PointerPayload) => void;
   OnPointerMove?: (src: PointerPayload) => void;
   OnPointerUp?: (src: PointerPayload) => void;
+  /** Wheel over this Jiv when it's the topmost hit. Source carries the
+   *  delta fields (WheelPayload) so main can rebuild a faithful WheelEvent. */
+  OnWheel?: (src: WheelPayload) => void;
   /** Called when the worker posts a fresh rect snapshot for this node.
    *  Set on Handles that have subscribed via `WatchRect(true)`. */
   OnRectSnapshot?: (rect: { X: number; Y: number; Width: number; Height: number }) => void;
@@ -360,6 +363,7 @@ export class MainBridge {
       case 'pointerdown':   h.OnPointerDown?.(m.Source); break;
       case 'pointermove':   h.OnPointerMove?.(m.Source); break;
       case 'pointerup':     h.OnPointerUp?.(m.Source); break;
+      case 'wheel':         h.OnWheel?.(m.Source as WheelPayload); break;
     }
   };
 

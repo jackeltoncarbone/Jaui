@@ -305,6 +305,10 @@ export class Jinput implements OnDestroy {
   readonly FontWeight = input(400);
   readonly LineHeightRatio = input(1.6);
   readonly RowGapPx = input(5);
+  /** Placeholder slant. Defaults to the historical italic (set by the
+   *  `JinputPlaceholder` JSS class); consumers can pass 'Normal' for a
+   *  straight placeholder without touching the shared class. */
+  readonly PlaceholderFontStyle = input<'Normal' | 'Italic'>('Italic');
 
   // ── Outputs ─────────────────────────────────────────────────────
   /** Char-index click. Fires before caret positioning; consumers can call
@@ -574,11 +578,13 @@ export class Jinput implements OnDestroy {
     FontSize: string;
     FontWeight: number;
     LineHeight: string;
+    FontStyle: 'Normal' | 'Italic';
   } => ({
     FontFamily: this.FontFamily(),
     FontSize: `${this.FontSizePx()}px`,
     FontWeight: this.FontWeight(),
     LineHeight: String(this.LineHeightRatio()),
+    FontStyle: this.PlaceholderFontStyle(),
   });
 
   constructor() {

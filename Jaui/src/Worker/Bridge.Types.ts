@@ -392,9 +392,10 @@ export interface W2M_HitEvent {
   /** Worker-side Jiv id whose handler fired. Maps to the Angular Jiv
    *  component's host element. */
   JivId: number;
-  Kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup';
+  Kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup' | 'wheel';
   /** Original event payload so the synthetic event carries faithful
-   *  clientX/Y/buttons/etc. for downstream listeners. */
+   *  clientX/Y/buttons/etc. for downstream listeners. For `wheel` kind this
+   *  is a `WheelPayload` (carries DeltaX/Y/Mode) — main narrows on Kind. */
   Source: PointerPayload;
 }
 

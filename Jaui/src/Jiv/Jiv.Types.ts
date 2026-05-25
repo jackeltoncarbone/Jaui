@@ -190,6 +190,11 @@ export interface JivStyle {
   InnerShadow: boolean;
 
   // Appearance
+  /** Foreground brightness — multiplies the element's FINAL composited rgb
+   *  (fill, image, text, border — the whole element), unlike BackdropBrightness
+   *  which only filters the glass backdrop behind it. Default `'1'` (no-op).
+   *  Animatable via `@Transition Brightness`. */
+  Brightness: string;
   Opacity: string;
 
   /** Sibling stacking order. Higher = paints on top. Default `0`.
@@ -276,6 +281,8 @@ export interface JivRenderStyle {
   ShadowOffsetY: number;
   InnerShadow: boolean;
 
+  /** Foreground brightness multiplier on the final rgb. Default 1. */
+  Brightness: number;
   Opacity: number;
 
   Layer: number;

@@ -37,6 +37,7 @@ import type {
   M2W_JivOps,
   W2M,
   PointerPayload,
+  WheelPayload,
 } from './Bridge.Types';
 import { LookupJanvasRenderer } from './Worker.RendererRegistry';
 
@@ -459,11 +460,12 @@ export class JivRegistry {
     core.OnPointerDown = (e) => this._postHit(id, 'pointerdown', _payloadFromPointerEvent(e));
     core.OnPointerMove = (e) => this._postHit(id, 'pointermove', _payloadFromPointerEvent(e));
     core.OnPointerUp = (e) => this._postHit(id, 'pointerup', _payloadFromPointerEvent(e));
+    core.OnWheel = (e) => this._postHit(id, 'wheel', _payloadFromWheelEvent(e));
   };
 
   private _postHit = (
     jivId: number,
-    kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup',
+    kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup' | 'wheel',
     source: PointerPayload,
   ): void => {
     this._post({ T: 'hit', JivId: jivId, Kind: kind, Source: source });
@@ -500,6 +502,22 @@ const _payloadFromPointerEvent = (e: {
   Shift: e.shiftKey ?? false, Ctrl: e.ctrlKey ?? false,
   Alt: e.altKey ?? false, Meta: e.metaKey ?? false,
   TimeStamp: e.timeStamp ?? 0,
+});
+
+const _payloadFromWheelEvent = (e: {
+  clientX?: number; clientY?: number;
+  shiftKey?: boolean; ctrlKey?: boolean; altKey?: boolean; metaKey?: boolean;
+  timeStamp?: number;
+  deltaX?: number; deltaY?: number; deltaMode?: number;
+}): WheelPayload => ({
+  PointerId: -1, PointerType: 'mouse',
+  X: e.clientX ?? 0, Y: e.clientY ?? 0,
+  ClientX: e.clientX ?? 0, ClientY: e.clientY ?? 0,
+  Buttons: 0, Button: 0,
+  Shift: e.shiftKey ?? false, Ctrl: e.ctrlKey ?? false,
+  Alt: e.altKey ?? false, Meta: e.metaKey ?? false,
+  TimeStamp: e.timeStamp ?? 0,
+  DeltaX: e.deltaX ?? 0, DeltaY: e.deltaY ?? 0, DeltaMode: e.deltaMode ?? 0,
 });
 
 const _payloadFromMouseEvent = (e: {

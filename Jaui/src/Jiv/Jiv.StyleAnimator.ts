@@ -59,6 +59,9 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BackdropSaturation',     s => s.BackdropSaturation,           (s, v) => { s.BackdropSaturation = v; }],
   ['BackdropContrast',       s => s.BackdropContrast,             (s, v) => { s.BackdropContrast = v; }],
 
+  // Foreground brightness (multiplies final rgb) — springs like the others.
+  ['Brightness',             s => s.Brightness,                   (s, v) => { s.Brightness = v; }],
+
   // Refraction band geometry
   ['BezelWidth',             s => s.BezelWidth,                   (s, v) => { s.BezelWidth = v; }],
   ['BezelScale',             s => s.BezelScale,                   (s, v) => { s.BezelScale = v; }],

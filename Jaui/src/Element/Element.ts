@@ -188,6 +188,14 @@ export class Element {
    *  the up-Jiv may differ from the down-Jiv if the pointer moved during
    *  the press; for the standard click semantics use OnClick instead. */
   OnPointerUp: ((e: PointerEvent) => void) | null = null;
+
+  /** Wheel handler — fired on the topmost-hit Jiv at the wheel point, BEFORE
+   *  scroll-container resolution, so consumers can bind `(wheel)` and receive
+   *  it only when this Jiv is genuinely on top (z-ordered, like pointer hits).
+   *  Scroll containers still handle the wheel independently; a non-scrolling
+   *  consumer (e.g. the drill field) uses this to drive its own zoom. Angular
+   *  binding bridges it to a DOM `wheel` event on the host element. */
+  OnWheel: ((e: WheelEvent) => void) | null = null;
   PointerEvents: 'Auto' | 'None' = 'Auto';
   Cursor: CursorStyle = 'Default';
   UserSelect: 'Auto' | 'None' = 'Auto';
