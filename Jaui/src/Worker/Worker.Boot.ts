@@ -19,6 +19,8 @@
  * fully populated before any message is processed.
  */
 
+/// <reference lib="webworker" />
+
 import { Canvas } from '../Core/Jaui';
 import { WebGL2Renderer } from '../Core/WebGL2.Renderer';
 import { WorkerPlatform } from './Worker.Platform';
