@@ -689,6 +689,11 @@ export class Jinput implements OnDestroy {
     // user resizes the window.
     window.addEventListener('resize', this._onWindowResize);
     window.addEventListener('pointermove', this._onWindowHoverMove);
+    // SS-199: dismiss the keyboard when the user taps outside the input. The
+    // hidden textarea is offscreen, so a tap elsewhere never moves DOM focus
+    // on its own — without this the soft keyboard stays up after the user
+    // leaves the field. Capture phase so we see the tap before it's consumed.
+    window.addEventListener('pointerdown', this._onPointerDownDismiss, true);
 
     // Re-run layout once the @font-face font lands in the canvas2d font
     // registry — measureText falls back to a wider system font until
@@ -711,6 +716,7 @@ export class Jinput implements OnDestroy {
     document.removeEventListener('pointercancel', this._onDocPointerUp);
     window.removeEventListener('resize', this._onWindowResize);
     window.removeEventListener('pointermove', this._onWindowHoverMove);
+    window.removeEventListener('pointerdown', this._onPointerDownDismiss, true);
     if (this._blinkTimer) clearInterval(this._blinkTimer);
     this._clearLongPressTimer();
     if (this._wrapReadFrame !== null) cancelAnimationFrame(this._wrapReadFrame);
@@ -817,6 +823,34 @@ export class Jinput implements OnDestroy {
     this.syncSelection();
   };
 
+  /** Programmatically blur the input and dismiss the on-screen keyboard
+   *  (SS-199). The hidden textarea sits offscreen, so canvas taps never move
+   *  DOM focus away from it on their own — without an explicit blur the soft
+   *  keyboard stays up after the user leaves the field. Consumers call this on
+   *  tap-outside / submit. `onBlur` then fires and emits FocusChanged(false). */
+  Blur = (): void => {
+    const input = this._hiddenInput()?.nativeElement;
+    if (!input) return;
+    if (document.activeElement === input) input.blur();
+  };
+
+  /** Tap-outside dismissal (SS-199). Fires for every real pointerdown on the
+   *  page; when we're focused and the tap lands outside this input's text
+   *  wrap, blur so the keyboard leaves. Taps inside the wrap are ignored so
+   *  caret/selection gestures still work. */
+  private _onPointerDownDismiss = (e: PointerEvent): void => {
+    if (!this._focused()) return;
+    const wrap = this._wrap();
+    const canvasEl = this._jaui?.Canvas?.Element;
+    if (!wrap || !canvasEl) return;
+    const cRect = canvasEl.getBoundingClientRect();
+    const localX = e.clientX - cRect.left;
+    const localY = e.clientY - cRect.top;
+    const inWrap = localX >= wrap.Node.X && localX < wrap.Node.X + wrap.Node.Width
+                && localY >= wrap.Node.Y && localY < wrap.Node.Y + wrap.Node.Height;
+    if (!inWrap) this.Blur();
+  };
+
   /** Focus the hidden textarea such that the on-screen keyboard reopens
    *  reliably on mobile. The blur step is the linchpin: iOS Safari and
    *  Android Chrome no-op a `focus()` call on an already-focused element,
@@ -861,6 +895,13 @@ export class Jinput implements OnDestroy {
   private _dragGranularity: 'char' | 'word' | 'line' = 'char';
   private _dragAnchor = 0;
   private _dragPointerId: number | null = null;
+  // SS-199: whether the active drag began from a touch pointer. A plain
+  // single-finger touch drag must scroll, not char-select.
+  private _dragIsTouch = false;
+  // SS-199: touch is dragging an existing selection's end to adjust it. The
+  // selection edges are the grab targets (no drawn handles); char-drag stays
+  // live in this mode instead of being inert.
+  private _draggingSelectionEnd = false;
   private _longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private _pointerDownX = 0;
   private _pointerDownY = 0;
@@ -889,6 +930,31 @@ export class Jinput implements OnDestroy {
       // pointerdown shifts focus away after our handler returns.
       setTimeout(() => this._focusHidden(input), 0);
       return;
+    }
+
+    // SS-199: touch grab of an existing selection's end. The selection edges
+    // themselves are the handles (no drawn knobs) — touching near an end and
+    // dragging moves that end while the opposite end stays anchored.
+    if (e.pointerType === 'touch') {
+      const ss = this._selStart();
+      const se = this._selEnd();
+      if (ss !== se) {
+        const NEAR = 2; // chars of slop for a fingertip near an edge
+        if (Math.abs(idx - ss) <= NEAR || Math.abs(idx - se) <= NEAR) {
+          this._dragAnchor = Math.abs(idx - ss) <= Math.abs(idx - se) ? se : ss;
+          this._dragGranularity = 'char';
+          this._draggingSelectionEnd = true;
+          this._dragIsTouch = true;
+          this._dragPointerId = e.pointerId;
+          this._pointerDownX = e.clientX;
+          this._pointerDownY = e.clientY;
+          this._clearLongPressTimer();
+          document.addEventListener('pointermove', this._onDocPointerMove);
+          document.addEventListener('pointerup', this._onDocPointerUp);
+          document.addEventListener('pointercancel', this._onDocPointerUp);
+          return; // keep the selection; the drag adjusts the grabbed end
+        }
+      }
     }
 
     const now = performance.now();
@@ -939,6 +1005,8 @@ export class Jinput implements OnDestroy {
     }
     this._dragGranularity = granularity;
     this._dragPointerId = e.pointerId;
+    this._dragIsTouch = e.pointerType === 'touch';
+    this._draggingSelectionEnd = false;
     this._pointerDownX = e.clientX;
     this._pointerDownY = e.clientY;
     document.addEventListener('pointermove', this._onDocPointerMove);
@@ -1021,6 +1089,12 @@ export class Jinput implements OnDestroy {
         this._clearLongPressTimer();
       }
     }
+    // SS-199: a plain single-finger touch drag must scroll, not select. Only
+    // extend selection once the gesture has been promoted to word/line
+    // granularity (long-press, or double/triple-tap), or when the user is
+    // dragging an existing selection's end. Otherwise char-granularity touch
+    // drags are inert here so the enclosing scroll container owns the gesture.
+    if (this._dragIsTouch && this._dragGranularity === 'char' && !this._draggingSelectionEnd) return;
     const idx = this._indexAtClient(e.clientX, e.clientY);
     if (idx === null) return;
     const input = this._hiddenInput()?.nativeElement;
@@ -1048,6 +1122,7 @@ export class Jinput implements OnDestroy {
   private _onDocPointerUp = (e: PointerEvent): void => {
     if (e.pointerId !== this._dragPointerId) return;
     this._dragPointerId = null;
+    this._draggingSelectionEnd = false;
     this._clearLongPressTimer();
     document.removeEventListener('pointermove', this._onDocPointerMove);
     document.removeEventListener('pointerup', this._onDocPointerUp);
