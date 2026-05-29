@@ -238,6 +238,7 @@ function _withAlpha(color: string, alpha: number): string {
     <textarea
       #hiddenInput
       class="HiddenInput"
+      name="JinputHidden"
       autocapitalize="off"
       autocomplete="off"
       autocorrect="off"
