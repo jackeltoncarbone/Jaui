@@ -589,6 +589,17 @@ export class Jinput implements OnDestroy {
   });
 
   constructor() {
+    // SS-200: seed the wrap width from the canvas's real DOM width before the
+    // first layout pass. Jaui resolves node widths over later frames (they read
+    // 0 on the first tick), so without this the first paint falls back to the
+    // 600px default and long text wraps at ~half the container width before
+    // snapping out a frame later. The canvas is the only synchronously
+    // measurable real width; the rAF poll (_startLayoutWidthPoll) still refines
+    // to the exact wrap width. Safe fallback: if the canvas isn't sized yet we
+    // keep the 600 default — never worse than before.
+    const initialCanvasWidth = this._jaui?.Canvas?.Element?.getBoundingClientRect().width;
+    if (initialCanvasWidth && initialCanvasWidth > 0) this._wrapWidth.set(initialCanvasWidth);
+
     // External Text changes (programmatic) flow into the hidden input value
     // unless the user is actively editing.
     effect(() => {
