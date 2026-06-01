@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Pre-build step: wrap every .vert/.frag/.glsl file under src/ in a
+ * Pre-build step: wrap every .vert/.frag/.glsl file under Source/ in a
  * sibling `.gen.ts` module that exports the source as a string literal.
  *
  * Why: the Renderer files used to import shaders via Vite's `?raw` query,
@@ -17,7 +17,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SRC = join(HERE, '..', 'src');
+const SRC = join(HERE, '..', 'Source');
 
 const SHADER_EXTS = new Set(['.vert', '.frag', '.glsl', '.wgsl']);
 

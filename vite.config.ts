@@ -1,13 +1,13 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
-import { JssPlugin } from './src/Jss/Jss.VitePlugin';
+import { JssPlugin } from './Source/Jss/Jss.VitePlugin';
 
 export default defineConfig({
   root: resolve(__dirname, 'playground'),
   plugins: [JssPlugin()],
   resolve: {
     alias: {
-      '@jaui': resolve(__dirname, 'src'),
+      '@jaui': resolve(__dirname, 'Source'),
     },
   },
   server: {

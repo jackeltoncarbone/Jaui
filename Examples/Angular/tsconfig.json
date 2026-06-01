@@ -17,8 +17,8 @@
     "module": "preserve",
     "baseUrl": ".",
     "paths": {
-      "jaui-angular": ["../Jaui.Angular/src/public-api.ts"],
-      "jaui": ["../Jaui/src/Core/Jaui.ts"]
+      "jaui-angular": ["../../Angular/src/public-api.ts"],
+      "jaui": ["../../Source/Core/Jaui.ts"]
     }
   },
   "angularCompilerOptions": {

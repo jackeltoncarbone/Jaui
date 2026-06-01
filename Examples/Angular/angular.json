@@ -7,7 +7,7 @@
   },
   "newProjectRoot": "projects",
   "projects": {
-    "Jaui.Angular.Demo": {
+    "Angular.Demo": {
       "projectType": "application",
       "schematics": {
         "@schematics/angular:component": {
@@ -63,10 +63,10 @@
           "builder": "@angular/build:dev-server",
           "configurations": {
             "production": {
-              "buildTarget": "Jaui.Angular.Demo:build:production"
+              "buildTarget": "Angular.Demo:build:production"
             },
             "development": {
-              "buildTarget": "Jaui.Angular.Demo:build:development"
+              "buildTarget": "Angular.Demo:build:development"
             }
           },
           "defaultConfiguration": "development"

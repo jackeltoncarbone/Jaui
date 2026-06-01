@@ -6,21 +6,21 @@
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noImplicitReturns": true,
     "esModuleInterop": true,
-    "types": ["@webgpu/types", "node"],
+    "types": ["@webgpu/types"],
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "declaration": true,
-    "declarationMap": true,
     "sourceMap": true,
-    "outDir": "dist",
-    "rootDir": "src",
     "baseUrl": ".",
     "paths": {
-      "@jaui/*": ["src/*"]
+      "jaui": ["../../Source/Core/Jaui.ts"],
+      "@jaui/*": ["../../Source/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts"],
-  "exclude": ["node_modules", "dist", "playground", "tests"]
+  "include": [
+    "./**/*.ts",
+    "../../Source/Jss/Jss.d.ts",
+    "../../Source/glsl.d.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
 }

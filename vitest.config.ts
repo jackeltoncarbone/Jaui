@@ -4,7 +4,7 @@ import { resolve } from 'path';
 export default defineConfig({
   resolve: {
     alias: {
-      '@jaui': resolve(__dirname, 'src'),
+      '@jaui': resolve(__dirname, 'Source'),
     },
   },
   test: {

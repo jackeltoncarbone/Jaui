@@ -1,16 +1,39 @@
 {
-  "name": "jaui-workspace",
-  "private": true,
-  "description": "Jaui monorepo — core library + demos + Angular bindings",
+  "name": "jaui",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Canvas-based UI rendering engine for the web",
+  "main": "./dist/Core/Jaui.js",
+  "types": "./dist/Core/Jaui.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/Core/Jaui.d.ts",
+      "default": "./dist/Core/Jaui.js"
+    }
+  },
   "workspaces": [
-    "Jaui",
-    "Jaui.Demo",
-    "Jaui.Angular",
-    "Jaui.Angular.Demo"
+    "Angular",
+    "Examples/Vanilla",
+    "Examples/Angular"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace=Jaui.Demo",
-    "test": "npm test --workspace=Jaui",
-    "build": "npm run build --workspace=Jaui"
+    "build:shaders": "node Scripts/BuildShaders.mjs",
+    "prebuild": "npm run build:shaders",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "npm run dev --workspace=Examples/Vanilla"
+  },
+  "files": [
+    "dist"
+  ],
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@webgpu/types": "^0.1.69",
+    "playwright": "^1.59.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.0.0",
+    "vite-plugin-glsl": "^1.4.0",
+    "vitest": "^4.0.0"
   }
 }
