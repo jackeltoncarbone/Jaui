@@ -67,9 +67,6 @@ export class TextAnimator implements Animatable {
    *  same snapped weight) always agrees with layout. Atlas churn is bounded
    *  by the 25-unit snap (12 entries max between 400..700). */
   private _weightSpring: Spring;
-  /** Last weight at which positions were re-measured. Skip the re-measure
-   *  when the snapped value hasn't actually moved across a 25-step boundary. */
-  private _lastMeasuredWeight: number;
   /** Fired by `Tick` every frame the weight spring steps. Lets the Jaui
    *  core invalidate the owning node's TextMeasurement so the next layout
    *  pass re-measures intrinsic width at the new live weight — keeping
@@ -92,7 +89,6 @@ export class TextAnimator implements Animatable {
     const w = Number(style.FontWeight);
     const initial = Number.isFinite(w) ? w : 400;
     this._weightSpring = new Spring(initial, stiffness, damping, 1);
-    this._lastMeasuredWeight = initial;
     this._onWeightChange = onWeightChange;
   }
 
@@ -171,7 +167,6 @@ export class TextAnimator implements Animatable {
       this._weightSpring.Value = safe;
       this._weightSpring.Velocity = 0;
       this._weightSpring.Set(safe);
-      this._lastMeasuredWeight = safe;
     } else if (wrapChanged) {
       needsKick = this._reflow(maxWidth) || needsKick;
       this._maxWidth = maxWidth;
@@ -216,7 +211,6 @@ export class TextAnimator implements Animatable {
       const raw = this._weightSpring.Value;
       if (Number.isFinite(raw)) {
         this._remeasureAtWeight(raw);
-        this._lastMeasuredWeight = raw;
       }
       this._onWeightChange?.();
     }

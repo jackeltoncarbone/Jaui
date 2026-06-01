@@ -65,7 +65,6 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
 const _MAX_BG_GRAD_STOPS = 8;
 const _BG_GRAD_COLOR_SCRATCH = new Float32Array(_MAX_BG_GRAD_STOPS * 4);
 const _BG_GRAD_POS_SCRATCH   = new Float32Array(_MAX_BG_GRAD_STOPS);
-const _BG_UV_IDENTITY = [1, 1, 0, 0];
 
 // ─── Opaque handle wrapping ─────────────────────────────────────────────────
 

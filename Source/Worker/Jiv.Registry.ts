@@ -55,11 +55,9 @@ export class JivRegistry {
    *  routes incoming `M2W_JanvasInput` through this map and disposes
    *  on destroy. */
   private _janvasRenderers = new Map<number, JanvasRenderer>();
-  private _root: JivCore;
   private _post: (msg: W2M, transfer?: Transferable[]) => void;
 
   constructor(root: JivCore, post: (msg: W2M, transfer?: Transferable[]) => void) {
-    this._root = root;
     this._post = post;
     this._nodes.set(ROOT_ID, root);
   }

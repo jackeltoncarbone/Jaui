@@ -52,10 +52,6 @@ interface ScrollState {
 /** Drag-momentum velocity retention per second. Smaller = faster decay.
  *  0.02/s ⇒ half-life ≈ 0.18 s, full settle ≈ 0.6 s after a flick. */
 const FRICTION_PER_SEC = 0.02;
-/** Elastic spring constant for rubber-band (bigger = stiffer resist). */
-const RUBBER_K = 180;
-/** Extra damping when overscrolled, on top of normal friction. */
-const OVER_FRICTION = 0.005;
 /** Velocity magnitude below which we settle to zero (px/s). */
 const SETTLE_V = 1;
 /** Trailing window of DragMove samples used to derive release velocity, ms.
@@ -358,14 +354,3 @@ export class ScrollManager implements Animatable {
   };
 }
 
-/** Rubber-band drag resistance: 1 inside bounds, drops off past bounds so the
- *  content feels elastic — dragging 100 px past the edge only moves ~50 px. */
-const _rubberResistance = (pos: number, minBound: number, maxBound: number): number => {
-  let over = 0;
-  if (pos < minBound) over = minBound - pos;
-  else if (pos > maxBound) over = pos - maxBound;
-  if (over <= 0) return 1;
-  // 1 / (1 + over/size) — standard Apple rubber-band formula
-  const size = Math.max(1, maxBound - minBound);
-  return 1 / (1 + over / size);
-};
