@@ -8,3 +8,9 @@ dist/
 # Playwright perf-probe artifacts (local-only)
 perf-probe-output/
 perf-probe.mjs
+
+# Test screenshot / visual-diff output (local-only)
+Tests/compare-out/
+Tests/*.png
+playwright-report/
+playwright-results/

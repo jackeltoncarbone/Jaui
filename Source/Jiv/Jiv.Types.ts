@@ -37,12 +37,27 @@ export type BackgroundValue =
  *  this are evenly resampled in the parser before being uploaded. */
 export const MAX_GRADIENT_STOPS = 8;
 
-/** Derived at resolve time from which props the author set. Not authorable —
- *  Jiv infers the render pipeline from what you're actually using:
- *    • Thickness > 0                   → 'LiquidGlass' (glass pipeline, refraction)
- *    • ProgressiveBlurDirection != null → 'ProgressiveBlur' (compositing overlay)
- *    • otherwise                       → 'None' (plain panel) */
-export type MaterialType = 'None' | 'LiquidGlass' | 'ProgressiveBlur';
+/** A Jiv that emits light into the one shared scene. Open-ended; adding a kind is
+ *  one switch arm in the resolver + renderer. */
+export type LightKind = 'Directional' | 'Ambient' | 'Point' | 'Spot' | 'Area';
+
+/** Resolved scene light, produced from the Light* JivStyle props when LightType is
+ *  set. Position is filled from the node's solved layout + Space at collect time
+ *  (not here). Color is linear rgb in 0..1; Intensity is a scalar multiplier. */
+export interface ResolvedLight {
+  Kind: LightKind;
+  Color: Color;
+  Intensity: number;
+  /** Aim (unit-ish vector) for Directional / Spot. */
+  Direction: [number, number, number];
+  /** Falloff distance in device px for Point / Spot / Area. 0 = no limit. */
+  Range: number;
+  /** Spot cone half-angle in radians. */
+  ConeAngle: number;
+  /** Spot edge softness 0..1. */
+  Penumbra: number;
+  CastShadow: boolean;
+}
 
 /** Direction the blur ramps TO — i.e. the edge that's fully blurred. The
  *  opposite edge is fully clear (unblurred scene shows through). */
@@ -112,6 +127,7 @@ export interface JivStyle {
   BackdropFrostBlur: string;
   Thickness: string;
   Fillet: string;
+  Elevation: string;
   Refraction: string;
   BackdropBrightness: string;
   BackdropSaturation: string;
@@ -121,9 +137,25 @@ export interface JivStyle {
   BezelWidth: string;
   BezelScale: string;
 
-  // Lighting
+  // Lighting — how this surface RECEIVES light (art-direction overrides on the
+  // shared scene lighting). Distinct from the Light* SOURCE props below.
   LightAngle: string;        // degrees
   LightIntensity: string;
+
+  // ── Light SOURCE (a Jiv as a scene light) ──────────────────────────────────
+  // A Jiv with LightType set EMITS light into the one shared scene (lighting all
+  // surfaces + meshes) instead of (or in addition to) painting. Empty LightType
+  // (default) = not a light. Position/aim come from the normal layout + Space.
+  // LightType is open-ended: Directional | Ambient | Point | Spot | Area.
+  LightType: string;
+  LightColor: string;        // emitted color (rgb)
+  LightIntensity_: string;   // emitted intensity (scalar). (Trailing _ avoids
+                             // colliding with the receive-side LightIntensity.)
+  LightDirection: string;    // 'x y z' aim — Directional / Spot
+  LightRange: string;        // falloff distance (length) — Point / Spot / Area
+  LightConeAngle: string;    // degrees — Spot cone half-angle
+  LightPenumbra: string;     // 0..1 — Spot edge softness
+  LightCastShadow: boolean;  // opt-in shadow casting (cost)
 
   // Specular catchlight
   SpecularIntensity: string;
@@ -155,8 +187,16 @@ export interface JivStyle {
   /** Scale around `VisualOrigin`. Default `'1'`. */
   VisualScale: string;
   /** Translation in CSS px (or any Length unit). Applied AFTER scale,
-   *  in this Jiv's local space. Default `'0'`. */
+   *  in this Jiv's local space. A THIRD value is Z (depth):
+   *  `'0 0 40'` translates 40 in Z. One value = uniform XY, Z=0;
+   *  two values (`x y`) = X Y, Z=0; three values (`x y z`) = X Y Z.
+   *  Default `'0'`. */
   VisualTranslate: string;
+  /** Coordinate space. `'Screen'` (default) = element sits on the
+   *  calibrated near-plane, world units = device px (2D behavior).
+   *  `'World'` = positioned in the 3D world, subject to
+   *  perspective/fog/lighting. Animatable between the two. */
+  Space: 'Screen' | 'World';
   /** Origin for VisualScale, in [0, 1] of the Jiv's box.
    *  `0.5` = center. Default `'0.5'`. */
   VisualOrigin: string;
@@ -210,7 +250,18 @@ export interface JivStyle {
  * reads and what the style animator writes each tick.
  */
 export interface JivRenderStyle {
-  Material: MaterialType;
+  /** A Jiv is ONE physical surface — these are NOT a material taxonomy. They are
+   *  render-path selectors derived purely from physical attributes (see
+   *  Style.Resolver `_samplesBackdrop`), used internally to pick how the backdrop
+   *  is sampled. Never author-visible, never gate visibility. */
+  SamplesBackdrop: boolean;
+  HasProgressiveBlur: boolean;
+  /** Unified physical depth in device px (Thickness + Elevation summed). 0 = an
+   *  impossibly thin sheet (the shape, zero depth); continuous up from there. */
+  Depth: number;
+  /** Non-null when this Jiv is a scene light (LightType set). The worker collects
+   *  these into the shared light set; lights everything (surfaces + meshes). */
+  Light: ResolvedLight | null;
   ProgressiveBlurDirection: ProgressiveBlurDirection;
   /** Feather ramp length in device pixels. 0 = ramp spans whole element. */
   ProgressiveBlurFeather: number;
@@ -229,7 +280,6 @@ export interface JivRenderStyle {
 
   Frost: number;
   BackdropFrostBlur: number;
-  Thickness: number;
   Fillet: number;
   Refraction: number;
   BackdropBrightness: number;
@@ -261,8 +311,10 @@ export interface JivRenderStyle {
   VisualScaleY: number;
   VisualTranslateX: number;
   VisualTranslateY: number;
+  VisualTranslateZ: number;
   VisualOriginX: number;
   VisualOriginY: number;
+  Space: 'Screen' | 'World';
 
   BorderColor: Color;
   BorderWidth: number;

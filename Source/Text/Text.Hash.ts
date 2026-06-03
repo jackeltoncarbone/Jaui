@@ -32,6 +32,7 @@ export const HashTextKey = (content: string, style: ResolvedTextStyle, dpr: numb
   h = _hashString(h, style.TextAlignLast);
   h = _hashString(h, style.TextOverflow);
   h = _hashNumber(h, style.MaxLines === null ? -1 : style.MaxLines);
+  h = _hashString(h, style.Space ?? 'Screen');   // screen=raster vs world=SDF
   h = _hashNumber(h, dpr);
 
   return (h >>> 0).toString(36);

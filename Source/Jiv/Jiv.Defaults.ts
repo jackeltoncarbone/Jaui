@@ -18,6 +18,7 @@ export const DefaultJivStyle: JivStyle = {
   BackdropFrostBlur: '0',
   Thickness: '0',
   Fillet: '0',
+  Elevation: '0',
   Refraction: '0',
   BackdropBrightness: '1',
   BackdropSaturation: '1',
@@ -26,6 +27,17 @@ export const DefaultJivStyle: JivStyle = {
   BezelScale: '0.35',
   LightAngle: '-45',
   LightIntensity: '1',
+
+  // Light SOURCE — empty LightType means "not a light" (the default for every
+  // ordinary Jiv). Set LightType to make a Jiv emit light into the scene.
+  LightType: '',
+  LightColor: 'rgb(255, 255, 255)',
+  LightIntensity_: '1',
+  LightDirection: '0 0 -1',
+  LightRange: '0',
+  LightConeAngle: '30',
+  LightPenumbra: '0.1',
+  LightCastShadow: false,
   SpecularIntensity: '0',
   SpecularSharpness: '100',
   FresnelStrength: '0',
@@ -42,6 +54,7 @@ export const DefaultJivStyle: JivStyle = {
   // Shorthand: single value = uniform; two values (`x y`) = per-axis.
   VisualScale: '1',
   VisualTranslate: '0',
+  Space: 'Screen',
   VisualOrigin: '0.5',
   BorderColor: 'rgba(0, 0, 0, 0)',
   BorderWidth: '0',

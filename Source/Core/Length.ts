@@ -104,6 +104,24 @@ export const Resolve = (
   return _resolveParsed(parsed, ctx, axis, ptRefersToParent, null);
 };
 
+/** Resolve a DIMENSIONLESS multiplier (LineHeight, VisualScale, VisualOrigin).
+ *  A bare number is the literal ratio — NOT a `pt` length. The unitless→pt
+ *  default (`44` == `44pt`) is right for sizes but wrong for ratios: a
+ *  `LineHeight: 1.15` resolved as a length becomes `1.15 × PointScale` (≈18×),
+ *  which makes every text line taller than the screen and flings glyphs/
+ *  selection rects off-canvas. Bare numbers stay verbatim; `%`/units/`@var`
+ *  expressions still route through `Resolve`. */
+export const ResolveScalar = (
+  value: Length,
+  ctx: ResolveContext,
+  axis: 'W' | 'H',
+): number => {
+  if (typeof value === 'number') return value;
+  const trimmed = value.trim();
+  if (/^-?\d*\.?\d+$/.test(trimmed)) return Number(trimmed);
+  return Resolve(value, ctx, axis);
+};
+
 /** Missing-var warnings are deduped — one console message per var name
  *  per page load, not one per property that references it. */
 const _warnedMissingVars = new Set<string>();
@@ -373,10 +391,14 @@ const _parseFactor = (s: _ParseState): _Parsed => {
     const next = s.tokens[s.pos];
     if (next && next.T === 'unit') {
       s.pos++;
-      if (next.V === 'px') return t.V;   // bare px collapses to number
+      if (next.V === 'px') return t.V;   // EXPLICIT px → literal device pixels
       return { V: t.V, U: next.V };
     }
-    return t.V;
+    // UNITLESS number → POINTS (pt), not px. Points are the design-system base
+    // unit (V × cascading PointScale); px is legacy/opt-in. At the default
+    // PointScale of 1, `44` == `44pt` == 44px numerically, so this is a no-op
+    // until something sets PointScale ≠ 1 — then the whole UI scales coherently.
+    return { V: t.V, U: 'pt' };
   }
 
   if (t.T === 'var') {

@@ -1,0 +1,13 @@
+import { chromium } from 'playwright';
+import { resolve } from 'node:path';
+const OUT = resolve(process.cwd(), 'tests/compare-out');
+const browser = await chromium.launch({ args: ['--use-gl=angle','--use-angle=swiftshader','--ignore-gpu-blocklist'] });
+const page = await browser.newPage({ viewport: { width: 800, height: 600 }, deviceScaleFactor: 1 });
+const errs = []; page.on('pageerror', e => errs.push(e.message)); page.on('console', m => { if (m.type() === 'error') errs.push(m.text()); });
+await page.goto('http://localhost:6777/Corpus/index.html?scene=FrostTest', { waitUntil: 'domcontentloaded' });
+await page.locator('canvas').first().waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+await page.waitForTimeout(2500);
+await page.screenshot({ path: `${OUT}/frosttest.png`, animations: 'disabled' });
+await browser.close();
+console.log('errors:', errs.length, errs.slice(0, 5).join(' | '));
+console.log('shot -> tests/compare-out/frosttest.png');

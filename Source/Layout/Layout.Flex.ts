@@ -477,6 +477,15 @@ const _positionMainAxis = (
         itemGap = even;
         break;
       }
+      default:
+        // Any unhandled / invalid JustifyContent (e.g. 'Stretch', which is an
+        // ALIGN value, not a justify value) falls back to Start. Without this
+        // default, pos/itemGap stayed `undefined` → the position math below
+        // emitted NaN, which propagated into element X/Y (and into Janvas rects,
+        // blanking 3D content). Never emit NaN from an out-of-range enum.
+        pos = 0;
+        itemGap = gap;
+        break;
     }
   }
 

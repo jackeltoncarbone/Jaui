@@ -144,6 +144,10 @@ export interface Renderer {
     useGlassShader?: boolean,
     scene?: GpuTextureHandle | null,
     bgPaint?: BgPaint,
+    /** When true, draw with depth test+write ON so this WORLD-space batch
+     *  occludes / is occluded by 3D subsystem content and other world panels by
+     *  true Z. Screen-space (default/false) draws depth-off in painter's order. */
+    worldSpace?: boolean,
   ): void;
 
   // ── Text Rendering (instanced) ──
@@ -255,4 +259,54 @@ export interface Renderer {
   PresentScene(): void;
 
   SetViewport(x: number, y: number, width: number, height: number): void;
+
+  /** Attach/tick Janvas subsystems for this frame. The orchestrator collects
+   *  visible Janvas nodes during its tree walk and hands them here; the backend
+   *  mounts each subsystem's content into its scene (Three) and advances it.
+   *  Backends without a subsystem world (none currently) may no-op. Kept
+   *  THREE-type-free at this seam — the renderer supplies the scene context
+   *  internally, so Core never imports Three. */
+  DrawSubsystems?(items: ReadonlyArray<SubsystemDrawItem>, dt: number): void;
+
+  /** Set the shared scene light set for this frame. The orchestrator gathers
+   *  every Light Jiv (with world position) in a pre-pass and hands them here
+   *  BEFORE any surface draws, so all surfaces + meshes are lit by the full set.
+   *  One shared lighting environment; `Space` only affects where a light sits.
+   *  Empty array => backend falls back to a default key+ambient (no black). */
+  SetSceneLights?(lights: ReadonlyArray<SceneLightItem>): void;
+}
+
+/** One Janvas subsystem to attach/tick this frame. `Renderer` is the subsystem's
+ *  `JanvasRenderer` (Attach/Update/Detach); `Rect` is its screen rect (device px).
+ *  Typed structurally to avoid a Core→Janvas import cycle. */
+export interface SubsystemDrawItem {
+  Renderer: {
+    Attach(ctx: unknown): void;
+    Update(rect: { X: number; Y: number; Width: number; Height: number }, dt: number): void;
+    Detach?(): void;
+  };
+  Rect: { X: number; Y: number; Width: number; Height: number };
+  /** Stable key for attach-once tracking (the Janvas's identity). */
+  Key: object;
+  /** True the frame the subsystem needs an Update (dirty / first attach). */
+  Dirty: boolean;
+}
+
+/** One scene light for this frame — a resolved Light plus its world position
+ *  (device px; +z toward the viewer). Typed structurally to avoid a Core import
+ *  cycle; `Light` is a `ResolvedLight` from Jiv.Types. */
+export interface SceneLightItem {
+  Light: {
+    Kind: 'Directional' | 'Ambient' | 'Point' | 'Spot' | 'Area';
+    Color: { R: number; G: number; B: number; A: number };
+    Intensity: number;
+    Direction: [number, number, number];
+    Range: number;
+    ConeAngle: number;
+    Penumbra: number;
+    CastShadow: boolean;
+  };
+  X: number;
+  Y: number;
+  Z: number;
 }

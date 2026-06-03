@@ -23,6 +23,9 @@ export interface TextDrawCommand {
   Opacity: number;
   ClipOffset: number;
   ClipCount: number;
+  /** True when the atlas alpha is an SDF (large text) vs raw coverage (small).
+   *  Packed into a_OpacityClip.w; the text shader branches its edge math on it. */
+  IsSdf: boolean;
   /** RGBA tint multiplier. (1,1,1,1) = passthrough. */
   TintR: number;
   TintG: number;
@@ -68,7 +71,7 @@ export class TextInstanceBuffer {
     data[offset + 8] = cmd.Opacity;
     data[offset + 9] = cmd.ClipOffset;
     data[offset + 10] = cmd.ClipCount;
-    data[offset + 11] = 0;
+    data[offset + 11] = cmd.IsSdf ? 1 : 0;
 
     data[offset + 12] = cmd.TintR;
     data[offset + 13] = cmd.TintG;

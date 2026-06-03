@@ -33,11 +33,13 @@ export const LiquidGlass: Partial<JivStyle> = {
   ShadowBlur: '22',
   ShadowOffsetY: '6',
 
-  // Backdrop grading — gentle, content stays readable
-  BackdropFrostBlur: '3',
-  BackdropBrightness: '1',
-  BackdropSaturation: '1.25',
-  BackdropContrast: '0.75',
+  // Backdrop grading — Apple Liquid Glass is HEAVILY frosted; the backdrop reads
+  // as a soft, milky blur, not a near-sharp window. 18px frost (was 3px, which
+  // looked like plain refraction with no blur).
+  BackdropFrostBlur: '18',
+  BackdropBrightness: '1.02',
+  BackdropSaturation: '1.3',
+  BackdropContrast: '0.92',
 
   // Refraction / bezel — match Apple's dossier. Bulge stays near-zero; the
   // Apple glass surface reads as FLAT, not fishbowl-domed. Thickness controls
@@ -54,9 +56,11 @@ export const LiquidGlass: Partial<JivStyle> = {
 
   // Specular: SpecularIntensity drives BOTH the Blinn-Phong bevel catchlight
   // AND the thin rim-specular highlight. Sharpness is for the bevel catchlight.
-  SpecularIntensity: '0.55',
-  SpecularSharpness: '10',
-  FresnelStrength: '0.55',
+  // Apple's glass speculars are SUBTLE and TIGHT — a thin glint, not a hot blob.
+  // Lower intensity + higher sharpness kills the ugly broad white highlight.
+  SpecularIntensity: '0.28',
+  SpecularSharpness: '28',
+  FresnelStrength: '0.32',
 
   // Chromatic aberration at rim — subtle
   ChromaticAberration: '0.3',

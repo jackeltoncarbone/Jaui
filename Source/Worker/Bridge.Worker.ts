@@ -282,10 +282,6 @@ export class WorkerBridge {
 
   private _onResize = (m: M2W_Resize): void => {
     if (!this._canvas) return;
-    // Re-use Canvas's existing resize plumbing: write into the same
-    // _pendingResize slot the ResizeObserver path filled. The engine's
-    // public Resize entry isn't typed for this; we use the bridge-friendly
-    // public ResizeFromBridge helper added on Canvas.
     this._canvas.ResizeFromBridge(m.Width, m.Height);
   };
 

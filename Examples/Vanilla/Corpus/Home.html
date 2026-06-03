@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Show Studio — Home</title>
+  <style>
+    /* Real-app host: the canvas fills the window exactly, nothing scrolls. The
+       engine sizes its drawing buffer to the canvas's measured CSS box (×dpr)
+       via its ResizeObserver, so the world is always exactly the viewport. */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #14101c; }
+    #app { position: fixed; inset: 0; }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  </style>
+</head>
+<body>
+  <div id="app"><canvas id="jaui"></canvas></div>
+  <script type="module">
+    // The canvas has a CSS size of 100%×100% (the window). Jaui OWNS the backing
+    // store: its ResizeObserver measures the canvas CSS box and sets
+    // canvas.width/height = cssSize × dpr every resize. We just hand it the
+    // element — no manual sizing, no conflict.
+    const { default: setup } = await import('./home.ts');
+    await setup(document.getElementById('jaui'));
+  </script>
+</body>
+</html>

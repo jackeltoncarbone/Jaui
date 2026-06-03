@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch({ args: ['--use-gl=angle','--use-angle=swiftshader','--ignore-gpu-blocklist'] });
+const p = await b.newPage({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+const errs=[]; p.on('pageerror',e=>errs.push(e.message)); p.on('console',m=>{if(m.type()==='error')errs.push(m.text());});
+await p.goto('http://localhost:6777/', { waitUntil: 'domcontentloaded' });
+await p.locator('canvas').first().waitFor({ state: 'visible', timeout: 15000 }).catch(()=>{});
+await p.waitForTimeout(5000);
+await p.screenshot({ path: 'tests/compare-out/ng-home.png' });
+console.log('saved ng-home.png; errors:', errs.length); errs.slice(0,6).forEach(e=>console.log('  '+e));
+await b.close();

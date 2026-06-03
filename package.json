@@ -29,11 +29,18 @@
   ],
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "@types/pngjs": "^6.0.5",
+    "@types/three": "^0.180.0",
     "@webgpu/types": "^0.1.69",
+    "pixelmatch": "^7.2.0",
     "playwright": "^1.59.1",
+    "pngjs": "^7.0.0",
     "typescript": "^5.9.2",
     "vite": "^7.0.0",
     "vite-plugin-glsl": "^1.4.0",
     "vitest": "^4.0.0"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
   }
 }

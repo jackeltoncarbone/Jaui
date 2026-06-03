@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, HostListener, signal, computed, inject, afterNextRender } from '@angular/core';
-import { Jiv, Jext, Jyle, Jaui } from 'jaui-angular';
+import { Jiv, Jext, Jyle, Light, Jaui } from 'jaui-angular';
 import HomeJss from './Home.jss';
 
 type Company = { Id: string; Name: string };
@@ -55,12 +55,13 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
 @Component({
   selector: 'home',
   standalone: true,
-  imports: [Jiv, Jext, Jyle],
+  imports: [Jiv, Jext, Jyle, Light],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <jyle [source]="JssSource" />
 
     <jiv class="Screen">
+      <light class="KeyLight" />
       <jiv class="TopBlur" />
       <jiv class="ContentBlur" />
 
@@ -95,6 +96,13 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
           <jiv class="HeroCta">
             <jext class="HeroCtaLabel" text="Get Started" />
           </jiv>
+        </jiv>
+
+        <jiv class="ThickRow">
+          <jiv class="Slab0" />
+          <jiv class="Slab1" />
+          <jiv class="Slab2" />
+          <jiv class="Slab3" />
         </jiv>
 
         @for (s of Sections(); track s.Id) {

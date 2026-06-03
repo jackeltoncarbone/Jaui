@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch({ args: ['--use-gl=angle','--use-angle=swiftshader','--ignore-gpu-blocklist'] });
+const p = await b.newPage({ viewport: { width: 800, height: 600 }, deviceScaleFactor: 1 });
+const errs=[]; p.on('pageerror',e=>errs.push(e.message)); p.on('console',m=>{if(m.type()==='error')errs.push(m.text());});
+await p.goto('http://localhost:6777/Corpus/index.html?scene=ModelTest', { waitUntil: 'domcontentloaded' });
+await p.locator('canvas').first().waitFor({ state: 'visible', timeout: 10000 }).catch(()=>{});
+await p.waitForTimeout(2500);
+await p.screenshot({ path: 'tests/compare-out/modeltest.png', animations: 'disabled', timeout: 60000 });
+await b.close();
+console.log('errors:', errs.length, errs.slice(0,3).join(' | '));

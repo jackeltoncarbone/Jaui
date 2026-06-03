@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jaui Corpus</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; overflow: hidden; }
+    /* The engine observes the canvas's PARENT for sizing. Give the canvas a
+       fixed-size wrapper so the parity fixtures stay exactly 800x600 regardless
+       of window size (this is a test host, not a responsive app — see Home.html
+       for the full-window product page). */
+    #stage { width: 800px; height: 600px; position: relative; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="stage"><canvas id="jaui" width="800" height="600"></canvas></div>
+  <script type="module">
+    import { Scenes, DefaultScene } from './Scenes.ts';
+    const id = new URLSearchParams(location.search).get('scene') ?? DefaultScene;
+    const entry = Scenes[id];
+    if (!entry) {
+      document.body.textContent = `Unknown scene "${id}". Try: ${Object.keys(Scenes).join(', ')}`;
+    } else {
+      const { default: setup } = await entry();
+      const canvas = document.getElementById('jaui');
+      await setup(canvas);
+    }
+  </script>
+</body>
+</html>

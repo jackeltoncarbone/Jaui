@@ -1,5 +1,5 @@
 import type { Color } from '../Core/Types';
-import { Resolve, type ResolveContext } from '../Core/Length';
+import { Resolve, ResolveScalar, type ResolveContext } from '../Core/Length';
 import { ParseColor } from '../Core/Color.Parse';
 
 export type TextAlign = 'Left' | 'Center' | 'Right' | 'Justify';
@@ -43,6 +43,12 @@ export interface ResolvedTextStyle {
   TextAlignLast: TextAlignLast;
   TextOverflow: TextOverflow;
   MaxLines: number | null;
+  /** Coordinate space of the owning element. Screen-space text (the default)
+   *  rasterizes crisp at 1:1 — matching the WebGL2 reference at every size and
+   *  dpr. Only World-space text (scaled / Z-pushed in 3D) is SDF-ified so it
+   *  stays sharp under magnification (raster would blur). Optional: callers that
+   *  don't set it get crisp raster. */
+  Space?: 'Screen' | 'World';
 }
 
 /** Resolve a TextStyle into its numeric/parsed form using the Jiv's ctx. */
@@ -52,12 +58,15 @@ export const ResolveTextStyle = (style: TextStyle, ctx: ResolveContext): Resolve
   FontWeight: style.FontWeight,
   FontStyle: style.FontStyle,
   Color: ParseColor(style.Color),
-  LineHeight: Resolve(style.LineHeight, ctx, 'W'),
+  LineHeight: ResolveScalar(style.LineHeight, ctx, 'W'),
   LetterSpacing: Resolve(style.LetterSpacing, ctx, 'W'),
   TextAlign: style.TextAlign,
   TextAlignLast: style.TextAlignLast,
   TextOverflow: style.TextOverflow,
   MaxLines: style.MaxLines,
+  // World-space text opts into SDF (sharp under 3D scaling). Screen-space (the
+  // default, and anything that doesn't carry Space) stays crisp raster.
+  Space: (style as { Space?: 'Screen' | 'World' }).Space ?? 'Screen',
 });
 
 /** Resolve `TextAlignLast: 'Auto'` to a concrete TextAlign value. Justified

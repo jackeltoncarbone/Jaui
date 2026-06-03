@@ -52,7 +52,10 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // Physical material
   ['Frost',                  s => s.Frost,                        (s, v) => { s.Frost = v; }],
   ['BackdropFrostBlur',      s => s.BackdropFrostBlur,            (s, v) => { s.BackdropFrostBlur = v; }],
-  ['Thickness',              s => s.Thickness,                    (s, v) => { s.Thickness = v; }],
+  // Thickness and Elevation both animate the one unified physical Depth (they
+  // are the same axis — see Style.Resolver). Authoring either @Transition works.
+  ['Thickness',              s => s.Depth,                        (s, v) => { s.Depth = v; }],
+  ['Elevation',              s => s.Depth,                        (s, v) => { s.Depth = v; }],
   ['Fillet',                 s => s.Fillet,                       (s, v) => { s.Fillet = v; }],
   ['Refraction',             s => s.Refraction,                   (s, v) => { s.Refraction = v; }],
   ['BackdropBrightness',     s => s.BackdropBrightness,           (s, v) => { s.BackdropBrightness = v; }],
@@ -150,7 +153,9 @@ const DEFAULT_MASS = 1;
  *  cache stays clean and previous render.Background is GC'd.
  */
 const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void => {
-  render.Material = target.Material;
+  render.SamplesBackdrop = target.SamplesBackdrop;
+  render.HasProgressiveBlur = target.HasProgressiveBlur;
+  render.Light = target.Light;
   render.ProgressiveBlurDirection = target.ProgressiveBlurDirection;
   render.ProgressiveBlurFeather = target.ProgressiveBlurFeather;
   render.ProgressiveBlurEasing = target.ProgressiveBlurEasing;
@@ -313,12 +318,12 @@ export class JivStyleAnimator implements Animatable {
       set(render, s.Value);
     }
 
-    // Keep glass pipeline running while the Thickness spring decays past
-    // author target=0 (otherwise refraction/bezel/specular snap off).
-    if (target.Material !== 'ProgressiveBlur') {
-      const t = Math.max(render.Thickness, target.Thickness);
-      render.Material = t > 0.01 ? 'LiquidGlass' : 'None';
-    }
+    // No material flip: a Jiv is one physical surface. SamplesBackdrop /
+    // HasProgressiveBlur are copied straight from the target (attribute-derived,
+    // see _copyNonAnimated); Depth is just an animated number that scales
+    // continuously through 0 (impossibly thin) with no threshold. Every
+    // backdrop/refraction/bevel term scales off the same animated attributes,
+    // so there is nothing to snap on or off.
 
     return springActive || driverActive;
   };

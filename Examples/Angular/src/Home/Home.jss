@@ -1,6 +1,6 @@
-@ScreenR:   80pt
-@ChromePad: 10pt
-@GlassPad:  4pt
+@ScreenR:   5pt
+@ChromePad: 0.625pt
+@GlassPad:  0.25pt
 
 Screen {
   Direction: Column
@@ -8,7 +8,7 @@ Screen {
   FlexGrow: 1
   BorderRadius: @ScreenR
   Overflow: Hidden
-  PointScale: 1.25
+  PointScale: 1
 }
 
 ChromeFrame {
@@ -29,14 +29,14 @@ ToolbarRow {
   Direction: Row
   Justify: SpaceBetween
   Align: Center
-  Padding: 12pt
+  Padding: 0.75pt
   Layer: 20
   PointerEvents: Auto
 }
 
 ToolbarLogo {
-  Height: 40pt
-  Width: 104pt
+  Height: 2.5pt
+  Width: 6.5pt
   FlexShrink: 0
 }
 
@@ -44,8 +44,8 @@ Scroll {
   Direction: Column
   Justify: Start
   Align: Stretch
-  Padding: 0pt 0pt 32pt 0pt
-  Gap: 40pt
+  Padding: 0pt 0pt 2pt 0pt
+  Gap: 2.5pt
   Overflow: Scroll
   FlexGrow: 1
 }
@@ -54,7 +54,7 @@ TabBarRow {
   Direction: Row
   Justify: Center
   Align: Center
-  Height: 64pt
+  Height: 4pt
   PointerEvents: Auto
 }
 
@@ -62,10 +62,10 @@ ContentBlur {
   ProgressiveBlurDirection: ToBottom
   Position: Fixed
   Width: 100vw
-  Height: 250pt
+  Height: 15.625pt
   Left: 0pt
   Bottom: 0pt
-  BackdropFrostBlur: 17pt
+  BackdropFrostBlur: 1.0625pt
   Background: rgba(0, 0, 0, 0.5)
   Layer: 5
 }
@@ -74,21 +74,21 @@ TopBlur {
   ProgressiveBlurDirection: ToTop
   Position: Fixed
   Width: 100vw
-  Height: 200pt
+  Height: 12.5pt
   Left: 0pt
   Top: 0pt
-  BackdropFrostBlur: 24pt
+  BackdropFrostBlur: 1.5pt
   Background: rgba(0, 0, 0, 0)
   Layer: 5
 }
 
 HeroStub {
   Direction: Column
-  Justify: Center
+  Justify: End
   Align: Start
-  Padding: 128pt 32pt 32pt 80pt
-  Gap: 30pt
-  Height: 70vh
+  Padding: 5pt 5pt 4pt 5pt
+  Gap: 1.25pt
+  Height: 60vh
   Background: rgba(81, 81, 81, 0.24)
   FlexGrow: 0
   FlexShrink: 0
@@ -96,40 +96,95 @@ HeroStub {
 
 HeroTitle {
   FontFamily: Inter
-  FontSize: 36pt
-  FontWeight: 600
-  LineHeight: 1.15
+  FontSize: 2.75pt
+  FontWeight: 700
+  LineHeight: 1.1
   Color: rgba(255, 255, 255, 0.98)
-  LetterSpacing: -0.72pt
-  Width: 500pt
+  LetterSpacing: -0.06pt
+  Width: 37.5pt
 }
 
 HeroCta {
   Direction: Row
   Justify: Center
   Align: Center
-  Padding: 12pt 32pt
-  BorderRadius: 999pt
+  Padding: 0.75pt 2pt
+  BorderRadius: 62.5pt
   Background: rgba(255, 255, 255, 0.1)
-  Width: 180pt
+  Width: 11.25pt
+  Height: 3pt
+  FlexGrow: 0
   FlexShrink: 0
 }
 
 HeroCtaLabel {
   FontFamily: Inter
-  FontSize: 15pt
+  FontSize: 0.9375pt
   FontWeight: 500
   Color: rgba(255, 255, 255, 0.85)
   TextAlign: Center
   FlexGrow: 1
 }
 
+ThickRow {
+  Direction: Row
+  Justify: Center
+  Align: Center
+  Gap: 2pt
+  Padding: 2pt 1.5pt 2pt 1.5pt
+  FlexGrow: 0
+  FlexShrink: 0
+}
+
+KeyLight {
+  LightType: Directional
+  LightColor: rgb(255, 250, 235)
+  LightIntensity_: 1.3
+  LightDirection: -0.4 0.5 -1
+}
+
+Slab {
+  Width: 9pt
+  Height: 6pt
+  BorderRadius: 1.75pt
+  Background: rgba(255, 255, 255, 0.92)
+  ShadowColor: rgba(0, 0, 0, 0.45)
+  FlexGrow: 0
+  FlexShrink: 0
+}
+
+Slab0 : Slab {
+  Elevation: 0
+  Fillet: 0
+}
+
+Slab1 : Slab {
+  Elevation: 8
+  Fillet: 6
+  ShadowBlur: 0.75pt
+  ShadowOffsetY: 0.5pt
+}
+
+Slab2 : Slab {
+  Elevation: 20
+  Fillet: 14
+  ShadowBlur: 1.5pt
+  ShadowOffsetY: 1pt
+}
+
+Slab3 : Slab {
+  Elevation: 40
+  Fillet: 24
+  ShadowBlur: 2.5pt
+  ShadowOffsetY: 1.75pt
+}
+
 Section {
   Direction: Column
   Justify: Start
   Align: Stretch
-  Gap: 14pt
-  Padding: 0pt 24pt 0pt 24pt
+  Gap: 0.875pt
+  Padding: 0pt 1.5pt 0pt 1.5pt
   FlexGrow: 0
   FlexShrink: 0
 }
@@ -138,30 +193,31 @@ SectionHeader {
   Direction: Row
   Justify: SpaceBetween
   Align: Center
-  Gap: 8pt
+  Gap: 0.5pt
 }
 
 SectionTitle {
   FontFamily: Inter
-  FontSize: 22pt
+  FontSize: 1.375pt
   FontWeight: 600
   Color: rgba(255, 255, 255, 0.96)
-  LetterSpacing: -0.2pt
+  LetterSpacing: -0.0125pt
 }
 
 LiquidGlass {
   Background: rgba(255, 255, 255, 0)
-  BorderRadius: 32pt
-  BorderWidth: 1pt
-  BorderBlur: 0.25pt
-  BorderBrightness: 1.25
-  BorderSaturation: 1.5
+  BorderRadius: 2pt
+  BorderWidth: 0.0625pt
+  BorderBlur: 0.015625pt
+  BorderColor: rgba(255, 255, 255, 0.18)
+  BorderBrightness: 1.15
+  BorderSaturation: 1
 
   ShadowColor: rgba(0, 0, 0, 0.18)
-  ShadowBlur: 22pt
-  ShadowOffsetY: 6pt
+  ShadowBlur: 1.375pt
+  ShadowOffsetY: 0.375pt
 
-  BackdropFrostBlur: 4pt
+  BackdropFrostBlur: 0.25pt
   BackdropBrightness: 1.25
   BackdropSaturation: 1.25
   BackdropContrast: 0.75
@@ -176,8 +232,8 @@ LiquidGlass {
   LightIntensity: 1
   SpecularIntensity: 0
   SpecularSharpness: 10
-  FresnelStrength: 0.55
-  ChromaticAberration: 0.3
+  FresnelStrength: 0.4
+  ChromaticAberration: 0
   EdgeLightTop: 0
   EdgeLightBottom: 0.03
   BorderVariance: 0
@@ -190,17 +246,17 @@ SectionViewAll : LiquidGlass {
   Direction: Row
   Justify: End
   Align: Center
-  Padding: 6pt 12pt
-  BorderRadius: 999pt
-  BorderWidth: 1pt
+  Padding: 0.375pt 0.75pt
+  BorderRadius: 62.5pt
+  BorderWidth: 0.0625pt
   BorderColor: rgba(255, 255, 255, 0.18)
-  BackdropFrostBlur: 14pt
+  BackdropFrostBlur: 0.875pt
   BackdropBrightness: 1.05
 }
 
 SectionViewAllLabel {
   FontFamily: Inter
-  FontSize: 13pt
+  FontSize: 0.8125pt
   FontWeight: 500
   Color: rgba(255, 255, 255, 0.85)
 }
@@ -210,33 +266,33 @@ Row {
   Wrap: Wrap
   Justify: Start
   Align: Start
-  Gap: 14pt
-  RowGap: 14pt
-  Padding: 2pt 4pt 2pt 4pt
+  Gap: 0.875pt
+  RowGap: 0.875pt
+  Padding: 0.125pt 0.25pt 0.125pt 0.25pt
   FlexGrow: 0
   FlexShrink: 0
 }
 
 RowCompact : Row {
-  Gap: 12pt
-  RowGap: 12pt
+  Gap: 0.75pt
+  RowGap: 0.75pt
 }
 
 RowHero : Row {
-  Gap: 16pt
-  RowGap: 16pt
+  Gap: 1pt
+  RowGap: 1pt
 }
 
 Card {
   Direction: Column
   Justify: End
   Align: Stretch
-  Width: 260pt
-  Height: 195pt
-  BorderRadius: 48pt
+  Width: 16.25pt
+  Height: 12.1875pt
+  BorderRadius: 3pt
   ShadowColor: rgba(0, 0, 0, 0.45)
-  ShadowBlur: 24pt
-  ShadowOffsetY: 10pt
+  ShadowBlur: 1.5pt
+  ShadowOffsetY: 0.625pt
   FlexGrow: 0
   FlexShrink: 0
   Overflow: Hidden
@@ -244,30 +300,30 @@ Card {
 }
 
 CardCompact : Card {
-  Width: 200pt
-  Height: 150pt
+  Width: 12.5pt
+  Height: 9.375pt
   ShadowColor: rgba(0, 0, 0, 0.4)
-  ShadowBlur: 20pt
-  ShadowOffsetY: 8pt
+  ShadowBlur: 1.25pt
+  ShadowOffsetY: 0.5pt
 }
 
 CardHero : Card {
-  Width: 480pt
-  Height: 360pt
-  BorderRadius: 56pt
+  Width: 30pt
+  Height: 22.5pt
+  BorderRadius: 3.5pt
   ShadowColor: rgba(0, 0, 0, 0.5)
-  ShadowBlur: 32pt
-  ShadowOffsetY: 14pt
+  ShadowBlur: 2pt
+  ShadowOffsetY: 0.875pt
 }
 
 CardFooter {
   Direction: Column
   Justify: Start
   Align: Start
-  Padding: 18pt
-  Gap: 8pt
+  Padding: 1.125pt
+  Gap: 0.5pt
   ProgressiveBlurDirection: ToBottom
-  BackdropFrostBlur: 32pt
+  BackdropFrostBlur: 2pt
   Background: rgba(0, 0, 0, 0.55)
 }
 
@@ -275,30 +331,30 @@ CardBadge {
   Direction: Row
   Justify: Center
   Align: Center
-  Padding: 3pt 8pt
-  BorderRadius: 999pt
+  Padding: 0.1875pt 0.5pt
+  BorderRadius: 62.5pt
   Background: rgba(255, 255, 255, 0.18)
 }
 
 CardBadgeLabel {
   FontFamily: Inter
-  FontSize: 10pt
+  FontSize: 0.625pt
   FontWeight: 700
   Color: rgba(255, 255, 255, 0.95)
-  LetterSpacing: 0.8pt
+  LetterSpacing: 0.05pt
 }
 
 CardTitle {
   FontFamily: Inter
-  FontSize: 22pt
+  FontSize: 1.375pt
   FontWeight: 700
   LineHeight: 1.1
   Color: rgba(255, 255, 255, 0.98)
-  LetterSpacing: -0.2pt
+  LetterSpacing: -0.0125pt
 }
 
 CardTitleCompact : CardTitle {
-  FontSize: 17pt
+  FontSize: 1.0625pt
   FontWeight: 600
   LineHeight: 1.15
   Color: rgba(255, 255, 255, 0.97)
@@ -309,26 +365,26 @@ CardMeta {
   Direction: Row
   Justify: Start
   Align: Center
-  Gap: 8pt
+  Gap: 0.5pt
 }
 
 CardAvatar {
-  Width: 20pt
-  Height: 20pt
-  BorderRadius: 999pt
+  Width: 1.25pt
+  Height: 1.25pt
+  BorderRadius: 62.5pt
   Background: rgba(255, 255, 255, 0.25)
 }
 
 CardMetaLabel {
   FontFamily: Inter
-  FontSize: 12pt
+  FontSize: 0.75pt
   FontWeight: 500
   Color: rgba(255, 255, 255, 0.85)
 }
 
 CardDescription {
   FontFamily: Inter
-  FontSize: 12pt
+  FontSize: 0.75pt
   FontWeight: 400
   LineHeight: 1.3
   Color: rgba(255, 255, 255, 0.75)
@@ -340,8 +396,8 @@ ToolbarDropdown : LiquidGlass {
   Direction: Row
   Justify: Center
   Align: Center
-  Width: 48pt
-  Height: 48pt
+  Width: 3pt
+  Height: 3pt
   BorderRadius: @ScreenR - @ChromePad
 }
 
@@ -356,7 +412,7 @@ ToolbarAvatar {
 
 ToolbarAvatarGlyph {
   FontFamily: JauiIcons
-  FontSize: 20pt
+  FontSize: 1.25pt
   Color: rgba(255, 255, 255, 0.9)
   TextAlign: Center
 }
@@ -367,9 +423,9 @@ TabBar : LiquidGlass {
   Align: Stretch
   Gap: 0pt
   Padding: @GlassPad
-  Width: 400pt
+  Width: 25pt
   MaxWidth: 100%
-  Height: 64pt
+  Height: 4pt
   BorderRadius: @ScreenR - @ChromePad
 }
 
@@ -377,38 +433,38 @@ TabItem {
   Direction: Column
   Justify: Center
   Align: Center
-  Gap: 4pt
+  Gap: 0.25pt
   Width: 20%
   BorderRadius: @ScreenR - @ChromePad - @GlassPad
 }
 
 TabItemActive : TabItem {
   Gap: 0pt
-  BorderRadius: 100pt
+  BorderRadius: 6.25pt
   Background: rgba(255, 255, 255, 0.15)
 }
 
 TabIcon {
   FontFamily: JauiIcons
-  FontSize: 24pt
+  FontSize: 1.5pt
   FontWeight: 400
   Color: rgba(255, 255, 255, 0.6)
   TextAlign: Center
 }
 
 TabIconActive : TabIcon {
-  FontSize: 20pt
+  FontSize: 1.25pt
   FontWeight: 600
   Color: rgba(255, 255, 255, 0.95)
 }
 
 TabLabel {
   FontFamily: Inter
-  FontSize: 10pt
+  FontSize: 0.625pt
   FontWeight: 500
   Color: rgba(255, 255, 255, 0.6)
   TextAlign: Center
-  LetterSpacing: 0.1pt
+  LetterSpacing: 0.00625pt
 }
 
 TabLabelActive : TabLabel {

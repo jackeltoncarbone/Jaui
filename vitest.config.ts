@@ -8,7 +8,10 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['tests/**/*.test.ts'],
-    setupFiles: ['./tests/setup.ts'],
+    include: ['Tests/**/*.test.ts'],
+    // Parity.test.ts is a Playwright test (browser + GPU), run via
+    // `npx playwright test`, not vitest. Exclude it from the unit suite.
+    exclude: ['Tests/Parity.test.ts', '**/node_modules/**'],
+    setupFiles: ['./Tests/setup.ts'],
   },
 });

@@ -2,6 +2,7 @@ import type { ResolvedTextStyle, TextMeasurement } from './Text.Types';
 import { MeasureText, ApplyTextStyle } from './Text.Measure';
 import { HashTextKey } from './Text.Hash';
 import { LayoutWords } from './Text.WordLayout';
+import { ComputeSdf } from './Text.Sdf';
 import type { Renderer, GpuTextureHandle } from '../Core/Renderer';
 
 /** UV rect within the atlas texture (normalized 0→1). */
@@ -20,6 +21,10 @@ export interface TextCacheEntry {
   CssHeight: number;
   Measurement: TextMeasurement;
   LastUsed: number;
+  /** True when this entry's atlas alpha is a signed distance field (large text,
+   *  scale-stable) vs. raw coverage raster (small text, crisp). The shader picks
+   *  the matching edge reconstruction. */
+  IsSdf: boolean;
 }
 
 /** Shelf in the shelf-packing atlas. */
@@ -203,6 +208,31 @@ export class TextCache {
       }
     }
 
+    // HYBRID raster/SDF text. The crisp anti-aliased RASTER is the DEFAULT for
+    // ALL screen-space text — at 1:1 it is pixel-sharp at every size and every
+    // dpr (matching the WebGL2 reference). An SDF round-trip through a discrete
+    // grid always SOFTENS the edge slightly (the dpr-scaled spread makes large
+    // headings visibly hazy at retina — the "blurry text" regression), so SDF is
+    // reserved for the ONE case where raster genuinely fails: WORLD-space text
+    // that gets scaled / Z-pushed in the 3D world, where a fixed-res raster atlas
+    // would blur under magnification but an SDF stays sharp. So: gate SDF on
+    // Space:World (and a sane min size), NOT on size alone. The atlas entry
+    // records `IsSdf` so the shader picks the matching edge reconstruction.
+    const SDF_MIN_FONT_PX = 18;   // below this even world text stays raster
+    const fontPx = style.FontSize * dpr;
+    let isSdf = false;
+    if (style.Space === 'World' && fontPx >= SDF_MIN_FONT_PX) {
+      const img = ctx.getImageData(0, 0, pxW, pxH);
+      const alpha = new Uint8Array(pxW * pxH);
+      for (let i = 0; i < alpha.length; i++) alpha[i] = img.data[i * 4 + 3];
+      const spread = Math.max(3, Math.min(12, Math.round(fontPx * 0.14)));
+      const sdf = ComputeSdf(alpha, pxW, pxH, spread);
+      // Preserve baked color (rgb); replace alpha with the SDF (128 = edge).
+      for (let i = 0; i < sdf.length; i++) img.data[i * 4 + 3] = sdf[i];
+      ctx.putImageData(img, 0, 0);
+      isSdf = true;
+    }
+
     // Upload to atlas via Renderer
     const atlas = this._ensureAtlas();
     const origin = this._allocate(pxW, pxH);
@@ -222,6 +252,7 @@ export class TextCache {
       CssHeight: cssH,
       Measurement: measurement,
       LastUsed: this._frameCounter,
+      IsSdf: isSdf,
     };
   };
 

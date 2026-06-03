@@ -304,7 +304,7 @@ export class JivRegistry {
     if (!core) return;
     const renderer = this._janvasRenderers.get(id);
     if (renderer) {
-      renderer.Dispose?.();
+      renderer.Detach?.();   // unmount subtree + dispose (was Dispose in the GL-FBO era)
       this._janvasRenderers.delete(id);
     }
     if (core.Parent) (core.Parent as JivCore).RemoveChild(core);

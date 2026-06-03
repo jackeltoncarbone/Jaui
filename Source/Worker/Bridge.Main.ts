@@ -190,7 +190,15 @@ export class MainBridge {
 
   private _sendInit = (): void => {
     // Page-rect for initial size — saves the first ResizeObserver round-trip.
+    // FALLBACK to the viewport when the rect is 0: on the early-boot path the
+    // bridge is created before <jaui> has layout, so getBoundingClientRect() can
+    // be 0×0. The worker adopts this init size and the ResizeFromBridge 0-guard
+    // rejects later 0s — so a 0 here would leave the Root 0×0 forever (blank
+    // page, no error). A full-window canvas falls back to innerWidth/Height; a
+    // real ResizeObserver delta refines it the moment layout settles.
     const rect = this.Canvas.getBoundingClientRect();
+    const initW = rect.width  > 0 ? rect.width  : (typeof window !== 'undefined' ? window.innerWidth  : 0);
+    const initH = rect.height > 0 ? rect.height : (typeof window !== 'undefined' ? window.innerHeight : 0);
     const offscreen = this.Canvas.transferControlToOffscreen();
     const dpr = window.devicePixelRatio || 1;
     const isCoarse = !!window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
@@ -199,7 +207,7 @@ export class MainBridge {
       {
         T: 'init',
         Canvas: offscreen,
-        Width: rect.width, Height: rect.height,
+        Width: initW, Height: initH,
         DevicePixelRatio: dpr,
         IsPointerCoarse: isCoarse,
         UrlSearch: window.location.search,

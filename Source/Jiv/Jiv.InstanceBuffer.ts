@@ -1,6 +1,6 @@
 import type { Jiv } from './Jiv';
 
-// Per-instance floats (15 vec4 slots = 60 floats = 240 bytes):
+// Per-instance floats (16 vec4 slots = 64 floats = 256 bytes):
 //   loc  1: a_Rect         (x, y, w, h)
 //   loc  2: a_PanelGeom    (cx, cy, halfW, halfH)
 //   loc  3: a_Radii        (tl, tr, br, bl)
@@ -20,15 +20,20 @@ import type { Jiv } from './Jiv';
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
 //   loc 15: a_BorderFilter (brightnessMul, saturationMul, contrastMul, lodOffset)
+//   loc 16: a_SlabParams   (elevation, translateZ, spaceWorld, _)
+//          .x = Elevation (device px) — SOLID-panel slab depth that drives the
+//          lit-bevel effect WITHOUT promoting the panel to glass.
+//          .y = VisualTranslateZ (device px) — depth translation.
+//          .z = spaceWorld flag (1 = World space, 0 = Screen). .w reserved.
 //
-// WebGL2 guarantees only 16 vertex attribute slots (locations 0..15), so we
-// pack clip_meta into `a_Outline`'s padding rather than adding a 17th slot.
+// Instance data lives in a data texture (texelFetch by slot), not vertex
+// attributes, so there is no 16-attribute ceiling — slots can grow freely.
 
-export const JIV_FLOATS_PER_INSTANCE = 60;
+export const JIV_FLOATS_PER_INSTANCE = 64;
 
 /**
  * CPU-side instance data packer for Jiv panels. Reads from Jiv.RenderStyle
- * and packs 60 floats per instance into a Float32Array. Backend-agnostic —
+ * and packs 64 floats per instance into a Float32Array. Backend-agnostic —
  * the Renderer consumes the raw data via PanelAddInstance().
  */
 export class JivInstanceBuffer {
@@ -149,7 +154,7 @@ export class JivInstanceBuffer {
     const blurPx = Math.max(0.5, style.BackdropFrostBlur * d);
     data[offset + 35] = Math.max(0, Math.min(10, Math.log2(blurPx)));
 
-    data[offset + 36] = style.Thickness * avgScale * d;
+    data[offset + 36] = style.Depth * avgScale * d;
     data[offset + 37] = style.BezelWidth * avgScale * d;
     data[offset + 38] = style.Refraction;
     data[offset + 39] = style.BezelScale;
@@ -168,7 +173,10 @@ export class JivInstanceBuffer {
     data[offset + 48] = style.EdgeLightTop;
     data[offset + 49] = style.EdgeLightBottom;
     data[offset + 50] = style.BorderVariance;
-    data[offset + 51] = style.Fillet;
+    // Fillet is a depth/edge measure like Thickness & Elevation — scale it the
+    // same way (avgScale * dpr) so the bevel stays proportional to the slab at
+    // every dpr. (Was raw CSS-px → too small relative to the slab at dpr>1.)
+    data[offset + 51] = style.Fillet * avgScale * d;
 
     data[offset + 52] = style.BorderAlphaVariance;
     data[offset + 53] = style.BorderFresnelBrightness;
@@ -179,6 +187,11 @@ export class JivInstanceBuffer {
     data[offset + 57] = style.BorderSaturation;
     data[offset + 58] = style.BorderContrast;
     data[offset + 59] = style.BorderBackdropBlur;
+
+    data[offset + 60] = style.Depth * avgScale * d;
+    data[offset + 61] = style.VisualTranslateZ * avgScale * d;
+    data[offset + 62] = style.Space === 'World' ? 1.0 : 0.0;
+    data[offset + 63] = 0;
 
     this._count++;
   };

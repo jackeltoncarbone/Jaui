@@ -16,40 +16,28 @@ import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
-import type { Renderer, GpuTextureHandle, BgPaint } from './Renderer';
+import type { Renderer, GpuTextureHandle, BgPaint, SubsystemDrawItem, SceneLightItem } from './Renderer';
+import { Janvas } from '../Janvas/Janvas';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
 // `Renderer.Factory.ts` and handed in. Canvas has no opinion about
 // which backend is running underneath it.
 import { ImageCache } from '../Image/Image.Cache';
 import { BrowserPlatform, type Platform } from './Platform';
-import type { MaterialType } from '../Jiv/Jiv.Types';
 
-/** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
- *  materials like ProgressiveBlur are compositing overlays — they don't have
- *  a backdrop sample, border, or specular, and they render in their own pass. */
-const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
-
-/** True when a non-glass panel has any non-default backdrop filter set
- *  (BackdropBrightness / Saturation / Contrast ≠ 1, BackdropFrostBlur > 0).
- *  These flat panels need the blur pyramid bound and the scene flushed just
- *  like glass does, so the shader's backdrop sample reflects everything
- *  drawn behind the panel. */
-const _hasBackdropFilter = (node: Jiv): boolean => {
-  const s = node.RenderStyle;
-  return Math.abs(s.BackdropBrightness - 1) > 0.001
-    || Math.abs(s.BackdropSaturation - 1) > 0.001
-    || Math.abs(s.BackdropContrast - 1) > 0.001
-    || s.BackdropFrostBlur > 0.001;
-};
+// A Jiv is ONE physical surface — no glass/solid taxonomy. Whether a surface
+// needs the scene flushed + blur pyramid bound (so its shader can sample/refract
+// the scene behind it) is a render-path fact derived purely from attributes:
+// `node.RenderStyle.SamplesBackdrop` (set in Style.Resolver from backdrop
+// filter / refraction / frost). Progressive blur is its own sampler path,
+// flagged by `HasProgressiveBlur`. Neither is an author-visible category.
 import { DirtyFlag } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
-import { WebGL2Renderer } from './WebGL2.Renderer';
-import { Janvas } from '../Janvas/Janvas';
+import { ThreeRenderer } from './Three.Renderer';
 
 export class Canvas implements DirtyTracker {
   readonly Element: HTMLCanvasElement;
@@ -130,27 +118,37 @@ export class Canvas implements DirtyTracker {
   private _frameCount:   number = 0;
   private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
-  /** Deferred janvas clip-mask draws — populated during the janvas pre-pass,
-   *  applied AFTER the panel pass (just before final present). Wiping the
-   *  scene FBO immediately after the foreign render destroys data that
-   *  in-tree consumers (pblur snapshots, glass blur pyramids) need to read.
-   *  Deferring means the visual clip still applies to the presented frame
-   *  while pblur/glass see the unclipped scene during their samples. */
-  private _pendingJanvasMasks: Array<{
-    drawX: number; drawY: number; drawW: number; drawH: number;
-    clipX: number; clipY: number; clipW: number; clipH: number;
-    radius: number; smoothness: number;
-  }> = [];
+  // TODO(Phase4): _pendingJanvasMasks — deferred Janvas clip masks, rebuilt natively in Three.
+
+  /** Reused per-frame scratch list of visible Janvas subsystems handed to
+   *  `Renderer.DrawSubsystems`. Cleared and refilled each frame by
+   *  `_collectSubsystems`. */
+  private _subsystemItems: SubsystemDrawItem[] = [];
+  /** Reused per-frame scratch list of scene lights (Light Jivs + world pos),
+   *  cleared and refilled by `_collectLights` before any surface draws. */
+  private _frameLights: SceneLightItem[] = [];
   /** Rolling window of per-frame GPU ms from `Renderer.GetFrameGpuMs`. The
    *  reading is null when the backend doesn't support timer queries or no
    *  query has resolved yet. We skip nulls when averaging. */
   private _phaseGpu: Float32Array = new Float32Array(30);
   private _phaseGpuCount: number = 0;
 
+  /** Convenience factory — builds a `ThreeRenderer` (the sole backend),
+   *  awaits its async init, and returns a ready `Canvas`. Use this for
+   *  main-thread apps; tests/worker construct a renderer explicitly and
+   *  pass it to the constructor. */
+  static Create = async (
+    canvas: HTMLCanvasElement,
+    platform: Platform = BrowserPlatform,
+  ): Promise<Canvas> => {
+    const renderer = new ThreeRenderer();
+    await renderer.Init(canvas);
+    return new Canvas(canvas, renderer, platform);
+  };
+
   /** Canvas takes a pre-initialized renderer. No backend selection happens
-   *  here — callers build a renderer via `Renderer.Factory` (or their own
-   *  path) and hand it in. Keeps this class free of concrete-backend
-   *  imports so new backends can land without touching Canvas. */
+   *  here — callers build a renderer (or use `Canvas.Create`) and hand it in.
+   *  Keeps this class free of forced-backend wiring in the hot constructor. */
   constructor(canvas: HTMLCanvasElement, renderer: Renderer, platform: Platform = BrowserPlatform) {
     this.Element = canvas;
     this.Root = new Jiv();
@@ -330,6 +328,28 @@ export class Canvas implements DirtyTracker {
   /** The internal AnimationManager — exposed for external use (e.g. manual animators). */
   get Animations(): AnimationManager { return this._animationManager; }
 
+  /** Atmospheric fog for depth-pushed UI (Phase 5). Forwarded to the backend if
+   *  it supports fog (ThreeRenderer); a no-op otherwise. Off by default. */
+  SetFog = (opts: { Color?: [number, number, number]; Start?: number; Range?: number; Density?: number }): void => {
+    const r = this._renderer as unknown as { SetFog?: (o: typeof opts) => void };
+    r.SetFog?.(opts);
+  };
+
+  /** Scene light the UI responds to (Phase 5) — cursor/gyro-driven sheen +
+   *  specular. Forwarded to the backend if supported; no-op otherwise. Off by
+   *  default. Pos is device px (x,y) + height (z). */
+  SetLight = (opts: { Pos?: [number, number, number]; Color?: [number, number, number]; Strength?: number; Radius?: number }): void => {
+    const r = this._renderer as unknown as { SetLight?: (o: typeof opts) => void };
+    r.SetLight?.(opts);
+  };
+
+  /** Depth-of-field (Phase 5) — soften elements away from the focus depth.
+   *  Forwarded to the backend if supported; no-op otherwise. Off by default. */
+  SetDof = (opts: { FocusDepth?: number; FocusRange?: number; Strength?: number }): void => {
+    const r = this._renderer as unknown as { SetDof?: (o: typeof opts) => void };
+    r.SetDof?.(opts);
+  };
+
   /** Post-frame hook list — invoked at the end of every render tick.
    *  Used by the worker's JivRegistry to broadcast rect snapshots once
    *  per frame to subscribed nodes. */
@@ -463,8 +483,16 @@ export class Canvas implements DirtyTracker {
    *  in-engine ResizeObserver filled, so the existing _resize() pipeline
    *  picks it up on its next tick. */
   ResizeFromBridge = (cssWidth: number, cssHeight: number): void => {
-    this._pendingResize = { width: cssWidth, height: cssHeight };
-    requestAnimationFrame(() => this._resize());
+    // Skip transient 0-dimension pushes (see _observeResize) — adopting a 0
+    // collapses the scene with no guaranteed recovery.
+    if (cssWidth > 0 && cssHeight > 0) {
+      this._pendingResize = { width: cssWidth, height: cssHeight };
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => this._resize());
+      } else {
+        this._resize();
+      }
+    }
   };
 
   /** Internal — register an engine handler for `kind`. Returns disposer.
@@ -757,73 +785,26 @@ export class Canvas implements DirtyTracker {
     // blits per frame: 1 (final present), down from 1+N (one per
     // glass/pblur that used to call SnapshotScreen).
     r.DisableBlend();
+
+    // Scene lighting pre-pass: gather every Light Jiv (with world position from
+    // its cascaded transform) BEFORE any surface draws, so all surfaces + meshes
+    // this frame are lit by the full set regardless of tree order. One shared
+    // light set; `Space` only affects where the light sits. Cheap — lights are
+    // sparse, and the walk early-returns down non-light branches' leaves anyway.
+    this._frameLights.length = 0;
+    this._collectLights(this.Root, 1, 1, 0, 0);
+    if (r.SetSceneLights) r.SetSceneLights(this._frameLights);
+
     r.BeginScenePass(0, 0, 0);
 
-    // ── Janvas pre-pass ──
-    // Foreign WebGL2 renderers (a THREE.js scene, a custom shader app, etc.)
-    // attached to <janvas> elements draw into the just-bound scene FBO at
-    // their layout rect. Subsequent panels render over the top; glass
-    // surfaces sample the result as their backdrop. Only WebGL2 backends
-    // expose a raw GL handle — on WebGPU this loop is a no-op.
-    if (this._renderer instanceof WebGL2Renderer) {
-      const gl = this._renderer.GetGL();
-      if (gl) {
-        this._pendingJanvasMasks.length = 0;
-        this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt, null);
-        // Restore the state Jaui's panel pass expects after the foreign
-        // renderer ran. Jaui's draws assume: scene FBO bound, canvas-sized
-        // viewport, no scissor, no depth/cull/stencil, no bound program /
-        // VAO / array buffers, texture unit 0 active. THREE in particular
-        // leaves all of these in arbitrary states. ALSO drop our own state
-        // cache (`_lastProgram` etc.) so the next Jaui draw doesn't trust
-        // stale caches against THREE's bindings.
-        // Full reset of every GL state THREE may have touched. THREE
-        // mutates 30+ pieces of state during a render and Jaui's draws
-        // assume specific defaults; partial reset = subtle bugs (inverted
-        // text from leftover blend equation, missing text from leftover
-        // depth/colour mask, etc.).
-        //
-        // NOTE: a previous attempt trimmed the texture-unit unbind loop
-        // and the null program/VAO/buffer binds. CPU-submit time dropped
-        // by ~120ms/frame on software ANGLE, but wall-time *rose* by
-        // ~200ms/frame — the rasterizer was apparently doing extra work
-        // when we left bindings in their post-THREE state. Keep the
-        // full reset.
-        this._renderer.RebindSceneTarget();
-        gl.viewport(0, 0, w, h);
-        gl.disable(gl.SCISSOR_TEST);
-        gl.disable(gl.DEPTH_TEST);
-        gl.disable(gl.CULL_FACE);
-        gl.disable(gl.STENCIL_TEST);
-        gl.disable(gl.POLYGON_OFFSET_FILL);
-        gl.disable(gl.SAMPLE_ALPHA_TO_COVERAGE);
-        gl.disable(gl.RASTERIZER_DISCARD);
-        gl.depthMask(true);
-        gl.colorMask(true, true, true, true);
-        gl.stencilMask(0xFF);
-        gl.frontFace(gl.CCW);
-        gl.cullFace(gl.BACK);
-        gl.enable(gl.BLEND);
-        gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
-        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-        gl.blendColor(0, 0, 0, 0);
-        gl.useProgram(null);
-        gl.bindVertexArray(null);
-        gl.bindBuffer(gl.ARRAY_BUFFER, null);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-        gl.bindRenderbuffer(gl.RENDERBUFFER, null);
-        for (let unit = 0; unit < 8; unit++) {
-          gl.activeTexture(gl.TEXTURE0 + unit);
-          gl.bindTexture(gl.TEXTURE_2D, null);
-          gl.bindTexture(gl.TEXTURE_CUBE_MAP, null);
-          gl.bindTexture(gl.TEXTURE_2D_ARRAY, null);
-          gl.bindTexture(gl.TEXTURE_3D, null);
-        }
-        gl.activeTexture(gl.TEXTURE0);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-        gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
-        this._renderer.InvalidateStateCache();
+    // Janvas subsystems: collect visible Janvas nodes + their device-px rects
+    // and let the backend mount/tick them into the shared scene (Three) before
+    // panels draw over the top. No FBO pre-pass — they're native scene objects.
+    if (r.DrawSubsystems) {
+      this._subsystemItems.length = 0;
+      this._collectSubsystems(this.Root);
+      if (this._subsystemItems.length > 0) {
+        r.DrawSubsystems(this._subsystemItems, _dt);
       }
     }
 
@@ -944,6 +925,11 @@ export class Canvas implements DirtyTracker {
         effOx = ox + cx * (pivotX * (1 - sx) + tx);
         effOy = oy + cy * (pivotY * (1 - sy) + ty);
       }
+      // Scene light: a Jiv with a Light has no surface — it was already gathered
+      // into the shared light set by the `_collectLights` pre-pass (so every
+      // panel in this walk is lit by all lights, regardless of tree order). Skip
+      // painting it.
+      if (node.RenderStyle.Light !== null) return;
       if (!this._isInsideClipStack(node, effCx, effCy, effOx, effOy, stack)) return;
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
       // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
@@ -974,9 +960,9 @@ export class Canvas implements DirtyTracker {
       // panel/text instances reference it by (offset, count).
       const clipMeta = this._clipBuffer.Encode(stack, this._dpr);
 
-      const material = node.RenderStyle.Material;
+      const samplesBackdrop = node.RenderStyle.SamplesBackdrop;
 
-      if (material === 'ProgressiveBlur') {
+      if (node.RenderStyle.HasProgressiveBlur) {
         // Flush both pending batches: the pblur snapshots the scene and
         // samples it — so the scene must contain everything drawn so
         // far. Deferred panels AND text in the buffers haven't hit the
@@ -1068,14 +1054,14 @@ export class Canvas implements DirtyTracker {
         });
         this._counts.PBlur++;
 
-      } else if (_isGlass(material) || _hasBackdropFilter(node)) {
-        // Flush pending batches: same reason as pblur — backdrop-filter
-        // panels (glass or flat) read the scene (indirectly via the blur
-        // pyramid), so the scene must be current. Flat panels with
-        // non-default BackdropBrightness/Saturation/Contrast/FrostBlur go
-        // through this same path — the shader branches on materialType
-        // to skip refraction/CA/bezel for them, but they still need the
-        // pyramid bound to sample.
+      } else if (samplesBackdrop) {
+        // A surface that samples the scene behind it (backdrop filter / frost /
+        // refraction — SamplesBackdrop, derived from attributes) needs the scene
+        // flushed + the blur pyramid bound so its shader reads everything drawn
+        // behind it. Same one surface shader for all of them; the refraction /
+        // bezel / frost terms simply scale from their own attributes (zero when
+        // unset), so there is no separate "glass" path — just more or less
+        // transmission on the same surface.
         flushPanels();
         flushText();
         // Glass samples only `u_Backdrop` (the blur pyramid), never the raw
@@ -1152,9 +1138,12 @@ export class Canvas implements DirtyTracker {
         // of v_Tint when u_BgMode != 0. Border, refraction, frost, rim
         // spec all keep working.
         const glassBgPaint = this._computeBgPaint(node);
-        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
-        if (_isGlass(material)) this._counts.Glass++;
-        else this._counts.Panels++;
+        // This surface samples the scene behind it. The backdrop-sampling shader
+        // variant handles it; its refraction/frost/bezel terms scale from the
+        // surface's own attributes (zero when unset) — step 2 folds this and the
+        // plain variant into one surface shader so there is no variant at all.
+        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, samplesBackdrop, sceneSnap, glassBgPaint, node.RenderStyle.Space === 'World');
+        this._counts.Glass++;
         if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
         // Reset the shared panel buffer so this glass instance isn't picked
         // up by the next flushPanels() and drawn AGAIN as a non-glass panel
@@ -1174,7 +1163,11 @@ export class Canvas implements DirtyTracker {
         //                another fill mode, not a separate draw pipeline.
         flushText();
         const flatBgPaint = this._computeBgPaint(node);
-        if (flatBgPaint !== undefined) {
+        // World-space panels draw as their own depth-tested batch (occlude by Z
+        // against subsystems + each other). Screen-space panels accumulate into
+        // the shared painter's-order batch exactly as before (2D parity intact).
+        const isWorld = node.RenderStyle.Space === 'World';
+        if (flatBgPaint !== undefined || isWorld) {
           flushPanels();
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
@@ -1182,9 +1175,9 @@ export class Canvas implements DirtyTracker {
           r.PanelBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-          r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, flatBgPaint);
+          r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, flatBgPaint, isWorld);
           this._counts.Panels++;
-          if (flatBgPaint.Mode === 'Image') this._counts.Image++;
+          if (flatBgPaint?.Mode === 'Image') this._counts.Image++;
           this._panelBuffer.Begin();
         } else {
           this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
@@ -1239,25 +1232,7 @@ export class Canvas implements DirtyTracker {
     // every in-tree consumer has read the scene, so pblur/glass blur
     // pyramids see foreign content (not zeroed corners) while the
     // presented frame still respects the visual clip.
-    if (this._pendingJanvasMasks.length > 0 && this._renderer instanceof WebGL2Renderer) {
-      const gl = this._renderer.GetGL();
-      if (gl) {
-        const gl2r = this._renderer;
-        gl2r.RebindSceneTarget();
-        gl.viewport(0, 0, w, h);
-        gl.disable(gl.SCISSOR_TEST);
-        gl.disable(gl.DEPTH_TEST);
-        gl.disable(gl.CULL_FACE);
-        gl.disable(gl.STENCIL_TEST);
-        gl.colorMask(true, true, true, true);
-        gl.depthMask(false);
-        gl.disable(gl.BLEND);
-        for (const m of this._pendingJanvasMasks) {
-          gl2r.DrawClipMask(m.drawX, m.drawY, m.drawW, m.drawH, m.clipX, m.clipY, m.clipW, m.clipH, m.radius, m.smoothness);
-        }
-        gl2r.InvalidateStateCache();
-      }
-    }
+    // TODO(Phase4): deferred Janvas clip masks — rebuilt natively in Three.
 
     // Final composite: the whole frame lives in sceneFbo. `PresentScene`
     // does a hardware `blitFramebuffer` from sceneFbo into the swap chain —
@@ -1535,6 +1510,7 @@ export class Canvas implements DirtyTracker {
         Opacity: opacity,
         ClipOffset: clipOffset,
         ClipCount: clipCount,
+        IsSdf: entry.IsSdf,
         TintR: w.TintR.Value,
         TintG: w.TintG.Value,
         TintB: w.TintB.Value,
@@ -1869,17 +1845,83 @@ export class Canvas implements DirtyTracker {
     // in-line causes the browser to emit "ResizeObserver loop completed
     // with undelivered notifications" (benign but noisy).
     if (typeof ResizeObserver === 'undefined') return;
+    // Observe the canvas's PARENT, not the canvas. Writing the canvas backing
+    // store (Element.width/height) changes a canvas's intrinsic CSS size when the
+    // host gave it no explicit CSS width/height — so observing the canvas itself
+    // forms a feedback loop: our backing-store write -> larger CSS box -> RO
+    // fires -> we multiply by dpr -> even larger -> unbounded blowup (saw 2^26 px
+    // at dpr 2, which the GPU then rejects and the scene dies). The parent's box
+    // is owned by the page layout and does NOT change when we resize the canvas,
+    // so it is a stable, loop-free size source. Fall back to the canvas only if
+    // there is no parent (detached / unusual host).
+    const el = this.Element as unknown as HTMLElement;
+    const parent = (el.parentElement as HTMLElement | null);
+    const target = parent ?? (el as unknown as Element);
+
+    // Size from the ResizeObserver's OWN contentRect, applied synchronously in
+    // the callback. Two properties make this correct and lag-free:
+    //  - contentRect is POST-LAYOUT by spec: the box the browser just settled
+    //    on. No rAF, no re-measure, no one-frame lag (the bug from reading
+    //    clientWidth at event time, before layout, or in a later rAF after the
+    //    box moved again).
+    //  - Observing the PARENT (not the canvas) means our backing-store write
+    //    (Element.width) never changes the observed box, so the browser has no
+    //    reason to drop notifications — the silent-drop that froze the backing
+    //    store only happens when a callback dirties the OBSERVED subtree.
+    // The clamp guards a mis-styled host from driving a runaway blowup.
+    // CAPTURE the post-layout size in the RO callback (contentRect is settled by
+    // spec), but DEFER the actual _resize() to a rAF. This is the only ordering
+    // that avoids BOTH failure modes seen empirically:
+    //  - Applying synchronously in the RO callback writes Element.width, which
+    //    reflows, and the browser then SILENTLY DROPS the next RO notifications
+    //    -> backing store FREEZES on the following resize.
+    //  - Re-measuring (clientWidth) inside the rAF reads a size that may have
+    //    moved again -> backing store LAGS one resize behind.
+    // Capturing contentRect (correct, post-layout) and applying it later in a
+    // coalesced rAF (out of the callback, so no drop) fixes both.
+    let _pendingW = 0, _pendingH = 0, _frame = 0;
+    const liveSize = (): [number, number] => {
+      const src = parent ?? el;
+      return [src.clientWidth, src.clientHeight];
+    };
+    const clampToWindow = (w: number, h: number): [number, number] =>
+      (typeof window !== 'undefined') ? [Math.min(w, window.innerWidth), Math.min(h, window.innerHeight)] : [w, h];
+    const queue = (rw: number, rh: number): void => {
+      if (rw <= 0 || rh <= 0) return;   // transient collapse — keep last good size
+      [_pendingW, _pendingH] = clampToWindow(rw, rh);
+      if (_frame) return;               // coalesce a burst into one apply
+      _frame = requestAnimationFrame(() => {
+        _frame = 0;
+        this._pendingResize = { width: _pendingW, height: _pendingH };
+        this._resize();
+        // POST-APPLY VERIFY: after the apply settles, re-read the live parent box
+        // on the NEXT frame. If it no longer matches what we applied, an event
+        // was dropped or a measurement was stale (the dpr-2 stuck-on-last-resize
+        // bug) — re-queue with the true current size. This self-corrects any
+        // missed transition without polling; converges in one extra frame.
+        requestAnimationFrame(() => {
+          const [lw, lh] = liveSize();
+          const [cw, ch] = clampToWindow(lw, lh);
+          if (lw > 0 && lh > 0 && (cw !== this._width || ch !== this._height)) queue(lw, lh);
+        });
+      });
+    };
+
     const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (entry) {
-        this._pendingResize = {
-          width: entry.contentRect.width,
-          height: entry.contentRect.height,
-        };
-      }
-      requestAnimationFrame(() => this._resize());
+      const entry = entries[entries.length - 1];   // latest box this batch
+      if (entry) queue(entry.contentRect.width, entry.contentRect.height);
     });
-    observer.observe(this.Element as unknown as Element);
+    observer.observe(target);
+
+    // Fallback: recover any dropped RO notification. window.resize fires on every
+    // viewport change; its handler runs after the resize's layout pass, so the
+    // parent's client box is current. Idempotent with the RO path.
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', () => {
+        const src = parent ?? el;
+        queue(src.clientWidth, src.clientHeight);
+      }, { passive: true });
+    }
   };
 
   /** Pointer tracking → specular tilt. Simulates Apple's gyro-driven catchlight:
@@ -2690,87 +2732,59 @@ export class Canvas implements DirtyTracker {
   private _debugLatest: string | null = null;
   private _debugLogLast: number = 0;
 
-  /** Walks the tree, runs each Janvas's foreign renderer at its layout rect.
-   *  Called once per frame, between BeginScenePass and the panel pass, so
-   *  foreign content lands in the scene FBO and gets composited under any
-   *  panels Jaui draws on top.
-   *
-   *  WebGL viewport coordinates are bottom-left origin; Element coords are
-   *  top-left. We flip Y here so the foreign renderer can think in normal
-   *  screen-space without learning Jaui's quirks. */
-  private _renderJanvases(
-    gl: WebGL2RenderingContext,
-    node: JauiElement,
-    offsetX: number,
-    offsetY: number,
-    canvasW: number,
-    canvasH: number,
-    dt: number,
-    /** Active rounded clip (device px, top-left). When set, the foreign
-     *  renderer's writes are stencil-clipped to this shape — letting the
-     *  janvas honour its ancestor's `Overflow:Hidden` + `BorderRadius`,
-     *  same as Jaui's own panel pass already does for jivs. */
-    clip: { x: number; y: number; w: number; h: number; radius: number; smoothness: number } | null,
-  ): void {
+  /** Walk the tree, pushing each visible Janvas (with a bound renderer) into
+   *  `_subsystemItems` with its device-px screen rect. The backend mounts the
+   *  subsystem into the shared scene (Attach once) and ticks it (Update when
+   *  dirty). offsetX/offsetY accumulate ancestor positions (CSS px). */
+  private _collectSubsystems(node: JauiElement): void {
     if (node instanceof Janvas) {
       const renderer = node.Renderer;
       if (renderer && node.Width > 0 && node.Height > 0 && node.Visible) {
-        if (!node.IsInited()) {
-          renderer.Init(gl, node.MarkDirty);
-          node.MarkInited();
-        }
         const d = this._dpr;
-        const px = Math.round((node.X + offsetX) * d);
-        const py = Math.round((node.Y + offsetY) * d);
-        const pw = Math.round(node.Width * d);
-        const ph = Math.round(node.Height * d);
-        const yFromBottom = canvasH - py - ph;
-        gl.viewport(px, yFromBottom, pw, ph);
-        gl.enable(gl.SCISSOR_TEST);
-        gl.scissor(px, yFromBottom, pw, ph);
-
-        const r = this._renderer as WebGL2Renderer;
-        const fbo = r.GetSceneFramebuffer();
-        renderer.Render(gl, fbo, { X: px, Y: yFromBottom, Width: pw, Height: ph }, dt);
+        // node.X / node.Y are ABSOLUTE (the layout solver writes resolved screen
+        // coordinates onto every node, not parent-relative offsets). So use them
+        // directly — adding an accumulated parent offset double-counts and threw
+        // the Janvas rect far off-screen (e.g. 480 → 2631), blanking the model.
+        this._subsystemItems.push({
+          Renderer: renderer,
+          Rect: {
+            X: Math.round(node.X * d),
+            Y: Math.round(node.Y * d),
+            Width: Math.round(node.Width * d),
+            Height: Math.round(node.Height * d),
+          },
+          Key: node,
+          Dirty: node.IsDirty(),
+        });
         node.ClearDirty();
-
-        // Defer the visual clip mask to the end of the frame. Wiping scene
-        // FBO pixels here destroys data that in-tree consumers need: a
-        // descendant pblur (e.g. HeroLeftBlur over a fullscreen Reality
-        // janvas) snapshots the scene to build its blur pyramid; if the
-        // wipe ran first, the rounded-corner regions sample as transparent
-        // black, smearing darkness into the blur. We queue (drawRect,
-        // clipRect, radius) and apply them after the panel pass — visual
-        // clipping for the presented frame, intact source for sampling.
-        if (clip) {
-          this._pendingJanvasMasks.push({
-            drawX: px, drawY: py, drawW: pw, drawH: ph,
-            clipX: clip.x, clipY: clip.y, clipW: clip.w, clipH: clip.h,
-            radius: clip.radius, smoothness: clip.smoothness,
-          });
-        }
       }
     }
-
-    // Update active clip for descendants if this node is a clipping container.
-    let childClip = clip;
-    if (node instanceof Jiv) {
-      const overflow = node.Overflow;
-      if ((overflow === 'Hidden' || overflow === 'Scroll') && node.Width > 0 && node.Height > 0) {
-        const d = this._dpr;
-        const px = Math.round((node.X + offsetX) * d);
-        const py = Math.round((node.Y + offsetY) * d);
-        const pw = Math.round(node.Width * d);
-        const ph = Math.round(node.Height * d);
-        const radii = node.RenderStyle?.BorderRadius;
-        const r0 = radii ? radii[0] : 0;
-        const smoothness = node.RenderStyle?.BorderRadiusSmoothness ?? 0;
-        childClip = { x: px, y: py, w: pw, h: ph, radius: r0 * d, smoothness };
-      }
-    }
-
     for (const child of node.Children) {
-      this._renderJanvases(gl, child, node.X + offsetX, node.Y + offsetY, canvasW, canvasH, dt, childClip);
+      this._collectSubsystems(child);
+    }
+  }
+
+  /** Gather every Light Jiv into `_frameLights` before any surface draws, so the
+   *  whole frame is lit by the full shared set regardless of tree order. Like
+   *  `_collectSubsystems`, `node.X/Y` are absolute (the solver writes resolved
+   *  screen coords), so the light's world center is direct — no transform
+   *  threading. +z toward viewer via VisualTranslateZ. `Space` only affects
+   *  where the light sits, never whether it lights (one shared scene). */
+  private _collectLights(node: JauiElement, _cx: number, _cy: number, _ox: number, _oy: number): void {
+    if (node instanceof Jiv) {
+      const light = node.RenderStyle.Light;
+      if (light !== null) {
+        const d = this._dpr;
+        this._frameLights.push({
+          Light: light,
+          X: (node.X + node.Width / 2) * d,
+          Y: (node.Y + node.Height / 2) * d,
+          Z: node.RenderStyle.VisualTranslateZ * d,
+        });
+      }
+    }
+    for (const child of node.Children) {
+      this._collectLights(child, _cx, _cy, _ox, _oy);
     }
   }
 }
@@ -2796,12 +2810,11 @@ export class Jaui {
 
   /**
    * @param canvasEl  HTMLCanvasElement to render into.
-   * @param opts.renderer  Optional renderer override; defaults to a fresh
-   *                       WebGL2Renderer (sync init, safe for descendants
-   *                       that read `Root` in their own ngOnInit).
+   * @param opts.renderer  Renderer instance for DI/tests only. ThreeRenderer is
+   *                       the sole backend — this is not a backend-selection knob.
    */
   constructor(canvasEl: HTMLCanvasElement, opts?: { renderer?: Renderer; platform?: Platform }) {
-    const r = opts?.renderer ?? new WebGL2Renderer();
+    const r = opts?.renderer ?? new ThreeRenderer();
     void r.Init(canvasEl);
     this.Canvas = new Canvas(canvasEl, r, opts?.platform ?? BrowserPlatform);
   }
@@ -2842,8 +2855,11 @@ const _CURSOR_CSS: Record<'Default' | 'Pointer' | 'Text' | 'Move' | 'None', stri
 
 // ─── Re-exports by slice ───
 
-export { Janvas } from '../Janvas/Janvas';
-export type { JanvasRenderer, JanvasRect } from '../Janvas/Janvas.Renderer';
+export { Janvas };  // imported above for the subsystem walk
+export type { JanvasRenderer, JanvasRect, JanvasContext } from '../Janvas/Janvas.Renderer';
+// 3D content as a Jiv component (see Documentation/Model3DComponent.md).
+export { Model3D, type Model3DOptions } from '../Model3D/Model3D';
+export { RotationView, type RotationViewOptions } from '../Model3D/RotationView';
 
 export { Jath } from './Jath';
 export { Jiv } from '../Jiv/Jiv';
@@ -2852,14 +2868,10 @@ export { Jiv } from '../Jiv/Jiv';
 export type { Vec2, Vec4, Rect, Color, DeviceTier, DirtyFlags } from './Types';
 export { DirtyFlag } from './Types';
 export type { Renderer } from './Renderer';
-// Renderers are exported directly — callers pick the one they want and
-// hand it to `new Canvas(el, renderer)`. No auto-pick factory: the choice
-// between WebGL2 (sync) and WebGPU (async) is the caller's to make.
-export { WebGL2Renderer } from './WebGL2.Renderer';
-export { WebGPURenderer } from './WebGPU.Renderer';
+export { ThreeRenderer } from './Three.Renderer';
 
 // Jiv
-export type { JivStyle, CornerShape, BlendMode, MaterialType, ProgressiveBlurDirection, BackgroundValue, GradientStop } from '../Jiv/Jiv.Types';
+export type { JivStyle, CornerShape, BlendMode, ProgressiveBlurDirection, BackgroundValue, GradientStop } from '../Jiv/Jiv.Types';
 export type { FitMode } from '../Element/Element';
 export { DefaultJivStyle } from '../Jiv/Jiv.Defaults';
 

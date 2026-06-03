@@ -1,71 +1,78 @@
+import type * as THREE from 'three';
+
 /**
- * JanvasRenderer — interface a foreign renderer (THREE.js, vanilla WebGL,
- * etc.) implements to draw into a Janvas region of Jaui's scene.
+ * JanvasRenderer — the contract a self-contained 3D subsystem (reality marchers,
+ * field sim, a custom shader app) implements to live inside Jaui's unified
+ * Three.js scene.
+ *
+ * This is the Three-native evolution of the old "foreign WebGL2 renderer draws
+ * into our FBO" model (see Documentation/ThreeMigration.md, "one world, two
+ * authoring paths"). A subsystem no longer blits into a framebuffer; it **mounts
+ * its own `Object3D` subtree** into the shared scene and renders as part of the
+ * single unified Three frame — so it shares the camera, depth buffer, and lights
+ * with the UI, occluding and being lit alongside it automatically.
  *
  * Lifecycle:
- *   1. `Init(gl, markDirty)` is called once when the Janvas first becomes
- *      visible to the frame loop. The renderer should build any GPU resources
- *      it needs (programs, buffers, textures) using the provided WebGL2
- *      context — that context is shared with Jaui, so anything created here
- *      participates in the same GL device.
- *   2. `Render(gl, width, height, dt)` is called every Jaui frame the renderer
- *      is marked dirty. The viewport and scissor are set by Jaui to the
- *      Janvas's screen rect before the call; the foreign renderer just draws
- *      into the currently bound framebuffer at the origin.
- *   3. `Dispose()` is called when the Janvas leaves the tree.
+ *   1. `Attach(ctx)` — once, when the Janvas first becomes visible. The subsystem
+ *      adds its root Object3D to `ctx.World` (or builds geometry/materials using
+ *      `ctx.Renderer`). It gets the raw Three handles — this is the deliberate
+ *      escape hatch: build whatever's fastest (InstancedMesh of 200 marchers,
+ *      custom ShaderMaterial), at native Three speed, NOT through the JSS path.
+ *   2. `Update(rect, dt)` — each frame the Janvas is dirty. The subsystem
+ *      positions/sizes its content for the Janvas's current screen rect (device
+ *      px, top-left origin) and advances its animation by `dt` seconds. It does
+ *      NOT call renderer.render — Jaui renders the whole scene once per frame.
+ *   3. `Detach()` — when the Janvas leaves the tree. Remove the subtree, dispose.
  *
- * The `markDirty` callback handed to `Init` lets the renderer signal that
- * its internal state changed (camera moved, model updated, animation tick).
- * Jaui only calls `Render` when the dirty flag is set, so a static scene
- * has zero per-frame cost beyond the clear/scissor reset.
- *
- * GL state contract: Jaui save-and-restores the framebuffer binding, viewport,
- * scissor, blend, depth-test, and the four texture-unit-0 bindings around
- * `Render`. The renderer is free to mutate ANY other GL state without
- * disturbing Jaui's pipeline.
+ * The `markDirty` callback handed to `Attach` lets the subsystem request a frame
+ * (camera moved, model changed, animation tick). Jaui only calls `Update` when
+ * the Janvas is dirty, so a static subsystem costs nothing per frame.
  */
+
+/** Janvas screen rect in device pixels, top-left origin. */
 export interface JanvasRect {
-  /** Janvas region in device pixels, GL viewport conventions:
-   *   - X, Y: bottom-left-origin offset into the scene FBO (Y is
-   *           `canvasHeight - topLeftY - Height`, ready for
-   *           `gl.viewport` / THREE `renderTarget.viewport`).
-   *   - Width, Height: size.
-   *  The foreign renderer must pass all four to its viewport — passing
-   *  `(0, 0, Width, Height)` makes content land at the canvas bottom-left
-   *  regardless of where the janvas actually is. */
   X: number;
   Y: number;
   Width: number;
   Height: number;
 }
 
-export interface JanvasRenderer {
-  Init(gl: WebGL2RenderingContext, markDirty: () => void): void;
-  /** @param fbo The framebuffer Jaui wants the renderer to draw into. May
-   *             be null = default framebuffer. THREE consumers wrap it via
-   *             `WebGLRenderTarget` + `__webglFramebuffer` override.
-   *  @param rect Screen rect in device pixels for the janvas region. */
-  Render(gl: WebGL2RenderingContext, fbo: WebGLFramebuffer | null, rect: JanvasRect, dt: number): void;
-  /** Receive a state push from main (or another worker-side service) by
-   *  named channel. Optional — renderers that don't track external state
-   *  omit it. The registry forwards `M2W_JanvasInput` messages addressed
-   *  to this Janvas's id. Channels namespace by intent: `'reality:camera'`,
-   *  `'reality:marchers'`, `'reality:selection'`, etc. */
-  Input?(channel: string, payload: unknown): void;
-  Dispose?(): void;
+/** Shared-world handles handed to a subsystem at `Attach`. The subsystem mounts
+ *  into `World` and may read `Scene`/`Camera`/`Renderer` for advanced use. */
+export interface JanvasContext {
+  /** The single THREE.Scene. */
+  Scene: THREE.Scene;
+  /** The world group — mount your subtree here (it inherits the world transform). */
+  World: THREE.Group;
+  /** The shared perspective camera (read-only; do not reparent or mutate unless
+   *  you own the camera for a full-bleed 3D Janvas). */
+  Camera: THREE.PerspectiveCamera;
+  /** The shared WebGLRenderer — for creating GPU resources (textures, RTs). */
+  Renderer: THREE.WebGLRenderer;
+  /** Request a redraw. Call when internal state changes between frames. */
+  MarkDirty: () => void;
+  /** Forward an event to this Janvas's main-side counterpart (worker mode). */
+  PostEvent?: (channel: string, payload: unknown, transfer?: Transferable[]) => void;
 }
 
-/** Construction context handed to a `JanvasRendererFactory` at attach time.
- *  Lets the factory close over per-instance plumbing it can't access
- *  globally — most importantly `PostEvent`, which the renderer uses to
- *  surface state changes back to its main-side counterpart. */
+export interface JanvasRenderer {
+  /** Mount the subsystem's Object3D subtree into the shared scene. Called once. */
+  Attach(ctx: JanvasContext): void;
+  /** Position/animate for the current screen rect; advance by `dt` seconds.
+   *  Called per dirty frame. Must NOT call renderer.render. */
+  Update(rect: JanvasRect, dt: number): void;
+  /** Receive a state push from main (or another service) by named channel.
+   *  Optional. Channels namespace by intent: 'reality:camera', 'reality:marchers'. */
+  Input?(channel: string, payload: unknown): void;
+  /** Remove the subtree and dispose GPU resources. */
+  Detach?(): void;
+}
+
+/** Construction context for a `JanvasRendererFactory`. Lets the factory close
+ *  over per-instance plumbing — most importantly `PostEvent`. */
 export interface JanvasFactoryContext {
-  /** Worker-side Jiv id of the Janvas this renderer is being constructed
-   *  for. Useful for renderers that maintain a side-table keyed by id
-   *  (e.g. a multi-Janvas selection registry). */
+  /** Worker-side Jiv id of the Janvas this renderer is being constructed for. */
   JivId: number;
-  /** Forwarder to `WorkerBridge.PostJanvasEvent` with this Janvas's id
-   *  pre-bound. Calling `PostEvent('foo', payload)` emits a `W2M_JanvasEvent`
-   *  on main with `{JivId: <this>, Channel: 'foo', Payload}`. */
+  /** Forwarder to `WorkerBridge.PostJanvasEvent` with this Janvas's id bound. */
   PostEvent: (channel: string, payload: unknown, transfer?: Transferable[]) => void;
 }

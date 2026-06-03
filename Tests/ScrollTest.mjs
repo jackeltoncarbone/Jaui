@@ -1,0 +1,16 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch({ args: ['--use-gl=angle','--use-angle=swiftshader','--ignore-gpu-blocklist'] });
+const p = await b.newPage({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+const errs=[]; p.on('pageerror',e=>errs.push(e.message));
+await p.goto('http://localhost:6777/Corpus/Home.html', { waitUntil: 'domcontentloaded' });
+await p.locator('canvas').first().waitFor({ state: 'visible', timeout: 10000 }).catch(()=>{});
+await p.waitForTimeout(2500);
+const sy0 = await p.evaluate(() => window.__scrollJiv?.ScrollY ?? 'no-hook');
+await p.mouse.move(700, 400);
+await p.mouse.wheel(0, 600); await p.waitForTimeout(400);
+await p.mouse.wheel(0, 600); await p.waitForTimeout(400);
+const sy1 = await p.evaluate(() => window.__scrollJiv?.ScrollY ?? 'no-hook');
+console.log('ScrollY before:', sy0, ' after wheel:', sy1);
+console.log('scrolls:', (typeof sy1==='number' && sy1 > 0) ? 'YES' : 'NO');
+console.log('errors:', errs.length, errs.slice(0,3).join(' | '));
+await b.close();

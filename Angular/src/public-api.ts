@@ -11,6 +11,7 @@ export * from './Janvas/Janvas';
 export * from './Jiv/Jiv';
 export * from './Jimage/Jimage';
 export * from './Jext/Jext';
+export * from './Light/Light';
 export * from './Jyle/Jyle';
 export * from './SvgJiv/SvgJiv';
 export * from './Jinput/Jinput';
@@ -22,7 +23,7 @@ export * from './Jss/Jss.Registry';
 // need the core class can import from 'jaui' directly.
 export type {
   JivStyle, LayoutConfig, ChildLayout, TextStyle,
-  CornerShape, BlendMode, MaterialType, Color,
+  CornerShape, BlendMode, Color,
   ProgressiveBlurDirection,
   Stylesheet, Ruleset,
 } from 'jaui';

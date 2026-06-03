@@ -1,226 +1,172 @@
 # Next Up
 
-Handoff doc for the next agent picking this up fresh. Current as of 2026-04-17 (late session — GPU-perf arc just shipped).
+Handoff doc for the next agent picking this up fresh. Current as of **2026-06-03**
+(Jiv-3D-native arc: taxonomy collapse + `<light>` element + shared scene lighting
+just shipped and verified).
+
+Read `Documentation/Jiv3D.md` FIRST — it is the canonical design spec for the
+current direction. `Documentation/ThreeParityAndDepth.md` covers the screen/world
+depth model. This doc is the operational state + next steps.
 
 ---
 
-## Where we are
+## Branches (all repos, as of this handoff)
 
-**Engine.** WebGL2 + WebGPU backends, both live. CSS-style overflow
-clipping fully implemented — per-frame clip-stack buffer shared across
-panel/text/progressive-blur shaders. Clip SDF matches the panel's own
-superellipse so the discard edge exactly traces the painted rounded-rect
-edge. Clip edges use a 1-pixel smoothstep AA; progressive blur clamps UV
-lookups to the clip AABB so beyond-clip content can't bleed.
+| Repo | Branch | Remote |
+|---|---|---|
+| show-studio (root) | `jev` | (parent repo) |
+| Jaui (submodule) | `jev` (created from detached `067aef7` this session) | github.com/jackeltoncarbone/Jaui |
+| Jwift (submodule) | `jev` (created from detached `1f20b8f` this session) | github.com/jackeltoncarbone/Jwift |
 
-**JSS language.** Parser supports:
-- `@Name: value` variable declarations + `@Name` reference in expressions
-- `Name : Base1, Base2 { … }` multi-class inheritance (build-time flatten)
-- `@spring Property { Stiffness, Damping }` per-property spring overrides
-- `Presence`, `Entering`, `Exiting` as first-class built-in identifiers
-  (resolved per-Jiv per-frame from the Presence spring)
-- Full arithmetic in Length values (`+`, `-`, `*`, `/`, parens, `vh`/`vw`/`%`/`pt`)
+Note: `ShowStudio.Web/src/Plan.md` at the root is untracked and NOT mine — left
+uncommitted; another agent may own it.
 
-**Presence (entry/exit).** Fully live through M4. Every Jiv has a
-`Presence` spring (0→1 on mount, 1→0 on `RequestLeave()`, removed on
-settle). `Entering` / `Exiting` boolean flags exposed as built-in
-identifiers. Default `Opacity: Presence` in Jiv.Defaults.ts gives
-implicit fade without any JSS authoring. Authors can write
-`OffsetY: Entering * -20 * (1 - Presence)` etc.
+## The mission (user's words, distilled)
 
-**Progressive blur.** True per-pixel variable Gaussian — shader samples
-unblurred scene + mipmapped pyramid with ramp-driven LOD, blending
-entirely in RGB (no alpha-masked haze). Background tint + grading ramp
-along the gradient.
+One unified 3D UI framework. **Jiv is the one universal element and it is one
+physical surface** — NO glass/solid/translucent classification, ever. Physical
+attributes on continua (opacity, backdrop filter, refraction, thickness, fillet).
+**Thickness is intrinsic**: every Jiv has it; 0 = "impossibly thin" sheet, not a
+mode. One THREE scene; `Space: Screen|World` is transform/styling ONLY (never
+segregation). **Lights are Jivs** (`<light>`), JSS-authored, lighting everything
+(surfaces + meshes) from one shared set. Wants "rubbery frosted-glass /
+frosted-paper sheets, small fillet, Apple radius, real presence" — performant AND
+physically present, both. Mental model and code must match. Build the ideal now,
+no legacy paths.
 
-**Home demo.** Show Studio home page port with hero, card widgets
-(URL-backed ImageSrc, FitMode: Cover), Liquid Glass chrome (Toolbar +
-TabBar in a ChromeFrame with concentric radii), progressive blur
-feathers, icon font. `npm run dev` → port 6777.
+## What shipped this arc (all verified live on the demo)
 
-**Core design rules (non-negotiable):**
-- Concentric radii: `child = parent - gap`. Always.
-- "Everything animates, no hard seams." Springs chase instant layout.
-- Layout/compute is instant; springs create motion from the delta.
+1. **Material taxonomy collapsed** (`Source/Core/Style.Resolver.ts`,
+   `Jiv.Types.ts`, `Jiv.Defaults.ts`, `Jaui.ts`, `Jiv.StyleAnimator.ts`,
+   `Jiv.InstanceBuffer.ts`): `MaterialType` enum + `_inferMaterial` +
+   Thickness→glass promotion DELETED. Replaced by attribute-derived
+   `SamplesBackdrop` / `HasProgressiveBlur` booleans + one unified `Depth`
+   (= Thickness + Elevation, both JSS names still authorable/animatable, both
+   drive the one Depth). The StyleAnimator's discontinuous material-flip
+   machinery is gone — depth animates continuously through 0.
+   `Tests/Jiv.Material.test.ts` fully rewritten for the new model (14/14 pass).
+2. **`<light>` element** (`Angular/src/Light/Light.ts`, exported from
+   public-api): a Jiv subclass, selector `light`. JSS props on every Jiv:
+   `LightType` (Directional|Ambient|Point|Spot|Area, '' = not a light),
+   `LightColor`, `LightIntensity_` (trailing underscore avoids collision with the
+   receive-side `LightIntensity`), `LightDirection` ('x y z'), `LightRange`,
+   `LightConeAngle`, `LightPenumbra`, `LightCastShadow`. Resolver builds
+   `RenderStyle.Light: ResolvedLight | null` (`_resolveLight` in Style.Resolver).
+3. **Shared scene lighting** (`Jaui.ts` `_collectLights` pre-pass →
+   `Renderer.SetSceneLights` → `Three.Renderer.ts`): every frame, light Jivs are
+   gathered (world pos from solved layout) BEFORE any draw; the renderer syncs a
+   pool of real `THREE.Light`s (for World/Janvas meshes) + drives the surface
+   shader. Directional lights feed `u_SceneLightDir/Color/Int/On` (bevel + face
+   shading); Point/Spot additionally drive the positional sheen
+   (`u_LightPos/Strength/Radius`, clamped — feeding a Directional into the sheen
+   washes the screen white; that bug is fixed). Ambient lights sum into a
+   `THREE.AmbientLight`. No lights ⇒ default ambient (nothing goes black).
+4. **Slab presence**: PANEL_FRAG's `elevation>0` bevel block now lights from the
+   scene light (`u_SceneLightOn` selects scene light vs per-instance LightAngle
+   fallback) + a depth-scaled whole-face shade. With the demo's
+   `<light class="KeyLight">` (Directional, warm, upper-right), deep slabs
+   visibly catch light on their bevels; drop shadows scale with depth.
+   Continuity invariant verified: Depth-0 slab pixel-identical to flat.
+5. **Demo state** (`Examples/Angular/src/Home/`): Home has a temporary `ThickRow`
+   slab strip (Slab0..3, Elevation 0/8/20/40 + fillets + shadows) as the live
+   proving ground, plus the `KeyLight`. REMOVE the strip when presence tuning is
+   done (or keep as showcase if user wants).
 
----
+## Critical operational gotchas (will eat hours if unknown)
 
-## GPU-perf arc shipped this session (2026-04-17)
+- **STALE-SERVING TRAP (worst one):** if the Angular build fails to compile,
+  `ng serve` silently keeps serving the last-good bundle — screenshots stop
+  reflecting edits and you chase phantoms. Lib `tsc` does NOT compile
+  `Angular/src/public-api.ts` (a stale re-export there broke the build invisibly
+  for an hour). ALWAYS check the ng serve output for `ERROR` vs
+  `Application bundle generation complete`, or run a fresh `ng serve` on a new
+  port to surface errors. When the build is green, the watcher DOES pick up
+  `Source/` changes fine.
+- Worker-source edits need `Examples/Angular/src/app/jaui.worker.ts` touched to
+  force the worker chunk rebuild (HMR misses it).
+- Playwright: full-page `page.screenshot` at deviceScaleFactor 1 ONLY (clipped
+  and 2× shots hang on the animating canvas). Race `document.fonts.load` against
+  a timeout (it can hang headless; serif/tofu in shots = headless font quirk,
+  fonts are fine in real browsers). Verify with code reasoning first, screenshot
+  once at the end (user preference).
+- Two dev servers existed at handoff: the user's long-running `ng serve` on
+  **:6777** (was serving the stale bundle — needs restart to pick up this work)
+  and my fresh verified one on **:6779** (background task; may be dead by the
+  time you read this — start your own: `cd Examples/Angular && npx ng serve
+  --port 6779`).
+- Angular demo is THE test surface (user directive). Don't use the Vanilla
+  corpus. Scope vitest runs to what you touched.
+- The user's standing rules: execute decisively, don't ask A/B questions, no
+  commits/pushes without fresh permission, shared worktree (no stash/destructive
+  git), minimal comments-style, PascalCase, point-first JSS (bare number = pt;
+  1pt = 16px; ratios/material scalars resolve literal via `ResolveScalar`).
 
-All in the WebGL2 render path. Full details in `PLAN.gpu-optimize.md`.
+## Known remaining work (task list lives in session, mirrored here)
 
-- **Scene FBO routing** (`_render`) — scene draws into `_sceneFbo` not the default framebuffer. Glass samples sceneFbo.Texture directly (zero blits). Final `PresentScene()` hardware-blit composites to swap chain. Pblurs still need a one-shot `SnapshotScreen` per pass because the shader samples both unblurred scene and blur pyramid (feedback-loop on sceneFbo otherwise).
-- **Rect-scoped blur** (`BlurPass.ts`) — `ComputeBlur` accepts an optional `scissor` rect. Glass and pblur pass their panel rect + LOD-aware margin so the blur only fills the region the panel will sample. 20–50× fill reduction for localized glass at HD.
-- **Non-glass panel batching** (`_render.flushPanels`) — 30–100 individual panel draw calls collapse into 3–5 batched instanced draws. Flush points: glass/pblur/image/text/end-of-walk.
-- **Text batching** (`_render.flushText`) — same pattern. On Home the count doesn't drop much because text is heavily interleaved with panels, but infrastructure is in place for UIs with long text runs.
-- **Shader variants** (`ShaderCompiler` + `Jiv.Panel.frag`) — `MATERIAL_GLASS` / `MATERIAL_NONE` defines let GLSL DCE strip the unused branches. Non-glass fragments run a ~400-line shader instead of ~900. `PanelDrawBatch` selects program by `backdrop != null`.
-- **Shadow early-out** — skips `ShapeSDF` + smoothstep when `ShadowColor.a ≈ 0`. Most non-Card panels benefit.
-- **`invalidateFramebuffer`** end-of-frame — default-FB depth/stencil + scene-FBO color marked discard-after-use. Mobile TBDR bandwidth win.
-- **`useProgram` state cache** — skip redundant JS→GL program binds. Invalidated after BlurPass (which uses raw gl.useProgram).
-- **Custom Gaussian mipmap** (`BlurPass.GenerateOutputMipmap`) — replaces driver's `generateMipmap` box filter with iterated dual-filter DOWN passes. Blurred output pyramid has Gaussian-quality mip levels through LOD 8 — no blocky artifacts at any LOD. `MAX_LEVELS = 9`.
+1. **Presence tuning** — bevels read but subtly; user wants "rubbery frosted
+   paper". Iterate bevel strength/width, face shade range, shadow defaults;
+   consider frost-on-slab (SamplesBackdrop + Depth together) for the
+   frosted-sheet look. The mechanism is proven; this is aesthetics.
+2. **Shader unification (cleanup)** — PANEL_FRAG vs GLASS_FRAG still two GPU
+   programs selected by `samplesBackdrop` (under-the-covers only — fine per
+   user). Eventually fold into one surface shader where every term scales to
+   zero at default. `GLASS_FRAG`'s `materialType` branches are now dead-ish
+   (glass batch always materialType==1) — safe to simplify.
+3. **Pluggable cross-section shape** — Jiv footprint as a base-path/SDF attribute
+   (NOT clip); default = current superellipse box→pill→circle. See Jiv3D.md
+   "shape as an attribute".
+4. **Volumetric frost + spatial child containment** — progressive blur becomes a
+   participating medium with real Z depth; children live INSIDE the parent slab
+   (between back/front face), hazed by fog-depth traversed (Beer-Lambert over Z),
+   not paint order. See Jiv3D.md "frost/blur is volumetric". Big arc; depends on
+   the lighting/depth foundation that now exists.
+5. **More light kinds** — Point/Spot THREE-side exist crudely (pool is all
+   DirectionalLight currently — make kind-correct THREE.PointLight/SpotLight),
+   Area + Environment/IBL (scene.environment for reflections) not started.
+   Multi-light surface shading (currently dominant-light-only on surfaces).
+6. **pt-flip test debt** — ~25 pre-existing failures (Length/Layout.Attach/
+   Text.Layout/StyleAnimator.Animation tests) assert old bare-number=px values;
+   the unitless→pt (×16) flip invalidated them. Update assertions (use explicit
+   `px` or expect ×16). NOT from this arc's changes.
+7. **Home polish (Show Studio)** — hero recognizability (field/marchers idea),
+   scroll feel, nav color-outline tuning (ChromaticAberration now 0), volumetric
+   "Disney World" inline 3D content once the framework supports it.
 
-**HUD metrics for verification:** demo URL with `?debug` shows an overlay + console logs `[Jaui perf]` each frame with per-phase CPU time + draw counts. CPU render on HD dropped from ~2ms baseline to ~0.7ms over the arc (headless readings; real machine will vary with 30/60/120Hz display).
+## My current thoughts / judgment calls made
 
----
+- Depth = Thickness + Elevation **summed** (not max) — both names kept authorable
+  on purpose; could collapse to one JSS name later but the user values authoring
+  continuity.
+- A light Jiv early-returns from the paint walk (`Jaui.ts` renderNode) — it has
+  no surface. If a light should ALSO paint (glowing panel), that's a future
+  attribute (`LightType` + visible body); trivial to add by removing the early
+  return behind a flag.
+- `LightIntensity_` naming is ugly (collision with receive-side LightIntensity).
+  Consider renaming the receive-side prop to `SurfaceLightIntensity` or similar
+  in a follow-up — but that touches existing JSS/docs.
+- The positional-sheen clamp (intensity×0.3 max 0.6, radius default 700) is a
+  taste call — revisit with the user during presence tuning.
+- I did NOT touch the frozen `Jaui Copy/` golden reference (OneDrive). 2D parity
+  harnesses (`Tests/Compare.mjs` etc.) still reference it as oracle.
 
-## Remaining work (priority order)
+## Open questions for the user (ask when relevant, don't block)
 
-### 1. MSDF / SDF text rendering (half-started — DO NOT SHIP HALF-BAKED)
-Current text atlas rasterizes whole words via Canvas 2D `fillText` into RGBA tiles. Text scales poorly — aliasing when zoomed out, blurriness when scaled up. MSDF is the standard fix.
+- Should the slab strip stay in Home as a permanent material/lighting showcase
+  row, or be removed once tuning lands?
+- Frosted-paper look: how much frost should a thick OPAQUE sheet have by default
+  (frost currently requires explicitly setting BackdropFrostBlur — should Depth
+  imply a touch of edge frost)?
+- Multi-light on surfaces: dominant-light-only is cheap and looks fine for one
+  key light — is N-light surface accumulation worth the fragment cost now, or
+  after the volumetric arc?
+- Keep `Elevation` as an alias forever, or deprecate toward a single `Thickness`?
 
-**Realistic constraints:**
-- Browsers don't expose TrueType outlines → true MSDF (needs edge coloring) is unreachable in-browser. Single-channel SDF is the achievable target.
-- Jump flooding in JS is ~100-200ms per cache-miss word. Prohibitive at runtime. **The SDF pass must run on the GPU** (fragment-shader JFA chain, ping-pong FBOs, ~log₂(maxDim) passes).
-- Alternatively: pre-bake a font atlas at build time and ship as a binary asset. Trade: runtime font-loading flexibility for correctness + startup speed.
+## How to verify your changes (closed loop)
 
-**Components needed:**
-1. GPU JFA compute chain (or build-time atlas generator).
-2. `Text.Cache` atlas format: single-channel distance in R (or 8-bit R in RGBA8).
-3. `Text.Quad.frag`: `alpha = smoothstep(0.5 - fwidth(d), 0.5 + fwidth(d), d)`.
-4. Atlas padding / spread knobs; test visually at multiple scales.
-
-**Cheap alternative if MSDF is too big to ship this pass:** supersample + mipmap the existing Canvas-2D rasterization. Render words at 1.5-2× supersample, add mipmap to text atlas (currently `MIN_FILTER: LINEAR` with no mipmap), trilinear sample. Not SDF's "sharp at any scale" but solid improvement at fixed render sizes — which is Home's use case. ~30 min of work.
-
-### 2. Verify perf on real hardware (iPad / Macbook)
-Session probe ran in headless Chromium which caps FPS at ~1 regardless. Real perf across all the GPU-perf changes needs validation on the target devices. Use Safari Web Inspector via USB for iPad, or DevTools on Macbook, to read `[Jaui perf]` console output. User previously reported "laggy as f" on iPad — should be dramatically better now. HD desktop user reported 30fps cap which turned out to be display-level / Chrome-setting (not Jaui's doing; see PLAN.gpu-optimize.md sources).
-
-### 3. `when(cond, a, b)` expression in Length resolver
-Branching expression for JSS: `OffsetX: when(Exiting, 40 * (1 - Presence), 0)`.
-Currently authors approximate with arithmetic (`Exiting * 40 * ...`) but
-that breaks for non-linear properties (e.g. different enter vs exit
-transforms). Parser + Length.ts need a `when()` function node.
-
-### 4. Presence M5 — `@spring Presence` override per-class
-`@spring` already cascades for style properties; wire it to the Presence
-spring specifically so individual classes can tune stiffness/damping for
-their own enter/exit animation.
-
-### 5. `@when Width > N { … }` responsive rules
-Parser + resolver. Unlocks media-query equivalents in JSS — hero padding
-variant is the first use case.
-
-### 6. Wallace analytic drop shadow (perf + quality bump)
-Current shadow is `ShapeSDF + smoothstep` inside the panel shader. Early-out already lands (skips when ShadowColor.a≈0), but for panels WITH shadows the SDF path remains. Evan Wallace's erf-based analytic shadow (https://madebyevan.com/shaders/fast-rounded-rectangle-shadows/) is constant-time, better-looking at large blur radii, and could move to its own pre-pass so panels without shadows never even reference the shadow varyings. Medium-complexity refactor.
-
-### 7. Batch text draws — infrastructure in place, but re-evaluate
-The flushText() pattern landed in this session. On Home it gave ~0 improvement because text is heavily interleaved with panels. If a future page has long text runs (chat, list, menu), batching will pay off. Meanwhile: worth looking at the clip-buffer upload pattern during text batches — `SetClipBuffer` gets called per-flush; verify it's actually dedup'd.
-
-### 8. Polish
-- Scroll container clipping: verify content behind the tab bar is
-  clipped by the overflow clip-stack. Fix if not.
-- `"Renections"` glyph artifact on cold-load before fonts ready.
-  Related to text measurement timing.
-- `<jiv>` template inputs for `X` / `Y` so floating chrome can use
-  `Position: Placed` without imperative resize hooks.
-- Visually verify smoothstep AA on clip corners — no shimmer at
-  sub-pixel scales.
-
-### 9. Three.js hero integration
-The 3D reality-view region in the hero needs Three.js via the "External
-Canvas Compositing" feature in `Features.md`. Not yet implemented.
-
----
-
-## Suggested: set up Playwright perf probe for verification
-
-The session used a local Playwright script (gitignored at `perf-probe.mjs`) that launched the dev server, captured `[Jaui perf]` console logs across three viewport sizes (small / medium / HD), and screenshot each for visual regression verification. **Strongly recommended** for any future perf/visual work — catches regressions instantly.
-
-Minimal setup:
-```bash
-# playwright already in node_modules
-# dev server must be running on :6777
-# create perf-probe.mjs: launch chromium, goto ?debug, wait for rAF
-#   samples, resize viewport, screenshot. ~80 lines.
-```
-
-Notes:
-- Headless Chromium throttles WebGL aggressively — **FPS readings are meaningless** (~1 fps regardless of load). Use it for visual regression + CPU phase timing + draw counts + screenshot diffs, NOT for FPS numbers.
-- Real perf validation needs actual browser on real device.
-- The perf probe + screenshots directory should stay gitignored (local artifacts).
-
-See `PLAN.gpu-optimize.md` for the full shipped work and pending items (e.g. `C3 texStorage2D`, full Wallace shadow pass) that were scoped but not done.
-
-### 2. `when(cond, a, b)` expression in Length resolver
-Branching expression for JSS: `OffsetX: when(Exiting, 40 * (1 - Presence), 0)`.
-Currently authors approximate with arithmetic (`Exiting * 40 * ...`) but
-that breaks for non-linear properties (e.g. different enter vs exit
-transforms). Parser + Length.ts need a `when()` function node.
-
-### 3. Presence M5 — `@spring Presence` override per-class
-`@spring` already cascades for style properties; wire it to the Presence
-spring specifically so individual classes can tune stiffness/damping for
-their own enter/exit animation.
-
-### 4. `@when Width > N { … }` responsive rules
-Parser + resolver. Unlocks media-query equivalents in JSS — hero padding
-variant is the first use case.
-
-### 5. Polish
-- Scroll container clipping: verify content behind the tab bar is
-  clipped by the overflow clip-stack. Fix if not.
-- `"Renections"` glyph artifact on cold-load before fonts ready.
-  Related to text measurement timing.
-- `<jiv>` template inputs for `X` / `Y` so floating chrome can use
-  `Position: Placed` without imperative resize hooks.
-- Visually verify smoothstep AA on clip corners — no shimmer at
-  sub-pixel scales.
-
-### 6. Three.js hero integration
-The 3D reality-view region in the hero needs Three.js via the "External
-Canvas Compositing" feature in `Features.md`. Not yet implemented.
-
----
-
-## Where things live
-
-**Specs:** `Jaui/src/Shared/Documents/Specifications/`
-- `Specification.md` — architecture, pipeline, milestones M1–M7
-- `Features.md` — every visual/interaction feature
-- `Styling.md` — JSS language
-- `Layout.md` — flex solver design
-- `Presence.md` — entry/exit animation system
-- `Conventions.md` — code style
-- `Examples.md` — target API
-- `Var.md` — `@var` spec
-
-**Engine core:** `Jaui/src/Core/`
-- `Jaui.ts` — Canvas class, render loop, clip-stack walker
-- `Clip.Stack.ts` — ClipShape type + per-frame accumulator
-- `WebGPU.Renderer.ts`, `WebGL2.Renderer.ts` — GPU backends
-- `Style.Resolver.ts` — JivStyle → JivRenderStyle
-- `Length.ts` — expression parser (arithmetic, `@Name` vars, built-ins)
-
-**Animation:** `Jaui/src/Animation/`
-- `Animation.Manager.ts` — RAF loop, settle detection
-- `Spring.ts` — spring physics
-- `Presence.Manager.ts` — Presence springs + settle-then-remove
-
-**JSS parser:** `Jaui/src/Jss/`
-- `Jss.Parser.ts` — rulesets, extends, `@var`, `@spring`
-- `Jss.Routes.ts` — prop-name → slot routing
-
-**Shaders** (edit source, regen via `npm run build:shaders`):
-- `Jaui/src/Core/Shaders/` — WebGPU WGSL
-- `Jaui/src/Jiv/Shaders/`, `Jaui/src/Text/Shaders/`,
-  `Jaui/src/ProgressiveBlur/ProgressiveBlur.Shader.ts` — WebGL2 GLSL
-
-**Demo:** `Jaui.Angular.Demo/src/Home/Home.jss` + `Home.ts`
-Dev server: `npm run dev` (port 6777).
-
-**Show Studio reference:**
-`../show-studio/ShowStudio.Web/src/Libraries/Jaui/` — DOM-based Jiv.
-`../show-studio/ShowStudio.Web/src/App/Home/` — the home page being ported.
-
----
-
-## Key context
-
-1. **Jaui is an engine, Show Studio is the test customer.** Everything
-   must serve the Home page port.
-2. **Concentric is non-negotiable** — every radius = parent - gap.
-3. **Instant compute + spring motion** — discrete calculation, temporal
-   animation.
-4. **"Everything animates"** — hard pops are a bug.
-5. **Vertical slices** — each feature owns its full stack from shader
-   to public API.
-6. **Read the spec before writing code.**
+1. `npx tsc --noEmit -p tsconfig.json` (lib) AND `cd Examples/Angular &&
+   npx tsc --noEmit` (demo types) AND watch the ng serve output compiles.
+2. Touch `Examples/Angular/src/app/jaui.worker.ts` if you changed `Source/`.
+3. One full-page Playwright shot at dsf 1 against the demo; compare against the
+   continuity oracle (flat Jivs unchanged) + whatever you intended to change.
+4. `npx vitest run Tests/Jiv.Material.test.ts` (the no-taxonomy contract) +
+   scoped tests for whatever you touched.

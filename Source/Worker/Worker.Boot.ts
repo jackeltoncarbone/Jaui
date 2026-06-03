@@ -22,7 +22,7 @@
 /// <reference lib="webworker" />
 
 import { Canvas } from '../Core/Jaui';
-import { WebGL2Renderer } from '../Core/WebGL2.Renderer';
+import { ThreeRenderer } from '../Core/Three.Renderer';
 import { WorkerPlatform } from './Worker.Platform';
 import { WorkerBridge, PlatformInitFromMessage } from './Bridge.Worker';
 import { JivRegistry } from './Jiv.Registry';
@@ -98,8 +98,8 @@ export const BootJauiWorker = (): void => {
       Dpr: m.DevicePixelRatio,
     });
     try {
-      const renderer = new WebGL2Renderer();
-      await renderer.Init(m.Canvas);
+      const renderer = new ThreeRenderer();
+      await renderer.Init(m.Canvas as unknown as HTMLCanvasElement);
 
       const platform = new WorkerPlatform(PlatformInitFromMessage(m));
       bridge.AttachPlatform(platform);

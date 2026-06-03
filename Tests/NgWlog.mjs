@@ -1,0 +1,10 @@
+import { chromium } from 'playwright';
+const b = await chromium.launch({ args: ['--use-gl=angle','--use-angle=swiftshader','--ignore-gpu-blocklist'] });
+const p = await b.newPage({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+const w=[]; p.on('console',m=>{ const t=m.text(); if(t.includes('[worker]')||m.type()==='error') w.push(m.type()+': '+t.slice(0,200)); });
+await p.goto('http://localhost:6777/', { waitUntil: 'domcontentloaded' });
+await p.waitForTimeout(9000);
+const sz = await p.evaluate(()=>{ const j=window.__jaui?.canvas; return { rootW:j?.Root?.Width, rootH:j?.Root?.Height }; });
+console.log('Root size:', JSON.stringify(sz));
+console.log('worker/error lines:', w.length); w.slice(-15).forEach(l=>console.log('  '+l));
+await b.close();
