@@ -506,9 +506,17 @@ const _solveNode = (
 
       flexChildren.push({
         Index: flowIndices.length,
-        Order: c.ChildLayout.Order,
-        FlexGrow: c.ChildLayout.FlexGrow,
-        FlexShrink: c.ChildLayout.FlexShrink,
+        // FlexGrow / FlexShrink / Order are typed `number`, but the JSS
+        // parser stores every declaration value as a raw string ('1'), so a
+        // `.jss`-authored `FlexGrow: 1` arrives here as the string '1'. The
+        // flex solver sums these (`reduce(sum + FlexGrow)`); string '+' is
+        // concatenation, so 3 items would yield totalGrow '0111' = 111 and
+        // each share = 1/111 of free space — grow effectively never fires.
+        // Coerce at this boundary so both JSS and imperative-string sources
+        // feed the solver real numbers. Number() is a no-op for true numbers.
+        Order: Number(c.ChildLayout.Order),
+        FlexGrow: Number(c.ChildLayout.FlexGrow),
+        FlexShrink: Number(c.ChildLayout.FlexShrink),
         FlexBasis: flexBasis,
         AlignSelf: c.ChildLayout.AlignSelf,
         Margin: [mt, mr, mb, ml],
@@ -598,7 +606,18 @@ const _simulateWrapHeight = (
       : Resolve(rawH, childCtx, 'H');
     const [cmt, cmr, cmb, cml] = ResolveLengthTuple4(c.ChildLayout.Margin, childCtx, ['H', 'W', 'H', 'W']);
 
-    const w = (explicitW ?? c.IntrinsicWidth ?? 0) + cml + cmr;
+    // Main-axis hypothetical size for bin-packing MUST match what SolveFlex
+    // uses as each item's base main size: FlexBasis wins over explicit Width
+    // wins over intrinsic. A card sized via `FlexBasis: 420pt` (Width: Auto)
+    // lays out ~528px wide in the real flex pass, so the wrap prediction has
+    // to bin-pack at 528px too — using its (much smaller) IntrinsicWidth
+    // packs all cards onto one line, predicts a single-line height, and the
+    // Row never grows tall enough for the wrapped line (following sections
+    // overlap it). Mirrors Layout.Flex.SolveFlex lines 117-124.
+    const flexBasisMain = c.ChildLayout.FlexBasis === 'Auto'
+      ? null
+      : Resolve(c.ChildLayout.FlexBasis, childCtx, 'W');
+    const w = (flexBasisMain ?? explicitW ?? c.IntrinsicWidth ?? 0) + cml + cmr;
     const h = (explicitH ?? c.IntrinsicHeight ?? 0) + cmt + cmb;
 
     const addWithGap = lineMain === 0 ? w : lineMain + mainGap + w;

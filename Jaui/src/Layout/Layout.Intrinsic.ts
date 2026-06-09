@@ -305,9 +305,22 @@ const _simulateWrapCrossSize = (
     const maxBoundW = _boundOf(c.ChildLayout.MaxWidth, childCtx, 'W', true);
     const minBoundH = _boundOf(c.ChildLayout.MinHeight, childCtx, 'H', false);
     const maxBoundH = _boundOf(c.ChildLayout.MaxHeight, childCtx, 'H', true);
+    // Main-axis hypothetical size must match SolveFlex's item base size:
+    // FlexBasis wins over explicit Width wins over intrinsic. A card sized
+    // by `FlexBasis` (Width: Auto) bin-packs at its basis, not its (smaller)
+    // IntrinsicWidth — otherwise the wrap line count is under-predicted and
+    // the container's intrinsic cross size collapses to a single line.
+    const fbMain = c.ChildLayout.FlexBasis === 'Auto'
+      ? null
+      : _intrinsicOf(c.ChildLayout.FlexBasis, childCtx, horiz ? 'W' : 'H');
+    const effMain = Jath.Clamp(
+      fbMain ?? (horiz ? (explicitW ?? c.IntrinsicWidth ?? 0) : (explicitH ?? c.IntrinsicHeight ?? 0)),
+      horiz ? minBoundW : minBoundH,
+      horiz ? maxBoundW : maxBoundH,
+    );
     const effW = Jath.Clamp(explicitW ?? c.IntrinsicWidth ?? 0, minBoundW, maxBoundW);
     const effH = Jath.Clamp(explicitH ?? c.IntrinsicHeight ?? 0, minBoundH, maxBoundH);
-    const childMain = horiz ? effW : effH;
+    const childMain = effMain;
     const childCross = horiz ? effH : effW;
     const addWithGap = lineMain === 0 ? childMain : lineMain + mainGap + childMain;
     if (lineMain > 0 && addWithGap > mainBudget) {
