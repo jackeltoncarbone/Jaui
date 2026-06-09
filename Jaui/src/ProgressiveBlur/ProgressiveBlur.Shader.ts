@@ -21,16 +21,24 @@ layout(location = 0) in vec2 a_Position;    // unit quad 0..1
 
 uniform vec2 u_Resolution;                  // canvas w/h, device px
 uniform vec4 u_Rect;                        // x, y, w, h in device px (y = top)
+uniform vec4 u_Rot;                         // cosθ, sinθ, pivotX, pivotY (device px); (1,0)=none
 
 out vec2 v_Local;                           // 0..1 across the Jiv; y=0 is top
 out vec2 v_SampleUv;                        // UV into the blur pyramid / scene
 out vec2 v_PixelPos;                        // device-pixel position (for clip SDF)
 
 void main() {
+    // v_Local (0..1) stays in the element's UNROTATED frame so the gradient
+    // ramp + feather run along the element's own axes — which now follow its
+    // rotation. The quad's screen position IS rotated about the pivot so the
+    // blur region tracks the rotated card. (1,0) ⇒ identity (unrotated pblur).
     v_Local = a_Position;
 
-    // Jiv's pixel-space corner. y is top-anchored in our convention.
+    // Jiv's pixel-space corner, then rotated about the pivot.
     vec2 pixel = u_Rect.xy + a_Position * u_Rect.zw;
+    vec2 rel = pixel - u_Rot.zw;
+    pixel = vec2(rel.x * u_Rot.x - rel.y * u_Rot.y,
+                 rel.x * u_Rot.y + rel.y * u_Rot.x) + u_Rot.zw;
     v_PixelPos = pixel;
 
     // Sample UV into the sceneFbo-derived textures. sceneFbo was written by
@@ -70,6 +78,63 @@ uniform ivec2 u_ClipMeta;                   // (offset, count) into clip stack
 
 out vec4 fragColor;
 
+// Interleaved Gradient Noise (Jimenez 2014). Unlike fract(sin(dot(...))),
+// which decays into faint diagonal patterns at large pixel coordinates —
+// exactly the full-screen high-blur region where banding shows — IGN stays
+// well-distributed everywhere. Two offset samples form a triangular PDF;
+// ±1 LSB at 8-bit dissolves the staircase contours a wide blur bakes into
+// an RGBA8 gradient, invisibly.
+float _ign(vec2 p) {
+    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+float triDither(vec2 p) {
+    return (_ign(p) + _ign(p + vec2(113.0, 71.0)) - 1.0) / 255.0;
+}
+
+// 4-tap cubic B-spline upsample. The progressive ramp's heavy end samples a
+// tiny mip (LOD ~5 = 1/32 res); a plain bilinear textureLod magnifies that
+// mip's texel grid into visible soft "blocks". A cubic B-spline
+// reconstruction is smooth (no ringing) and dissolves the blocks for only 4
+// bilinear fetches via the standard weight-folding trick — cheap enough for
+// the (scissored) progressive pass. All B-spline pair-weights are positive
+// and partition to 1, so the divisions below never hit zero.
+vec4 cubicWeights(float v) {
+    vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v;
+    vec4 s = n * n * n;
+    float x = s.x;
+    float y = s.y - 4.0 * s.x;
+    float z = s.z - 4.0 * s.y + 6.0 * s.x;
+    float w = 6.0 - x - y - z;
+    return vec4(x, y, z, w) * (1.0 / 6.0);
+}
+
+// texSize = the pyramid's effective resolution at this (fractional) LOD,
+// i.e. u_Resolution / 2^lod. textureLod still does the trilinear mip blend;
+// the B-spline reconstructs smoothly across that level's texel grid.
+vec3 textureBicubicLod(sampler2D tex, vec2 uv, float lod, vec2 texSize) {
+    vec2 invTexSize = 1.0 / texSize;
+    vec2 coord = uv * texSize - 0.5;
+    vec2 fxy = fract(coord);
+    coord -= fxy;
+
+    vec4 xcubic = cubicWeights(fxy.x);
+    vec4 ycubic = cubicWeights(fxy.y);
+
+    vec4 c = coord.xxyy + vec2(-0.5, 1.5).xyxy;
+    vec4 s = vec4(xcubic.xz + xcubic.yw, ycubic.xz + ycubic.yw);
+    vec4 offset = c + vec4(xcubic.yw, ycubic.yw) / s;
+    offset *= invTexSize.xxyy;
+
+    vec3 s0 = textureLod(tex, offset.xz, lod).rgb;
+    vec3 s1 = textureLod(tex, offset.yz, lod).rgb;
+    vec3 s2 = textureLod(tex, offset.xw, lod).rgb;
+    vec3 s3 = textureLod(tex, offset.yw, lod).rgb;
+
+    float sx = s.x / (s.x + s.y);
+    float sy = s.z / (s.z + s.w);
+    return mix(mix(s3, s2, sx), mix(s1, s0, sx), sy);
+}
+
 float pickClipRadius(vec2 p, vec4 radii) {
     if (p.x >= 0.0) {
         return p.y <= 0.0 ? radii.y : radii.z;
@@ -105,7 +170,17 @@ float clipStackDistance(vec2 pixel, int offset, int count) {
         vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
         vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
         vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
-        d = max(d, clipShapeDistance(pixel, rect, radii, meta.x));
+        // meta = (Smoothness, cosθ, sinθ, _). Un-rotate the sample about the clip's
+        // center by R(-θ) so a ROTATED clip parent clips the blur along its rotated
+        // edges — IDENTICAL to Jiv.Panel.frag's clipStackDistance (the card body uses
+        // that path, which is why the card outline rotates). Without this the pblur was
+        // masked by an AXIS-ALIGNED rounded rect, so the (correctly rotated) gradient got
+        // cropped to a non-rotated box and read as "not rotated". cos=1/sin=0 ⇒ identity.
+        vec2 cc = rect.xy + rect.zw * 0.5;
+        vec2 rel = pixel - cc;
+        vec2 local = vec2(rel.x * meta.y + rel.y * meta.z,
+                          -rel.x * meta.z + rel.y * meta.y) + cc;
+        d = max(d, clipShapeDistance(local, rect, radii, meta.x));
     }
     return d;
 }
@@ -121,8 +196,23 @@ vec4 clipStackUvAabb(int offset, int count, vec2 resolution) {
         if (i >= count) break;
         int base = (offset + i) * 3;
         vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
+        vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0); // (smoothness, cosθ, sinθ, _)
         vec2 pxMin = rect.xy;
         vec2 pxMax = rect.xy + rect.zw;
+        // Under rotation (meta.y,meta.z != 1,0) the stored rect is the UNROTATED
+        // box; the real clip occupies its rotated AABB, which is larger. Expand
+        // the clamp to that rotated bounding box so the blur can sample the whole
+        // rotated clip — otherwise the diagonal corners are clipped too tight
+        // ("edge miss on the outside") and shift as the rotation animates.
+        float aCos = abs(meta.y), aSin = abs(meta.z);
+        if (aSin > 0.0001) {
+            vec2 c = rect.xy + rect.zw * 0.5;
+            vec2 halfExt = rect.zw * 0.5;
+            vec2 rotHalf = vec2(aCos * halfExt.x + aSin * halfExt.y,
+                                aSin * halfExt.x + aCos * halfExt.y);
+            pxMin = c - rotHalf;
+            pxMax = c + rotHalf;
+        }
         vec2 cUvMin = vec2(pxMin.x / resolution.x, 1.0 - pxMax.y / resolution.y);
         vec2 cUvMax = vec2(pxMax.x / resolution.x, 1.0 - pxMin.y / resolution.y);
         uvMin = max(uvMin, cUvMin);
@@ -189,13 +279,26 @@ void main() {
     // ramp looks exponential to the eye. Squaring makes the perceived blur
     // increase feel linear (gentle near clear end, steeper near blurred end).
     float lod = ramp * ramp * u_MaxLod;
+    // Dissolve mip-transition contours. As lod sweeps across the ramp, each
+    // integer mip boundary is a trilinear crossover between two blur octaves
+    // of (perceptually) different blur amount, which reads as a faint band.
+    // This is BETWEEN mip levels, so precision / bicubic / output dither
+    // can't touch it. A ±0.5-level per-pixel jitter spreads every crossover
+    // into noise the blur + output dither absorb.
+    lod = max(0.0, lod + (_ign(v_PixelPos + 31.0) - 0.5));
     vec2 texelUv = exp2(lod) / u_Resolution;
-    vec2 uvMin = clipUv.xy + texelUv * 0.5;
-    vec2 uvMax = clipUv.zw - texelUv * 0.5;
+    // Inset by ~2 texels (not ½) so the bicubic kernel's footprint stays
+    // inside the clip AABB — no beyond-clip scene content bleeds into the
+    // blurred edge.
+    vec2 uvMin = clipUv.xy + texelUv * 2.0;
+    vec2 uvMax = clipUv.zw - texelUv * 2.0;
     vec2 safeUv = clamp(v_SampleUv, min(uvMin, uvMax), max(uvMin, uvMax));
 
     vec3 sceneRgb = texture(u_Scene, safeUv).rgb;
-    vec3 blurRgb = textureLod(u_Pyramid, safeUv, lod).rgb;
+    // Cubic B-spline upsample of the pyramid mip — smooth, block-free
+    // magnification at the heavy end. texSize = pyramid resolution at this
+    // LOD = u_Resolution / 2^lod (== 1 / texelUv).
+    vec3 blurRgb = textureBicubicLod(u_Pyramid, safeUv, lod, u_Resolution / exp2(lod));
     // Gradual crossfade from the unblurred scene into the pyramid over the
     // first 20% of the gradient. Beyond 20%, fully in the pyramid.
     float blendT = smoothstep(0.0, 0.2, ramp);
@@ -218,6 +321,9 @@ void main() {
     // into the TabBar without touching the clear top edge.
     float bgMix = u_Background.a * ramp;
     rgb = mix(rgb, u_Background.rgb, bgMix);
+
+    // Dither the final RGB to break RGBA8 banding across the smooth ramp.
+    rgb += triDither(v_PixelPos);
 
     // Alpha = u_Opacity (Jiv-level fade only). No ramp in alpha — the ramp
     // is already baked into rgb via the stage interpolation + grading above.

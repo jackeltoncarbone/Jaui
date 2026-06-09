@@ -35,29 +35,33 @@ export class AnimationManager {
     requestAnimationFrame(this._tick);
   };
 
-  private _tick = (time: number): void => {
-    if (!this._lastTime) this._lastTime = time;
-    // Cap at 1s of catch-up. Spring.Step substeps internally for stability
-    // (up to 64 substeps), so honoring real wall-clock dt is safe — and
-    // necessary, otherwise a main-thread block during a fade-in leaves
-    // springs frozen mid-curve until they crawl back up at 33ms/frame
-    // (the symptom that looks like UI "freezing mid-opacity"). 1s is a
-    // long-enough cap that ~all visible blocks resolve in one Step, but
-    // still bounds work after a backgrounded-tab return.
-    const dt = Math.min((time - this._lastTime) / 1000, 1.0);
-    this._lastTime = time;
-
+  /**
+   * Advance every animatable by `dt` synchronously — the HOST (Jaui) calls this
+   * once per frame at the TOP of its render frame, so spring writes (e.g.
+   * Transform.Rotation via JivStyleAnimator) land BEFORE the same frame's render
+   * reads them. Previously the springs advanced in this manager's OWN rAF
+   * callback, a separate frame from the render, so the render read a one-frame-
+   * stale value — visible as a rotating panel's progressive blur lagging its
+   * edge. This is the fix; it does NOT schedule rAF (the host owns the loop).
+   */
+  StepFrame = (dt: number): void => {
     let anyActive = false;
     for (const a of this._animatables) {
       if (a.Tick(dt)) anyActive = true;
     }
-
+    this._running = anyActive;
+    // OnFrame stays wired (currently a no-op RequestFrame) for compatibility.
     if (this._onFrame) this._onFrame();
+  };
 
-    if (anyActive) {
+  // Schedule-only loop: the host's frame loop now advances the springs via
+  // StepFrame, so this just keeps an rAF armed while animations are running
+  // (so Kick from idle has a frame to settle on). It no longer steps the
+  // animatables itself — that would double-advance them against StepFrame.
+  private _tick = (): void => {
+    if (this._running) {
       requestAnimationFrame(this._tick);
     } else {
-      this._running = false;
       this._lastTime = 0;
     }
   };

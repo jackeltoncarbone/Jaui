@@ -52,7 +52,14 @@ float clipStackDistance(vec2 pixel, int offset, int count) {
         vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
         vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
         vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
-        d = max(d, clipShapeDistance(pixel, rect, radii, meta.x));
+        // meta = (Smoothness, cosθ, sinθ, _). Un-rotate the sample about the
+        // clip center by R(-θ) so a rotated clip parent clips text along its
+        // rotated edges. cos=1/sin=0 ⇒ identity. (Matches Jiv.Panel.frag.)
+        vec2 cc = rect.xy + rect.zw * 0.5;
+        vec2 rel = pixel - cc;
+        vec2 local = vec2(rel.x * meta.y + rel.y * meta.z,
+                          -rel.x * meta.z + rel.y * meta.y) + cc;
+        d = max(d, clipShapeDistance(local, rect, radii, meta.x));
     }
     return d;
 }

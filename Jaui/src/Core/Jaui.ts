@@ -16,6 +16,7 @@ import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
+import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
 import type { Renderer, GpuTextureHandle, BgPaint } from './Renderer';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
@@ -604,6 +605,15 @@ export class Canvas implements DirtyTracker {
     const dt = this._lastTime === 0 ? 0.016 : Math.min((time - this._lastTime) / 1000, 0.033);
     this._lastTime = time;
 
+    // Advance all springs SYNCHRONOUSLY, in THIS frame, before the render walk
+    // below reads their values. JivStyleAnimator springs (Transform.Rotation,
+    // Opacity, Visual*, …) used to advance in the AnimationManager's OWN rAF
+    // callback — a separate frame from this render — so the render read a
+    // one-frame-stale value (the rotating-panel blur lagging its edge). Stepping
+    // here couples spring-write → render-read in one frame. The manager's loop
+    // is now schedule-only; this does NOT change any rAF kick or the boot path.
+    this._animationManager.StepFrame(dt);
+
     // Phase timing — active when the debug HUD is on OR `?wkr-jaui-prof` was
     // set. Gate reads at each boundary rather than branching inside hot loops;
     // performance.now() is cheap but we skip it entirely in release.
@@ -924,27 +934,34 @@ export class Canvas implements DirtyTracker {
     // Identity (cx=cy=1, ox=oy=0) at the root is the no-transform path.
     // VisualScale on an ancestor composes into the effective tuple so
     // descendants ride along, just like CSS transform on a parent.
-    const renderNode = (node: Jiv, cx: number, cy: number, ox: number, oy: number, stack: ClipStack): void => {
-      // Compose own's Visual transform onto the inherited transform.
-      // Pivot in NATURAL coords (jiv.X / jiv.Y are in the same space
-      // as our cx/cy/ox/oy expect — i.e. what the layout solver
-      // assigned). Order: scale around pivot, then translate.
+    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack): void => {
+      // Compose own's transform onto the inherited matrix. Order: rotation
+      // (outermost, about Transform.Origin) then VisualScale/Translate (about
+      // VisualOrigin). Both ride the inherited matrix so they CASCADE to
+      // descendants — rotation now flows to children exactly like scale/translate.
+      // Pivots are in NATURAL coords (jiv.X/Y as the layout solver assigned).
+      let eff: Mat2x3 = m;
+      // STEP A — rotation about Transform.Origin (the new cascading behavior).
+      const rotDeg = node.RenderStyle.Transform.Rotation;
+      if (rotDeg !== 0) {
+        const th = rotDeg * (Math.PI / 180);
+        const rc = Math.cos(th), rs = Math.sin(th);
+        const rpx = node.X + node.Width * node.RenderStyle.Transform.OriginX;
+        const rpy = node.Y + node.Height * node.RenderStyle.Transform.OriginY;
+        eff = matMul(eff, [rc, rs, -rs, rc, rpx * (1 - rc) + rpy * rs, rpy * (1 - rc) - rpx * rs]);
+      }
+      // STEP B — VisualScale/Translate about VisualOrigin (matches the legacy
+      // formula exactly when rotation is absent; now stacks onto rotation).
       const sx = node.RenderStyle.VisualScaleX;
       const sy = node.RenderStyle.VisualScaleY;
       const tx = node.RenderStyle.VisualTranslateX;
       const ty = node.RenderStyle.VisualTranslateY;
-      const vox = node.RenderStyle.VisualOriginX;
-      const voy = node.RenderStyle.VisualOriginY;
-      let effCx = cx, effCy = cy, effOx = ox, effOy = oy;
       if (sx !== 1 || sy !== 1 || tx !== 0 || ty !== 0) {
-        const pivotX = node.X + node.Width * vox;
-        const pivotY = node.Y + node.Height * voy;
-        effCx = cx * sx;
-        effCy = cy * sy;
-        effOx = ox + cx * (pivotX * (1 - sx) + tx);
-        effOy = oy + cy * (pivotY * (1 - sy) + ty);
+        const pivotX = node.X + node.Width * node.RenderStyle.VisualOriginX;
+        const pivotY = node.Y + node.Height * node.RenderStyle.VisualOriginY;
+        eff = matMul(eff, [sx, 0, 0, sy, pivotX * (1 - sx) + tx, pivotY * (1 - sy) + ty]);
       }
-      if (!this._isInsideClipStack(node, effCx, effCy, effOx, effOy, stack)) return;
+      if (!this._isInsideClipStack(node, eff, stack)) return;
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
       // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
       // the loaded image. Without this, the node stays at 0 height forever.
@@ -962,10 +979,10 @@ export class Canvas implements DirtyTracker {
       }
 
       if (node.Width <= 0 || node.Height <= 0 || !node.Visible) {
-        const boxClip = this._boxClip(node, effCx, effCy, effOx, effOy);
-        const [chOx, chOy] = this._descendOffset(node, effOx, effOy, effCx, effCy);
+        const boxClip = this._boxClip(node, eff);
+        const childM = this._descendOffset(node, eff);
         for (const child of orderedChildren(node)) {
-          renderNode(child, effCx, effCy, chOx, chOy, this._childClip(node, stack, boxClip, child));
+          renderNode(child, childM, this._childClip(node, stack, boxClip, child));
         }
         return;
       }
@@ -992,6 +1009,11 @@ export class Canvas implements DirtyTracker {
         // feedback risk.
         const d = this._dpr;
         const maxFeatherSigma = node.RenderStyle.BackdropFrostBlur;
+        // Keep level 0 lightly blurred (σ ≈ 1px) so the ramp climbs the full
+        // clear→heavy range smoothly. Raising the base σ to floor the heavy
+        // end's resolution compresses the gradient into a near-uniform "mask"
+        // (most of the element reads as already-blurred) — not worth it. The
+        // heavy end's low-res mip is kept smooth instead by the output dither.
         const baseSigmaDevice = this._dpr;
         const targetSigmaDevice = maxFeatherSigma * this._dpr;
         const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
@@ -1005,10 +1027,13 @@ export class Canvas implements DirtyTracker {
         // blur pass, 4 passes per blur = ~50× cumulative fragment work
         // saved per localized pblur per frame.
         const lodMargin = Math.ceil(Math.pow(2, maxLod + 1));
-        const px = (effOx + effCx * node.X) * d;
-        const py = (effOy + effCy * node.Y) * d;
-        const pw = effCx * node.Width * d;
-        const ph = effCy * node.Height * d;
+        // AABB of the (possibly rotated) node in canvas px — scissor is an
+        // axis-aligned GPU cull, so use the rotated rect's bounding box.
+        const _ab = this._nodeAabb(node, eff);
+        const px = _ab.minX * d;
+        const py = _ab.minY * d;
+        const pw = (_ab.maxX - _ab.minX) * d;
+        const ph = (_ab.maxY - _ab.minY) * d;
         // When a feather is set AND the background is fully opaque, the
         // solid post-feather region collapses to just u_Background — no
         // pyramid samples read past the feather zone (the shader early-outs
@@ -1018,8 +1043,15 @@ export class Canvas implements DirtyTracker {
         const feather = node.RenderStyle.ProgressiveBlurFeather * d;
         const bgOpaque = node.RenderStyle.Background.Color.A >= 0.999;
         const dir = node.RenderStyle.ProgressiveBlurDirection;
+        // The feather-strip tightening slices one edge off the AXIS-ALIGNED
+        // AABB. Under rotation the AABB is larger than (and offset from) the
+        // rotated panel, so a tightened strip clips the rotated blur's edge
+        // ("edge miss on the outside"). When rotated, fall back to the full
+        // AABB scissor — the shader's ramp/feather still runs correctly in the
+        // rotated frame; only this CPU-side fill optimization is skipped.
+        const _rotated = matSin(eff) !== 0;
         let fx = px, fy = py, fw = pw, fh = ph;
-        if (feather > 0 && bgOpaque) {
+        if (feather > 0 && bgOpaque && !_rotated) {
           if (dir === 'ToBottom')      { fh = feather; }
           else if (dir === 'ToTop')    { fy = py + ph - feather; fh = feather; }
           else if (dir === 'ToRight')  { fw = feather; }
@@ -1048,8 +1080,31 @@ export class Canvas implements DirtyTracker {
         r.RebindSceneTarget();
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+        // The shader builds a UNROTATED quad from `Rect` and rotates it about
+        // the pivot, so its ramp/feather run along the element's own (rotated)
+        // axes. Rect = the element's unrotated device rect (centered on the
+        // mapped center); Cos/Sin/Pivot carry the accumulated rotation. At
+        // rotation 0 the unrotated rect equals the legacy AABB and (1,0) is a
+        // no-op, so non-rotated pblur is unchanged.
+        const _pbCx = matScaleX(eff), _pbCy = matScaleY(eff);
+        const _pbPivotX = matApplyX(eff, node.X + node.Width * 0.5, node.Y + node.Height * 0.5) * d;
+        const _pbPivotY = matApplyY(eff, node.X + node.Width * 0.5, node.Y + node.Height * 0.5) * d;
+        const _pbHalfW = _pbCx * node.Width * 0.5 * d;
+        const _pbHalfH = _pbCy * node.Height * 0.5 * d;
+        // Expand the unrotated quad to the rotated AABB about the pivot, exactly as the
+        // panel does (Jiv.InstanceBuffer.ts). The pblur shader rotates THIS quad about the
+        // same pivot, so it must be large enough to contain the rotated content rect;
+        // otherwise its corners fall inside the rotated card and the blur edges drift off
+        // the panel edges. NO border/shadow margin term: the blur aligns to the content
+        // edge and is already clip-bounded by ClipOffset/ClipCount. At rotation 0,
+        // |cos|=1/|sin|=0 so these reduce to _pbHalfW/_pbHalfH (byte-identical, no regression).
+        const _pbACos = Math.abs(matCos(eff));
+        const _pbASin = Math.abs(matSin(eff));
+        const _pbRotHalfW = _pbACos * _pbHalfW + _pbASin * _pbHalfH;
+        const _pbRotHalfH = _pbASin * _pbHalfW + _pbACos * _pbHalfH;
         r.DrawProgressiveBlur({
-          Rect: { X: (effOx + effCx * node.X) * d, Y: (effOy + effCy * node.Y) * d, W: effCx * node.Width * d, H: effCy * node.Height * d },
+          Rect: { X: _pbPivotX - _pbRotHalfW, Y: _pbPivotY - _pbRotHalfH, W: _pbRotHalfW * 2, H: _pbRotHalfH * 2 },
+          Cos: matCos(eff), Sin: matSin(eff), PivotX: _pbPivotX, PivotY: _pbPivotY,
           Scene: sceneSnap, // reuse the snapshot we took for ComputeBlur
           Pyramid: lastBackdrop,
           MaxLod: maxLod,
@@ -1089,13 +1144,21 @@ export class Canvas implements DirtyTracker {
         // a ~500×80 TabBar on a 1920×1080 canvas, scissor saves ~98% of
         // the blur's fragment writes with zero visual change (glass only
         // samples inside this rect anyway).
-        const baseBlurCssPx = 1;
         const d = this._dpr;
-        const margin = 48 * d; // covers refraction offset + rim + bezel safely
-        const px = (effOx + effCx * node.X) * d;
-        const py = (effOy + effCy * node.Y) * d;
-        const pw = effCx * node.Width * d;
-        const ph = effCy * node.Height * d;
+        // Build the backdrop blur at THIS panel's actual frost sigma so the
+        // panel can sample LOD 0 (full resolution). Previously level 0 held
+        // only a ~1px Gaussian and a panel reached its real frost by sampling
+        // a high mip LOD (8pt frost -> LOD 3 -> 1/8 res), which made frosted
+        // backdrops read as a low-res texture upscaled. The dual filter still
+        // downsamples internally for speed then upsamples back to full res,
+        // and we scissor to the panel rect below, so cost stays bounded.
+        const frostCssPx = Math.max(1, node.RenderStyle.BackdropFrostBlur);
+        const margin = (48 + frostCssPx) * d; // refraction/rim/bezel + frost spread
+        const _ab = this._nodeAabb(node, eff);
+        const px = _ab.minX * d;
+        const py = _ab.minY * d;
+        const pw = (_ab.maxX - _ab.minX) * d;
+        const ph = (_ab.maxY - _ab.minY) * d;
         const scissor = {
           x: Math.max(0, Math.floor(px - margin)),
           y: Math.max(0, Math.floor(py - margin)),
@@ -1109,19 +1172,19 @@ export class Canvas implements DirtyTracker {
         // baked-in 1px base Gaussian. SnapshotScreen reuses an internal
         // texture so there's no per-frame allocation.
         const sceneSnap = r.SnapshotScreen();
-        lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, baseBlurCssPx * d, undefined, scissor);
-        lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
-        // Cap mip build at the largest LOD any glass panel will sample
-        // this frame: log2(maxFrostBlur) + slack for the lodBoost the
-        // glass shader stacks on (rim CA + inner blur, ≲ 2). Saves the
-        // chain-extension fill below the consumer's actual reach.
-        const glassMaxLod = Math.log2(Math.max(1, this._maxFrostBlur)) + 2;
+        lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
+        // Pyramid is built AT this panel's frost sigma, so set the base LOD to
+        // the panel's frostLod: the shader's main sample (lod = frostLod -
+        // u_BaseFrostLod) lands on LOD 0 (full res). Only the subtle glass
+        // rim/inner boost (≲ 2 LODs) climbs into the now full-sigma mip chain.
+        lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
+        const glassMaxLod = 2;
         r.GenerateBlurMipmap(glassMaxLod);
         r.RebindSceneTarget();
 
         r.EnableBlend();
         this._panelBuffer.Begin();
-        this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
+        this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count);
         r.PanelBeginBatch();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
@@ -1177,7 +1240,7 @@ export class Canvas implements DirtyTracker {
         if (flatBgPaint !== undefined) {
           flushPanels();
           this._panelBuffer.Begin();
-          this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
+          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count);
           r.EnableBlend();
           r.PanelBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -1187,7 +1250,7 @@ export class Canvas implements DirtyTracker {
           if (flatBgPaint.Mode === 'Image') this._counts.Image++;
           this._panelBuffer.Begin();
         } else {
-          this._panelBuffer.Push(node, this._dpr, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
+          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count);
         }
       }
 
@@ -1202,14 +1265,14 @@ export class Canvas implements DirtyTracker {
       const anim = this._textAnimators.get(node);
       if (anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
-        this._emitTextFor(node, effCx, effCy, effOx, effOy, clipMeta.Offset, clipMeta.Count);
+        this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count);
       }
 
       // Walk children in Layer order (ties break by tree order)
-      const boxClip = this._boxClip(node, effCx, effCy, effOx, effOy);
-      const [chOx, chOy] = this._descendOffset(node, effOx, effOy, effCx, effCy);
+      const boxClip = this._boxClip(node, eff);
+      const childM = this._descendOffset(node, eff);
       for (const child of orderedChildren(node)) {
-        renderNode(child, effCx, effCy, chOx, chOy, this._childClip(node, stack, boxClip, child));
+        renderNode(child, childM, this._childClip(node, stack, boxClip, child));
       }
     };
 
@@ -1227,7 +1290,7 @@ export class Canvas implements DirtyTracker {
     // the authored blur radius.
     this._maxFrostBlur = 0;
     this._scanFrostBlur(this.Root);
-    renderNode(this.Root, 1, 1, 0, 0, EmptyClipStack);
+    renderNode(this.Root, MAT_IDENTITY, EmptyClipStack);
     // Trailing flushes — catch anything deferred since the last category
     // boundary. Order: panels first (they were pushed earlier in tree
     // order than the trailing text, if any).
@@ -1373,11 +1436,28 @@ export class Canvas implements DirtyTracker {
    *  offset is `Cx * ScrollX` (subtracted) — the scroll moves content
    *  in the cascade-scaled space. Cx/Cy are unchanged on descent;
    *  this jiv's own VisualScale is composed in renderNode before this. */
-  private _descendOffset = (node: Jiv, ox: number, oy: number, cx: number, cy: number): [number, number] => {
-    if (node.Overflow === 'Scroll') {
-      return [ox - cx * node.ScrollX, oy - cy * node.ScrollY];
-    }
-    return [ox, oy];
+  private _descendOffset = (node: Jiv, m: Mat2x3): Mat2x3 => {
+    if (node.Overflow !== 'Scroll') return m;
+    // Scroll is a translation in the node's LOCAL (natural) frame, so compose
+    // it INTO the matrix as a local translate (right-multiply). A rotated
+    // scroll container then scrolls along its own rotated axes. At rotation 0
+    // this reduces to the legacy [ox - cx*ScrollX, oy - cy*ScrollY].
+    return matMul(m, [1, 0, 0, 1, -node.ScrollX, -node.ScrollY]);
+  };
+
+  /** Canvas-space AABB of `node`'s (possibly rotated) rect under matrix `m` —
+   *  the min/max of its four mapped corners. Used for axis-aligned scissor/cull
+   *  rects. At rotation 0 this is exactly the node's mapped rect. */
+  private _nodeAabb = (node: Jiv, m: Mat2x3): { minX: number; minY: number; maxX: number; maxY: number } => {
+    const x0 = node.X, y0 = node.Y, x1 = node.X + node.Width, y1 = node.Y + node.Height;
+    const ax = matApplyX(m, x0, y0), ay = matApplyY(m, x0, y0);
+    const bx = matApplyX(m, x1, y0), by = matApplyY(m, x1, y0);
+    const cx2 = matApplyX(m, x1, y1), cy2 = matApplyY(m, x1, y1);
+    const dx = matApplyX(m, x0, y1), dy = matApplyY(m, x0, y1);
+    return {
+      minX: Math.min(ax, bx, cx2, dx), minY: Math.min(ay, by, cy2, dy),
+      maxX: Math.max(ax, bx, cx2, dx), maxY: Math.max(ay, by, cy2, dy),
+    };
   };
 
   /** AABB cull against the inherited clip stack. Returns true if the node's
@@ -1387,13 +1467,12 @@ export class Canvas implements DirtyTracker {
    *  Uses the cascade-scaled rect so a transformed Jiv's clip cull respects
    *  its actually-rendered bbox. */
   private _isInsideClipStack = (
-    node: Jiv, cx: number, cy: number, ox: number, oy: number, stack: ClipStack,
+    node: Jiv, m: Mat2x3, stack: ClipStack,
   ): boolean => {
     if (stack.length === 0) return true;
-    const nx = ox + cx * node.X;
-    const ny = oy + cy * node.Y;
-    const nx2 = nx + cx * node.Width;
-    const ny2 = ny + cy * node.Height;
+    // AABB of the (possibly rotated) node — conservative cull (never rejects a
+    // visible pixel). At rotation 0 this is exactly the node's mapped rect.
+    const { minX: nx, minY: ny, maxX: nx2, maxY: ny2 } = this._nodeAabb(node, m);
     for (const c of stack) {
       if (nx2 <= c.X || nx >= c.X + c.W) return false;
       if (ny2 <= c.Y || ny >= c.Y + c.H) return false;
@@ -1406,16 +1485,20 @@ export class Canvas implements DirtyTracker {
    *  (Overflow: Hidden|Scroll) and when a child opts in (ParentOverflow:
    *  Hidden). All values stay in CSS px; the buffer multiplies by dpr. */
   private _boxClip = (
-    node: Jiv, cx: number, cy: number, ox: number, oy: number,
+    node: Jiv, m: Mat2x3,
   ): ClipShape => {
     const radii = node.RenderStyle.BorderRadius;
+    // Axis scales + rotation basis from the cascaded matrix. At rotation 0,
+    // cx=|a|, cy=|d|, cos=1, sin=0 — identical to the legacy scalar path.
+    const cx = matScaleX(m);
+    const cy = matScaleY(m);
     // Clamp to half-dimension (CSS border-radius rule). Without this, a
     // pill-style `BorderRadius: 999pt` on a small box produces an SDF whose
     // "inside" region is empty — the clip rejects everything including the
     // center, so the node's image/content draws are fully clipped away.
     const w = cx * node.Width;
     const h = cy * node.Height;
-    const avgScale = (Math.abs(cx) + Math.abs(cy)) * 0.5;
+    const avgScale = (cx + cy) * 0.5;
     const maxR = Math.min(w, h) / 2;
     const rtl = Math.min(radii[0] * avgScale, maxR);
     const rtr = Math.min(radii[1] * avgScale, maxR);
@@ -1428,9 +1511,17 @@ export class Canvas implements DirtyTracker {
     // circle. Mirrors ShapeMode's circle-mode classification in the panel
     // shader, which the clip path doesn't run.
     const fullyRounded = rtl >= maxR && rtr >= maxR && rbr >= maxR && rbl >= maxR;
+    // The clip rect is the node's box in canvas space; under rotation its
+    // top-left would be ambiguous, so store the CENTER (always well-defined)
+    // and let the clip SDF rebuild corners from center ± half-extents in the
+    // un-rotated frame. Cos/Sin let the per-pixel clip SDF un-rotate the sample.
+    const cxLocal = node.X + node.Width * 0.5;
+    const cyLocal = node.Y + node.Height * 0.5;
     return {
-      X: ox + cx * node.X,
-      Y: oy + cy * node.Y,
+      // X/Y are the top-left of the UNROTATED box at this scale (center − half).
+      // The clip SDF re-derives them after un-rotating about CenterX/Y.
+      X: matApplyX(m, cxLocal, cyLocal) - w * 0.5,
+      Y: matApplyY(m, cxLocal, cyLocal) - h * 0.5,
       W: w,
       H: h,
       RTL: rtl,
@@ -1438,6 +1529,10 @@ export class Canvas implements DirtyTracker {
       RBR: rbr,
       RBL: rbl,
       Smoothness: fullyRounded ? 0 : node.RenderStyle.BorderRadiusSmoothness,
+      Cos: matCos(m),
+      Sin: matSin(m),
+      CenterX: matApplyX(m, cxLocal, cyLocal),
+      CenterY: matApplyY(m, cxLocal, cyLocal),
     };
   };
 
@@ -1472,7 +1567,7 @@ export class Canvas implements DirtyTracker {
     for (const child of node.Children as Jiv[]) this._scanFrostBlur(child);
   };
 
-  private _emitTextFor = (node: Jiv, cx: number, cy: number, ox: number, oy: number, clipOffset: number, clipCount: number): void => {
+  private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number): void => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return;
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
@@ -1482,11 +1577,26 @@ export class Canvas implements DirtyTracker {
     // root's ctx if something went sideways to avoid NaN in the render.
     const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
     const [padT, , padB, padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
-    // Cascade the visual transform onto text content too — content
-    // origin (after padding) and total height live in the cascaded
-    // coord space so the glyph rasters scale with the parent.
-    const contentX = ox + cx * (node.X + padL);
-    const contentY = oy + cy * (node.Y + padT);
+    // Axis scales from the cascaded matrix (cx=cy=1 unscaled). Word ANCHORS go
+    // through the full matrix so rotated text flows along the rotated baseline;
+    // glyph quads ALSO tilt by the matrix rotation (cos/sin below) about the
+    // node's center, so a rotated panel's text rotates with it as one unit.
+    const cx = matScaleX(m);
+    const cy = matScaleY(m);
+    const tCos = matCos(m);
+    const tSin = matSin(m);
+    // Shared glyph pivot = the text node's center mapped to device px, so every
+    // glyph rotates about the same point (the panel center) and stays cohesive.
+    // centerLocal* is that center in LOCAL coords (used to build each glyph's
+    // UNROTATED anchor; the shader applies the rotation about the pivot).
+    const centerLocalX = node.X + node.Width * 0.5;
+    const centerLocalY = node.Y + node.Height * 0.5;
+    const pivotX = matApplyX(m, centerLocalX, centerLocalY) * this._dpr;
+    const pivotY = matApplyY(m, centerLocalX, centerLocalY) * this._dpr;
+    const cyForFold = cy > 1e-6 ? cy : 1; // guard the yOffset fold-into-local divide
+    // Content origin + height in LOCAL (natural) coords; mapped per-word below.
+    const contentLX = node.X + padL;
+    const contentLY = node.Y + padT;
     const contentH = cy * (node.Height - padT - padB);
 
     let totalTextHeight = 0;
@@ -1515,8 +1625,19 @@ export class Canvas implements DirtyTracker {
         ? { ...w.Style, FontWeight: effectiveWeight }
         : w.Style;
       const entry = this._textCache.Get(w.Content, styleForCache, null, this._dpr);
-      const wx = contentX + cx * w.SpringX.Value;
-      const wy = contentY + yOffset + cy * w.SpringY.Value;
+      // Word anchor in LOCAL coords, then mapped through the full matrix. yOffset
+      // is a canvas-space (cy-scaled) centering term; fold it back to local
+      // (÷cy) so the matrix re-applies it correctly under rotation.
+      const wlx = contentLX + w.SpringX.Value;
+      const wly = contentLY + (yOffset / cyForFold) + w.SpringY.Value;
+      // Glyph anchor in the UNROTATED (scale+translate-only) frame: the mapped
+      // node center plus the scaled offset from the node center, with rotation
+      // STRIPPED. The shader then rotates the quad about the same pivot, so the
+      // final glyph is rotated exactly once. (Mapping through the full matrix
+      // here AND rotating in the shader would double-rotate — the first-span
+      // drift.) cx,cy,centerLocal*,pivot* are hoisted above the loop.
+      const wx = pivotX / this._dpr + cx * (wlx - centerLocalX);
+      const wy = pivotY / this._dpr + cy * (wly - centerLocalY);
       // Word-level Scale — used during a FontSize-only transition to make
       // the NEW-size raster look OLD-sized on frame 0 and spring to 1.0.
       // Scale around each word's center to keep layout anchored.
@@ -1527,8 +1648,8 @@ export class Canvas implements DirtyTracker {
       const dxCenter = (entry.Width * cx - drawW) / 2 / this._dpr;
       const dyCenter = (entry.Height * cy - drawH) / 2 / this._dpr;
       this._textBuffer.Push({
-        X: (wx + dxCenter) * this._dpr,
-        Y: (wy + dyCenter) * this._dpr,
+        X: wx * this._dpr + dxCenter * this._dpr,
+        Y: wy * this._dpr + dyCenter * this._dpr,
         Width: drawW,
         Height: drawH,
         Uv: entry.Uv,
@@ -1539,6 +1660,10 @@ export class Canvas implements DirtyTracker {
         TintG: w.TintG.Value,
         TintB: w.TintB.Value,
         TintA: w.TintA.Value,
+        Cos: tCos,
+        Sin: tSin,
+        PivotX: pivotX,
+        PivotY: pivotY,
       });
     }
   };

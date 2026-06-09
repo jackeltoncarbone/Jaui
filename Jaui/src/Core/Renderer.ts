@@ -63,6 +63,12 @@ export interface ProgressiveBlurParams {
   /** Index into the per-frame clip-stack buffer. Count=0 means no clipping. */
   ClipOffset: number;
   ClipCount: number;
+  /** Rotation basis (cosθ, sinθ) + pivot (device px) so the blur region + its
+   *  ramp/feather rotate with a rotated element. Omitted ⇒ (1, 0, 0, 0) = none. */
+  Cos?: number;
+  Sin?: number;
+  PivotX?: number;
+  PivotY?: number;
 }
 
 // ─── Renderer Interface ────────────────────────────────────────────────────

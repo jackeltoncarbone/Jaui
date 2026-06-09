@@ -76,6 +76,15 @@ const _forwardWorkerConsole = (): void => {
  *  Call once per worker scope. */
 export const BootJauiWorker = (): void => {
   _forwardWorkerConsole();
+  // Build marker — proves WHICH worker bundle is live in the tab (a soft refresh
+  // reuses the cached module worker; only a hard reload re-inits it). Gated behind
+  // `?debug`/`?jdebug` so normal mode stays clean; enable it when verifying a
+  // worker-side change actually landed in the running bundle.
+  try {
+    if (/[?&](debug|jdebug)\b/.test(_self.location?.search ?? '')) {
+      console.log('[Jaui.Worker] BOOT rot-render v3 (pblur fragment clip un-rotates about clip center)');
+    }
+  } catch { /* never block boot */ }
 
   const post = (msg: W2M, transfer?: Transferable[]): void => {
     if (transfer && transfer.length > 0) {

@@ -1,8 +1,14 @@
 import type { Jiv } from './Jiv';
+import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
 
 // Per-instance floats (15 vec4 slots = 60 floats = 240 bytes):
-//   loc  1: a_Rect         (x, y, w, h)
-//   loc  2: a_PanelGeom    (cx, cy, halfW, halfH)
+//   loc  1: a_Rect         (x, y, w, h)  — the AABB of the (possibly rotated) panel
+//   loc  2: a_PanelGeom    (cosθ, sinθ, halfW, halfH)
+//          The panel CENTER (cx, cy) is recomputed in-shader as the AABB center
+//          (a_Rect.xy + a_Rect.zw*0.5) — it's mathematically identical to the old
+//          stored center (margins are symmetric), which freed these two lanes to
+//          carry the rotation basis (cosθ, sinθ) WITHOUT a 17th vertex attribute
+//          (WebGL2 caps at 16). Rotation 0 ⇒ (1, 0): the no-rotation identity.
 //   loc  3: a_Radii        (tl, tr, br, bl)
 //   loc  4: a_Tint         (R, G, B, A)        — Background color
 //   loc  5: a_BorderColor  (R, G, B, A)
@@ -60,9 +66,7 @@ export class JivInstanceBuffer {
    * walker is the source of truth, and Push just consumes. Identity
    * (cx=cy=1, ox=oy=0) reduces to the legacy `node.X` placement.
    */
-  Push = (jiv: Jiv, dpr: number,
-          cx: number = 1, cy: number = 1,
-          ox: number = 0, oy: number = 0,
+  Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0): void => {
     if (this._count >= this._capacity) this._grow();
 
@@ -70,15 +74,23 @@ export class JivInstanceBuffer {
     const d = dpr;
     const offset = this._count * JIV_FLOATS_PER_INSTANCE;
 
-    const x = (ox + cx * jiv.X) * d;
-    const y = (oy + cy * jiv.Y) * d;
-    const w = cx * jiv.Width * d;
+    // Axis scales + rotation basis come FROM THE CASCADED MATRIX, so a panel
+    // rotated by an ancestor (the parent's rotation accumulated into `m`)
+    // rotates with it. cos/sin are the ACCUMULATED basis — NOT the node's own
+    // Transform.Rotation (that was already folded into `m` by renderNode, so
+    // reading it again here would double-count). At rotation 0 / no Visual*,
+    // m = [cx,0,0,cy,ox,oy] → cx=|a|, cy=|d|, cos=1, sin=0: legacy values.
+    const cx = matScaleX(m);
+    const cy = matScaleY(m);
+    const cos = matCos(m);
+    const sin = matSin(m);
+    const w = cx * jiv.Width * d;   // unrotated device size (SDF half-extents)
     const h = cy * jiv.Height * d;
     // Border / shadow widths scale with the rendered geometry so they
     // stay visually proportional under a Visual* cascade — matches CSS
     // where transform on an ancestor scales its painted output.
     // Average the axes so non-uniform scale doesn't pinch shadows.
-    const avgScale = (Math.abs(cx) + Math.abs(cy)) * 0.5;
+    const avgScale = (cx + cy) * 0.5;
     const borderWidth = style.BorderWidth * avgScale * d;
     const borderEdgeAa = style.BorderBlur * avgScale * d;
     const shadowBlur = style.ShadowBlur * avgScale * d;
@@ -91,17 +103,34 @@ export class JivInstanceBuffer {
     const marginX = Math.max(shadowMarginX, borderMargin);
     const marginY = Math.max(shadowMarginY, borderMargin);
 
+    // Panel center: map the node's LOCAL center through the full matrix so the
+    // accumulated rotation+translation places it at its true rotated position.
+    const centerLX = jiv.X + jiv.Width * 0.5;
+    const centerLY = jiv.Y + jiv.Height * 0.5;
+    const cxDev = matApplyX(m, centerLX, centerLY) * d;
+    const cyDev = matApplyY(m, centerLX, centerLY) * d;
+
+    const halfW = w / 2;
+    const halfH = h / 2;
+    // Expand the AABB so the rotated quad (plus border/shadow margins) stays
+    // inside the rasterized rectangle: a rect of half-extents (a, b) rotated by
+    // θ has axis-aligned half-extents (|cos|·a + |sin|·b, |sin|·a + |cos|·b).
+    const aCos = Math.abs(cos);
+    const aSin = Math.abs(sin);
+    const rotHalfX = aCos * (halfW + marginX) + aSin * (halfH + marginY);
+    const rotHalfY = aSin * (halfW + marginX) + aCos * (halfH + marginY);
+
     const data = this._data;
 
-    data[offset + 0] = x - marginX;
-    data[offset + 1] = y - marginY;
-    data[offset + 2] = w + marginX * 2;
-    data[offset + 3] = h + marginY * 2;
+    data[offset + 0] = cxDev - rotHalfX;
+    data[offset + 1] = cyDev - rotHalfY;
+    data[offset + 2] = rotHalfX * 2;
+    data[offset + 3] = rotHalfY * 2;
 
-    data[offset + 4] = x + w / 2;
-    data[offset + 5] = y + h / 2;
-    data[offset + 6] = w / 2;
-    data[offset + 7] = h / 2;
+    data[offset + 4] = cos;
+    data[offset + 5] = sin;
+    data[offset + 6] = halfW;
+    data[offset + 7] = halfH;
 
     data[offset + 8] = style.BorderRadius[0] * avgScale * d;
     data[offset + 9] = style.BorderRadius[1] * avgScale * d;

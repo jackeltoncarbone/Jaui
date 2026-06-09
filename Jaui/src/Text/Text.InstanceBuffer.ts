@@ -1,18 +1,21 @@
 import type { AtlasUv } from './Text.Cache';
 
 /** Per-instance data for instanced text rendering.
- *  4 × vec4 = 16 floats per instance:
+ *  5 × vec4 = 20 floats per instance:
  *    a_Rect        (x, y, w, h)                           — device pixels [loc 1]
  *    a_UvRect      (u, v, uW, uH)                         — atlas UV     [loc 2]
  *    a_OpacityClip (opacity, clipOffset, clipCount, _pad) — clip meta     [loc 3]
  *    a_Tint        (R, G, B, A)                           — RGBA multiplier [loc 4]
+ *    a_Rot         (cosθ, sinθ, pivotX, pivotY)           — rotation [loc 5]
  *  clipOffset/clipCount index into the per-frame clip-stack buffer.
  *  count=0 means no clipping — shader short-circuits.
  *  tint=(1,1,1,1) is passthrough — used for static text and image quads.
  *  Animated color uses tint = oldColor/newColor at frame 0 → (1,1,1,1) over time
  *  while the glyph atlas raster snaps to the new color (see Text.Animator).
+ *  a_Rot rotates the glyph quad about its pivot (device px); (1,0) = unrotated,
+ *  so a glyph under a rotated ancestor tilts with the panel instead of resisting.
  */
-export const TEXT_FLOATS_PER_INSTANCE = 16;
+export const TEXT_FLOATS_PER_INSTANCE = 20;
 
 export interface TextDrawCommand {
   X: number;         // device pixels
@@ -28,6 +31,11 @@ export interface TextDrawCommand {
   TintG: number;
   TintB: number;
   TintA: number;
+  /** Rotation basis (cosθ, sinθ) + pivot (device px). Defaults (1,0,0,0) = none. */
+  Cos?: number;
+  Sin?: number;
+  PivotX?: number;
+  PivotY?: number;
 }
 
 /**
@@ -74,6 +82,11 @@ export class TextInstanceBuffer {
     data[offset + 13] = cmd.TintG;
     data[offset + 14] = cmd.TintB;
     data[offset + 15] = cmd.TintA;
+
+    data[offset + 16] = cmd.Cos ?? 1;
+    data[offset + 17] = cmd.Sin ?? 0;
+    data[offset + 18] = cmd.PivotX ?? 0;
+    data[offset + 19] = cmd.PivotY ?? 0;
 
     this._count++;
   };

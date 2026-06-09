@@ -15,10 +15,15 @@ export class Framebuffer {
   private _width: number = 0;
   private _height: number = 0;
   private _hasDepth: boolean;
+  /** Store color as RGB10_A2 (10-bit, 1024 levels) instead of RGBA8. Same
+   *  32 bits/texel, core WebGL2 (no extension), but 4× finer tonal steps —
+   *  removes the visible banding a wide blur bakes into an 8-bit gradient. */
+  private _highPrecision: boolean;
 
-  constructor(gl: WebGL2RenderingContext, opts?: { depth?: boolean }) {
+  constructor(gl: WebGL2RenderingContext, opts?: { depth?: boolean; highPrecision?: boolean }) {
     this._gl = gl;
     this._hasDepth = opts?.depth ?? false;
+    this._highPrecision = opts?.highPrecision ?? false;
 
     const fb = gl.createFramebuffer();
     if (!fb) throw new Error('[Jaui] Failed to create framebuffer');
@@ -48,7 +53,14 @@ export class Framebuffer {
 
     const gl = this._gl;
     gl.bindTexture(gl.TEXTURE_2D, this.Texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    if (this._highPrecision) {
+      // RGB10_A2: 10-bit RGB (1024 levels) + 2-bit alpha. Core WebGL2,
+      // color-renderable + filterable + mipmappable. The blur only uses RGB
+      // (alpha is written 1.0), so 2-bit alpha is irrelevant here.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
     // Start with plain LINEAR. Caller calls GenerateMipmap() to opt into mipmap filtering.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);

@@ -3,6 +3,7 @@ precision highp float;
 
 in vec2 v_PixelPos;
 flat in vec4 v_PanelGeom;      // cx, cy, halfW, halfH
+flat in vec4 v_Rot;            // cosθ, sinθ, centerX, centerY — panel rotation basis + pivot
 flat in vec4 v_Radii;
 flat in vec4 v_Tint;
 flat in vec4 v_BorderColor;
@@ -70,6 +71,15 @@ uniform vec4      u_BgGradColor[MAX_BG_GRAD_STOPS];
 uniform float     u_BgGradPos[MAX_BG_GRAD_STOPS];
 
 out vec4 fragColor;
+
+// Triangular-PDF dither — breaks 8-bit banding on smooth blurred backdrops.
+// Two hashed uniforms summed give a triangular distribution; amplitude is
+// ±1 LSB at 8-bit (invisible as noise, dissolves frost/glass banding).
+float triDither(vec2 p) {
+    float a = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+    float b = fract(sin(dot(p + 17.0, vec2(39.3468, 11.135))) * 24634.6345);
+    return (a + b - 1.0) / 255.0;
+}
 
 vec4 sampleBgGradient(float t) {
     // Sample the gradient at parameter t (clamped to [0, 1] by caller).
@@ -521,7 +531,14 @@ vec3 applyGrading(vec3 color, float brightness, float saturation, float contrast
 // call = no filter.
 vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
     float lod = max(0.0, frostLod - u_BaseFrostLod) + extraLod;
-    if (lod < 0.01) return texture(u_Scene, uv).rgb;
+    // Raw (unblurred) scene ONLY for panels that authored NO frost and have
+    // no rim/inner boost (e.g. a flat panel with just BackdropBrightness).
+    // Gate on frostLod, NOT the derived lod: the pyramid is now built at the
+    // panel's own frost sigma with u_BaseFrostLod == frostLod, so a frosted
+    // panel's blur lives at LOD 0 and its center lod rounds to 0 — it must
+    // still sample the pyramid, or the frosted center shows the raw scene
+    // (refracted but unblurred).
+    if (frostLod < 0.01 && extraLod < 0.01) return texture(u_Scene, uv).rgb;
     return textureLod(u_Backdrop, uv, lod).rgb;
 }
 
@@ -572,7 +589,16 @@ float clipStackDistance(vec2 pixel, int offset, int count) {
         vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
         vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
         vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
-        d = max(d, clipShapeDistance(pixel, rect, radii, meta.x));
+        // meta = (Smoothness, cosθ, sinθ, _). Un-rotate the sample about the
+        // clip's center by R(-θ) so a ROTATED clip parent clips its children
+        // along the rotated edges (the axis-aligned rounded-rect SDF then runs
+        // in the clip's local frame). cos=1/sin=0 ⇒ identity (unrotated clips
+        // unchanged). Center = rect.xy + rect.zw*0.5 (rect.xy is center−half).
+        vec2 cc = rect.xy + rect.zw * 0.5;
+        vec2 rel = pixel - cc;
+        vec2 local = vec2(rel.x * meta.y + rel.y * meta.z,
+                          -rel.x * meta.z + rel.y * meta.y) + cc;
+        d = max(d, clipShapeDistance(local, rect, radii, meta.x));
     }
     return d;
 }
@@ -590,6 +616,17 @@ void main() {
 
     vec2 panelCenter = v_PanelGeom.xy;
     vec2 panelHalfSize = v_PanelGeom.zw;
+
+    // Un-rotate the screen pixel into the panel's local (unrotated) frame so the
+    // whole rounded-rect SDF + border + shadow + fill geometry below evaluates as
+    // if axis-aligned. Screen-space samples (clip distance, backdrop/refraction
+    // UVs, dither) keep the original v_PixelPos. Identity when (cos,sin)=(1,0).
+    vec2 _rel = v_PixelPos - v_Rot.zw;
+    // Inverse rotation R(-θ): [ cos  sin; -sin  cos ].
+    vec2 pLocal = vec2(
+        _rel.x * v_Rot.x + _rel.y * v_Rot.y,
+        -_rel.x * v_Rot.y + _rel.y * v_Rot.x
+    ) + v_Rot.zw;
     vec2 shadowOffset = v_ShadowParams.xy;
     float shadowBlur = v_ShadowParams.z;
     float borderWidth = v_ShadowParams.w;
@@ -639,7 +676,7 @@ void main() {
     float borderVariance = v_RimEdge.z;
     float bulge = v_RimEdge.w;
 
-    vec2 p = v_PixelPos - panelCenter;
+    vec2 p = pLocal - panelCenter;
 
     // Shape mode — Rect uses the user's Smoothness as the superellipse exponent;
     // Pill/Circle bake their own exponent in ShapeSDF/ShapeGrad and ignore this.
@@ -878,7 +915,7 @@ void main() {
     // applies. Image-Background panels reuse the entire material treatment
     // (border, shadow, refraction, frost, rim-spec) for free — there is no
     // separate "image draw" pipeline, image is just one of many fill modes.
-    vec2 panelLocal = (v_PixelPos - (panelCenter - panelHalfSize))
+    vec2 panelLocal = (pLocal - (panelCenter - panelHalfSize))
                     / max(panelHalfSize * 2.0, vec2(1.0));
     vec4 fillSrc = resolveBgFill(panelLocal);
     vec3 fillRgb;
@@ -1072,6 +1109,13 @@ void main() {
     // image, border). Carried in v_StyleParams.w (the repurposed materialType
     // lane). Default 1.0 = no-op for every element that doesn't set Brightness.
     result.rgb *= v_StyleParams.w;
+
+    // Dither backdrop-sampling panels to break RGBA8 banding in frosted /
+    // glass regions. Sub-LSB amplitude; skipped where no backdrop is read
+    // so sharp solid/text panels stay bit-exact.
+    if (materialType == 1.0 || hasBackdropFilter) {
+        result.rgb += triDither(v_PixelPos);
+    }
 
     fragColor = result;
 }

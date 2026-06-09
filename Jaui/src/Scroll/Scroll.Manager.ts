@@ -1,5 +1,6 @@
 import type { Jiv } from '../Jiv/Jiv';
 import type { Animatable } from '../Animation/Animation.Manager';
+import { type Mat2x3, MAT_IDENTITY, matMul, matInvApply } from '../Transform/Mat2x3';
 
 /**
  * Scroll physics for Overflow:Scroll Jivs. Two behaviors share the same state:
@@ -213,7 +214,7 @@ export class ScrollManager implements Animatable {
   /** Topmost Jiv at (cssX, cssY) — respects Visible + PointerEvents. Shared
    *  by scroll, interaction-state tracking, and (soon) focus/click. */
   HitTopmost = (cssX: number, cssY: number): Jiv | null => {
-    return this._hitTopmost(this._root, cssX, cssY, 0, 0);
+    return this._hitTopmost(this._root, cssX, cssY, MAT_IDENTITY);
   };
 
   Tick = (dt: number): boolean => {
@@ -304,14 +305,32 @@ export class ScrollManager implements Animatable {
     for (const c of node.Children as Jiv[]) this._stepWalk(c, fn);
   };
 
-  private _hitTopmost = (node: Jiv, x: number, y: number, offX: number, offY: number): Jiv | null => {
+  private _hitTopmost = (node: Jiv, px: number, py: number, m: Mat2x3): Jiv | null => {
     if (!node.Visible) return null;
 
-    const ox = node.X + offX;
-    const oy = node.Y + offY;
+    // Build this node's effective matrix EXACTLY as renderNode does (rotation
+    // about Transform.Origin), so hit-test and paint agree to the pixel. Note:
+    // Visual* is intentionally NOT applied here — the legacy hit-test ignored
+    // VisualScale/Translate, and preserving that keeps a VisualScale'd node
+    // hit-testable at its layout box (paint/hit already diverged under Visual*).
+    let eff = m;
+    const rotDeg = node.RenderStyle.Transform.Rotation;
+    if (rotDeg !== 0) {
+      const th = rotDeg * (Math.PI / 180), rc = Math.cos(th), rs = Math.sin(th);
+      const rpx = node.X + node.Width * node.RenderStyle.Transform.OriginX;
+      const rpy = node.Y + node.Height * node.RenderStyle.Transform.OriginY;
+      eff = matMul(eff, [rc, rs, -rs, rc, rpx * (1 - rc) + rpy * rs, rpy * (1 - rc) - rpx * rs]);
+    }
+
+    // Invert eff to map the canvas pointer into this node's local (node.X/Y)
+    // frame. node.X/Y are ROOT-ABSOLUTE, so containment tests them directly.
+    // The pointer (px,py) stays in canvas space across the whole recursion;
+    // each node inverts its own accumulated matrix — so ANCESTOR rotation
+    // cascades into the hit-test, not just the node's own rotation.
+    const [lx, ly] = matInvApply(eff, px, py);
     const inside = node === this._root
       ? true
-      : x >= ox && x < ox + node.Width && y >= oy && y < oy + node.Height;
+      : lx >= node.X && lx < node.X + node.Width && ly >= node.Y && ly < node.Y + node.Height;
 
     // Overflow: Visible lets children extend past our rect (Placed/Fixed
     // or plain flow overflow). Only Hidden/Scroll clip children to us, so
@@ -319,8 +338,11 @@ export class ScrollManager implements Animatable {
     // clipping node. Otherwise descend and let a child pick the hit.
     if (!inside && node.Overflow !== 'Visible') return null;
 
-    const dx = node.Overflow === 'Scroll' ? offX - node.ScrollX : offX;
-    const dy = node.Overflow === 'Scroll' ? offY - node.ScrollY : offY;
+    // Scroll = local translate composed into the child matrix (mirrors render's
+    // _descendOffset), so children are hit in the scrolled (and rotated) frame.
+    const childM = node.Overflow === 'Scroll'
+      ? matMul(eff, [1, 0, 0, 1, -node.ScrollX, -node.ScrollY])
+      : eff;
     // Hit-test must walk children in the SAME z-order as paint: highest
     // Layer first. Paint uses `orderedChildren` (Layer asc, paint late =
     // on top); hit-test wants the inverse. For same-Layer ties, walk
@@ -342,12 +364,12 @@ export class ScrollManager implements Animatable {
         return dl !== 0 ? dl : b.i - a.i;
       });
       for (let i = 0; i < decorated.length; i++) {
-        const hit = this._hitTopmost(decorated[i].c, x, y, dx, dy);
+        const hit = this._hitTopmost(decorated[i].c, px, py, childM);
         if (hit) return hit;
       }
     } else {
       for (let i = children.length - 1; i >= 0; i--) {
-        const hit = this._hitTopmost(children[i], x, y, dx, dy);
+        const hit = this._hitTopmost(children[i], px, py, childM);
         if (hit) return hit;
       }
     }

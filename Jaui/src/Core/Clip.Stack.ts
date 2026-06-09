@@ -29,6 +29,16 @@ export interface ClipShape {
    *  higher = squircle). Must match the panel's shape so the clip exactly
    *  traces the parent's painted rounded-rect edge. */
   Smoothness: number;
+  /** Rotation basis of the clipping node (cosθ, sinθ). (1, 0) = unrotated.
+   *  The clip SDF un-rotates the sample point about the clip's center by this
+   *  basis before its axis-aligned rounded-rect test, so a rotated clip parent
+   *  clips its children along the rotated edges. Optional: absent ⇒ (1, 0). */
+  Cos?: number;
+  Sin?: number;
+  /** Canvas-space center of the clip box (well-defined under rotation, unlike
+   *  the top-left). The SDF un-rotates about this. Optional: absent ⇒ X+W/2,Y+H/2. */
+  CenterX?: number;
+  CenterY?: number;
 }
 
 /** Stack of clips inherited at a particular tree position. The same array
@@ -92,10 +102,14 @@ export class ClipStackBuffer {
       this._data[this._floats + 5] = c.RTR * dpr;
       this._data[this._floats + 6] = c.RBR * dpr;
       this._data[this._floats + 7] = c.RBL * dpr;
-      // Smoothness is unitless — don't multiply by dpr. Padding slots reserved.
+      // Smoothness is unitless — don't multiply by dpr. Slots 9/10 carry the
+      // rotation basis (cosθ, sinθ); (1, 0) when unrotated so the clip SDF's
+      // un-rotation is identity and non-rotated clips are unchanged. The clip
+      // center is recovered in-shader as (X+W/2, Y+H/2) — X was stored as
+      // center−half, so this is exact under rotation. Slot 11 stays reserved.
       this._data[this._floats + 8] = c.Smoothness;
-      this._data[this._floats + 9] = 0;
-      this._data[this._floats + 10] = 0;
+      this._data[this._floats + 9] = c.Cos ?? 1;
+      this._data[this._floats + 10] = c.Sin ?? 0;
       this._data[this._floats + 11] = 0;
       this._floats += CLIP_FLOATS_PER_ENTRY;
     }

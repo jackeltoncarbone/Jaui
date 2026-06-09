@@ -85,9 +85,9 @@ const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
 const PANEL_ATTR_COUNT = 15; // locations 1..15 — clip_meta is packed into a_Outline.zw
 const BYTES_PER_VEC4 = 16;
 
-const TEXT_FLOATS_PER_INSTANCE = 16;
+const TEXT_FLOATS_PER_INSTANCE = 20;
 const TEXT_BYTES_PER_INSTANCE = TEXT_FLOATS_PER_INSTANCE * 4;
-const TEXT_ATTR_COUNT = 4; // locations 1..4 — Rect / UvRect / OpacityClip / Tint
+const TEXT_ATTR_COUNT = 5; // locations 1..5 — Rect / UvRect / OpacityClip / Tint / Rot
 
 /** Clip-stack texture: RGBA32F, one row. Each clip = 2 texels
  *  (rect.xyzw, radii.xyzw). Sized so at least 1024 clips fit initially. */
@@ -234,6 +234,7 @@ export class WebGL2Renderer implements Renderer {
   private _progBlurLocs!: {
     resolution: WebGLUniformLocation | null;
     rect: WebGLUniformLocation | null;
+    rot: WebGLUniformLocation | null;
     scene: WebGLUniformLocation | null;
     pyramid: WebGLUniformLocation | null;
     maxLod: WebGLUniformLocation | null;
@@ -297,7 +298,14 @@ export class WebGL2Renderer implements Renderer {
     this._quad = new QuadGeometry(gl);
     // depth: true so foreign 3D renderers (THREE) can z-test against it
     // when they draw into Jaui's scene FBO via <janvas>.
-    this._sceneFbo = new Framebuffer(gl, { depth: true });
+    // highPrecision (RGB10_A2): the blur samples this FBO as its INPUT, so an
+    // 8-bit scene pre-bands gentle gradients (the 3D field behind the hero)
+    // BEFORE blurring — and a wide blur can't dissolve plateaus wider than
+    // its kernel, so the contours survive no matter the output precision.
+    // 10-bit RGB (1024 levels, same 32 bpp) feeds the blur a band-free
+    // gradient. NOTE: this trades alpha to 2-bit — fine for an opaque scene
+    // (the canvas fills its background); revisit if alpha precision matters.
+    this._sceneFbo = new Framebuffer(gl, { depth: true, highPrecision: true });
     this._blur = new BlurPass(gl);
 
     // Probe for GPU timer-query support. The extension object exposes the
@@ -667,6 +675,8 @@ export class WebGL2Renderer implements Renderer {
     this._useProgram(p);
     gl.uniform2f(this._progBlurLocs.resolution, this._width, this._height);
     gl.uniform4f(this._progBlurLocs.rect, params.Rect.X, params.Rect.Y, params.Rect.W, params.Rect.H);
+    gl.uniform4f(this._progBlurLocs.rot,
+      params.Cos ?? 1, params.Sin ?? 0, params.PivotX ?? 0, params.PivotY ?? 0);
     gl.uniform1i(this._progBlurLocs.scene, 0);
     gl.uniform1i(this._progBlurLocs.pyramid, 1);
     gl.uniform1i(this._progBlurLocs.clipTex, 2);
@@ -707,7 +717,9 @@ export class WebGL2Renderer implements Renderer {
       if (this._snapshotFbo) gl.deleteFramebuffer(this._snapshotFbo);
       this._snapshotTex = gl.createTexture()!;
       gl.bindTexture(gl.TEXTURE_2D, this._snapshotTex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      // RGB10_A2 to match the (now 10-bit) scene FBO — a blit down to 8-bit
+      // here would re-band the progressive blur's input. Same 32 bpp.
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -991,6 +1003,7 @@ export class WebGL2Renderer implements Renderer {
     this._progBlurLocs = {
       resolution: gl.getUniformLocation(p, 'u_Resolution'),
       rect: gl.getUniformLocation(p, 'u_Rect'),
+      rot: gl.getUniformLocation(p, 'u_Rot'),
       scene: gl.getUniformLocation(p, 'u_Scene'),
       pyramid: gl.getUniformLocation(p, 'u_Pyramid'),
       maxLod: gl.getUniformLocation(p, 'u_MaxLod'),

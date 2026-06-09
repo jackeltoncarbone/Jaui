@@ -111,7 +111,12 @@ export class BlurPass {
     this._up = ShaderCompiler.Compile(gl, VERT, UP_FRAG);
     this._quad = new QuadGeometry(gl);
 
-    for (let i = 0; i < MAX_LEVELS; i++) this._levels.push(new Framebuffer(gl));
+    // 10-bit pyramid levels: a wide blur produces a very smooth gradient
+    // that 8-bit (256 levels) quantizes into visible bands BEFORE the
+    // consumer shaders ever sample it. RGB10_A2 (1024 levels, same 32
+    // bits/texel) stores the gradient finely enough that the bands vanish;
+    // the consumers' output dither then handles the final 8-bit canvas write.
+    for (let i = 0; i < MAX_LEVELS; i++) this._levels.push(new Framebuffer(gl, { highPrecision: true }));
 
     this._downTexLoc = gl.getUniformLocation(this._down.Program, 'u_Tex');
     this._downHpLoc = gl.getUniformLocation(this._down.Program, 'u_HalfPixel');
