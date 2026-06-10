@@ -2445,14 +2445,28 @@ export class Canvas implements DirtyTracker {
       const rect = this._pageRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
-      const target = this._scrollManager.ResolveScrollTarget(cssX, cssY);
-      if (!target) return;
 
       let dx = e.deltaX, dy = e.deltaY;
       if (e.deltaMode === 1) { dx *= 16; dy *= 16; }
-      else if (e.deltaMode === 2) { dx *= target.Width; dy *= target.Height; }
 
-      this._scrollManager.ApplyDelta(target, dx, dy);
+      // Per-axis scroll chaining: a horizontal row (no vertical extent) lets a
+      // vertical wheel fall through to the page scroll behind it, and a maxed-
+      // out inner list chains to its parent — browser/Apple behavior, instead
+      // of the innermost Scroll swallowing the wheel.
+      const { xTarget, yTarget } = this._scrollManager.ResolveScrollChain(cssX, cssY, dx, dy);
+      if (!xTarget && !yTarget) return;
+
+      if (e.deltaMode === 2) {
+        if (xTarget) dx *= xTarget.Width;
+        if (yTarget) dy *= yTarget.Height;
+      }
+
+      if (xTarget && xTarget === yTarget) {
+        this._scrollManager.ApplyDelta(xTarget, dx, dy);
+      } else {
+        if (xTarget) this._scrollManager.ApplyDelta(xTarget, dx, 0);
+        if (yTarget) this._scrollManager.ApplyDelta(yTarget, 0, dy);
+      }
       this._animationManager.Kick();
       e.preventDefault();
     }, { passive: false });

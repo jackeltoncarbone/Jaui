@@ -211,6 +211,55 @@ export class ScrollManager implements Animatable {
     return null;
   };
 
+  /** Per-axis scroll chaining for wheel input. From the topmost hit we walk UP
+   *  the ancestor chain and, for EACH axis independently, pick the nearest
+   *  Overflow:Scroll container that can actually move in the delta's direction.
+   *
+   *  This is what makes a vertical wheel over a horizontal card row scroll the
+   *  PAGE behind it: the row has no vertical extent (maxY === 0), so it can't
+   *  consume dy and the chain falls through to the page's vertical Scroll —
+   *  matching browser/Apple scroll-chaining instead of swallowing the wheel.
+   *
+   *  An axis with zero delta yields a null target (nothing to apply); a target
+   *  already pinned at the bound in the wheel's direction is skipped so a
+   *  maxed-out inner list chains to its parent rather than dead-ending. */
+  ResolveScrollChain = (
+    cssX: number,
+    cssY: number,
+    dx: number,
+    dy: number,
+  ): { xTarget: Jiv | null; yTarget: Jiv | null } => {
+    const hit = this.HitTopmost(cssX, cssY);
+    let xTarget: Jiv | null = null;
+    let yTarget: Jiv | null = null;
+    for (let cur: Jiv | null = hit; cur; cur = cur.Parent as Jiv | null) {
+      if (cur.Overflow !== 'Scroll') continue;
+      if (!xTarget && this._canScrollAxis(cur, 'x', dx)) xTarget = cur;
+      if (!yTarget && this._canScrollAxis(cur, 'y', dy)) yTarget = cur;
+      if (xTarget && yTarget) break;
+    }
+    return { xTarget, yTarget };
+  };
+
+  /** Whether `jiv` has room to move in `delta`'s direction on `axis`. Uses the
+   *  pending wheel TARGET (not the eased position) so rapid wheels that have
+   *  already queued the container to its bound correctly chain to the parent
+   *  on the next tick instead of re-targeting the maxed-out child. */
+  private _canScrollAxis = (jiv: Jiv, axis: 'x' | 'y', delta: number): boolean => {
+    if (delta === 0) return false;
+    const s = this._states.get(jiv);
+    if (axis === 'x') {
+      const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
+      if (maxX <= 0) return false;
+      const pos = s ? s.targetX : jiv.ScrollX;
+      return delta > 0 ? pos < maxX - 0.5 : pos > 0.5;
+    }
+    const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
+    if (maxY <= 0) return false;
+    const pos = s ? s.targetY : jiv.ScrollY;
+    return delta > 0 ? pos < maxY - 0.5 : pos > 0.5;
+  };
+
   /** Topmost Jiv at (cssX, cssY) — respects Visible + PointerEvents. Shared
    *  by scroll, interaction-state tracking, and (soon) focus/click. */
   HitTopmost = (cssX: number, cssY: number): Jiv | null => {
