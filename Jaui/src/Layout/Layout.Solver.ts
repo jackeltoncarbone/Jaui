@@ -547,8 +547,67 @@ const _solveNode = (
       ry += _r(child.ChildLayout.OffsetY, childCtx, 'H');
     }
 
-    _solveNode(child, r.Width, r.Height, offsetX + rx, offsetY + ry, results, childCtx, viewport, rootPointScale, vars);
+    // AspectRatio (W:H) — applied AFTER flex so the determined axis is final.
+    // CSS-aligned: derive the axis the author left to `Auto` from the axis flex
+    // resolved. The common case (a data-driven card grid) fixes WIDTH via the
+    // column basis + grow/shrink and leaves HEIGHT Auto → height = width / ratio.
+    // We only override an axis whose declared size is `Auto` (didn't ask for a
+    // concrete W/H), so an explicit Width AND Height still wins; and we clamp the
+    // derived axis to its Min/Max so a tall ratio can't blow past MaxHeight.
+    let cw = r.Width;
+    let ch = r.Height;
+    const { width: aw, height: ah } = _applyAspectRatio(child, cw, ch, childCtx);
+    cw = aw; ch = ah;
+
+    _solveNode(child, cw, ch, offsetX + rx, offsetY + ry, results, childCtx, viewport, rootPointScale, vars);
   }
+};
+
+/** Resolve a child's final box against its AspectRatio (W÷H), if set. The flex
+ *  solver already fixed both axes; this re-derives whichever axis the author left
+ *  `Auto` from the other, then clamps it to that axis's Min/Max bound. If BOTH
+ *  axes are explicit (concrete Width AND Height) the ratio is ignored — an
+ *  explicit box wins, matching CSS. Returns the (possibly adjusted) box. */
+const _applyAspectRatio = (
+  child: Element,
+  width: number,
+  height: number,
+  ctx: ResolveContext,
+): { width: number; height: number } => {
+  const raw = child.ChildLayout.AspectRatio;
+  // JSS stores values as strings ('1.5'); a route entry can also arrive as a
+  // real number. Coerce + guard: ignore null / non-finite / non-positive.
+  const ratio = raw === null ? NaN : Number(raw);
+  if (!Number.isFinite(ratio) || ratio <= 0) return { width, height };
+
+  const widthAuto  = _isAutoSize(child.ChildLayout.Width);
+  const heightAuto = _isAutoSize(child.ChildLayout.Height);
+
+  // Both explicit → ratio ignored (explicit box wins). Both Auto → drive HEIGHT
+  // from the flex-resolved width (the cross axis a stretched/grown cell controls).
+  if (!widthAuto && !heightAuto) return { width, height };
+  if (heightAuto) {
+    const h = clamp(width / ratio,
+      _r(child.ChildLayout.MinHeight, ctx, 'H'),
+      ResolveBound(child.ChildLayout.MaxHeight, ctx, 'H'));
+    return { width, height: h };
+  }
+  // Width Auto, Height fixed → derive width from height.
+  const w = clamp(height * ratio,
+    _r(child.ChildLayout.MinWidth, ctx, 'W'),
+    ResolveBound(child.ChildLayout.MaxWidth, ctx, 'W'));
+  return { width: w, height };
+};
+
+const _isAutoSize = (v: string | 'Auto' | 'MinContent' | 'MaxContent'): boolean => {
+  const lower = typeof v === 'string' ? v.toLowerCase() : '';
+  return lower === 'auto' || lower === 'mincontent' || lower === 'maxcontent';
+};
+
+const clamp = (v: number, min: number, max: number): number => {
+  let out = Math.max(v, min);
+  if (Number.isFinite(max)) out = Math.min(out, max);  // ResolveBound 'none' → Infinity (no cap)
+  return out;
 };
 
 const _resolveSize = (
@@ -580,10 +639,15 @@ const _simulateWrapHeight = (
   const mainGap = _r(row.Layout.ColumnGap, rowCtx, 'W') || _r(row.Layout.Gap, rowCtx, 'W');
   const crossGap = _r(row.Layout.RowGap, rowCtx, 'H') || _r(row.Layout.Gap, rowCtx, 'H');
 
+  // Bin-pack into lines first (tracking each item's packed main size + box
+  // metadata), THEN compute each line's cross height. The two-pass split is
+  // needed for AspectRatio: an aspected card's height depends on its GROWN
+  // width, which is only known once we know how many items share the line and
+  // how much slack they grow into — i.e. after binning. Single pass can't do it.
+  type Packed = { mainOuter: number; mainInner: number; mainMargin: number; crossOuter: number; aspect: number | null; growW: number; cmTop: number; cmBot: number; minH: number; maxH: number };
+  const linesPacked: Packed[][] = [];
+  let line: Packed[] = [];
   let lineMain = 0;
-  let lineCross = 0;
-  let total = 0;
-  let lineCount = 0;
   for (const c of row.Children) {
     if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed') continue;
     if (c.LeaveRequested) continue;
@@ -617,23 +681,67 @@ const _simulateWrapHeight = (
     const flexBasisMain = c.ChildLayout.FlexBasis === 'Auto'
       ? null
       : Resolve(c.ChildLayout.FlexBasis, childCtx, 'W');
-    const w = (flexBasisMain ?? explicitW ?? c.IntrinsicWidth ?? 0) + cml + cmr;
+    const baseW = flexBasisMain ?? explicitW ?? c.IntrinsicWidth ?? 0;
+    const w = baseW + cml + cmr;
+
+    // AspectRatio cross prediction: an aspected card with Auto height derives
+    // height from its width, so its line-cross contribution is NOT its intrinsic
+    // height — it's width/ratio. We capture the ratio + grow intent here and
+    // resolve the actual height per-line below (grown width / ratio), because a
+    // grown card is taller than its basis predicts. Cards without aspect keep
+    // the old explicit/intrinsic height.
+    const rawAspect = c.ChildLayout.AspectRatio;
+    const ratio = rawAspect === null ? null : (Number.isFinite(Number(rawAspect)) && Number(rawAspect) > 0 ? Number(rawAspect) : null);
+    const heightAuto = rawH === 'Auto' || rawH === 'MinContent' || rawH === 'MaxContent';
+    const aspect = ratio !== null && heightAuto ? ratio : null;
     const h = (explicitH ?? c.IntrinsicHeight ?? 0) + cmt + cmb;
+
+    const packed: Packed = {
+      mainOuter: w,
+      mainInner: baseW,
+      mainMargin: cml + cmr,
+      crossOuter: h,
+      aspect,
+      growW: Number(c.ChildLayout.FlexGrow),
+      cmTop: cmt, cmBot: cmb,
+      minH: _r(c.ChildLayout.MinHeight, childCtx, 'H'),
+      maxH: ResolveBound(c.ChildLayout.MaxHeight, childCtx, 'H'),
+    };
 
     const addWithGap = lineMain === 0 ? w : lineMain + mainGap + w;
     if (lineMain > 0 && addWithGap > innerMain) {
-      total += lineCross;
-      lineCount++;
+      linesPacked.push(line);
+      line = [packed];
       lineMain = w;
-      lineCross = h;
     } else {
+      line.push(packed);
       lineMain = addWithGap;
-      if (h > lineCross) lineCross = h;
     }
   }
-  if (lineMain > 0) {
+  if (line.length > 0) linesPacked.push(line);
+
+  // Per line: cards with FlexGrow share the line's slack, so resolve each
+  // aspected card's height from its GROWN width. Non-aspected cards keep their
+  // measured cross. The line's cross extent = tallest card on the line.
+  let total = 0;
+  for (const ln of linesPacked) {
+    const usedMain = ln.reduce((s, p) => s + p.mainOuter, 0) + Math.max(0, ln.length - 1) * mainGap;
+    const slack = Math.max(0, innerMain - usedMain);
+    const totalGrow = ln.reduce((s, p) => s + p.growW, 0);
+    let lineCross = 0;
+    for (const p of ln) {
+      let cross = p.crossOuter;
+      if (p.aspect !== null) {
+        // Grow adds slack to the OUTER size; the content box that the ratio
+        // applies to is that minus the card's horizontal margins.
+        const grownOuter = totalGrow > 0 ? p.mainOuter + slack * (p.growW / totalGrow) : p.mainOuter;
+        const innerW = Math.max(0, grownOuter - p.mainMargin);
+        const derived = clamp(innerW / p.aspect, p.minH, p.maxH);
+        cross = derived + p.cmTop + p.cmBot;
+      }
+      if (cross > lineCross) lineCross = cross;
+    }
     total += lineCross;
-    lineCount++;
   }
-  return total + Math.max(0, lineCount - 1) * crossGap + pt + pb;
+  return total + Math.max(0, linesPacked.length - 1) * crossGap + pt + pb;
 };

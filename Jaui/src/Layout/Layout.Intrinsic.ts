@@ -321,7 +321,23 @@ const _simulateWrapCrossSize = (
     const effW = Jath.Clamp(explicitW ?? c.IntrinsicWidth ?? 0, minBoundW, maxBoundW);
     const effH = Jath.Clamp(explicitH ?? c.IntrinsicHeight ?? 0, minBoundH, maxBoundH);
     const childMain = effMain;
-    const childCross = horiz ? effH : effW;
+    // AspectRatio (W÷H) cross prediction: when a card leaves its CROSS axis
+    // `Auto`, its cross derives from its main size (height = width / ratio for a
+    // Row). Grow isn't known in the intrinsic pass, so estimate from the basis
+    // main size — the same size we bin-pack with. Without this, an aspected card
+    // with Auto height reports a near-zero intrinsic cross and the row collapses.
+    const rawAspect = c.ChildLayout.AspectRatio;
+    const aspect = rawAspect === null ? null
+      : (Number.isFinite(Number(rawAspect)) && Number(rawAspect) > 0 ? Number(rawAspect) : null);
+    const crossRaw = c.ChildLayout[horiz ? 'Height' : 'Width'];
+    const crossAuto = crossRaw === 'Auto' || crossRaw === 'MinContent' || crossRaw === 'MaxContent';
+    let childCross = horiz ? effH : effW;
+    if (aspect !== null && crossAuto) {
+      // For a Row, ratio is W÷H → cross(H) = main(W) / ratio. For a Column it's
+      // the dual: cross(W) = main(H) * ratio.
+      const derived = horiz ? childMain / aspect : childMain * aspect;
+      childCross = Jath.Clamp(derived, horiz ? minBoundH : minBoundW, horiz ? maxBoundH : maxBoundW);
+    }
     const addWithGap = lineMain === 0 ? childMain : lineMain + mainGap + childMain;
     if (lineMain > 0 && addWithGap > mainBudget) {
       total += lineCross;

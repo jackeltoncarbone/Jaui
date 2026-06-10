@@ -24,6 +24,18 @@ import { Jaui } from '../Jaui/Jaui';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
 
 /**
+ * Maps each attached node's worker handle to the Angular host element that owns
+ * it. `AddChild` appends, but a child created out of authored order — e.g. one
+ * inside `@if`, whose embedded view mounts AFTER its static siblings once the
+ * condition flips true on data load — would otherwise land at the END of the
+ * parent's Children and paint below content authored after it. Recording the
+ * host element lets a freshly-attached node reorder itself to its real DOM
+ * position among current siblings (see `_reorderToDomPosition`). Both `<jiv>`
+ * and `<janvas>` register here so mixed trees order correctly.
+ */
+export const JAUI_HOST_EL = new WeakMap<JivHandle, HTMLElement>();
+
+/**
  * `<jiv>` — generic Jaui node.
  *
  * Worker-mode shape: each `<jiv>` allocates a worker-side ID at
@@ -80,6 +92,7 @@ export class Jiv implements OnInit, OnDestroy {
     }
     const bridge = this._canvas.Bridge;
     this.Node = new JivHandle(bridge, bridge.AllocateId());
+    JAUI_HOST_EL.set(this.Node, this._host.nativeElement);
 
     // Bridge engine-side hit handlers to bubbling DOM events on this
     // component's host element so Angular `(click)` / `(pointerdown)` etc.
@@ -115,6 +128,35 @@ export class Jiv implements OnInit, OnDestroy {
   ngOnInit(): void {
     const parentNode = this._parentJiv ? this._parentJiv.Node : this._canvas!.Root;
     parentNode.AddChild(this.Node);
+    // AddChild appends. If this node mounted out of authored order (e.g. it sits
+    // in an @if that flipped true after its static siblings already attached),
+    // move it to its real DOM position so paint/layout order matches the
+    // template instead of attach order.
+    this._reorderToDomPosition(parentNode);
+  }
+
+  /** Reorder this node within its parent's Children to match DOM document order.
+   *  The target index is the count of current siblings whose host element
+   *  precedes ours in the DOM; a no-op when already in order (the common case),
+   *  so statically-ordered children never post a move op. */
+  private _reorderToDomPosition(parentNode: JivHandle): void {
+    const myEl = this._host.nativeElement;
+    const siblings = parentNode.Children;
+    let target = 0;
+    for (const sib of siblings) {
+      if (sib === this.Node) continue;
+      const sibEl = JAUI_HOST_EL.get(sib);
+      // Only order against siblings still in the DOM; a leaving node's element
+      // may be detached and would compare as disconnected.
+      if (!sibEl || !sibEl.isConnected) continue;
+      if (myEl.compareDocumentPosition(sibEl) & Node.DOCUMENT_POSITION_PRECEDING) {
+        target++;
+      }
+    }
+    const current = siblings.indexOf(this.Node);
+    if (current !== -1 && current !== target) {
+      parentNode.MoveChildToIndex(this.Node, target);
+    }
   }
 
   ngOnDestroy(): void {

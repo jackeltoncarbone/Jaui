@@ -1,6 +1,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
   OnDestroy,
   OnInit,
   forwardRef,
@@ -13,7 +14,7 @@ import {
   type LayoutConfig,
   type ChildLayout,
 } from 'jaui';
-import { Jiv } from '../Jiv/Jiv';
+import { Jiv, JAUI_HOST_EL } from '../Jiv/Jiv';
 import { Jaui } from '../Jaui/Jaui';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
 
@@ -71,6 +72,7 @@ export class Janvas implements OnInit, OnDestroy {
   });
   private _canvas = inject(Jaui, { optional: true });
   private _registry = inject(JSS_REGISTRY, { optional: true });
+  private _host = inject(ElementRef<HTMLElement>);
 
   constructor() {
     if (!this._canvas) {
@@ -78,6 +80,9 @@ export class Janvas implements OnInit, OnDestroy {
     }
     const bridge = this._canvas.Bridge;
     this.Node = new JivHandle(bridge, bridge.AllocateId());
+    // Register for DOM-order child placement (see JAUI_HOST_EL in Jiv.ts) so
+    // sibling <jiv>s order correctly relative to this janvas.
+    JAUI_HOST_EL.set(this.Node, this._host.nativeElement);
     // Note: we don't enqueue anything here — `key` and `config` may be
     // bound through Angular inputs that haven't resolved at constructor
     // time. ngOnInit fires the janvas-attach with the resolved values.
