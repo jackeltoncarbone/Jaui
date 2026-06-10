@@ -200,9 +200,12 @@ export interface Renderer {
   /** Full-screen textured-quad copy to the current render target. */
   Blit(source: GpuTextureHandle): void;
 
-  /** Copy the current screen (default framebuffer) to an offscreen texture
-   *  for use as a glass backdrop. Returns a handle to the snapshot. */
-  SnapshotScreen(): GpuTextureHandle;
+  /** Copy the scene to an offscreen texture for use as a glass/pblur backdrop.
+   *  Optional `scissor` (device px, y=0 at top) restricts the copy to a
+   *  sub-rect — the surface footprint plus blur/refraction margin — so the
+   *  blit cost scales with the surface, not the whole canvas. Returns a handle
+   *  to the snapshot. */
+  SnapshotScreen(scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle;
 
   // ── Texture Management ──
 

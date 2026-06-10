@@ -131,6 +131,10 @@ export class Canvas implements DirtyTracker {
   private _frameCount:   number = 0;
   private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
+  /** Frame counter for the one-shot per-surface dump (`?wkr-jaui-prof`). Logs
+   *  each glass/pblur surface's rect + scissor fill once on a settled frame so
+   *  we can see which surface dominates GPU fill. */
+  private _surfFrame: number = 0;
   /** Deferred janvas clip-mask draws — populated during the janvas pre-pass,
    *  applied AFTER the panel pass (just before final present). Wiping the
    *  scene FBO immediately after the foreign render destroys data that
@@ -712,6 +716,7 @@ export class Canvas implements DirtyTracker {
       }
       this._frameIdx = (i + 1) % this._phaseDirty.length;
       if (this._frameCount < this._phaseDirty.length) this._frameCount++;
+      if (this._consoleProfilingEnabled) this._surfFrame++;
 
       // Per-second console summary — only when `?wkr-jaui-prof` is set.
       // Independent of HUD rendering so it works in the worker (no DOM).
@@ -726,11 +731,19 @@ export class Canvas implements DirtyTracker {
         if (tEnd - this._profLastDumpMs >= 1000 && this._profN > 0) {
           const n = this._profN;
           const avg = (v: number) => (v / n).toFixed(1);
+          // Average the resolved GPU-timer samples in the rolling ring. The
+          // reading lags 2-3 frames behind submission, so we average rather
+          // than align; nulls were already skipped on write. `gpu n/a` when
+          // no query has resolved (Safari / ANGLE without timer queries).
+          const gpuFilled = Math.min(this._phaseGpuCount, this._phaseGpu.length);
+          let gpuSum = 0;
+          for (let g = 0; g < gpuFilled; g++) gpuSum += this._phaseGpu[g];
+          const gpuStr = gpuFilled > 0 ? `${(gpuSum / gpuFilled).toFixed(2)}ms` : 'n/a';
           // eslint-disable-next-line no-console
           console.log(
             `[Jaui] ${n}f over ${(tEnd - this._profLastDumpMs).toFixed(0)}ms — avg total ${avg(this._profSum.Total)}ms;` +
             ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
-            ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)}` +
+            ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)} | gpu ${gpuStr}` +
             ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
@@ -1063,8 +1076,15 @@ export class Canvas implements DirtyTracker {
           w: Math.min(w, Math.ceil(fw + lodMargin * 2)),
           h: Math.min(h, Math.ceil(fh + lodMargin * 2)),
         };
+        if (this._consoleProfilingEnabled && this._surfFrame === 90) {
+          // eslint-disable-next-line no-console
+          console.log(`[Jaui.surf] PBLUR rect=${Math.round(pw)}x${Math.round(ph)} scissor=${scissor.w}x${scissor.h} (${(scissor.w * scissor.h / 1e6).toFixed(2)}Mpx) frost=${maxFeatherSigma}pt dir=${dir} maxLod=${maxLod.toFixed(1)} bgOpaque=${bgOpaque}`);
+        }
         const baseBlurCssPx = 1;
-        const sceneSnap = r.SnapshotScreen();
+        // Snapshot only this pblur's footprint + blur margin (same scissor the
+        // blur uses) instead of the whole canvas — the shader samples u_Scene
+        // only within the panel, so the rest of the snapshot is never read.
+        const sceneSnap = r.SnapshotScreen(scissor);
         // Don't force deeper pyramid here: forcing depth > natural radius
         // over-blurs level 0 itself, which the shader uses as the "clear"
         // end of the gradient. The visible progression (clear → heavy) only
@@ -1165,13 +1185,20 @@ export class Canvas implements DirtyTracker {
           w: Math.min(w, Math.ceil(pw + margin * 2)),
           h: Math.min(h, Math.ceil(ph + margin * 2)),
         };
+        if (this._consoleProfilingEnabled && this._surfFrame === 90) {
+          // eslint-disable-next-line no-console
+          console.log(`[Jaui.surf] GLASS rect=${Math.round(pw)}x${Math.round(ph)} scissor=${scissor.w}x${scissor.h} (${(scissor.w * scissor.h / 1e6).toFixed(2)}Mpx) frost=${frostCssPx}pt margin=${Math.round(margin)}`);
+        }
         // Snapshot the raw scene BEFORE the pyramid overwrites anything.
         // The shader's sampleBackdrop falls back to this raw texture when
         // the effective LOD is 0 (no-frost flat panel, or the center of
         // a glass panel with frost=0) — avoids picking up the pyramid's
         // baked-in 1px base Gaussian. SnapshotScreen reuses an internal
-        // texture so there's no per-frame allocation.
-        const sceneSnap = r.SnapshotScreen();
+        // texture so there's no per-frame allocation. Scissor the blit to this
+        // glass panel's footprint + margin (same rect the blur uses) — the
+        // shader only samples the snapshot within the panel, so a full-canvas
+        // copy was pure wasted bandwidth scaling with screen size.
+        const sceneSnap = r.SnapshotScreen(scissor);
         lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
         // Pyramid is built AT this panel's frost sigma, so set the base LOD to
         // the panel's frostLod: the shader's main sample (lod = frostLod -

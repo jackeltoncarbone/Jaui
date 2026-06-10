@@ -709,7 +709,17 @@ export class WebGL2Renderer implements Renderer {
   private _snapshotW: number = 0;
   private _snapshotH: number = 0;
 
-  SnapshotScreen = (): GpuTextureHandle => {
+  /** Copy the scene FBO into the snapshot texture so glass/pblur can sample
+   *  it while drawing back into the scene FBO (avoids the read==write feedback
+   *  loop). `scissor` (device px, y=0 at TOP — same convention BlurPass uses)
+   *  restricts the blit to the surface's footprint + blur margin. The rest of
+   *  the snapshot texture keeps last frame's contents, but the panel shader
+   *  only samples within its own footprint (well inside the scissor's margin),
+   *  so the stale ring is never read. Full-canvas blit when omitted. This is
+   *  the dominant per-surface fill cost — full-canvas snapshots scale with
+   *  total canvas area × (glass + pblur count); scissoring makes each snapshot
+   *  proportional to the surface, not the screen. */
+  SnapshotScreen = (scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {
     const gl = this._gl;
     // Ensure snapshot texture exists at current size
     if (!this._snapshotTex || this._snapshotW !== this._width || this._snapshotH !== this._height) {
@@ -739,7 +749,21 @@ export class WebGL2Renderer implements Renderer {
     // sample while rendering into sceneFbo itself.
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._snapshotFbo);
-    gl.blitFramebuffer(0, 0, this._width, this._height, 0, 0, this._width, this._height, gl.COLOR_BUFFER_BIT, gl.LINEAR);
+    if (scissor) {
+      // Flip y=0-top → GL y=0-bottom, matching BlurPass. src and dst use the
+      // same rect, so every copied texel stays at its framebuffer position;
+      // NEAREST is exact for a 1:1 same-size copy and skips filter cost.
+      const W = this._width, H = this._height;
+      const x0 = Math.max(0, Math.floor(scissor.x));
+      const x1 = Math.min(W, Math.ceil(scissor.x + scissor.w));
+      const y0 = Math.max(0, Math.floor(H - (scissor.y + scissor.h)));
+      const y1 = Math.min(H, Math.ceil(H - scissor.y));
+      if (x1 > x0 && y1 > y0) {
+        gl.blitFramebuffer(x0, y0, x1, y1, x0, y0, x1, y1, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      }
+    } else {
+      gl.blitFramebuffer(0, 0, this._width, this._height, 0, 0, this._width, this._height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return _wrap(this._snapshotTex);
   };

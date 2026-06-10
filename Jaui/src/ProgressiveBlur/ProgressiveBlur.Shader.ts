@@ -90,6 +90,16 @@ float _ign(vec2 p) {
 float triDither(vec2 p) {
     return (_ign(p) + _ign(p + vec2(113.0, 71.0)) - 1.0) / 255.0;
 }
+// White-noise hash (Dave Hoskins). Decorrelated at ALL pixel coordinates, so
+// unlike IGN it has no regular diagonal structure. Used for the large (±0.5)
+// LOD jitter below, where IGN's structure reads as a Moiré weave on smooth
+// blurred regions. IGN is kept for the ±1-LSB color dither (triDither), where
+// its even distribution matters and its structure is sub-perceptual.
+float _wn(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
 
 // 4-tap cubic B-spline upsample. The progressive ramp's heavy end samples a
 // tiny mip (LOD ~5 = 1/32 res); a plain bilinear textureLod magnifies that
@@ -285,7 +295,13 @@ void main() {
     // This is BETWEEN mip levels, so precision / bicubic / output dither
     // can't touch it. A ±0.5-level per-pixel jitter spreads every crossover
     // into noise the blur + output dither absorb.
-    lod = max(0.0, lod + (_ign(v_PixelPos + 31.0) - 0.5));
+    // Triangular-PDF LOD jitter from two decorrelated IGN samples. Keeps the
+    // ±0.5 peak span needed to cross a mip boundary, but its lower RMS and
+    // decorrelated structure dissolve the crossover bands with far less
+    // visible grain than a single uniform ±0.5 sample (which read as a
+    // structured Moiré on smooth regions).
+    float lodJitter = (_wn(v_PixelPos + 31.0) + _wn(v_PixelPos + 97.0) - 1.0) * 0.5;
+    lod = max(0.0, lod + lodJitter);
     vec2 texelUv = exp2(lod) / u_Resolution;
     // Inset by ~2 texels (not ½) so the bicubic kernel's footprint stays
     // inside the clip AABB — no beyond-clip scene content bleeds into the
