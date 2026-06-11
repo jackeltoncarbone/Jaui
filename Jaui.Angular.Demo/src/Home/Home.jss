@@ -65,7 +65,7 @@ ContentBlur {
   Height: 250pt
   Left: 0pt
   Bottom: 0pt
-  BackdropFrostBlur: 17pt
+  BackdropFilter: Blur(17pt)
   Background: rgba(0, 0, 0, 0.5)
   Layer: 5
 }
@@ -77,7 +77,7 @@ TopBlur {
   Height: 200pt
   Left: 0pt
   Top: 0pt
-  BackdropFrostBlur: 24pt
+  BackdropFilter: Blur(24pt)
   Background: rgba(0, 0, 0, 0)
   Layer: 5
 }
@@ -154,17 +154,13 @@ LiquidGlass {
   BorderRadius: 32pt
   BorderWidth: 1pt
   BorderBlur: 0.25pt
-  BorderBrightness: 1.25
-  BorderSaturation: 1.5
+  BorderFilter: Brightness(1.25) Saturate(1.5)
 
   ShadowColor: rgba(0, 0, 0, 0.18)
   ShadowBlur: 22pt
   ShadowOffsetY: 6pt
 
-  BackdropFrostBlur: 4pt
-  BackdropBrightness: 1.25
-  BackdropSaturation: 1.25
-  BackdropContrast: 0.75
+  BackdropFilter: Blur(4pt) Brightness(1.25) Saturate(1.25) Contrast(0.75)
 
   Thickness: 2
   Fillet: 0.25
@@ -194,8 +190,7 @@ SectionViewAll : LiquidGlass {
   BorderRadius: 999pt
   BorderWidth: 1pt
   BorderColor: rgba(255, 255, 255, 0.18)
-  BackdropFrostBlur: 14pt
-  BackdropBrightness: 1.05
+  BackdropFilter: Blur(14pt) Brightness(1.05)
 }
 
 SectionViewAllLabel {
@@ -267,7 +262,7 @@ CardFooter {
   Padding: 18pt
   Gap: 8pt
   ProgressiveBlurDirection: ToBottom
-  BackdropFrostBlur: 32pt
+  BackdropFilter: Blur(32pt)
   Background: rgba(0, 0, 0, 0.55)
 }
 

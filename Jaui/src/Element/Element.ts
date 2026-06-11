@@ -152,6 +152,16 @@ export class Element {
    *  opacity isn't clobbered by the cascade between frames. */
   EffectiveOpacity: number = 1;
 
+  /** Render-time cascaded foreground filter grade: ancestors' product × own
+   *  RenderStyle grade, unless this element sets `Isolate` (which starts a
+   *  fresh grade for its subtree). Mirrors EffectiveOpacity — computed once
+   *  per frame before draw; the panel path reads these so a parent's `Filter`
+   *  grade folds into descendants CSS-style. Stored here (not RenderStyle) so
+   *  the authored grade isn't clobbered by the cascade between frames. */
+  EffectiveBrightness: number = 1;
+  EffectiveSaturation: number = 1;
+  EffectiveContrast: number = 1;
+
   /** Click handler — fired on pointerup when the release hits the same
    *  Jiv that pointerdown hit (standard click semantics). null = no
    *  handler (the common case). Angular binding bridges this to a DOM

@@ -1,4 +1,5 @@
 import { SlotFor } from './Jss.Routes';
+import { AssignStyleWithFilterMerge, MergeFilterValue, FILTER_PROPS } from '../Core/Filter.Parse';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
@@ -852,18 +853,45 @@ const _readValue = (s: _ScanState): string => {
 
 // ─── Slot assignment ────────────────────────────────────────────────────
 
+const _FILTER_KEY_SET: ReadonlySet<string> = new Set(FILTER_PROPS);
+
 const _assignToSlot = (ruleset: Ruleset, prop: string, value: string): void => {
   const slot = SlotFor(prop);
   switch (slot) {
-    case 'Style':       (ruleset.Style       ??= {})[prop as keyof JivStyle]    = value as never; break;
+    case 'Style': {
+      const st = (ruleset.Style ??= {});
+      // Filter properties merge-by-function within a block too, so several
+      // single-function lines (or a duplicate filter declaration) accumulate
+      // instead of clobbering — `BackdropFilter: Blur(16pt)` then
+      // `BackdropFilter: Brightness(1.25)` = both. Everything else last-wins.
+      if (_FILTER_KEY_SET.has(prop)) {
+        (st as Record<string, string>)[prop] = MergeFilterValue(
+          (st as Record<string, string>)[prop], value,
+        );
+      } else {
+        (st as Record<string, unknown>)[prop] = value;
+      }
+      break;
+    }
     case 'Layout':      (ruleset.Layout      ??= {})[prop as keyof LayoutConfig] = value as never; break;
     case 'ChildLayout': (ruleset.ChildLayout ??= {})[prop as keyof ChildLayout] = value as never; break;
     case 'TextStyle':   (ruleset.TextStyle   ??= {})[prop as keyof TextStyle]   = value as never; break;
   }
 };
 
+const _mergeStyleSlot = (
+  a: Partial<JivStyle> | undefined,
+  b: Partial<JivStyle> | undefined,
+): Partial<JivStyle> => {
+  const out: Partial<JivStyle> = { ...a };
+  // Filter properties merge-by-function across extends (a subclass that
+  // re-specifies one function keeps the base's others); the rest replace.
+  if (b) AssignStyleWithFilterMerge(out as Record<string, unknown>, b as Record<string, unknown>);
+  return out;
+};
+
 const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
-  Style:             { ...a.Style,             ...b.Style },
+  Style:             _mergeStyleSlot(a.Style, b.Style),
   Layout:            { ...a.Layout,            ...b.Layout },
   ChildLayout:       { ...a.ChildLayout,       ...b.ChildLayout },
   TextStyle:         { ...a.TextStyle,         ...b.TextStyle },

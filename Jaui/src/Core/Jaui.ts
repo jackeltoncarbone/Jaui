@@ -766,6 +766,13 @@ export class Canvas implements DirtyTracker {
     // multiplied value only lives for the current render pass.
     this._cascadeOpacity(this.Root, 1);
 
+    // Cascade the foreground filter grade (CSS `filter` on a subtree).
+    // brightness/saturation/contrast are pointwise, so folding the parent's
+    // grade into each descendant is identical to grading the composited
+    // subtree as a group — but free (no offscreen pass). `Isolate` starts a
+    // fresh grade for the subtree.
+    this._cascadeFilterGrade(this.Root, 1, 1, 1);
+
     r.Resize(w, h, this._dpr);
     r.BeginFrame();
     this._textCache.BeginFrame();
@@ -974,7 +981,25 @@ export class Canvas implements DirtyTracker {
         const pivotY = node.Y + node.Height * node.RenderStyle.VisualOriginY;
         eff = matMul(eff, [sx, 0, 0, sy, pivotX * (1 - sx) + tx, pivotY * (1 - sy) + ty]);
       }
-      if (!this._isInsideClipStack(node, eff, stack)) return;
+      if (!this._isInsideClipStack(node, eff, stack)) {
+        // This node's OWN box is outside the clip. If it CLIPS its children
+        // (Overflow: Hidden/Scroll), they're bounded by that box and can't be
+        // visible either — skip the whole subtree (the cheap, common case).
+        // But an Overflow: Visible node can have children that OVERFLOW its
+        // box and remain on-screen after the box itself scrolls off — e.g. a
+        // flex-wrap container whose intrinsic height is one row while its
+        // children wrap to several rows. Dropping the subtree there made the
+        // overflowing rows vanish the instant the (one-row) box passed the
+        // viewport edge. So recurse — each child self-culls by its OWN AABB —
+        // and just skip drawing this node's own panel/text (it's off-screen).
+        if (node.Overflow === 'Hidden' || node.Overflow === 'Scroll') return;
+        const boxClip = this._boxClip(node, eff);
+        const childM = this._descendOffset(node, eff);
+        for (const child of orderedChildren(node)) {
+          renderNode(child, childM, this._childClip(node, stack, boxClip, child));
+        }
+        return;
+      }
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
       // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
       // the loaded image. Without this, the node stays at 0 height forever.
@@ -1373,6 +1398,26 @@ export class Canvas implements DirtyTracker {
     const eff = node === this.Root ? 1 : parentOp * node.RenderStyle.Opacity;
     node.EffectiveOpacity = eff;
     for (const child of node.Children) this._cascadeOpacity(child as Jiv, eff);
+  };
+
+  private _cascadeFilterGrade = (
+    node: Jiv,
+    parentB: number,
+    parentS: number,
+    parentC: number,
+  ): void => {
+    const rs = node.RenderStyle;
+    // Isolate (or the Root) ignores the ancestor grade and starts fresh, so
+    // an isolated subtree is graded only by its own + its own descendants'
+    // Filter — the ancestor's grade does not bleed in.
+    const base = node === this.Root || rs.Isolate;
+    const b = (base ? 1 : parentB) * rs.Brightness;
+    const s = (base ? 1 : parentS) * rs.Saturation;
+    const c = (base ? 1 : parentC) * rs.Contrast;
+    node.EffectiveBrightness = b;
+    node.EffectiveSaturation = s;
+    node.EffectiveContrast = c;
+    for (const child of node.Children) this._cascadeFilterGrade(child as Jiv, b, s, c);
   };
 
   /** Resolve a Jiv's Background to a BgPaint the renderer can consume.

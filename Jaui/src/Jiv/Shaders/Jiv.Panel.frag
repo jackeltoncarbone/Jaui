@@ -1105,10 +1105,19 @@ void main() {
 
     result.a *= opacity * clipAlpha;
 
-    // Foreground brightness — multiplies the whole element's final rgb (fill,
-    // image, border). Carried in v_StyleParams.w (the repurposed materialType
-    // lane). Default 1.0 = no-op for every element that doesn't set Brightness.
-    result.rgb *= v_StyleParams.w;
+    // Foreground filter grade — brightness + saturation + contrast applied to
+    // the whole element's final rgb (fill, image, text, border), so it reads
+    // the same on every material. Bit-packed into v_StyleParams.w (see
+    // Jiv.InstanceBuffer._packFgGrade): brightness 10 bits ·256, saturation /
+    // contrast 7 bits ·32, layout b·16384 + s·128 + c. Identity (1,1,1) = no-op.
+    {
+        float fgPacked = v_StyleParams.w;
+        float fgB = floor(fgPacked / 16384.0);
+        float fgRem = fgPacked - fgB * 16384.0;
+        float fgS = floor(fgRem / 128.0);
+        float fgC = fgRem - fgS * 128.0;
+        result.rgb = applyGrading(result.rgb, fgB / 256.0, fgS / 32.0, fgC / 32.0);
+    }
 
     // Dither backdrop-sampling panels to break RGBA8 banding in frosted /
     // glass regions. Sub-LSB amplitude; skipped where no backdrop is read

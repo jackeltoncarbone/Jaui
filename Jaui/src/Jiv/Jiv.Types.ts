@@ -107,15 +107,35 @@ export interface JivStyle {
   Background: string;
   BlendMode: BlendMode;
 
+  // ── Filters (CSS-shaped, ordered function lists) ──────────────────
+  // One property per zone; each is a space-separated list of PascalCase
+  // CSS-filter functions: Brightness(x) Saturate(x) Contrast(x) Blur(len).
+  // `None` / empty = identity. Cross-state and cross-extends MERGE BY
+  // FUNCTION (last occurrence of a function wins), so a `:Hover` can bump
+  // one function without restating the rest.
+  /** Foreground filter — grades the element's composited pixels (fill +
+   *  image + text + border) AND cascades to descendants as a group (CSS
+   *  `filter`). Stop the cascade into a subtree with `Isolate: true`.
+   *  Animate the whole filter via `@Transition Filter`. */
+  Filter: string;
+  /** Backdrop filter — frost + grade on the glass/backdrop behind this box
+   *  (CSS `backdrop-filter`). Per-box; never inherited. `Blur(len)` is the
+   *  frost radius. */
+  BackdropFilter: string;
+  /** Border-zone backdrop filter — frost LOD offset + grade applied in the
+   *  rim region only. Per-box. `Blur(len)` is the LOD octave offset vs the
+   *  panel face (negative = sharper rim, positive = softer). */
+  BorderFilter: string;
+  /** Cascade barrier for the foreground `Filter`. `true` stops an ancestor's
+   *  Filter grade from folding into this element + its subtree (CSS
+   *  `isolation: isolate`). Default `false`. */
+  Isolate: string;
+
   // Physical material — the Jiv is a slab with measurable properties
   Frost: string;
-  BackdropFrostBlur: string;
   Thickness: string;
   Fillet: string;
   Refraction: string;
-  BackdropBrightness: string;
-  BackdropSaturation: string;
-  BackdropContrast: string;
 
   // Refraction band geometry
   BezelWidth: string;
@@ -167,20 +187,11 @@ export interface JivStyle {
   /** Edge feather half-width in CSS px. Controls how soft the border
    *  stroke's silhouette edge is — larger = softer/glowier outline. At
    *  `0.5` the edge is antialiased over ~1 physical px (the old hardcoded
-   *  default). At `0` the edge is a hard step (aliased). */
+   *  default). At `0` the edge is a hard step (aliased). The border-zone
+   *  backdrop blur + grade live on `BorderFilter` instead. */
   BorderBlur: string;
-  /** Extra blur applied to the backdrop sample in the border-zone rim
-   *  (mipmap LOD octave offset; positive = wider blur than the panel
-   *  face, negative = sharper). 0 = border uses the same blur as the
-   *  panel. Not edge antialiasing — see `BorderBlur` for that. */
-  BorderBackdropBlur: string;
   BorderOffset: string;
   ContainBorder: boolean;
-
-  // Border-zone backdrop filter
-  BorderBrightness: string;
-  BorderSaturation: string;
-  BorderContrast: string;
 
   // Shadow
   ShadowColor: string;
@@ -190,11 +201,6 @@ export interface JivStyle {
   InnerShadow: boolean;
 
   // Appearance
-  /** Foreground brightness — multiplies the element's FINAL composited rgb
-   *  (fill, image, text, border — the whole element), unlike BackdropBrightness
-   *  which only filters the glass backdrop behind it. Default `'1'` (no-op).
-   *  Animatable via `@Transition Brightness`. */
-  Brightness: string;
   Opacity: string;
 
   /** Sibling stacking order. Higher = paints on top. Default `0`.
@@ -281,8 +287,16 @@ export interface JivRenderStyle {
   ShadowOffsetY: number;
   InnerShadow: boolean;
 
-  /** Foreground brightness multiplier on the final rgb. Default 1. */
+  /** Foreground grade — multiplies the element's FINAL composited rgb
+   *  (fill + image + text + border). From the `Filter` property; cascades
+   *  to descendants (folded into the Effective* values the renderer reads).
+   *  Default 1 (no-op). */
   Brightness: number;
+  Saturation: number;
+  Contrast: number;
+  /** Cascade barrier for the foreground filter grade. When true, an
+   *  ancestor's Filter grade does not fold into this element / subtree. */
+  Isolate: boolean;
   Opacity: number;
 
   Layer: number;

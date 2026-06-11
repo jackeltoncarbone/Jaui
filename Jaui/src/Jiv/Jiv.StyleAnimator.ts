@@ -51,16 +51,22 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
 
   // Physical material
   ['Frost',                  s => s.Frost,                        (s, v) => { s.Frost = v; }],
-  ['BackdropFrostBlur',      s => s.BackdropFrostBlur,            (s, v) => { s.BackdropFrostBlur = v; }],
   ['Thickness',              s => s.Thickness,                    (s, v) => { s.Thickness = v; }],
   ['Fillet',                 s => s.Fillet,                       (s, v) => { s.Fillet = v; }],
   ['Refraction',             s => s.Refraction,                   (s, v) => { s.Refraction = v; }],
-  ['BackdropBrightness',     s => s.BackdropBrightness,           (s, v) => { s.BackdropBrightness = v; }],
-  ['BackdropSaturation',     s => s.BackdropSaturation,           (s, v) => { s.BackdropSaturation = v; }],
-  ['BackdropContrast',       s => s.BackdropContrast,             (s, v) => { s.BackdropContrast = v; }],
 
-  // Foreground brightness (multiplies final rgb) — springs like the others.
-  ['Brightness',             s => s.Brightness,                   (s, v) => { s.Brightness = v; }],
+  // Backdrop filter — every channel springs under the `BackdropFilter`
+  // bucket, so `@Transition BackdropFilter { ... }` tunes them together.
+  ['BackdropFilter',         s => s.BackdropFrostBlur,            (s, v) => { s.BackdropFrostBlur = v; }],
+  ['BackdropFilter',         s => s.BackdropBrightness,           (s, v) => { s.BackdropBrightness = v; }],
+  ['BackdropFilter',         s => s.BackdropSaturation,           (s, v) => { s.BackdropSaturation = v; }],
+  ['BackdropFilter',         s => s.BackdropContrast,             (s, v) => { s.BackdropContrast = v; }],
+
+  // Foreground filter grade (multiplies final rgb) — bucket `Filter`, so
+  // `@Transition Filter { ... }` springs brightness/saturation/contrast.
+  ['Filter',                 s => s.Brightness,                   (s, v) => { s.Brightness = v; }],
+  ['Filter',                 s => s.Saturation,                   (s, v) => { s.Saturation = v; }],
+  ['Filter',                 s => s.Contrast,                     (s, v) => { s.Contrast = v; }],
 
   // Refraction band geometry
   ['BezelWidth',             s => s.BezelWidth,                   (s, v) => { s.BezelWidth = v; }],
@@ -110,11 +116,12 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BorderColor',            s => s.BorderColor.A,                (s, v) => { s.BorderColor.A = v; }],
   ['BorderWidth',            s => s.BorderWidth,                  (s, v) => { s.BorderWidth = v; }],
   ['BorderBlur',             s => s.BorderBlur,                   (s, v) => { s.BorderBlur = v; }],
-  ['BorderBackdropBlur',     s => s.BorderBackdropBlur,           (s, v) => { s.BorderBackdropBlur = v; }],
   ['BorderOffset',           s => s.BorderOffset,                 (s, v) => { s.BorderOffset = v; }],
-  ['BorderBrightness',       s => s.BorderBrightness,             (s, v) => { s.BorderBrightness = v; }],
-  ['BorderSaturation',       s => s.BorderSaturation,             (s, v) => { s.BorderSaturation = v; }],
-  ['BorderContrast',         s => s.BorderContrast,               (s, v) => { s.BorderContrast = v; }],
+  // Border-zone backdrop filter — bucket `BorderFilter`.
+  ['BorderFilter',           s => s.BorderBackdropBlur,           (s, v) => { s.BorderBackdropBlur = v; }],
+  ['BorderFilter',           s => s.BorderBrightness,             (s, v) => { s.BorderBrightness = v; }],
+  ['BorderFilter',           s => s.BorderSaturation,             (s, v) => { s.BorderSaturation = v; }],
+  ['BorderFilter',           s => s.BorderContrast,               (s, v) => { s.BorderContrast = v; }],
 
   // Shadow
   ['ShadowColor',            s => s.ShadowColor.R,                (s, v) => { s.ShadowColor.R = v; }],
@@ -158,6 +165,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.BlendMode = target.BlendMode;
   render.ContainBorder = target.ContainBorder;
   render.InnerShadow = target.InnerShadow;
+  render.Isolate = target.Isolate;
   render.Layer = target.Layer;
   render.Background = target.Background;
 };

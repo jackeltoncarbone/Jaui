@@ -4,6 +4,7 @@ import { Resolve } from './Length';
 import { ResolveLengthTuple4 } from './Length.Tuple';
 import { ParseColor } from './Color.Parse';
 import { ParseBackground } from './Background.Parse';
+import { ParseFilter } from './Filter.Parse';
 import { ResolveTransform } from '../Transform/Transform.Parse';
 
 /**
@@ -90,6 +91,15 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   const borderRadius = ResolveLengthTuple4(s.BorderRadius, ctx, ['W', 'W', 'W', 'W']);
   const thickness = Resolve(s.Thickness, ctx, 'W');
 
+  // Filters — each authored as a CSS-shaped function list, normalized into
+  // the per-zone scalar render fields the shader already consumes. Blur()'s
+  // arg stays a Length and resolves under ctx (frost px for BackdropFilter,
+  // LOD octave offset for BorderFilter); a missing Blur() = 0.
+  const fg = ParseFilter(s.Filter);
+  const backdrop = ParseFilter(s.BackdropFilter);
+  const border = ParseFilter(s.BorderFilter);
+  const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
+
   return {
     Material: _inferMaterial(thickness, s.ProgressiveBlurDirection),
     ProgressiveBlurDirection: s.ProgressiveBlurDirection ?? 'ToTop',
@@ -105,16 +115,20 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BlendMode: s.BlendMode,
 
     Frost: Resolve(s.Frost, ctx, 'W'),
-    BackdropFrostBlur: Resolve(s.BackdropFrostBlur, ctx, 'W'),
+    BackdropFrostBlur: resolveBlur(backdrop.BlurRaw),
     Thickness: thickness,
     Fillet: Resolve(s.Fillet, ctx, 'W'),
     Refraction: Resolve(s.Refraction, ctx, 'W'),
-    BackdropBrightness: Resolve(s.BackdropBrightness, ctx, 'W'),
-    BackdropSaturation: Resolve(s.BackdropSaturation, ctx, 'W'),
-    BackdropContrast: Resolve(s.BackdropContrast, ctx, 'W'),
+    BackdropBrightness: backdrop.Brightness,
+    BackdropSaturation: backdrop.Saturation,
+    BackdropContrast: backdrop.Contrast,
 
-    // Foreground brightness — multiplies the element's final rgb at paint time.
-    Brightness: Resolve(s.Brightness, ctx, 'W'),
+    // Foreground filter grade — multiplies the element's final rgb at paint
+    // time and cascades to descendants (folded into Effective* downstream).
+    Brightness: fg.Brightness,
+    Saturation: fg.Saturation,
+    Contrast: fg.Contrast,
+    Isolate: s.Isolate === 'true' || (s.Isolate as unknown) === true,
 
     BezelWidth: Resolve(s.BezelWidth, ctx, 'W'),
     BezelScale: Resolve(s.BezelScale, ctx, 'W'),
@@ -152,13 +166,13 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderColor: ParseColor(s.BorderColor),
     BorderWidth: Resolve(s.BorderWidth, ctx, 'W'),
     BorderBlur: Resolve(s.BorderBlur, ctx, 'W'),
-    BorderBackdropBlur: Resolve(s.BorderBackdropBlur, ctx, 'W'),
+    BorderBackdropBlur: resolveBlur(border.BlurRaw),
     BorderOffset: Resolve(s.BorderOffset, ctx, 'W'),
     ContainBorder: s.ContainBorder,
 
-    BorderBrightness: Resolve(s.BorderBrightness, ctx, 'W'),
-    BorderSaturation: Resolve(s.BorderSaturation, ctx, 'W'),
-    BorderContrast: Resolve(s.BorderContrast, ctx, 'W'),
+    BorderBrightness: border.Brightness,
+    BorderSaturation: border.Saturation,
+    BorderContrast: border.Contrast,
 
     ShadowColor: ParseColor(s.ShadowColor),
     ShadowBlur: Resolve(s.ShadowBlur, ctx, 'W'),

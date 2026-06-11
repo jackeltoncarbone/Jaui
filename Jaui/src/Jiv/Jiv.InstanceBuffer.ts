@@ -32,6 +32,27 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 
 export const JIV_FLOATS_PER_INSTANCE = 60;
 
+/** Quantize a grade multiplier to an integer code. `scale` = codes per unit,
+ *  `max` = the code ceiling (bit budget). Non-finite → identity (1). */
+const _q = (v: number, scale: number, max: number): number => {
+  const x = Number.isFinite(v) ? v : 1;
+  const code = Math.round(x * scale);
+  return code < 0 ? 0 : code > max ? max : code;
+};
+
+/** Bit-pack the foreground filter grade (brightness, saturation, contrast)
+ *  into a single 24-bit-exact float for a_StyleParams.w. brightness: 10 bits
+ *  over [0, 4) (×256, smooth for animation); saturation/contrast: 7 bits each
+ *  over [0, 4) (×32). Layout: brightnessCode·16384 + saturationCode·128 +
+ *  contrastCode. The panel frag reverses this. Identity (1,1,1) packs to
+ *  256·16384 + 32·128 + 32. */
+const _packFgGrade = (brightness: number, saturation: number, contrast: number): number => {
+  const b = _q(brightness, 256, 1023);
+  const s = _q(saturation, 32, 127);
+  const c = _q(contrast, 32, 127);
+  return b * 16384 + s * 128 + c;
+};
+
 /**
  * CPU-side instance data packer for Jiv panels. Reads from Jiv.RenderStyle
  * and packs 60 floats per instance into a Float32Array. Backend-agnostic —
@@ -165,12 +186,16 @@ export class JivInstanceBuffer {
     // `Opacity: <expr>` for a custom curve.
     data[offset + 30] = jiv.EffectiveOpacity;
     // offset+31 (a_StyleParams.w) was the materialType flag, but in production
-    // the shader picks the glass/non-glass variant at compile time (the
-    // renderer's `useGlassShader`), so this lane is dead there. Repurposed to
-    // carry the foreground Brightness multiplier (multiplies the element's
-    // final rgb in the frag; default 1 = no-op). Guarded so a non-finite style
-    // value can never write NaN and black out the panel.
-    data[offset + 31] = Number.isFinite(style.Brightness) ? style.Brightness : 1;
+    // the shader picks the glass/non-glass variant at compile time, so this
+    // lane is free. It now carries the foreground Filter GRADE — brightness,
+    // saturation, AND contrast — bit-packed into this one UNIVERSAL lane so the
+    // foreground filter renders identically on every material (glass + plain
+    // panels alike), without spending one of WebGL2's full 16 vertex-attribute
+    // slots. Values are the CASCADED Effective* (a parent's `Filter` folds into
+    // descendants). brightness gets 10 bits (smooth animation), saturation /
+    // contrast 7 each; all three are exact in a 24-bit float mantissa. The frag
+    // unpacks and runs applyGrading. NaN-guarded so it can never black a panel.
+    data[offset + 31] = _packFgGrade(jiv.EffectiveBrightness, jiv.EffectiveSaturation, jiv.EffectiveContrast);
 
     data[offset + 32] = style.BackdropBrightness;
     data[offset + 33] = style.BackdropSaturation;

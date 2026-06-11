@@ -18,15 +18,11 @@ export const LiquidGlass: Partial<JivStyle> = {
   BorderColor: 'rgba(255, 255, 255, 0.12)',
   BorderWidth: '1.4',
   BorderRadius: '32',
-  // Border-zone backdrop refilter — brighter + more saturated than the
-  // panel face so the rim catches color like a real glass bevel. These
-  // multiply the panel's grading. BorderBackdropBlur is the extra LOD
-  // octave offset applied on top of the panel's own blur LOD — negative
-  // = sharper border, positive = wider, softer rim.
-  BorderBrightness: '1.35',
-  BorderSaturation: '1.25',
-  BorderContrast: '1.0',
-  BorderBackdropBlur: '-0.5',
+  // Border-zone backdrop refilter — brighter + more saturated than the panel
+  // face so the rim catches color like a real glass bevel. Blur() here is the
+  // extra LOD octave offset on top of the panel's own blur LOD (negative =
+  // sharper rim, positive = softer).
+  BorderFilter: 'Blur(-0.5) Brightness(1.35) Saturate(1.25)',
 
   // Ambient drop shadow — Apple shadows are SUBTLE; ~18% alpha, soft blur
   ShadowColor: 'rgba(0, 0, 0, 0.18)',
@@ -34,10 +30,7 @@ export const LiquidGlass: Partial<JivStyle> = {
   ShadowOffsetY: '6',
 
   // Backdrop grading — gentle, content stays readable
-  BackdropFrostBlur: '3',
-  BackdropBrightness: '1',
-  BackdropSaturation: '1.25',
-  BackdropContrast: '0.75',
+  BackdropFilter: 'Blur(3) Saturate(1.25) Contrast(0.75)',
 
   // Refraction / bezel — match Apple's dossier. Bulge stays near-zero; the
   // Apple glass surface reads as FLAT, not fishbowl-domed. Thickness controls
@@ -84,10 +77,7 @@ export const ClearGlass: Partial<JivStyle> = {
   BorderWidth: '1',
   BorderRadius: '32',
 
-  BackdropFrostBlur: '1',
-  BackdropBrightness: '1',
-  BackdropSaturation: '1.1',
-  BackdropContrast: '1',
+  BackdropFilter: 'Blur(1) Saturate(1.1)',
 
   Thickness: '1',
   Fillet: '0.5',

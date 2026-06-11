@@ -8,6 +8,7 @@ import { Element, type CursorStyle } from '../Element/Element';
 import { DirtyFlag } from '../Core/Types';
 import type { PredicateStyle } from '../Jss/Jss.Parser';
 import { EvaluatePredicate } from '../Jss/Jss.Predicate';
+import { AssignStyleWithFilterMerge } from '../Core/Filter.Parse';
 
 /**
  * Jiv — a visual panel element. Extends Element with material, style,
@@ -315,7 +316,13 @@ export class Jiv extends Element {
     for (const entry of this.PredicateStyles) {
       if (entry.Style && EvaluatePredicate(entry.Predicate, this._states)) {
         if (!merged) merged = { ...this.Style };
-        Object.assign(merged, entry.Style);
+        // Filter properties merge-by-function (concatenate); everything else
+        // replaces. So `:Hover { BackdropFilter: Brightness(2) }` keeps the
+        // resting blur/saturate and only overrides brightness.
+        AssignStyleWithFilterMerge(
+          merged as unknown as Record<string, unknown>,
+          entry.Style as unknown as Record<string, unknown>,
+        );
       }
     }
     return merged ?? this.Style;
