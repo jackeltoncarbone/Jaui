@@ -119,6 +119,17 @@ export class Canvas implements DirtyTracker {
   private _profSum = { Dirty: 0, Layout: 0, Text: 0, Render: 0, Total: 0 };
   private _profN = 0;
 
+  // TEMP perf-isolation toggles (URL params, off by default — zero cost unless
+  // set). Route a blur surface to the plain-panel branch so the worker-fps
+  // delta is that surface's full-res blur cost. Remove after diagnosis.
+  //   ?no-pblur       skip all progressive-blur surfaces (render flat)
+  //   ?no-glass       skip all glass / backdrop-filter surfaces (render flat)
+  //   ?no-pblur-draw  build the pblur pyramid but skip the DrawProgressiveBlur
+  //                   pass — isolates build cost vs the bicubic draw shader
+  private _diagNoPblur: boolean = false;
+  private _diagNoGlass: boolean = false;
+  private _diagNoPblurDraw: boolean = false;
+
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
   // Only populated when the debug HUD is active so release builds pay
@@ -1031,7 +1042,7 @@ export class Canvas implements DirtyTracker {
 
       const material = node.RenderStyle.Material;
 
-      if (material === 'ProgressiveBlur') {
+      if (material === 'ProgressiveBlur' && !this._diagNoPblur) {
         // Flush both pending batches: the pblur snapshots the scene and
         // samples it — so the scene must contain everything drawn so
         // far. Deferred panels AND text in the buffers haven't hit the
@@ -1078,9 +1089,17 @@ export class Canvas implements DirtyTracker {
         // there). Tighten the blur scissor to only the feather strip + LOD
         // margin — for a tall content-area pblur with a 120pt feather,
         // that's ~15× less blur fill per frame.
-        const feather = node.RenderStyle.ProgressiveBlurFeather * d;
         const bgOpaque = node.RenderStyle.Background.Color.A >= 0.999;
         const dir = node.RenderStyle.ProgressiveBlurDirection;
+        // Feather ceilings at the element's OWN device axis length — height for
+        // ToTop/ToBottom, width for ToLeft/ToRight. A feather longer than the
+        // axis can never complete the ramp, leaving the whole element a partial
+        // gradient that never reaches full blur. 0 keeps "span the whole axis".
+        const axisLenDev = (dir === 'ToTop' || dir === 'ToBottom')
+          ? matScaleY(eff) * node.Height * d
+          : matScaleX(eff) * node.Width * d;
+        const featherRaw = node.RenderStyle.ProgressiveBlurFeather * d;
+        const feather = featherRaw > 0 ? Math.min(featherRaw, axisLenDev) : 0;
         // The feather-strip tightening slices one edge off the AXIS-ALIGNED
         // AABB. Under rotation the AABB is larger than (and offset from) the
         // rotated panel, so a tightened strip clips the rotated blur's edge
@@ -1134,27 +1153,26 @@ export class Canvas implements DirtyTracker {
         const _pbCx = matScaleX(eff), _pbCy = matScaleY(eff);
         const _pbPivotX = matApplyX(eff, node.X + node.Width * 0.5, node.Y + node.Height * 0.5) * d;
         const _pbPivotY = matApplyY(eff, node.X + node.Width * 0.5, node.Y + node.Height * 0.5) * d;
+        // The element's OWN unrotated device half-extents. The pblur vertex
+        // shader builds the quad from this Rect and ROTATES it about the pivot,
+        // so an element-sized quad already covers the rotated element exactly —
+        // do NOT expand to the rotated AABB (the panel does that because its
+        // quad is an un-rotated screen-space cover; the pblur's quad is not).
+        // Expanding here would make v_Local / axisLen track the AABB, so the
+        // feather distance and ramp "height" would breathe with the rotation
+        // angle. Element-sized keeps the ramp on the element's true axes; the
+        // clip SDF (ClipOffset/ClipCount) bounds the silhouette. At rotation 0
+        // this is byte-identical to the previous AABB form.
         const _pbHalfW = _pbCx * node.Width * 0.5 * d;
         const _pbHalfH = _pbCy * node.Height * 0.5 * d;
-        // Expand the unrotated quad to the rotated AABB about the pivot, exactly as the
-        // panel does (Jiv.InstanceBuffer.ts). The pblur shader rotates THIS quad about the
-        // same pivot, so it must be large enough to contain the rotated content rect;
-        // otherwise its corners fall inside the rotated card and the blur edges drift off
-        // the panel edges. NO border/shadow margin term: the blur aligns to the content
-        // edge and is already clip-bounded by ClipOffset/ClipCount. At rotation 0,
-        // |cos|=1/|sin|=0 so these reduce to _pbHalfW/_pbHalfH (byte-identical, no regression).
-        const _pbACos = Math.abs(matCos(eff));
-        const _pbASin = Math.abs(matSin(eff));
-        const _pbRotHalfW = _pbACos * _pbHalfW + _pbASin * _pbHalfH;
-        const _pbRotHalfH = _pbASin * _pbHalfW + _pbACos * _pbHalfH;
-        r.DrawProgressiveBlur({
-          Rect: { X: _pbPivotX - _pbRotHalfW, Y: _pbPivotY - _pbRotHalfH, W: _pbRotHalfW * 2, H: _pbRotHalfH * 2 },
+        if (!this._diagNoPblurDraw) r.DrawProgressiveBlur({
+          Rect: { X: _pbPivotX - _pbHalfW, Y: _pbPivotY - _pbHalfH, W: _pbHalfW * 2, H: _pbHalfH * 2 },
           Cos: matCos(eff), Sin: matSin(eff), PivotX: _pbPivotX, PivotY: _pbPivotY,
           Scene: sceneSnap, // reuse the snapshot we took for ComputeBlur
           Pyramid: lastBackdrop,
           MaxLod: maxLod,
           Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
-          Feather: node.RenderStyle.ProgressiveBlurFeather * d,
+          Feather: feather,
           Easing: Math.max(0.001, node.RenderStyle.ProgressiveBlurEasing),
           Opacity: node.EffectiveOpacity,
           Background: node.RenderStyle.Background.Color,
@@ -1168,7 +1186,7 @@ export class Canvas implements DirtyTracker {
         });
         this._counts.PBlur++;
 
-      } else if (_isGlass(material) || _hasBackdropFilter(node)) {
+      } else if ((_isGlass(material) || _hasBackdropFilter(node)) && material !== 'ProgressiveBlur' && !this._diagNoGlass) {
         // Flush pending batches: same reason as pblur — backdrop-filter
         // panels (glass or flat) read the scene (indirectly via the blur
         // pyramid), so the scene must be current. Flat panels with
@@ -2711,6 +2729,10 @@ export class Canvas implements DirtyTracker {
     if (params.has('wkr-jaui-prof') || hash.includes('wkr-jaui-prof')) {
       this._consoleProfilingEnabled = true;
     }
+    // TEMP perf-isolation toggles (exact-key query params). See field decls.
+    if (params.has('no-pblur')) this._diagNoPblur = true;
+    if (params.has('no-glass')) this._diagNoGlass = true;
+    if (params.has('no-pblur-draw')) this._diagNoPblurDraw = true;
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────

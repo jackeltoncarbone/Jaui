@@ -122,7 +122,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
   if (uniforms.feather > 0.0) {
     let axis_len = select(uniforms.rect.z, uniforms.rect.w, uniforms.direction == 0 || uniforms.direction == 1);
-    t = clamp(t * axis_len / uniforms.feather, 0.0, 1.0);
+    // Ceiling the feather at the axis length — a longer feather can never
+    // complete the ramp, leaving the element a gradient that never fully blurs.
+    let fe = min(uniforms.feather, axis_len);
+    t = clamp(t * axis_len / fe, 0.0, 1.0);
   }
 
   // Early-out: past the feather AND opaque background, skip pyramid sampling.

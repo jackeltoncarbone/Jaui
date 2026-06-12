@@ -248,7 +248,11 @@ void main() {
     // (ramp spans the whole element on the gradient axis).
     if (u_Feather > 0.0) {
         float axisLen = (u_Direction == 0 || u_Direction == 1) ? u_Rect.w : u_Rect.z;
-        t = clamp(t * axisLen / u_Feather, 0.0, 1.0);
+        // Ceiling the feather at the axis length — a feather longer than the
+        // element can never complete the ramp, so the whole element would read
+        // as a partial gradient that never reaches full blur.
+        float fe = min(u_Feather, axisLen);
+        t = clamp(t * axisLen / fe, 0.0, 1.0);
     }
 
     // Early-out: past the feather AND the background is fully opaque, the
