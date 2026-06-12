@@ -62,6 +62,7 @@ export class JivAnimator implements Animatable {
     this._element.Y = this.Springs.Y.Value;
     this._element.Width = this.Springs.Width.Value;
     this._element.Height = this.Springs.Height.Value;
+    this._element.TeleportSeq = 0;
   };
 
   Tick = (dt: number): boolean => {
@@ -76,6 +77,9 @@ export class JivAnimator implements Animatable {
     this._element.Y = s.Y.Value;
     this._element.Width = s.Width.Value;
     this._element.Height = s.Height.Value;
+
+    // Teleport flight settled — drop the render-walk elevation.
+    if (!active && this._element.TeleportSeq !== 0) this._element.TeleportSeq = 0;
 
     return active;
   };

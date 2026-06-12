@@ -17,6 +17,7 @@ import {
 } from 'jaui';
 import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
 import { SemanticMirror } from '../Seo/Semantic.Mirror';
+import { TeleportRegistry, TELEPORT_REGISTRY } from '../Teleport/Teleport.Registry';
 
 /** DI token for the `<jaui>`-hosted Worker. The consumer must provide a
  *  Worker instance — there's no sane default because the worker is
@@ -58,6 +59,8 @@ export const JAUI_WORKER = new InjectionToken<Worker>('JAUI_WORKER');
     JssRegistry,
     { provide: JSS_REGISTRY, useExisting: JssRegistry },
     SemanticMirror,
+    TeleportRegistry,
+    { provide: TELEPORT_REGISTRY, useExisting: TeleportRegistry },
   ],
 })
 export class Jaui implements OnInit, OnDestroy {

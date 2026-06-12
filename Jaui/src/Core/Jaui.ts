@@ -957,6 +957,44 @@ export class Canvas implements DirtyTracker {
       return [...children].sort((a, b) => a.RenderStyle.Layer - b.RenderStyle.Layer);
     };
 
+    // ── Teleport elevation ──
+    // A subtree mid-teleport (Element.TeleportSeq != 0 — live-reparented, rect
+    // springs still flying) is DEFERRED: painted after everything else inside
+    // its nearest LAYERED ancestor's scope (most recent teleport last = topmost),
+    // with the clip stack captured ABOVE that ancestor — so a card flying home
+    // into a scrolled rail paints over its cousins and is not clipped by the
+    // scroll container it is returning into, while still staying under
+    // higher-Layer chrome (the scope replays before the next layered sibling
+    // paints). Zero-cost when nothing is in flight (one int check per child).
+    interface TeleportScope { Deferred: { N: Jiv; M: Mat2x3 }[]; Stack: ClipStack }
+
+    const replayScope = (scope: TeleportScope): void => {
+      while (scope.Deferred.length > 0) {
+        const items = scope.Deferred.sort((a, b) => a.N.TeleportSeq - b.N.TeleportSeq);
+        scope.Deferred = [];
+        for (const d of items) renderNode(d.N, d.M, scope.Stack, scope);
+      }
+    };
+
+    const descendChildren = (node: Jiv, eff: Mat2x3, stack: ClipStack, scope: TeleportScope): void => {
+      const boxClip = this._boxClip(node, eff);
+      const childM = this._descendOffset(node, eff);
+      for (const child of orderedChildren(node)) {
+        const clip = this._childClip(node, stack, boxClip, child);
+        if (child.TeleportSeq !== 0) {
+          scope.Deferred.push({ N: child, M: childM });
+          continue;
+        }
+        if (child.RenderStyle.Layer !== 0) {
+          const childScope: TeleportScope = { Deferred: [], Stack: clip };
+          renderNode(child, childM, clip, childScope);
+          replayScope(childScope);
+          continue;
+        }
+        renderNode(child, childM, clip, scope);
+      }
+    };
+
     // Single tree walk — renders everything in z-order. The (cx, cy,
     // ox, oy) tuple is the affine map from this Jiv's natural
     // (post-layout, pre-Visual-transform) coords to canvas px:
@@ -965,7 +1003,7 @@ export class Canvas implements DirtyTracker {
     // Identity (cx=cy=1, ox=oy=0) at the root is the no-transform path.
     // VisualScale on an ancestor composes into the effective tuple so
     // descendants ride along, just like CSS transform on a parent.
-    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack): void => {
+    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope): void => {
       // Compose own's transform onto the inherited matrix. Order: rotation
       // (outermost, about Transform.Origin) then VisualScale/Translate (about
       // VisualOrigin). Both ride the inherited matrix so they CASCADE to
@@ -1004,11 +1042,7 @@ export class Canvas implements DirtyTracker {
         // viewport edge. So recurse — each child self-culls by its OWN AABB —
         // and just skip drawing this node's own panel/text (it's off-screen).
         if (node.Overflow === 'Hidden' || node.Overflow === 'Scroll') return;
-        const boxClip = this._boxClip(node, eff);
-        const childM = this._descendOffset(node, eff);
-        for (const child of orderedChildren(node)) {
-          renderNode(child, childM, this._childClip(node, stack, boxClip, child));
-        }
+        descendChildren(node, eff, stack, scope);
         return;
       }
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
@@ -1028,11 +1062,7 @@ export class Canvas implements DirtyTracker {
       }
 
       if (node.Width <= 0 || node.Height <= 0 || !node.Visible) {
-        const boxClip = this._boxClip(node, eff);
-        const childM = this._descendOffset(node, eff);
-        for (const child of orderedChildren(node)) {
-          renderNode(child, childM, this._childClip(node, stack, boxClip, child));
-        }
+        descendChildren(node, eff, stack, scope);
         return;
       }
 
@@ -1363,11 +1393,7 @@ export class Canvas implements DirtyTracker {
       }
 
       // Walk children in Layer order (ties break by tree order)
-      const boxClip = this._boxClip(node, eff);
-      const childM = this._descendOffset(node, eff);
-      for (const child of orderedChildren(node)) {
-        renderNode(child, childM, this._childClip(node, stack, boxClip, child));
-      }
+      descendChildren(node, eff, stack, scope);
     };
 
     this._textBuffer.Begin();
@@ -1384,7 +1410,10 @@ export class Canvas implements DirtyTracker {
     // the authored blur radius.
     this._maxFrostBlur = 0;
     this._scanFrostBlur(this.Root);
-    renderNode(this.Root, MAT_IDENTITY, EmptyClipStack);
+    const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
+    renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
+    // In-flight teleports with no layered ancestor paint last at root level.
+    replayScope(rootScope);
     // Trailing flushes — catch anything deferred since the last category
     // boundary. Order: panels first (they were pushed earlier in tree
     // order than the trailing text, if any).

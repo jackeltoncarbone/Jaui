@@ -26,6 +26,7 @@ import { JSS_REGISTRY } from '../Jss/Jss.Registry';
 import { SemanticMirror, type MirrorEntry } from '../Seo/Semantic.Mirror';
 import { ExtractBackgroundUrl, ResolveSemantics } from '../Seo/Seo.Resolve';
 import { JAUI_NAVIGATE, type SemanticRole } from '../Seo/Seo.Types';
+import { WireTeleportInputs } from '../Teleport/Teleport.Wiring';
 
 /**
  * Maps each attached node's worker handle to the Angular host element that owns
@@ -95,6 +96,17 @@ export class Jiv implements OnInit, OnDestroy {
   /** Cascading projection switch. Unset inherits the parent Jiv (root
    *  default comes from `<jaui [seo]>`); `false` prunes this subtree. */
   readonly seo = input<boolean | undefined>(undefined);
+
+  // ── Teleport (every jiv is a container — outlet/teleport is base capability) ──
+  /** Makes this jiv a named OUTLET (a parking space) in the canvas-scoped
+   *  TeleportRegistry. Other jivs `[TeleportTo]` it. */
+  readonly TeleportId = input<string | undefined>(undefined);
+  /** Live AT the named outlet: the declaration site stops determining this
+   *  jiv's canvas parent — the node is parented to the outlet, and MOVED
+   *  between outlets as this changes (the engine springs the rect across, so
+   *  a move IS the flight; the in-flight subtree paints elevated until it
+   *  settles). `null` re-parents to the real (declaration-site) parent. */
+  readonly TeleportTo = input<string | null | undefined>(undefined);
 
   /** Worker-side Jiv handle. Property writes buffer ops + flush per microtask. */
   readonly Node: JivHandle;
@@ -169,6 +181,13 @@ export class Jiv implements OnInit, OnDestroy {
       this._registry?.Version();
       this.Node.Apply(this._buildOptions());
       this._applyMirror();
+    });
+
+    WireTeleportInputs({
+      Node: this.Node,
+      TeleportId: this.TeleportId,
+      TeleportTo: this.TeleportTo,
+      NaturalParent: () => this._parentJiv ? this._parentJiv.Node : this._canvas?.Root ?? null,
     });
   }
 

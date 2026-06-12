@@ -15,6 +15,8 @@ export * from './Jyle/Jyle';
 export * from './SvgJiv/SvgJiv';
 export * from './Jinput/Jinput';
 export * from './Jss/Jss.Registry';
+export * from './Teleport/Teleport.Registry';
+export * from './Teleport/Teleport.Wiring';
 export * from './Seo/Seo.Types';
 export * from './Seo/Seo.Resolve';
 export * from './Seo/Semantic.Mirror';

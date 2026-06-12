@@ -138,6 +138,15 @@ export class Element {
    *  unless a feature opts out. */
   SnapLayout: boolean = false;
 
+  /** Non-zero while this element is mid-TELEPORT (a live reparent — moved between
+   *  parents while already mounted). Stamped monotonically by `AddChild`, cleared
+   *  by `JivAnimator` when the rect springs settle. The render walk paints
+   *  in-flight elements LAST within their nearest layered ancestor's scope (and
+   *  clip-free of the containers between), so a surface flying home never drops
+   *  behind its cousins or clips against the scroll container it's returning
+   *  into; the most recent teleport paints topmost. */
+  TeleportSeq: number = 0;
+
   // ── Appearance / Interaction ──
   /** Whether this element is visible. Hidden elements are skipped by rendering
    *  and hit testing but still participate in layout. */
@@ -292,6 +301,10 @@ export class Element {
   };
 
   AddChild = (child: Element): void => {
+    // A LIVE reparent (already mounted elsewhere) is a teleport: stamp the
+    // recency seq so the render walk elevates the in-flight subtree until its
+    // rect springs settle. Same-parent re-adds (reorders) don't stamp.
+    const teleporting = child.Parent !== null && child.Parent !== this;
     if (child.Parent) child.Parent.RemoveChild(child);
     child.Parent = this;
     this.Children.push(child);
@@ -300,8 +313,12 @@ export class Element {
     // notifying Canvas the moment it's part of the live tree. Pre-existing
     // descendants under `child` get the tracker via `_propagateTracker`.
     if (child.Tracker !== this.Tracker) child._propagateTracker(this.Tracker);
+    if (teleporting) child.TeleportSeq = ++Element._teleportSeqCounter;
     this.MarkLayoutDirty();
   };
+
+  /** Monotonic teleport recency counter — see `TeleportSeq`. */
+  private static _teleportSeqCounter = 0;
 
   RemoveChild = (child: Element): void => {
     const idx = this.Children.indexOf(child);
