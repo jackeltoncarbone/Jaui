@@ -15,6 +15,9 @@ export * from './Jyle/Jyle';
 export * from './SvgJiv/SvgJiv';
 export * from './Jinput/Jinput';
 export * from './Jss/Jss.Registry';
+export * from './Seo/Seo.Types';
+export * from './Seo/Seo.Resolve';
+export * from './Seo/Semantic.Mirror';
 
 // Re-export types from jaui core so consumers don't need a separate import
 // for type-only references. The runtime `Jiv` class from core is shadowed by

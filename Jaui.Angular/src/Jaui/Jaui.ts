@@ -16,6 +16,7 @@ import {
   type Stylesheet,
 } from 'jaui';
 import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
+import { SemanticMirror } from '../Seo/Semantic.Mirror';
 
 /** DI token for the `<jaui>`-hosted Worker. The consumer must provide a
  *  Worker instance — there's no sane default because the worker is
@@ -56,10 +57,14 @@ export const JAUI_WORKER = new InjectionToken<Worker>('JAUI_WORKER');
   providers: [
     JssRegistry,
     { provide: JSS_REGISTRY, useExisting: JssRegistry },
+    SemanticMirror,
   ],
 })
 export class Jaui implements OnInit, OnDestroy {
   readonly stylesheet = input<ParsedJss | Stylesheet | undefined>(undefined);
+  /** Default for the semantic-mirror cascade — descendants without their own
+   *  `seo` input inherit this. Subtrees flip themselves off with `[seo]="false"`. */
+  readonly seo = input<boolean>(true);
   readonly ready = output<CanvasProxy>();
 
   /** Main-thread proxy for the worker-side Canvas. Children inject this
@@ -76,6 +81,7 @@ export class Jaui implements OnInit, OnDestroy {
 
   private _host = inject(ElementRef<HTMLElement>);
   private _registry = inject(JssRegistry);
+  private _mirror = inject(SemanticMirror);
   private _canvasEl: HTMLCanvasElement;
 
   constructor() {
@@ -101,8 +107,16 @@ export class Jaui implements OnInit, OnDestroy {
       this.Bridge = new MainBridge({ Canvas: this._canvasEl, Worker: worker });
     }
     this._host.nativeElement.appendChild(this._canvasEl);
+    // The semantic mirror paints UNDER the canvas: its text is the page's
+    // first contentful paint during boot (a blank canvas isn't contentful),
+    // then the canvas's first frame covers it. Inline styles — component
+    // encapsulation can't reach these runtime-created elements.
+    this._canvasEl.style.position = 'relative';
+    this._canvasEl.style.zIndex = '1';
+    this._mirror.Attach(this._host.nativeElement, this._canvasEl);
     this.Canvas = new CanvasProxy(this.Bridge);
     (window as { __jaui?: { canvas: CanvasProxy } }).__jaui = { canvas: this.Canvas };
+    (window as { __jauiSemantics?: () => string }).__jauiSemantics = () => this._mirror.Serialize();
 
     // Push JSS var table to the worker on every registry version bump.
     effect(() => {

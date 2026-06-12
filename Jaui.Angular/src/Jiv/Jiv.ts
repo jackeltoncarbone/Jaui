@@ -4,6 +4,7 @@ import {
   ElementRef,
   OnDestroy,
   OnInit,
+  computed,
   effect,
   forwardRef,
   inject,
@@ -22,6 +23,9 @@ import {
 } from 'jaui';
 import { Jaui } from '../Jaui/Jaui';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
+import { SemanticMirror, type MirrorEntry } from '../Seo/Semantic.Mirror';
+import { ExtractBackgroundUrl, ResolveSemantics } from '../Seo/Seo.Resolve';
+import { JAUI_NAVIGATE, type SemanticRole } from '../Seo/Seo.Types';
 
 /**
  * Maps each attached node's worker handle to the Angular host element that owns
@@ -75,8 +79,36 @@ export class Jiv implements OnInit, OnDestroy {
    *  pointer events on the worker and don't need an input. */
   readonly disabled = input<boolean | undefined>(undefined);
 
+  // ── Semantic mirror inputs (SEO / accessibility projection) ──
+  /** Explicit semantic role — overrides the JSS `Semantics:` declaration. */
+  readonly semantics = input<SemanticRole | undefined>(undefined);
+  /** Heading level (1–6) when the role resolves to Heading. Default 2. */
+  readonly level = input<number | undefined>(undefined);
+  /** Real navigation target. Projects an `<a href>` into the mirror AND
+   *  navigates on canvas tap (via JAUI_NAVIGATE) unless a `(click)` handler
+   *  called preventDefault. One declaration: behavior + crawl graph. */
+  readonly href = input<string | null | undefined>(undefined);
+  /** Alt text — with an image background, projects an `<img alt>`. */
+  readonly alt = input<string | null | undefined>(undefined);
+  /** aria-label for the projected element. */
+  readonly label = input<string | null | undefined>(undefined);
+  /** Cascading projection switch. Unset inherits the parent Jiv (root
+   *  default comes from `<jaui [seo]>`); `false` prunes this subtree. */
+  readonly seo = input<boolean | undefined>(undefined);
+
   /** Worker-side Jiv handle. Property writes buffer ops + flush per microtask. */
   readonly Node: JivHandle;
+
+  /** Effective projection state — own `seo` ?? parent chain ?? canvas default.
+   *  Duck-typed: Jwift components provide the Jiv token without subclassing
+   *  Jiv (Toolbar, TabBar, Card...), so the parent may lack the cascade. */
+  readonly SeoEnabled: () => boolean = computed(() => {
+    const own = this.seo();
+    if (own !== undefined) return own;
+    const parent = this._parentJiv as { SeoEnabled?: () => boolean } | null;
+    if (parent && typeof parent.SeoEnabled === 'function') return parent.SeoEnabled();
+    return this._canvas?.seo() ?? true;
+  });
 
   private _parentJiv = inject<Jiv | null>(forwardRef(() => Jiv), {
     skipSelf: true,
@@ -85,6 +117,12 @@ export class Jiv implements OnInit, OnDestroy {
   private _canvas = inject(Jaui, { optional: true });
   private _registry = inject(JSS_REGISTRY, { optional: true });
   private _host = inject(ElementRef<HTMLElement>);
+  private _mirror = inject(SemanticMirror, { optional: true });
+  private _navigate = inject(JAUI_NAVIGATE, { optional: true })
+    ?? ((url: string) => location.assign(url));
+  private _mirrorEntry: MirrorEntry | null = null;
+  private _styleRole: string | undefined;
+  private _backgroundUrl: string | null = null;
 
   constructor() {
     if (!this._canvas) {
@@ -97,9 +135,17 @@ export class Jiv implements OnInit, OnDestroy {
     // Bridge engine-side hit handlers to bubbling DOM events on this
     // component's host element so Angular `(click)` / `(pointerdown)` etc.
     // bindings still fire — same shape as the pre-worker `<jiv>`.
+    this._mirrorEntry = this._mirror?.Register(
+      this._host.nativeElement,
+      this._parentJiv?._mirrorEntry ?? null,
+    ) ?? null;
+
     this.Node.SetHit({
       OnClick: () => {
-        this._host.nativeElement.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        const evt = new MouseEvent('click', { bubbles: true, cancelable: true });
+        this._host.nativeElement.dispatchEvent(evt);
+        const href = this.href();
+        if (href && !evt.defaultPrevented) this._navigate(href);
       },
       OnContextMenu: (src) => {
         this._host.nativeElement.dispatchEvent(new MouseEvent('contextmenu', {
@@ -122,6 +168,7 @@ export class Jiv implements OnInit, OnDestroy {
     effect(() => {
       this._registry?.Version();
       this.Node.Apply(this._buildOptions());
+      this._applyMirror();
     });
   }
 
@@ -169,7 +216,28 @@ export class Jiv implements OnInit, OnDestroy {
     // keeps the registry entry alive for ~400ms (one spring settle)
     // after Angular tears the component down; PresenceManager cleans
     // up bridge hit handlers + registry slots on its settle callback.
+    if (this._mirrorEntry) this._mirror?.Unregister(this._mirrorEntry);
     this.Node.RequestLeave();
+  }
+
+  /** Project (or prune) this Jiv's semantic mirror node. Runs inside the
+   *  apply effect, so role/href/alt/level/seo inputs and JSS changes all
+   *  retarget reactively. */
+  private _applyMirror(): void {
+    if (!this._mirror || !this._mirrorEntry) return;
+    const resolved = this.SeoEnabled()
+      ? ResolveSemantics({
+          Role: this.semantics(),
+          Level: this.level(),
+          StyleRole: this._styleRole,
+          Href: this.href(),
+          Alt: this.alt(),
+          Label: this.label(),
+          Text: this.text() ?? null,
+          BackgroundUrl: this._backgroundUrl,
+        })
+      : null;
+    this._mirror.Apply(this._mirrorEntry, resolved, this._navigate);
   }
 
   private _buildOptions(): JivApplyOpts {
@@ -197,6 +265,11 @@ export class Jiv implements OnInit, OnDestroy {
     if (img !== undefined && styleBag['Background'] === undefined) {
       styleBag['Background'] = img ? `Url("${img}", Cover)` : 'transparent';
     }
+    // Semantics is mirror-only data — the render engine must never see it.
+    const styleRole = styleBag['Semantics'];
+    this._styleRole = typeof styleRole === 'string' ? styleRole : undefined;
+    delete styleBag['Semantics'];
+    this._backgroundUrl = ExtractBackgroundUrl(styleBag['Background']);
     const elementProps: JivApplyOpts['ElementProps'] = {};
     for (const key of [
       'Overflow', 'Visible', 'Interactive', 'PointerEvents',

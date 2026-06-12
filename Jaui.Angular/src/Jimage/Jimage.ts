@@ -6,6 +6,7 @@ import {
 } from '@angular/core';
 import type { FitMode } from 'jaui';
 import { Jiv } from '../Jiv/Jiv';
+import type { SemanticRole } from '../Seo/Seo.Types';
 
 /**
  * `<jimage>` — convenience element for the common "this Jiv is a textured
@@ -30,7 +31,12 @@ import { Jiv } from '../Jiv/Jiv';
     [style]="MergedStyle()"
     [layout]="layout()"
     [childLayout]="childLayout()"
-    [disabled]="disabled()" />`,
+    [disabled]="disabled()"
+    [semantics]="semantics()"
+    [href]="href()"
+    [alt]="alt()"
+    [label]="label()"
+    [seo]="seo()" />`,
   styles: [':host { display: contents; }'],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
@@ -45,6 +51,12 @@ export class Jimage {
   readonly layout = input<Record<string, unknown> | undefined>(undefined);
   readonly childLayout = input<Record<string, unknown> | undefined>(undefined);
   readonly disabled = input<boolean | undefined>(undefined);
+  /** Alt text for the semantic mirror — with `src`, projects `<img alt>`. */
+  readonly alt = input<string | null | undefined>(undefined);
+  readonly semantics = input<SemanticRole | undefined>(undefined);
+  readonly href = input<string | null | undefined>(undefined);
+  readonly label = input<string | null | undefined>(undefined);
+  readonly seo = input<boolean | undefined>(undefined);
 
   readonly MergedStyle = computed<Record<string, unknown>>(() => {
     const base = (this.style() ?? {}) as Record<string, unknown>;
