@@ -797,9 +797,21 @@ void main() {
         // (x * (2 - x)) gives a gentler inward dropoff than pure smoothstep.
         float rimT = clamp(edgeDist / (bezelWidth * 2.5), 0.0, 1.0);
         float rimBoost = (1.0 - rimT) * (1.0 - rimT);
+        // Refraction-footprint LOD. `sampleBackdrop` uses textureLod (explicit
+        // LOD), which — unlike texture() — ignores screen-space derivatives. So
+        // where strong refraction COMPRESSES or FOLDS the backdrop (the bezel's
+        // hump rises then falls, reversing the sample position → a caustic), the
+        // fold isn't auto-blurred and shows as hard banded "holes" instead of
+        // blur. Re-introduce that missing footprint: fwidth(refractOffset) is
+        // how many device px the sampled position sweeps per 1 screen px, so
+        // log2 of it is the mip level whose texel matches that footprint. Adding
+        // it makes compressed/folded regions sample a blurrier mip — the caustic
+        // dissolves back into smooth blur while the full displacement is kept.
+        float refractFp = length(fwidth(refractOffset));
+        float refractLod = log2(1.0 + refractFp);
         // Scale by glassiness so rim blur fades with Thickness rather than
         // disappearing the instant the shader variant flips to MATERIAL_NONE.
-        lodBoost = (rimBoost * 1.5 + innerBlur * 1.0) * glassiness;
+        lodBoost = (rimBoost * 1.5 + innerBlur * 1.0) * glassiness + refractLod;
         vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
         vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
         vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);

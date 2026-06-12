@@ -1216,7 +1216,26 @@ export class Canvas implements DirtyTracker {
         // downsamples internally for speed then upsamples back to full res,
         // and we scissor to the panel rect below, so cost stays bounded.
         const frostCssPx = Math.max(1, node.RenderStyle.BackdropFrostBlur);
-        const margin = (48 + frostCssPx) * d; // refraction/rim/bezel + frost spread
+        // Margin must cover the FULL reach of the glass shader's backdrop
+        // sampling (Jiv.Panel.frag), or a displaced sample lands past the
+        // blurred region and reads unblurred/stale scene — the "no blur on the
+        // outer refraction" rim. The shader displaces by, at worst:
+        //   edge refraction: Thickness·avgScale·d · Refraction   (hump ≤ 1)
+        //   surface bulge:   Fillet · minHalf · 0.25·0.7 · Refraction  (domeProfile ≤ 0.7)
+        //   chromatic aberr: ChromaticAberration · 3
+        // plus the frost blur's own spatial spread. Compute the exact bound so
+        // the blur is built everywhere the panel can sample — keeps the full
+        // refraction look (no displacement clamp) while guaranteeing it reads
+        // blurred pixels. The scissor is still canvas-clamped below, so a heavy
+        // panel just falls back toward a full-canvas blur (correct, bounded).
+        const _gsx = matScaleX(eff), _gsy = matScaleY(eff);
+        const _gAvgScale = (_gsx + _gsy) * 0.5;
+        const _gMinHalf = Math.min(node.Width * _gsx, node.Height * _gsy) * d * 0.5;
+        const _gThicknessDev = node.RenderStyle.Thickness * _gAvgScale * d;
+        const _gBulgeMax = node.RenderStyle.Fillet * _gMinHalf * 0.25 * 0.7;
+        const _gRefractMax = (_gThicknessDev + _gBulgeMax) * node.RenderStyle.Refraction;
+        const _gCaMax = node.RenderStyle.ChromaticAberration * 3.0;
+        const margin = frostCssPx * d + _gRefractMax + _gCaMax + 8 * d;
         const _ab = this._nodeAabb(node, eff);
         const px = _ab.minX * d;
         const py = _ab.minY * d;
@@ -1248,7 +1267,12 @@ export class Canvas implements DirtyTracker {
         // u_BaseFrostLod) lands on LOD 0 (full res). Only the subtle glass
         // rim/inner boost (≲ 2 LODs) climbs into the now full-sigma mip chain.
         lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
-        const glassMaxLod = 2;
+        // Headroom for the panel shader's refraction-footprint LOD: strong
+        // refraction folds the backdrop and the shader raises the sampled LOD to
+        // blur the caustic away (see Jiv.Panel.frag refractLod). That can reach
+        // ~4-5; cap mip generation high enough that it ramps smoothly instead of
+        // clamping to a too-shallow deepest mip mid-fold.
+        const glassMaxLod = 5;
         r.GenerateBlurMipmap(glassMaxLod);
         r.RebindSceneTarget();
 
