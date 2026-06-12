@@ -95,6 +95,8 @@ export class Canvas implements DirtyTracker {
   private _specTiltY: number = 0;
   private _animationManager = new AnimationManager();
   private _animators = new Map<JauiElement, JivAnimator>();
+  /** Nodes already warned about non-finite layout results (one warn per node). */
+  private _nonFiniteWarned = new WeakSet<JauiElement>();
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
   private _textAnimators = new Map<JauiElement, TextAnimator>();
   private _scrollManager!: ScrollManager;
@@ -1976,6 +1978,21 @@ export class Canvas implements DirtyTracker {
       // animate the subtree-root either: its box was already fixed by the
       // prior solve and SolveLayout just reflected that into `results`.)
       if (node === this.Root || node === subtreeRoot) continue;
+
+      // Non-finite tripwire. A NaN layout result means a degenerate solve
+      // input (unresolvable Length, missing @var, NaN intrinsic) — Spring.Set
+      // refuses the value so the node holds its last good rect, but the
+      // PRODUCER is a real bug: name the node once so it gets fixed.
+      if (!Number.isFinite(result.X) || !Number.isFinite(result.Y)
+          || !Number.isFinite(result.Width) || !Number.isFinite(result.Height)) {
+        if (!this._nonFiniteWarned.has(node)) {
+          this._nonFiniteWarned.add(node);
+          const classes = node instanceof Jiv ? node.Classes.join(' ') : '(element)';
+          // eslint-disable-next-line no-console
+          console.warn(`[Jaui] non-finite layout result for [${classes}]:`,
+            { X: result.X, Y: result.Y, Width: result.Width, Height: result.Height });
+        }
+      }
 
       let animator = this._animators.get(node);
       if (!animator) {

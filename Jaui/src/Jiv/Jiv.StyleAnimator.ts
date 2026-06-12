@@ -265,7 +265,7 @@ export class JivStyleAnimator implements Animatable {
     for (let i = 0; i < BINDINGS.length; i++) {
       const [, get, set] = BINDINGS[i];
       const s = this._springs[i];
-      s.Target = get(target);
+      s.Set(get(target));   // Set (not raw Target write) — refuses non-finite values
       s.Snap();
       set(this._jiv.RenderStyle, s.Value);
     }
@@ -298,7 +298,7 @@ export class JivStyleAnimator implements Animatable {
       // the animation's lifetime, and null falls back to the class's
       // per-property @Spring / @Transition tuning captured in _baseConfigs.
       const ease = hasAnims ? this._animDriver.EaseFor(prop) : null;
-      s.Target = get(target);
+      s.Set(get(target));   // Set (not raw Target write) — refuses non-finite values
       if (ease === 'Linear') {
         s.Snap();
       } else {

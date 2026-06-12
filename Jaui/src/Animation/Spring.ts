@@ -44,14 +44,26 @@ export class Spring {
     damping: number = 26,
     mass: number = 1,
   ) {
-    this.Value = value;
-    this.Target = value;
+    // Non-finite seeds (a node constructed before its first solve) must not
+    // enter the integrator — one NaN poisons every subsequent Step forever
+    // (NaN position → NaN force → NaN velocity, and the settle check never
+    // trips, so the spring also never parks).
+    this.Value = Number.isFinite(value) ? value : 0;
+    this.Target = this.Value;
     this.Stiffness = stiffness;
     this.Damping = damping;
     this.Mass = mass;
   }
 
   Step = (dt: number): boolean => {
+    // Self-heal a poisoned state: if Value/Velocity ever went non-finite
+    // (a NaN target slipped in before Set() guarded, or external writes),
+    // integration can never recover — snap to the target and settle.
+    if (!Number.isFinite(this.Value) || !Number.isFinite(this.Velocity)) {
+      this.Value = Number.isFinite(this.Target) ? this.Target : 0;
+      this.Velocity = 0;
+      return false;
+    }
     // Stiffness: Infinity is the "no spring, just snap" sentinel produced by
     // TransitionToSpring for Duration: 0ms. Skip the integrator entirely.
     if (!isFinite(this.Stiffness)) {
@@ -92,12 +104,23 @@ export class Spring {
 
   /** Snap to target immediately, no animation. */
   Snap = (): void => {
-    this.Value = this.Target;
+    this.Value = Number.isFinite(this.Target) ? this.Target : 0;
     this.Velocity = 0;
   };
 
-  /** Set a new target. Returns true if the spring needs to animate. */
+  /** Set a new target. Returns true if the spring needs to animate.
+   *  Non-finite targets are REFUSED (the spring keeps its prior target) —
+   *  a single NaN frame from a degenerate layout input must not poison the
+   *  integrator permanently. A poisoned current state heals against the
+   *  incoming finite target instead. */
   Set = (target: number): boolean => {
+    if (!Number.isFinite(target)) return false;
+    if (!Number.isFinite(this.Value) || !Number.isFinite(this.Velocity)) {
+      this.Target = target;
+      this.Value = target;
+      this.Velocity = 0;
+      return false;
+    }
     this.Target = target;
     return Math.abs(this.Value - this.Target) > SETTLE_VALUE_EPSILON || Math.abs(this.Velocity) > SETTLE_VELOCITY_EPSILON;
   };

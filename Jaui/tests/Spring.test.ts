@@ -109,4 +109,46 @@ describe('Spring', () => {
     expect(s.IsSettled).toBe(true);
     expect(s.Value).toBe(100);
   });
+
+  describe('non-finite hygiene', () => {
+    it('a non-finite seed is sanitized to 0', () => {
+      const s = new Spring(NaN);
+      expect(s.Value).toBe(0);
+      expect(s.Target).toBe(0);
+    });
+
+    it('Set refuses a NaN target and keeps the prior one', () => {
+      const s = new Spring(50);
+      expect(s.Set(NaN)).toBe(false);
+      expect(s.Target).toBe(50);
+      s.Step(1 / 60);
+      expect(s.Value).toBe(50);
+    });
+
+    it('a poisoned state self-heals on the next finite Set', () => {
+      const s = new Spring(0);
+      s.Value = NaN;          // simulate a poisoned integrator
+      s.Velocity = NaN;
+      s.Set(120);
+      expect(s.Value).toBe(120);
+      expect(s.Velocity).toBe(0);
+      expect(s.IsSettled).toBe(true);
+    });
+
+    it('a poisoned state self-heals in Step and stops animating', () => {
+      const s = new Spring(0);
+      s.Set(80);
+      s.Value = NaN;          // poison mid-flight
+      expect(s.Step(1 / 60)).toBe(false);
+      expect(s.Value).toBe(80);
+      expect(s.Velocity).toBe(0);
+    });
+
+    it('Snap with a non-finite target parks at 0 instead of propagating', () => {
+      const s = new Spring(10);
+      s.Target = NaN;         // simulate a pre-guard poisoned target
+      s.Snap();
+      expect(s.Value).toBe(0);
+    });
+  });
 });
