@@ -18,6 +18,48 @@ import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
 import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
 import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
+import strokeVertSrc from '../Jline/Shaders/Jline.vert.gen';
+import strokeFragSrc from '../Jline/Shaders/Jline.frag.gen';
+import type { StrokeStyle } from './Renderer';
+
+// ─── Jline (stroke) uniform-location bundle ─────────────────────────────────
+interface _StrokeLocs {
+  resolution:  WebGLUniformLocation | null;
+  progress:    WebGLUniformLocation | null;
+  halfW:       WebGLUniformLocation | null;
+  headR:       WebGLUniformLocation | null;
+  blur:        WebGLUniformLocation | null;
+  ahead:       WebGLUniformLocation | null;
+  behind:      WebGLUniformLocation | null;
+  windowUnit:  WebGLUniformLocation | null;
+  headA:       WebGLUniformLocation | null;
+  floorA:      WebGLUniformLocation | null;
+  headFade:    WebGLUniformLocation | null;
+  spread:      WebGLUniformLocation | null;
+  showPrior:   WebGLUniformLocation | null;
+  fwdA:        WebGLUniformLocation | null;
+  fwdB:        WebGLUniformLocation | null;
+  prior:       WebGLUniformLocation | null;
+}
+
+const _extractStrokeLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _StrokeLocs => ({
+  resolution: gl.getUniformLocation(p, 'u_Resolution'),
+  progress:   gl.getUniformLocation(p, 'u_Progress'),
+  halfW:      gl.getUniformLocation(p, 'u_HalfW'),
+  headR:      gl.getUniformLocation(p, 'u_HeadR'),
+  blur:       gl.getUniformLocation(p, 'u_Blur'),
+  ahead:      gl.getUniformLocation(p, 'u_Ahead'),
+  behind:     gl.getUniformLocation(p, 'u_Behind'),
+  windowUnit: gl.getUniformLocation(p, 'u_WindowUnit'),
+  headA:      gl.getUniformLocation(p, 'u_HeadA'),
+  floorA:     gl.getUniformLocation(p, 'u_FloorA'),
+  headFade:   gl.getUniformLocation(p, 'u_HeadFade'),
+  spread:     gl.getUniformLocation(p, 'u_Spread'),
+  showPrior:  gl.getUniformLocation(p, 'u_ShowPrior'),
+  fwdA:       gl.getUniformLocation(p, 'u_FwdA'),
+  fwdB:       gl.getUniformLocation(p, 'u_FwdB'),
+  prior:      gl.getUniformLocation(p, 'u_Prior'),
+});
 
 // ─── Panel-shader uniform-location bundle ───────────────────────────────────
 // Holds the per-program uniform locations for the panel shader. We compile
@@ -88,6 +130,10 @@ const BYTES_PER_VEC4 = 16;
 const TEXT_FLOATS_PER_INSTANCE = 20;
 const TEXT_BYTES_PER_INSTANCE = TEXT_FLOATS_PER_INSTANCE * 4;
 const TEXT_ATTR_COUNT = 5; // locations 1..5 — Rect / UvRect / OpacityClip / Tint / Rot
+
+const STROKE_FLOATS_PER_INSTANCE = 12;            // a_Seg(4) + a_Miter(4) + a_Arc(4)
+const STROKE_BYTES_PER_INSTANCE = STROKE_FLOATS_PER_INSTANCE * 4;
+const STROKE_ATTR_COUNT = 3; // locations 1..3 — Seg / Miter / Arc
 
 /** Clip-stack texture: RGBA32F, one row. Each clip = 2 texels
  *  (rect.xyzw, radii.xyzw). Sized so at least 1024 clips fit initially. */
@@ -225,6 +271,14 @@ export class WebGL2Renderer implements Renderer {
   private _textResolutionLoc!: WebGLUniformLocation | null;
   private _textAtlasLoc!: WebGLUniformLocation | null;
 
+  // Jline (stroke) shader — instanced per segment
+  private _strokeShader!: ShaderProgram;
+  private _strokeLocs!: _StrokeLocs;
+  private _strokeVao!: WebGLVertexArrayObject;
+  private _strokeInstanceBuffer!: WebGLBuffer;
+  private _strokeInstanceData = new Float32Array(0);
+  private _strokeInstanceCount = 0;
+
   // Blit shader
   private _blitShader!: ShaderProgram;
   private _blitTexLoc!: WebGLUniformLocation | null;
@@ -318,6 +372,7 @@ export class WebGL2Renderer implements Renderer {
 
     this._initPanelShader(gl);
     this._initTextShader(gl);
+    this._initStrokeShader(gl);
     this._initBlitShader(gl);
     this._initClipMaskShader(gl);
     this._initProgBlurShader(gl);
@@ -641,6 +696,57 @@ export class WebGL2Renderer implements Renderer {
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._textInstanceCount);
   };
 
+  // ── Jline (stroke) Rendering — instanced per segment ──
+
+  StrokeBeginBatch = (): void => { this._strokeInstanceCount = 0; };
+
+  StrokeAddInstance = (data: Float32Array, offset: number, count: number): void => {
+    const needed = this._strokeInstanceCount * STROKE_FLOATS_PER_INSTANCE + count;
+    if (needed > this._strokeInstanceData.length) {
+      const newCap = Math.max(needed, this._strokeInstanceData.length * 2, 256 * STROKE_FLOATS_PER_INSTANCE);
+      const newData = new Float32Array(newCap);
+      newData.set(this._strokeInstanceData);
+      this._strokeInstanceData = newData;
+    }
+    this._strokeInstanceData.set(
+      data.subarray(offset, offset + count),
+      this._strokeInstanceCount * STROKE_FLOATS_PER_INSTANCE,
+    );
+    this._strokeInstanceCount += count / STROKE_FLOATS_PER_INSTANCE;
+  };
+
+  StrokeDrawBatch = (canvasWidth: number, canvasHeight: number, style: StrokeStyle): void => {
+    if (this._strokeInstanceCount === 0) return;
+    const gl = this._gl;
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._strokeInstanceBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER,
+      this._strokeInstanceData.subarray(0, this._strokeInstanceCount * STROKE_FLOATS_PER_INSTANCE),
+      gl.DYNAMIC_DRAW);
+
+    const l = this._strokeLocs;
+    this._useProgram(this._strokeShader.Program);
+    gl.uniform2f(l.resolution, canvasWidth, canvasHeight);
+    gl.uniform1f(l.progress, style.Progress);
+    gl.uniform1f(l.halfW, style.HalfWidth);
+    gl.uniform1f(l.headR, style.HeadRadius);
+    gl.uniform1f(l.blur, style.Blur);
+    gl.uniform1f(l.ahead, style.Ahead);
+    gl.uniform1f(l.behind, style.Behind);
+    gl.uniform1f(l.windowUnit, style.WindowUnit);
+    gl.uniform1f(l.headA, style.HeadAlpha);
+    gl.uniform1f(l.floorA, style.FloorAlpha);
+    gl.uniform1f(l.headFade, style.HeadFade);
+    gl.uniform1f(l.spread, style.Spread);
+    gl.uniform1f(l.showPrior, style.ShowPrior);
+    gl.uniform3f(l.fwdA, style.ForwardA[0], style.ForwardA[1], style.ForwardA[2]);
+    gl.uniform3f(l.fwdB, style.ForwardB[0], style.ForwardB[1], style.ForwardB[2]);
+    gl.uniform3f(l.prior, style.Prior[0], style.Prior[1], style.Prior[2]);
+
+    gl.bindVertexArray(this._strokeVao);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._strokeInstanceCount);
+  };
+
   // ── Blur ──
 
   ComputeBlur = (
@@ -941,6 +1047,18 @@ export class WebGL2Renderer implements Renderer {
 
     // Dedicated VAO for text rendering (separate from panel)
     this._textVao = this._createInstancedVao(gl, this._textInstanceBuffer, TEXT_ATTR_COUNT, TEXT_BYTES_PER_INSTANCE);
+  };
+
+  private _initStrokeShader = (gl: WebGL2RenderingContext): void => {
+    this._strokeShader = ShaderCompiler.Compile(gl, strokeVertSrc, strokeFragSrc);
+    this._strokeLocs = _extractStrokeLocs(gl, this._strokeShader.Program);
+
+    const buf = gl.createBuffer();
+    if (!buf) throw new Error('[Jaui] Failed to create stroke instance buffer');
+    this._strokeInstanceBuffer = buf;
+
+    // Dedicated VAO (unit quad at loc 0 + 3 per-instance vec4 at locs 1..3)
+    this._strokeVao = this._createInstancedVao(gl, this._strokeInstanceBuffer, STROKE_ATTR_COUNT, STROKE_BYTES_PER_INSTANCE);
   };
 
   /** Create a VAO with the unit quad at location 0 + instance attributes at locations 1..N. */

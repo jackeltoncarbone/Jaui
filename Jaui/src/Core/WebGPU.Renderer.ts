@@ -5,7 +5,7 @@
  * into a full render pipeline matching the 6-pass structure in Jaui.ts.
  */
 
-import type { Renderer, GpuTextureHandle, ProgressiveBlurParams } from './Renderer';
+import type { Renderer, GpuTextureHandle, ProgressiveBlurParams, StrokeStyle } from './Renderer';
 import { WebGPUDevice } from './WebGPU.Device';
 import { WebGPUBlurPass } from './WebGPU.BlurPass';
 import { WebGPUPipelineCache } from './WebGPU.Pipeline.Cache';
@@ -369,6 +369,12 @@ export class WebGPURenderer implements Renderer {
   };
 
   // ── Text Rendering ──
+
+  // ── Jline / Stroke (not yet implemented on the WebGPU backend — WebGL2 is
+  //    the active backend today; these satisfy the Renderer interface) ──
+  StrokeBeginBatch = (): void => {};
+  StrokeAddInstance = (_data: Float32Array, _offset: number, _count: number): void => {};
+  StrokeDrawBatch = (_canvasWidth: number, _canvasHeight: number, _style: StrokeStyle): void => {};
 
   TextBeginBatch = (): void => {
     this._textInstanceCount = 0;

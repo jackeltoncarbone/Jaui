@@ -39,6 +39,32 @@ export type BgPaint =
   | { Mode: 'LinearGradient', DirX: number, DirY: number, Stops: ReadonlyArray<{ Position: number; R: number; G: number; B: number; A: number }> }
   | { Mode: 'RadialGradient', CenterX: number, CenterY: number, Radius: number, Stops: ReadonlyArray<{ Position: number; R: number; G: number; B: number; A: number }> };
 
+/**
+ * Shared per-draw style for a Jline (stroke) batch. The geometry (per-segment
+ * miter-quad instances) carries position + arc-t; this carries the look that's
+ * uniform across the batch (the comet case: all marcher paths share one
+ * TransitionPaths.Style, differing only in geometry + the per-instance phase).
+ * Lengths are in the same device-px space as the instance positions. Colours
+ * are linear [r,g,b] 0..1.
+ */
+export interface StrokeStyle {
+  Progress: number;     // head position along arc, 0..1
+  HalfWidth: number;    // line half-width (device px)
+  HeadRadius: number;   // head dot radius (device px)
+  Blur: number;         // max edge-softness at the dissolved tail (device px)
+  Ahead: number;        // trail window ahead of head (window-units)
+  Behind: number;       // trail window behind head (window-units)
+  WindowUnit: number;   // window-unit -> arc-fraction scale
+  HeadAlpha: number;
+  FloorAlpha: number;
+  HeadFade: number;     // head-lobe arc width (fraction)
+  Spread: number;       // 1 = apply per-line phase offset, 0 = synced
+  ShowPrior: number;    // 1 = show prior (behind-head) ghost
+  ForwardA: readonly [number, number, number];
+  ForwardB: readonly [number, number, number];
+  Prior: readonly [number, number, number];
+}
+
 export interface ProgressiveBlurParams {
   /** Screen rect in device pixels. */
   Rect: { X: number; Y: number; W: number; H: number };
@@ -161,6 +187,15 @@ export interface Renderer {
     canvasHeight: number,
     atlas: GpuTextureHandle,
   ): void;
+
+  // ── Jline / Stroke Rendering (instanced per segment) ──
+
+  StrokeBeginBatch(): void;
+  /** Append raw per-segment instance data (12 floats/instance: Seg.xyzw,
+   *  Miter.xyzw, Arc=[t0,t1,phase,_]). The renderer copies the slice. */
+  StrokeAddInstance(data: Float32Array, offset: number, count: number): void;
+  /** Issue the instanced stroke draw with the batch-shared `style`. */
+  StrokeDrawBatch(canvasWidth: number, canvasHeight: number, style: StrokeStyle): void;
 
   // ── Blur ──
 
