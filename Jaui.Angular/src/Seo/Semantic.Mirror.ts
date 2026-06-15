@@ -34,18 +34,20 @@ export class SemanticMirror {
   private readonly _entries = new Set<MirrorEntry>();
   private _flushQueued = false;
 
-  /** Create the underlay root inside the `<jaui>` host, before the canvas.
+  /** Create the mirror root inside the `<jaui>` host, before the canvas.
    *  Inline styles only — component style encapsulation can't reach
-   *  runtime-created nodes. Not aria-hidden: this mirror is also the
-   *  accessibility tree. */
+   *  runtime-created nodes. Visually hidden via the standard accessible-clip
+   *  pattern (NOT display:none / aria-hidden) so it stays in the accessibility
+   *  tree and is crawled, while a sighted user only ever sees the canvas — no
+   *  pre-first-frame flash of unpositioned mirror text. */
   Attach = (host: HTMLElement, beforeEl: Element | null): void => {
     if (this._root) return;
     const root = document.createElement('div');
     root.className = 'JauiSemantics';
     root.setAttribute('style',
-      'position:absolute;inset:0;overflow:hidden;z-index:0;' +
-      'pointer-events:none;user-select:none;-webkit-user-select:none;' +
-      'background:var(--jaui-seo-bg,transparent)');
+      'position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;' +
+      'overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;' +
+      'z-index:0;pointer-events:none;user-select:none;-webkit-user-select:none');
     host.insertBefore(root, beforeEl);
     this._root = root;
   };

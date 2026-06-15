@@ -328,7 +328,12 @@ export class Jiv implements OnInit, OnDestroy {
       // PredicateStyle entries.
       PredicateStyles:     fromClass?.PredicateStyles as ReadonlyArray<Record<string, unknown>> | undefined,
       Springs:           fromClass?.Springs as Record<string, Record<string, unknown>> | undefined,
-      Animations:        fromClass?.Animations as Array<Record<string, unknown>> | undefined,
+      // Always emit a concrete array (never undefined): a class with no
+      // @Animation must CLEAR any animation a previous class left running.
+      // The worker only resets core.Animations when this is defined, so
+      // sending undefined on a class swap (animated → plain) left the old
+      // loop running forever — the "still wiggling after exiting edit mode" bug.
+      Animations:        (fromClass?.Animations ?? []) as Array<Record<string, unknown>>,
       AnimationTable:    this._registry
         ? Object.fromEntries(this._registry.Animations) as unknown as Record<string, Record<string, unknown>>
         : undefined,

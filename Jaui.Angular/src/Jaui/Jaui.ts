@@ -110,10 +110,10 @@ export class Jaui implements OnInit, OnDestroy {
       this.Bridge = new MainBridge({ Canvas: this._canvasEl, Worker: worker });
     }
     this._host.nativeElement.appendChild(this._canvasEl);
-    // The semantic mirror paints UNDER the canvas: its text is the page's
-    // first contentful paint during boot (a blank canvas isn't contentful),
-    // then the canvas's first frame covers it. Inline styles — component
-    // encapsulation can't reach these runtime-created elements.
+    // The semantic mirror sits under the canvas as the crawl + accessibility
+    // tree only; it is visually hidden (see SemanticMirror.Attach), so the
+    // canvas is the sole thing a sighted user sees. relative/z-index keeps the
+    // canvas above the mirror in the stacking context.
     this._canvasEl.style.position = 'relative';
     this._canvasEl.style.zIndex = '1';
     this._mirror.Attach(this._host.nativeElement, this._canvasEl);

@@ -228,8 +228,19 @@ export class ImageCache {
    *  workers can't decode SVG via createImageBitmap). The bitmap is
    *  consumed and `.close()`d after upload. */
   LoadBitmap = (key: string, bitmap: ImageBitmap): void => {
-    if (this._cache.has(key)) {
+    // Re-uploading the same key replaces the texture's pixels IN PLACE rather
+    // than no-op'ing. This is what lets a keyed SVG (see SvgJiv) behave like a
+    // normal SVG: when a bound attribute changes, the source re-rasterizes and
+    // re-uploads under the SAME key, so the Jiv's Background URL never changes
+    // — no new image load, no placeholder cross-fade, just updated pixels.
+    const existing = this._cache.get(key);
+    if (existing && existing.Width === bitmap.width && existing.Height === bitmap.height) {
+      // Same dimensions — reuse the GPU texture so the handle (and the Jiv's
+      // bound URL) stays identical; only the contents change.
+      this._renderer.UploadSubTexture(existing.Texture, 0, 0, bitmap);
+      existing.Ready = true;
       bitmap.close?.();
+      this._onLoad?.();
       return;
     }
     const tex = this._renderer.CreateTexture(bitmap.width, bitmap.height);
