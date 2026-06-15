@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ParseJss } from '../src/Jss/Jss.Parser';
+import { EvaluatePredicate } from '../src/Jss/Jss.Predicate';
+import { Resolve, TERNARY_SENTINEL, type ResolveContext } from '../src/Core/Length';
 
 describe('JSS — parser', () => {
   it('parses a simple single-class ruleset', () => {
@@ -350,11 +352,283 @@ describe('JSS — compound pseudo predicates', () => {
 
   it('throws on bare !operand without identifier', () => {
     expect(() => ParseJss(`Btn:(!) { Opacity: 1 }`))
-      .toThrowError(/expected state name/);
+      .toThrowError(/expected a state/);
   });
 
   it('throws on empty parens', () => {
     expect(() => ParseJss(`Btn:() { Opacity: 1 }`))
-      .toThrowError(/expected state name/);
+      .toThrowError(/expected a state/);
+  });
+});
+
+// ─── @If responsive blocks ────────────────────────────────────────────────
+// `@If (cond) { … }` compiles to PredicateStyles carrying all four content
+// slots, guarded by viewport-comparison predicates.
+describe('JSS — @If responsive', () => {
+  it('parses a block @If into a PredicateStyle with a Compare predicate', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Rail {
+        Width: 100vw
+        @If (Width >= 1024) { Width: 312pt }
+      }
+    `);
+    expect(sheet.Rail.ChildLayout?.Width).toBe('100vw');
+    const ps = sheet.Rail.PredicateStyles!;
+    expect(ps.length).toBe(1);
+    expect(ps[0].Predicate).toEqual({ Kind: 'Compare', Metric: 'Width', Op: '>=', Value: 1024 });
+    expect(ps[0].ChildLayout?.Width).toBe('312pt');
+  });
+
+  it('@If carries Layout/ChildLayout/Style/TextStyle slots', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Panel {
+        @If (Width < 600) {
+          Padding: 8pt
+          Left: 0pt
+          Background: rgba(0, 0, 0, 0.4)
+          FontSize: 12pt
+        }
+      }
+    `);
+    const ps = sheet.Panel.PredicateStyles![0];
+    expect(ps.Layout?.Padding).toBe('8pt');
+    expect(ps.ChildLayout?.Left).toBe('0pt');
+    expect(ps.Style?.Background).toBe('rgba(0, 0, 0, 0.4)');
+    expect(ps.TextStyle?.FontSize).toBe('12pt');
+  });
+
+  it('resolves @Var thresholds declared above the rule', () => {
+    const { Sheet: sheet } = ParseJss(`
+      @DesktopMin: 1024
+      Field {
+        @If (Width >= @DesktopMin) { Left: 312pt }
+      }
+    `);
+    expect(sheet.Field.PredicateStyles![0].Predicate)
+      .toEqual({ Kind: 'Compare', Metric: 'Width', Op: '>=', Value: 1024 });
+  });
+
+  it('supports compound conditions (Width + state) with precedence', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Bar {
+        @If (Width < 600 && !Recording) { Opacity: 0.5 }
+      }
+    `);
+    expect(sheet.Bar.PredicateStyles![0].Predicate).toEqual({
+      Kind: 'And',
+      Exprs: [
+        { Kind: 'Compare', Metric: 'Width', Op: '<', Value: 600 },
+        { Kind: 'Not', Expr: { Kind: 'State', Name: 'Recording' } },
+      ],
+    });
+  });
+
+  it('top-level @If wraps whole classes, guarding each rule', () => {
+    const { Sheet: sheet } = ParseJss(`
+      @If (Width >= 1024) {
+        Rail  { Width: 312pt }
+        Field { Left: 312pt }
+      }
+    `);
+    expect(sheet.Rail.PredicateStyles![0].ChildLayout?.Width).toBe('312pt');
+    expect(sheet.Rail.PredicateStyles![0].Predicate)
+      .toEqual({ Kind: 'Compare', Metric: 'Width', Op: '>=', Value: 1024 });
+    expect(sheet.Field.PredicateStyles![0].ChildLayout?.Left).toBe('312pt');
+    // Guarded rules emit no base slots — only the predicate entry.
+    expect(sheet.Rail.ChildLayout?.Width).toBeUndefined();
+  });
+
+  it('AND-merges a top-level guard into an inner pseudo predicate', () => {
+    const { Sheet: sheet } = ParseJss(`
+      @If (Width >= 1024) {
+        Btn:Hover { Opacity: 1 }
+      }
+    `);
+    expect(sheet.Btn.PredicateStyles![0].Predicate).toEqual({
+      Kind: 'And',
+      Exprs: [
+        { Kind: 'Compare', Metric: 'Width', Op: '>=', Value: 1024 },
+        { Kind: 'State', Name: 'Hover' },
+      ],
+    });
+  });
+
+  it('nested @If AND-merges conditions', () => {
+    const { Sheet: sheet } = ParseJss(`
+      Box {
+        @If (Width >= 600) {
+          @If (Width < 1024) { Padding: 4pt }
+        }
+      }
+    `);
+    expect(sheet.Box.PredicateStyles![0].Predicate).toEqual({
+      Kind: 'And',
+      Exprs: [
+        { Kind: 'Compare', Metric: 'Width', Op: '>=', Value: 600 },
+        { Kind: 'Compare', Metric: 'Width', Op: '<', Value: 1024 },
+      ],
+    });
+    expect(sheet.Box.PredicateStyles![0].Layout?.Padding).toBe('4pt');
+  });
+
+  it('throws on an unknown @If threshold variable', () => {
+    expect(() => ParseJss(`Box { @If (Width > @Nope) { Opacity: 1 } }`))
+      .toThrowError(/unknown variable/);
+  });
+});
+
+// ─── Predicate evaluation ─────────────────────────────────────────────────
+describe('JSS — EvaluatePredicate', () => {
+  const ctx = (w: number, h: number, ...states: string[]) =>
+    ({ States: new Set(states), ViewportW: w, ViewportH: h });
+
+  it('evaluates Width/Height comparisons against the viewport', () => {
+    const ge = ParseJss(`R { @If (Width >= 1024) { Left: 0pt } }`).Sheet.R.PredicateStyles![0].Predicate;
+    expect(EvaluatePredicate(ge, ctx(1440, 900))).toBe(true);
+    expect(EvaluatePredicate(ge, ctx(800, 900))).toBe(false);
+    const lt = ParseJss(`R { @If (Height < 500) { Left: 0pt } }`).Sheet.R.PredicateStyles![0].Predicate;
+    expect(EvaluatePredicate(lt, ctx(844, 390))).toBe(true);
+    expect(EvaluatePredicate(lt, ctx(844, 900))).toBe(false);
+  });
+
+  it('combines viewport + state under &&/||/!', () => {
+    const p = ParseJss(`R { @If (Width < 600 && !Recording) { Opacity: 0.5 } }`)
+      .Sheet.R.PredicateStyles![0].Predicate;
+    expect(EvaluatePredicate(p, ctx(390, 844))).toBe(true);
+    expect(EvaluatePredicate(p, ctx(390, 844, 'Recording'))).toBe(false);
+    expect(EvaluatePredicate(p, ctx(900, 844))).toBe(false);
+  });
+
+  it('still accepts a bare state Set (states-only, viewport 0)', () => {
+    const p = ParseJss(`B:(Hover) { Opacity: 1 }`).Sheet.B.PredicateStyles![0].Predicate;
+    expect(EvaluatePredicate(p, new Set(['Hover']))).toBe(true);
+    expect(EvaluatePredicate(p, new Set())).toBe(false);
+  });
+});
+
+// ─── Scoped @If: Self / Parent / Ancestor + contextual nesting ─────────────
+describe('JSS — scoped @If (container & ancestor queries)', () => {
+  const predOf = (src: string, cls = 'R') => ParseJss(src).Sheet[cls].PredicateStyles![0].Predicate;
+
+  it('parses Self/Parent/Ancestor size scopes', () => {
+    expect(predOf(`R { @If (Self.Width < 300) { Direction: Column } }`))
+      .toEqual({ Kind: 'Compare', Scope: { Kind: 'Self' }, Metric: 'Width', Op: '<', Value: 300 });
+    expect(predOf(`R { @If (Parent.Height >= 600) { Width: 50% } }`))
+      .toEqual({ Kind: 'Compare', Scope: { Kind: 'Parent' }, Metric: 'Height', Op: '>=', Value: 600 });
+    expect(predOf(`R { @If (Ancestor(Sidebar).Width > 400) { Padding: 8pt } }`))
+      .toEqual({ Kind: 'Compare', Scope: { Kind: 'Ancestor', Class: 'Sidebar' }, Metric: 'Width', Op: '>', Value: 400 });
+  });
+
+  it('parses Ancestor / Parent / Ancestor:State context predicates', () => {
+    expect(predOf(`R { @If (Ancestor(Compact)) { Padding: 6pt } }`))
+      .toEqual({ Kind: 'Ancestor', Class: 'Compact', Direct: false });
+    expect(predOf(`R { @If (Parent(List)) { Opacity: 1 } }`))
+      .toEqual({ Kind: 'Ancestor', Class: 'List', Direct: true });
+    expect(predOf(`R { @If (Ancestor(List):Hover) { Opacity: 1 } }`))
+      .toEqual({ Kind: 'Ancestor', Class: 'List', Direct: false, State: 'Hover' });
+  });
+
+  it('desugars contextual nesting `Ancestor Target { … }` to an Ancestor guard', () => {
+    const { Sheet } = ParseJss(`Compact Toolbar { Gap: 4pt }`);
+    const ps = Sheet.Toolbar.PredicateStyles![0];
+    expect(ps.Predicate).toEqual({ Kind: 'Ancestor', Class: 'Compact', Direct: false });
+    expect(ps.Layout?.Gap).toBe('4pt');
+    expect(Sheet.Compact).toBeUndefined(); // the leading name is context, not its own rule
+  });
+
+  it('AND-merges multiple ancestors in a descendant chain', () => {
+    const { Sheet } = ParseJss(`Sidebar Compact Item { Padding: 2pt }`);
+    expect(Sheet.Item.PredicateStyles![0].Predicate).toEqual({
+      Kind: 'And',
+      Exprs: [
+        { Kind: 'Ancestor', Class: 'Sidebar', Direct: false },
+        { Kind: 'Ancestor', Class: 'Compact', Direct: false },
+      ],
+    });
+  });
+
+  it('combines an ancestor condition with a size condition', () => {
+    expect(predOf(`R { @If (Ancestor(Compact) && Width < 900) { Gap: 4pt } }`)).toEqual({
+      Kind: 'And',
+      Exprs: [
+        { Kind: 'Ancestor', Class: 'Compact', Direct: false },
+        { Kind: 'Compare', Metric: 'Width', Op: '<', Value: 900 },
+      ],
+    });
+  });
+
+  // ── Evaluation against a mock element tree ──
+  type El = { Width: number; Height: number; Parent: El | null; Classes: string[]; States: Set<string> };
+  const node = (o: Partial<El>): El =>
+    ({ Width: o.Width ?? 0, Height: o.Height ?? 0, Parent: o.Parent ?? null, Classes: o.Classes ?? [], States: o.States ?? new Set() });
+  const ctxFor = (el: El) => ({ States: el.States, ViewportW: 0, ViewportH: 0, Element: el });
+
+  it('evaluates Self / Parent / Ancestor sizes against the tree', () => {
+    const sidebar = node({ Width: 500, Classes: ['Sidebar'] });
+    const parent = node({ Width: 320, Parent: sidebar });
+    const self = node({ Width: 280, Parent: parent });
+
+    expect(EvaluatePredicate(predOf(`R { @If (Self.Width < 300) { x: 1 } }`), ctxFor(self))).toBe(true);
+    expect(EvaluatePredicate(predOf(`R { @If (Parent.Width >= 320) { x: 1 } }`), ctxFor(self))).toBe(true);
+    expect(EvaluatePredicate(predOf(`R { @If (Ancestor(Sidebar).Width > 400) { x: 1 } }`), ctxFor(self))).toBe(true);
+    expect(EvaluatePredicate(predOf(`R { @If (Ancestor(Nope).Width > 0) { x: 1 } }`), ctxFor(self))).toBe(false);
+  });
+
+  it('evaluates Ancestor / Parent / Ancestor:State context', () => {
+    const list = node({ Classes: ['List'], States: new Set(['Hover']) });
+    const row = node({ Classes: ['Row'], Parent: list });
+    const cell = node({ Parent: row });
+
+    expect(EvaluatePredicate(predOf(`R { @If (Ancestor(List)) { x: 1 } }`), ctxFor(cell))).toBe(true);
+    expect(EvaluatePredicate(predOf(`R { @If (Parent(List)) { x: 1 } }`), ctxFor(cell))).toBe(false); // List is grandparent
+    expect(EvaluatePredicate(predOf(`R { @If (Parent(Row)) { x: 1 } }`), ctxFor(cell))).toBe(true);
+    expect(EvaluatePredicate(predOf(`R { @If (Ancestor(List):Hover) { x: 1 } }`), ctxFor(cell))).toBe(true);
+    list.States = new Set();
+    expect(EvaluatePredicate(predOf(`R { @If (Ancestor(List):Hover) { x: 1 } }`), ctxFor(cell))).toBe(false);
+  });
+});
+
+// ─── Inline ternary values (`cond ? a : b`) ───────────────────────────────
+describe('JSS — inline ternary values', () => {
+  const baseCtx = (over: Partial<ResolveContext>): ResolveContext => ({
+    ParentWidth: 0, ParentHeight: 0,
+    PointScale: 1, ParentPointScale: 1, RootPointScale: 1,
+    ViewportWidth: 0, ViewportHeight: 0, Vars: new Map(),
+    ...over,
+  });
+
+  it('compiles a ternary value to a sentinel-encoded condition + branches', () => {
+    const raw = ParseJss(`R { Left: Width >= 1024 ? 312pt : 0pt }`).Sheet.R.ChildLayout!.Left as string;
+    expect(raw.startsWith(TERNARY_SENTINEL)).toBe(true);
+    const node = JSON.parse(raw.slice(TERNARY_SENTINEL.length));
+    expect(node.Cond).toEqual({ Kind: 'Compare', Metric: 'Width', Op: '>=', Value: 1024 });
+    expect(node.T).toBe('312pt');
+    expect(node.F).toBe('0pt');
+  });
+
+  it('resolves a viewport ternary to the chosen branch', () => {
+    const raw = ParseJss(`R { Left: Width >= 1024 ? 312pt : 0pt }`).Sheet.R.ChildLayout!.Left as string;
+    expect(Resolve(raw, baseCtx({ ViewportWidth: 1440 }), 'W')).toBe(312); // PointScale 1 → 312pt = 312
+    expect(Resolve(raw, baseCtx({ ViewportWidth: 800 }), 'W')).toBe(0);
+  });
+
+  it('resolves a chained ternary', () => {
+    const raw = ParseJss(`R { Left: Width >= 1024 ? 300 : Width >= 600 ? 150 : 0 }`).Sheet.R.ChildLayout!.Left as string;
+    expect(Resolve(raw, baseCtx({ ViewportWidth: 1440 }), 'W')).toBe(300);
+    expect(Resolve(raw, baseCtx({ ViewportWidth: 800 }), 'W')).toBe(150);
+    expect(Resolve(raw, baseCtx({ ViewportWidth: 400 }), 'W')).toBe(0);
+  });
+
+  it('resolves a Self.Width ternary against the element box', () => {
+    const raw = ParseJss(`R { Left: Self.Width < 300 ? 4 : 12 }`).Sheet.R.ChildLayout!.Left as string;
+    const el = (w: number) => ({ LayoutWidth: w, LayoutHeight: 0, Parent: null, Classes: [], StateSet: new Set<string>() });
+    expect(Resolve(raw, baseCtx({ Element: el(280) }), 'W')).toBe(4);
+    expect(Resolve(raw, baseCtx({ Element: el(400) }), 'W')).toBe(12);
+  });
+
+  it('leaves non-ternary values untouched', () => {
+    expect(Resolve('42', baseCtx({}), 'W')).toBe(42);
+    const raw = ParseJss(`R { Left: 100 }`).Sheet.R.ChildLayout!.Left as string;
+    expect(raw).toBe('100');
   });
 });

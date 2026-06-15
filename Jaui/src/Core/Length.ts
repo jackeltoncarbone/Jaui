@@ -28,9 +28,32 @@
  * FontSize, Padding, BorderRadius, anything else can reference it via `pt`.
  */
 
+import { EvaluatePredicate, type PredicateContext, type PredicateElement } from '../Jss/Jss.Predicate';
+import type { PredicateExpr } from '../Jss/Jss.Parser';
+
 export type Length = number | string;
 
 export type Unit = 'px' | 'pt' | 'rpt' | '%' | '%w' | '%h' | 'vw' | 'vh';
+
+/** A laid-out node as the ternary/predicate resolver sees it — resolved box +
+ *  ancestry + classes/states. `Element` (the real Jiv) satisfies this
+ *  structurally (LayoutWidth/Height, Parent; Classes/StateSet on Jiv), so the
+ *  layout solver can stash the node in `ResolveContext.Element` with no
+ *  allocation; the PredicateElement adapter is built lazily only when a
+ *  ternary actually decodes. */
+export interface SizedNode {
+  readonly LayoutWidth: number;
+  readonly LayoutHeight: number;
+  readonly Parent: SizedNode | null;
+  readonly Classes?: readonly string[];
+  readonly StateSet?: ReadonlySet<string>;
+}
+
+/** Sentinel prefix marking a value string as a pre-compiled inline ternary
+ *  (`cond ? a : b`). The JSS parser encodes the parsed condition + branches as
+ *  `TERNARY_SENTINEL + JSON`; `ResolveTernary` decodes + picks at resolve time.
+ *  A control char keeps it disjoint from any real authored value. */
+export const TERNARY_SENTINEL = String.fromCharCode(0) + 'tern:';
 
 /** Context needed to resolve a Length to pixels. Layout solver fills this
  *  before running flex math; style animator fills it when resolving spring
@@ -66,6 +89,14 @@ export interface ResolveContext {
   /** 1 while the Jiv is leaving (Presence > 0 AND spring target === 0);
    *  0 otherwise. Symmetric counterpart to `Entering`. */
   Exiting?: number;
+  /** The laid-out node this resolve is for — supplies Self/Parent/Ancestor
+   *  size + ancestry to inline-ternary conditions. The solver stashes the raw
+   *  node (no alloc); `ResolveTernary` adapts it lazily. Absent in seed /
+   *  layout-intrinsic contexts (ternary conditions then see no element). */
+  Element?: SizedNode | null;
+  /** Element's live states, for ternary conditions that reference them.
+   *  Derived from `Element.StateSet` when absent. */
+  States?: ReadonlySet<string>;
   /** Internal flag — true on the seed context the Jiv constructor uses to
    *  produce its initial RenderStyle before any layout / style-animator
    *  pass has run. The registry's var table hasn't been merged at that
@@ -100,8 +131,54 @@ export const Resolve = (
   ptRefersToParent: boolean = false,
 ): number => {
   if (typeof length === 'number') return length;
+  length = ResolveTernary(length, ctx);
   const parsed = _parseCached(length);
   return _resolveParsed(parsed, ctx, axis, ptRefersToParent, null);
+};
+
+// ─── Inline ternaries (`cond ? a : b`) ──────────────────────────────────
+// The JSS parser pre-compiles ternaries to `TERNARY_SENTINEL + JSON({Cond,T,F})`
+// (Cond is a parsed PredicateExpr; T/F are value strings, themselves possibly
+// ternaries). At resolve time we evaluate Cond against the live context and
+// return the chosen branch — recursively, so chained `a ? x : b ? y : z` works.
+// Kept here (Core/Length) so every value resolver shares one decode path; only
+// the worker-safe evaluator is pulled in, never the parser.
+
+interface _Ternary { Cond: PredicateExpr; T: string; F: string; }
+const _ternaryCache = new Map<string, _Ternary>();
+const _EMPTY_STATE_SET: ReadonlySet<string> = new Set();
+
+/** Adapt a SizedNode (the real Jiv) to the evaluator's PredicateElement —
+ *  resolved box + chained ancestry. Built lazily, only while decoding. */
+const _adaptElement = (n: SizedNode | null | undefined): PredicateElement | null => {
+  if (!n) return null;
+  return {
+    get Width() { return n.LayoutWidth; },
+    get Height() { return n.LayoutHeight; },
+    get Parent() { return _adaptElement(n.Parent); },
+    Classes: n.Classes ?? [],
+    States: n.StateSet ?? _EMPTY_STATE_SET,
+  };
+};
+
+/** If `value` is an encoded ternary, evaluate its condition and return the
+ *  chosen branch (recursively resolving a chained branch); otherwise return
+ *  `value` unchanged. */
+export const ResolveTernary = (value: string, ctx: ResolveContext): string => {
+  if (!value.startsWith(TERNARY_SENTINEL)) return value;
+  let node = _ternaryCache.get(value);
+  if (!node) {
+    node = JSON.parse(value.slice(TERNARY_SENTINEL.length)) as _Ternary;
+    _ternaryCache.set(value, node);
+  }
+  const pctx: PredicateContext = {
+    States: ctx.States ?? ctx.Element?.StateSet ?? _EMPTY_STATE_SET,
+    ViewportW: ctx.ViewportWidth,
+    ViewportH: ctx.ViewportHeight,
+    Element: _adaptElement(ctx.Element),
+  };
+  const picked = EvaluatePredicate(node.Cond, pctx) ? node.T : node.F;
+  return ResolveTernary(picked, ctx);
 };
 
 /** Missing-var warnings are deduped — one console message per var name

@@ -79,6 +79,20 @@ void main() {
 }
 `;
 
+// 1-tap passthrough copy. Used to seed mip 0 with the RAW scene (σ=0) for the
+// progressive-blur "true continuum" path: GenerateOutputMipmap then builds the
+// Gaussian stack from a sharp root, so sampling a continuous LOD ramps clear →
+// heavy with no sharp/blurred crossfade and no separate scene texture.
+const COPY_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_Uv;
+uniform sampler2D u_Tex;
+out vec4 fragColor;
+void main() {
+    fragColor = vec4(texture(u_Tex, v_Uv).rgb, 1.0);
+}
+`;
+
 // 9 levels: covers LOD 0..8 with dual-filter quality. Progressive blur
 // samples up to LOD ~6 for heavy BackdropFrostBlur settings; extra headroom
 // keeps the smooth mipmap chain populated deeper than we'll typically read.
@@ -90,6 +104,7 @@ export class BlurPass {
   private _gl: WebGL2RenderingContext;
   private _down: ShaderProgram;
   private _up: ShaderProgram;
+  private _copy: ShaderProgram;
   private _quad: QuadGeometry;
   private _levels: Framebuffer[] = [];
   private _lastDepth: number = 0;
@@ -104,11 +119,13 @@ export class BlurPass {
   private _upTexLoc: WebGLUniformLocation | null;
   private _upHpLoc: WebGLUniformLocation | null;
   private _upOffLoc: WebGLUniformLocation | null;
+  private _copyTexLoc: WebGLUniformLocation | null;
 
   constructor(gl: WebGL2RenderingContext) {
     this._gl = gl;
     this._down = ShaderCompiler.Compile(gl, VERT, DOWN_FRAG);
     this._up = ShaderCompiler.Compile(gl, VERT, UP_FRAG);
+    this._copy = ShaderCompiler.Compile(gl, VERT, COPY_FRAG);
     this._quad = new QuadGeometry(gl);
 
     // 10-bit pyramid levels: a wide blur produces a very smooth gradient
@@ -124,6 +141,7 @@ export class BlurPass {
     this._upTexLoc = gl.getUniformLocation(this._up.Program, 'u_Tex');
     this._upHpLoc = gl.getUniformLocation(this._up.Program, 'u_HalfPixel');
     this._upOffLoc = gl.getUniformLocation(this._up.Program, 'u_Offset');
+    this._copyTexLoc = gl.getUniformLocation(this._copy.Program, 'u_Tex');
   }
 
   /**
@@ -151,6 +169,40 @@ export class BlurPass {
     scissor?: { x: number; y: number; w: number; h: number },
   ): WebGLTexture => {
     const gl = this._gl;
+
+    // Sharp-root mode (radius ≤ 0): seed mip 0 with the RAW input (σ=0) via a
+    // 1-tap copy, skipping the dual-filter pre-blur. The caller then builds the
+    // Gaussian mip stack (GenerateOutputMipmap) from this sharp root, so the
+    // progressive-blur shader's continuous LOD ramps from truly clear → heavy
+    // with no sharp/blurred crossfade. Scissored to the sampled rect (the rest
+    // of level 0 is never read). Also cheaper than the dual filter: one pass.
+    if (radius <= 0) {
+      this._levels[0].Resize(width, height);
+      this._levels[0].Bind();
+      gl.viewport(0, 0, width, height);
+      gl.disable(gl.BLEND);
+      if (scissor) {
+        gl.enable(gl.SCISSOR_TEST);
+        const sx = Math.max(0, Math.floor(scissor.x));
+        // gl.scissor y=0 at bottom; scissor.y is y=0 at top — flip.
+        const sy = Math.max(0, Math.floor(height - (scissor.y + scissor.h)));
+        const sw = Math.max(1, Math.min(width - sx, Math.ceil(scissor.w)));
+        const sh = Math.max(1, Math.min(height - sy, Math.ceil(scissor.h)));
+        gl.scissor(sx, sy, sw, sh);
+      } else {
+        gl.disable(gl.SCISSOR_TEST);
+      }
+      gl.useProgram(this._copy.Program);
+      gl.uniform1i(this._copyTexLoc, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, input);
+      gl.bindVertexArray(this._quad.Vao);
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      if (scissor) gl.disable(gl.SCISSOR_TEST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._lastDepth = 0;
+      return this._levels[0].Texture;
+    }
 
     // Pick pyramid depth from desired sigma. Each Down/Up pair roughly
     // doubles the effective sigma, with a baseline of ~3 px per level.

@@ -224,6 +224,7 @@ export class JivRegistry {
     if (opts.Layout) {
       _resetTo(core.Layout as unknown as Record<string, unknown>, DefaultLayoutConfig as unknown as Record<string, unknown>);
       Object.assign(core.Layout, opts.Layout as Partial<LayoutConfig>);
+      core.SetBaseLayout(); // snapshot pre-@If base for responsive re-materialization
     }
     if (opts.ChildLayout) {
       const cl = this._resolveAttachTo(opts.ChildLayout);
@@ -235,11 +236,15 @@ export class JivRegistry {
       const { AttachTargetAnchor: _ta, AttachSelfAnchor: _sa, ...clRest } = cl;
       void _ta; void _sa;
       Object.assign(core.ChildLayout, clRest as Partial<ChildLayout>);
+      core.SetBaseChildLayout(); // snapshot pre-@If base for responsive re-materialization
     }
     // All pseudo-selector state styling — both single-state and compound
     // predicate forms — rides PredicateStyles. _applyStateBits routes
     // them onto the JivCore.
     this._applyStateBits(core, opts);
+    // Responsive @If: overlay matching Layout/ChildLayout patches onto the
+    // base just captured (no-op unless this Jiv has layout-bearing predicates).
+    core.RecomputeResponsiveLayout();
     if (opts.GroupTriggerClasses !== undefined) this._updateGroupClasses(core, opts.GroupTriggerClasses);
     if ('Text' in opts || opts.TextStyle) {
       const nextText = 'Text' in opts ? (opts.Text ?? null) : core.Text;

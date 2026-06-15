@@ -245,6 +245,11 @@ const _anyPredicateReferences = (
 const _exprReferences = (expr: PredicateExpr, stateName: string): boolean => {
   switch (expr.Kind) {
     case 'State': return expr.Name === stateName;
+    // Size comparisons carry no state; an Ancestor predicate's optional State
+    // is the *ancestor's* state, not this node's — neither participates in
+    // self group-hover trigger detection.
+    case 'Compare':  return false;
+    case 'Ancestor': return false;
     case 'Not':   return _exprReferences(expr.Expr, stateName);
     case 'And':
     case 'Or': {

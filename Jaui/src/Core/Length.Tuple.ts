@@ -1,4 +1,4 @@
-import { Parse as ParseLength, Resolve, type ResolveContext } from './Length';
+import { Parse as ParseLength, Resolve, ResolveTernary, type ResolveContext } from './Length';
 
 /**
  * Parser for CSS-style space-separated length tuples. Supports the standard
@@ -114,6 +114,9 @@ export const ResolveLengthTuple4 = (
   ctx: ResolveContext,
   axes: ['W' | 'H', 'W' | 'H', 'W' | 'H', 'W' | 'H'],
 ): [number, number, number, number] => {
+  // A whole-value ternary (`BorderRadius: cond ? 8pt : 0`) must resolve before
+  // the tuple split — otherwise the space in a branch would be miscut.
+  if (typeof raw === 'string') raw = ResolveTernary(raw, ctx);
   const tuple = ParseLengthTuple4(raw);
   return [
     Resolve(tuple[0], ctx, axes[0]),

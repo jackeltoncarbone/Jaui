@@ -84,6 +84,10 @@ const _cascadePointScale = (
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
     Vars: vars,
+    // The node itself — supplies Self/Parent/Ancestor size + states to inline
+    // ternary conditions. Stashed by reference (Element structurally satisfies
+    // SizedNode); ResolveTernary adapts it lazily only when one decodes.
+    Element: node,
   };
 
   for (const child of node.Children) _cascadePointScale(child, pointScale, viewport, vars);

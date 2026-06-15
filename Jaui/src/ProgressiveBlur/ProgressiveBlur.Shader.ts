@@ -64,8 +64,7 @@ in vec2 v_PixelPos;
 
 uniform vec2 u_Resolution;                  // canvas w/h, device px
 uniform vec4 u_Rect;                        // x, y, w, h of this pblur element (device px)
-uniform sampler2D u_Scene;                  // unblurred scene (level -1)
-uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = base blur, higher = more)
+uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = sharp scene, higher = more blur)
 uniform float u_MaxLod;                     // max mipmap LOD to sample (maps to ramp = 1.0)
 uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 ToRight
 uniform float u_Feather;                    // ramp length in device px (0 = span whole element)
@@ -314,15 +313,16 @@ void main() {
     vec2 uvMax = clipUv.zw - texelUv * 2.0;
     vec2 safeUv = clamp(v_SampleUv, min(uvMin, uvMax), max(uvMin, uvMax));
 
-    vec3 sceneRgb = texture(u_Scene, safeUv).rgb;
-    // Cubic B-spline upsample of the pyramid mip — smooth, block-free
-    // magnification at the heavy end. texSize = pyramid resolution at this
-    // LOD = u_Resolution / 2^lod (== 1 / texelUv).
-    vec3 blurRgb = textureBicubicLod(u_Pyramid, safeUv, lod, u_Resolution / exp2(lod));
-    // Gradual crossfade from the unblurred scene into the pyramid over the
-    // first 20% of the gradient. Beyond 20%, fully in the pyramid.
-    float blendT = smoothstep(0.0, 0.2, ramp);
-    vec3 rgb = mix(sceneRgb, blurRgb, blendT);
+    // True single-continuum sample. The pyramid's mip 0 IS the sharp scene
+    // (seeded raw — see BlurPass sharp-root), so one continuous LOD ramps from
+    // crisp (lod 0) to heavy (u_MaxLod) with NO sharp/blurred crossfade and no
+    // separate scene texture — true progression, not a mask. Trilinear at low
+    // LOD keeps the clear edge pixel-crisp; the block-free cubic B-spline folds
+    // in as LOD grows (the heavy end magnifies tiny mips, where plain bilinear
+    // would show soft blocks). texSize = pyramid res at this LOD = res / 2^lod.
+    vec3 sharpRgb  = textureLod(u_Pyramid, safeUv, lod).rgb;
+    vec3 smoothRgb = textureBicubicLod(u_Pyramid, safeUv, lod, u_Resolution / exp2(lod));
+    vec3 rgb = mix(sharpRgb, smoothRgb, smoothstep(1.0, 3.0, lod));
 
     // Backdrop grading — each factor ramps from 1 (identity, clear end) to
     // its authored value (blurred end). Doing this per-pixel keeps the

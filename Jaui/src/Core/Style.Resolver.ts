@@ -1,6 +1,6 @@
 import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
 import type { ResolveContext } from './Length';
-import { Resolve } from './Length';
+import { Resolve, ResolveTernary } from './Length';
 import { ResolveLengthTuple4 } from './Length.Tuple';
 import { ParseColor } from './Color.Parse';
 import { ParseBackground } from './Background.Parse';
@@ -95,9 +95,9 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // the per-zone scalar render fields the shader already consumes. Blur()'s
   // arg stays a Length and resolves under ctx (frost px for BackdropFilter,
   // LOD octave offset for BorderFilter); a missing Blur() = 0.
-  const fg = ParseFilter(s.Filter);
-  const backdrop = ParseFilter(s.BackdropFilter);
-  const border = ParseFilter(s.BorderFilter);
+  const fg = ParseFilter(ResolveTernary(s.Filter, ctx));
+  const backdrop = ParseFilter(ResolveTernary(s.BackdropFilter, ctx));
+  const border = ParseFilter(ResolveTernary(s.BorderFilter, ctx));
   const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
 
   return {
@@ -108,10 +108,10 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 
     BorderRadius: borderRadius,
-    CornerShape: _parseCornerShape(s.CornerShape),
+    CornerShape: _parseCornerShape(ResolveTernary(s.CornerShape, ctx)),
     BorderRadiusSmoothness: Resolve(s.BorderRadiusSmoothness, ctx, 'W'),
 
-    Background: ParseBackground(s.Background),
+    Background: ParseBackground(ResolveTernary(s.Background, ctx)),
     BlendMode: s.BlendMode,
 
     Frost: Resolve(s.Frost, ctx, 'W'),
@@ -147,15 +147,15 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderFresnelBrightness: Resolve(s.BorderFresnelBrightness, ctx, 'W'),
     InnerBlur: Resolve(s.InnerBlur, ctx, 'W'),
 
-    Transform: ResolveTransform(s.Transform, ctx),
+    Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
 
     // Visual* — render-time scale/translate around an origin, applied
     // per-Jiv only (no descendant cascade). Each shorthand string is
     // split into [X, Y]; uniform values populate both axes.
     ...(() => {
-      const [vsx, vsy] = _parseVisualPair(s.VisualScale, ctx, 1);
-      const [vtx, vty] = _parseVisualPair(s.VisualTranslate, ctx, 0);
-      const [vox, voy] = _parseVisualPair(s.VisualOrigin, ctx, 0.5);
+      const [vsx, vsy] = _parseVisualPair(ResolveTernary(s.VisualScale, ctx), ctx, 1);
+      const [vtx, vty] = _parseVisualPair(ResolveTernary(s.VisualTranslate, ctx), ctx, 0);
+      const [vox, voy] = _parseVisualPair(ResolveTernary(s.VisualOrigin, ctx), ctx, 0.5);
       return {
         VisualScaleX: vsx, VisualScaleY: vsy,
         VisualTranslateX: vtx, VisualTranslateY: vty,
@@ -163,7 +163,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
       };
     })(),
 
-    BorderColor: ParseColor(s.BorderColor),
+    BorderColor: ParseColor(ResolveTernary(s.BorderColor, ctx)),
     BorderWidth: Resolve(s.BorderWidth, ctx, 'W'),
     BorderBlur: Resolve(s.BorderBlur, ctx, 'W'),
     BorderBackdropBlur: resolveBlur(border.BlurRaw),
@@ -174,7 +174,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderSaturation: border.Saturation,
     BorderContrast: border.Contrast,
 
-    ShadowColor: ParseColor(s.ShadowColor),
+    ShadowColor: ParseColor(ResolveTernary(s.ShadowColor, ctx)),
     ShadowBlur: Resolve(s.ShadowBlur, ctx, 'W'),
     ShadowOffsetX: Resolve(s.ShadowOffsetX, ctx, 'W'),
     ShadowOffsetY: Resolve(s.ShadowOffsetY, ctx, 'H'),

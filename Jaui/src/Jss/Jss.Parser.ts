@@ -1,4 +1,5 @@
 import { SlotFor } from './Jss.Routes';
+import { TERNARY_SENTINEL } from '../Core/Length';
 import { AssignStyleWithFilterMerge, MergeFilterValue, FILTER_PROPS } from '../Core/Filter.Parse';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
@@ -51,13 +52,35 @@ import {
  */
 
 /** Boolean-expression AST for compound pseudo-selectors authored as
- *  `Name:(expr) { ... }`. `expr` is built from state-name atoms combined
- *  with `&&`, `||`, `!`, and parens. JSON-serializable by design — the
- *  worker bridge ships these across the main-thread/worker boundary
- *  alongside Style. Evaluation is `(states: Set<string>) => boolean`,
- *  implemented in the runtime (Phase 2). */
+ *  `Name:(expr) { ... }` and for `@If (expr) { ... }` responsive blocks.
+ *  `expr` is built from atoms — state names (`Hover`) and viewport
+ *  comparisons (`Width > 900`) — combined with `&&`, `||`, `!`, and parens.
+ *  JSON-serializable by design — the worker bridge ships these across the
+ *  main-thread/worker boundary alongside Style. Evaluation is
+ *  `(expr, PredicateContext) => boolean`, implemented in Jss.Predicate. */
+export type CompareOp = '>' | '>=' | '<' | '<=' | '==' | '!=';
+
+/** What a size comparison measures against. Absent on a `Compare` node ⇒
+ *  Viewport (the common case, keeps viewport ASTs minimal):
+ *    Viewport            — the canvas/window (CSS px).
+ *    Self                — the element's own resolved box.
+ *    Parent              — the element's direct parent's resolved box.
+ *    Ancestor(Class)     — nearest ancestor carrying `Class`, its resolved box. */
+export type SizeScope =
+  | { Kind: 'Self' }
+  | { Kind: 'Parent' }
+  | { Kind: 'Ancestor'; Class: string };
+
 export type PredicateExpr =
   | { Kind: 'State'; Name: string }
+  /** Size comparison vs a px threshold (number literal or `@Var` resolved at
+   *  parse time). `Scope` absent ⇒ the viewport. */
+  | { Kind: 'Compare'; Scope?: SizeScope; Metric: 'Width' | 'Height'; Op: CompareOp; Value: number }
+  /** Ancestor/parent context — true when an ancestor (any, or the direct
+   *  parent when `Direct`) carries `Class`; if `State` is set, that ancestor
+   *  must also be in that state. Powers `Ancestor(X)`, `Parent(X)`,
+   *  `Ancestor(X):Hover`, and contextual-nesting (`X Y { … }`). */
+  | { Kind: 'Ancestor'; Class: string; Direct: boolean; State?: string }
   | { Kind: 'Not'; Expr: PredicateExpr }
   | { Kind: 'And'; Exprs: readonly PredicateExpr[] }
   | { Kind: 'Or';  Exprs: readonly PredicateExpr[] };
@@ -73,6 +96,13 @@ export interface PredicateStyle {
   Predicate: PredicateExpr;
   Style?: Partial<JivStyle>;
   TextStyle?: Partial<TextStyle>;
+  /** Layout / ChildLayout overrides — populated by `@If` blocks (responsive
+   *  breakpoints), which may set ANY property. Pseudo-state blocks (`:Hover`)
+   *  only ever carry Style/TextStyle, so these stay undefined there. The
+   *  runtime merges them in EffectiveLayout / EffectiveChildLayout when the
+   *  predicate matches, exactly as Style rides EffectiveStyle. */
+  Layout?: Partial<LayoutConfig>;
+  ChildLayout?: Partial<ChildLayout>;
 }
 
 export interface Ruleset {
@@ -149,7 +179,7 @@ export const ParseJss = (source: string, globals?: Stylesheet): ParsedJss => {
     if (state.src[state.pos] === '@') {
       _parseTopLevelAt(state, vars, animations, sheet, globals);
     } else {
-      _parseRuleset(state, sheet, globals);
+      _parseRuleset(state, sheet, globals, vars);
     }
     _skipWs(state);
   }
@@ -234,11 +264,17 @@ const _parseTopLevelAt = (
     return;
   }
 
+  if (name === 'If') {
+    // Top-level responsive group: `@If (cond) { ClassA { … } ClassB { … } }`.
+    _parseTopLevelIfWith(s, sheet, globals, vars, undefined);
+    return;
+  }
+
   if (s.src[s.pos] !== ':') {
     if (name === 'var') {
       throw new Error(`[Jaui] "@var" is no longer a keyword, declare variables as "@Name: value" directly (drop the "@var" prefix)`);
     }
-    throw new Error(`[Jaui] Unexpected "@${name}" at top level, only "@Name: value" var declarations and "@Animation Name { ... }" definitions are allowed here`);
+    throw new Error(`[Jaui] Unexpected "@${name}" at top level, only "@Name: value" vars, "@Animation Name { ... }" definitions, and "@If (cond) { ... }" responsive groups are allowed here`);
   }
 
   if (_RESERVED_IDENTS.has(name)) {
@@ -256,10 +292,21 @@ const _parseTopLevelAt = (
 
 // ─── Rulesets ───────────────────────────────────────────────────────────
 
-const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): void => {
-  // Selector — bare class name, no leading `.`, no ids, no tags, no
-  // combinators. JSS uses class-only selectors by design.
-  const className = _readIdent(s);
+const _parseRuleset = (
+  s: _ScanState,
+  out: Stylesheet,
+  globals?: Stylesheet,
+  vars?: VarTable,
+  /** When set (this ruleset is inside a top-level `@If (cond) { … }`), the
+   *  rule's declarations are emitted as a PredicateStyle guarded by `cond`
+   *  instead of as base styles, and any inner pseudo/`@If` predicates are
+   *  AND-merged with `cond`. */
+  guardCond?: PredicateExpr,
+): void => {
+  // Selector — bare class name(s). A single name is the common case; a
+  // space-separated chain (`Ancestor Target { … }`) is contextual nesting:
+  // the leading names become Ancestor() guards on the trailing target.
+  let className = _readIdent(s);
 
   // Tight `:State` / `:(expr)` pseudo (no whitespace). Three legal shapes:
   //   `Foo:Hover { ... }`           — single-state pseudo (compiles to a
@@ -275,7 +322,7 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
     if (next === '(') {
       // Compound predicate — `:(expr)` with &&, ||, !, parens.
       s.pos++; // consume ':'
-      predicate = _parseParenPredicate(s, className);
+      predicate = _parseParenPredicate(s, className, vars);
     } else if (next && next !== ' ' && next !== '\t' && next !== '\n') {
       // Tight colon — single-state pseudo. Compiles to a one-atom
       // predicate `{ Kind: 'State', Name: stateName }` so the runtime
@@ -289,6 +336,27 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
   }
 
   _skipWs(s);
+
+  // Contextual nesting — `Ancestor… Target { … }`. After the first name and
+  // any tight pseudo, a run of further bare identifiers means descendant
+  // context: the trailing name is the target; the leading names (incl. the
+  // first) become `Ancestor(Name)` guards AND-merged into this rule (and into
+  // any enclosing top-level `@If` guard). Plain descendant semantics — each
+  // ancestor must be somewhere above, order not enforced (v1).
+  if (!predicate && /[A-Za-z_]/.test(s.src[s.pos] ?? '')) {
+    const ancestors: string[] = [className];
+    while (/[A-Za-z_]/.test(s.src[s.pos] ?? '')) {
+      ancestors.push(_readIdent(s));
+      _skipWs(s);
+    }
+    className = ancestors.pop()!; // trailing name is the target
+    let chainGuard: PredicateExpr | undefined;
+    for (const a of ancestors) {
+      const g: PredicateExpr = { Kind: 'Ancestor', Class: a, Direct: false };
+      chainGuard = chainGuard ? _and(chainGuard, g) : g;
+    }
+    if (chainGuard) guardCond = guardCond ? _and(guardCond, chainGuard) : chainGuard;
+  }
 
   // Optional `: Base1, Base2` extends list (only valid on the base form —
   // not after a pseudo).
@@ -316,27 +384,30 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
       throw new Error(`[Jaui] Unterminated ruleset "${className}${label}" — missing "}"`);
     }
     if (s.src[s.pos] === '@') {
-      _parseRulesetAt(s, own, className);
+      _parseRulesetAt(s, own, className, vars);
     } else {
-      _parseDeclaration(s, own);
+      _parseDeclaration(s, own, vars, className);
     }
   }
 
   // Pseudo-selector ruleset — both `Foo:Hover` and `Foo:(Hover && !Disabled)`
   // arrive here. Push a PredicateStyle entry onto the class's PredicateStyles
-  // list in source order. Last-wins within the tier.
+  // list in source order. Last-wins within the tier. Under a top-level `@If`
+  // guard, the guard is AND-merged into the pseudo predicate and all four
+  // slots are carried (the guarded block may set layout).
   if (predicate) {
-    let target = out[className];
-    if (!target) {
-      target = {};
-      out[className] = target;
-    }
+    const target = (out[className] ??= {});
     target.PredicateStyles ??= [];
-    target.PredicateStyles.push({
-      Predicate: predicate,
-      Style: own.Style,
-      TextStyle: own.TextStyle,
-    });
+    if (guardCond) {
+      const ps = _predicateStyleFromRuleset(_and(guardCond, predicate), own);
+      if (ps) target.PredicateStyles.push(ps);
+    } else {
+      target.PredicateStyles.push({
+        Predicate: predicate,
+        Style: own.Style,
+        TextStyle: own.TextStyle,
+      });
+    }
     return;
   }
 
@@ -360,6 +431,25 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
     ruleset = _mergeRulesets(ruleset, own);
   }
 
+  // Guarded (inside a top-level `@If`): the rule's base slots become a single
+  // PredicateStyle gated by the guard, and any inner pseudo/`@If` predicates
+  // are AND-merged with the guard. Springs/Animations only tune, so they
+  // merge unconditionally onto the class.
+  if (guardCond) {
+    const target = (out[className] ??= {});
+    target.PredicateStyles ??= [];
+    const base = _predicateStyleFromRuleset(guardCond, ruleset);
+    if (base) target.PredicateStyles.push(base);
+    if (ruleset.PredicateStyles) {
+      for (const e of ruleset.PredicateStyles) {
+        target.PredicateStyles.push({ ...e, Predicate: _and(guardCond, e.Predicate) });
+      }
+    }
+    if (ruleset.Springs) target.Springs = { ...target.Springs, ...ruleset.Springs };
+    if (ruleset.Animations) target.Animations = [...(target.Animations ?? []), ...ruleset.Animations];
+    return;
+  }
+
   // If this class appears multiple times in one sheet, merge (later
   // declarations win inside matching slots). Matches CSS cascade behavior.
   const existing = out[className];
@@ -370,6 +460,26 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
   }
 };
 
+/** Build a PredicateStyle from a ruleset's four content slots under a
+ *  predicate. Returns null if the ruleset carries no content slots. */
+const _predicateStyleFromRuleset = (predicate: PredicateExpr, r: Ruleset): PredicateStyle | null => {
+  const ps: PredicateStyle = { Predicate: predicate };
+  const has = (o?: object): boolean => !!o && Object.keys(o).length > 0;
+  if (has(r.Style)) ps.Style = r.Style;
+  if (has(r.TextStyle)) ps.TextStyle = r.TextStyle;
+  if (has(r.Layout)) ps.Layout = r.Layout;
+  if (has(r.ChildLayout)) ps.ChildLayout = r.ChildLayout;
+  return (ps.Style || ps.TextStyle || ps.Layout || ps.ChildLayout) ? ps : null;
+};
+
+/** AND two predicate expressions, flattening nested Ands for a tidy tree. */
+const _and = (a: PredicateExpr, b: PredicateExpr): PredicateExpr => {
+  const exprs: PredicateExpr[] = [];
+  const push = (e: PredicateExpr): void => { if (e.Kind === 'And') exprs.push(...e.Exprs); else exprs.push(e); };
+  push(a); push(b);
+  return { Kind: 'And', Exprs: exprs };
+};
+
 /** Inside-ruleset `@` directives. Three supported keywords:
  *    `@Spring Property { Stiffness, Damping, Mass }` - direct spring tune.
  *    `@Spring * { ... }`                    - universal default for every animatable property.
@@ -377,15 +487,21 @@ const _parseRuleset = (s: _ScanState, out: Stylesheet, globals?: Stylesheet): vo
  *      translates to a critically-damped spring with matching settle.
  *    `@Animation Name[, Name2, ...]`        - apply named animations (no block, comma-separated).
  *    `@Animation Property { From, To, Duration, Loop }` - inline anonymous. */
-const _parseRulesetAt = (s: _ScanState, ruleset: Ruleset, className: string): void => {
+const _parseRulesetAt = (s: _ScanState, ruleset: Ruleset, className: string, vars?: VarTable): void => {
   s.pos++; // skip '@'
   const directive = _readIdent(s);
+  if (directive === 'If') {
+    // Responsive breakpoint block: `@If (cond) { decls }`. Compiles to a
+    // PredicateStyle on this ruleset carrying all four content slots.
+    _parseBlockIfWith(s, ruleset, className, vars, undefined);
+    return;
+  }
   if (directive === 'Animation') {
     _parseRulesetAnimation(s, ruleset, className);
     return;
   }
   if (directive !== 'Spring' && directive !== 'Transition') {
-    throw new Error(`[Jaui] "${className}" unknown @${directive}; supported: @Spring, @Transition, @Animation.`);
+    throw new Error(`[Jaui] "${className}" unknown @${directive}; supported: @Spring, @Transition, @Animation, @If.`);
   }
   _skipWs(s);
   // Property name — identifier OR `*` (universal default, @Spring only).
@@ -823,13 +939,140 @@ const _resolveClassRefStops = (
   }
 };
 
-const _parseDeclaration = (s: _ScanState, ruleset: Ruleset): void => {
+// ─── @If responsive blocks ──────────────────────────────────────────────
+//
+// `@If (cond) { … }`. Two contexts share one predicate grammar + the
+// PredicateStyle pipeline:
+//   • Block form, inside a ruleset (`_parseBlockIfWith`) — the block's
+//     declarations become a PredicateStyle on that ruleset.
+//   • Top-level form, wrapping whole class rulesets (`_parseTopLevelIfWith`)
+//     — each contained rule is parsed guarded by the condition.
+// Both nest; nested conditions AND-merge with the enclosing one.
+
+/** Parse `@If (cond) { declarations | nested @If }` inside a ruleset. The
+ *  `@If` directive ident has already been consumed by `_parseRulesetAt`. */
+const _parseBlockIfWith = (
+  s: _ScanState,
+  ruleset: Ruleset,
+  className: string,
+  vars: VarTable | undefined,
+  baseCond: PredicateExpr | undefined,
+): void => {
+  _skipWs(s);
+  const ownCond = _parseParenPredicate(s, `${className} @If`, vars);
+  const cond = baseCond ? _and(baseCond, ownCond) : ownCond;
+  _skipWs(s);
+  _expect(s, '{');
+  const tmp: Ruleset = {};
+  while (true) {
+    _skipWs(s);
+    if (s.src[s.pos] === '}') { s.pos++; break; }
+    if (s.pos >= s.src.length) {
+      throw new Error(`[Jaui] Unterminated @If block in "${className}", missing "}"`);
+    }
+    if (s.src[s.pos] === '@') {
+      s.pos++;
+      const d = _readIdent(s);
+      if (d !== 'If') {
+        throw new Error(`[Jaui] "${className}" @${d} is not allowed inside @If; only nested @If or declarations.`);
+      }
+      _parseBlockIfWith(s, ruleset, className, vars, cond);
+      continue;
+    }
+    _parseDeclaration(s, tmp, vars, className);
+  }
+  const ps = _predicateStyleFromRuleset(cond, tmp);
+  if (ps) {
+    ruleset.PredicateStyles ??= [];
+    ruleset.PredicateStyles.push(ps);
+  }
+};
+
+/** Parse a top-level `@If (cond) { rulesets | nested @If }`. The `@If`
+ *  directive ident has already been consumed by `_parseTopLevelAt`. */
+const _parseTopLevelIfWith = (
+  s: _ScanState,
+  sheet: Stylesheet,
+  globals: Stylesheet | undefined,
+  vars: VarTable | undefined,
+  baseCond: PredicateExpr | undefined,
+): void => {
+  _skipWs(s);
+  const ownCond = _parseParenPredicate(s, '@If (top-level)', vars);
+  const cond = baseCond ? _and(baseCond, ownCond) : ownCond;
+  _skipWs(s);
+  _expect(s, '{');
+  while (true) {
+    _skipWs(s);
+    if (s.src[s.pos] === '}') { s.pos++; break; }
+    if (s.pos >= s.src.length) {
+      throw new Error('[Jaui] Unterminated top-level @If, missing "}"');
+    }
+    if (s.src[s.pos] === '@') {
+      s.pos++;
+      const d = _readIdent(s);
+      if (d !== 'If') {
+        throw new Error(`[Jaui] @${d} is not allowed inside a top-level @If; only nested @If or class rulesets.`);
+      }
+      _parseTopLevelIfWith(s, sheet, globals, vars, cond);
+      continue;
+    }
+    _parseRuleset(s, sheet, globals, vars, cond);
+  }
+};
+
+const _parseDeclaration = (s: _ScanState, ruleset: Ruleset, vars?: VarTable, className = ''): void => {
   const prop = _readIdent(s);
   _skipWs(s);
   _expect(s, ':');
   _skipWs(s);
-  const value = _readValue(s);
+  let value = _readValue(s);
+  value = _maybeEncodeTernary(value, vars, className || prop);
   _assignToSlot(ruleset, prop, value);
+};
+
+// ─── Inline ternary values (`cond ? a : b`) ─────────────────────────────
+// Compiled at parse time so the worker resolver never imports this parser:
+// the condition becomes a PredicateExpr and the whole value is encoded as
+// `TERNARY_SENTINEL + JSON({Cond, T, F})`. Branches are recursively encoded so
+// chained `a ? x : b ? y : z` works. Core/Length.ResolveTernary decodes.
+
+/** Split `cond ? a : b` at the top-level `?`/`:` (paren-aware, skipping the
+ *  `?:` of nested ternaries). Returns null when there's no top-level ternary. */
+const _trySplitTernary = (raw: string): { cond: string; t: string; f: string } | null => {
+  let pd = 0, q = -1, colon = -1, tn = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === '(' || c === '[') pd++;
+    else if (c === ')' || c === ']') pd--;
+    else if (pd === 0) {
+      if (c === '?') { if (q < 0) q = i; else tn++; }
+      else if (c === ':' && q >= 0) { if (tn === 0) { colon = i; break; } tn--; }
+    }
+  }
+  if (q < 0 || colon < 0) return null;
+  return { cond: raw.slice(0, q).trim(), t: raw.slice(q + 1, colon).trim(), f: raw.slice(colon + 1).trim() };
+};
+
+/** Parse a standalone (un-parenthesized) predicate condition string. */
+const _parseCondString = (src: string, vars: VarTable | undefined, className: string): PredicateExpr => {
+  const st: _ScanState = { src, pos: 0 };
+  _skipWs(st);
+  const expr = _parsePredOr(st, className, vars);
+  _skipWs(st);
+  if (st.pos < st.src.length) {
+    throw new Error(`[Jaui] "${className}" — unexpected "${src.slice(st.pos)}" in ternary condition "${src}"`);
+  }
+  return expr;
+};
+
+const _maybeEncodeTernary = (raw: string, vars: VarTable | undefined, className: string): string => {
+  const split = _trySplitTernary(raw);
+  if (!split) return raw;
+  const cond = _parseCondString(split.cond, vars, className);
+  const t = _maybeEncodeTernary(split.t, vars, className);
+  const f = _maybeEncodeTernary(split.f, vars, className);
+  return TERNARY_SENTINEL + JSON.stringify({ Cond: cond, T: t, F: f });
 };
 
 /** Read a JSS value — everything up to a declaration terminator (newline,
@@ -931,27 +1174,27 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
 // are consumed by the caller's open-paren detection + this function's
 // closing `)` match.
 
-const _parseParenPredicate = (s: _ScanState, className: string): PredicateExpr => {
+const _parseParenPredicate = (s: _ScanState, className: string, vars?: VarTable): PredicateExpr => {
   _expect(s, '(');
   _skipWs(s);
-  const expr = _parsePredOr(s, className);
+  const expr = _parsePredOr(s, className, vars);
   _skipWs(s);
   if (s.src[s.pos] !== ')') {
-    throw new Error(`[Jaui] "${className}:(...)" — expected ")" at position ${s.pos}, got "${s.src[s.pos] ?? 'EOF'}". Compound predicates must close their outer paren before "{".`);
+    throw new Error(`[Jaui] "${className}:(...)" — expected ")" at position ${s.pos}, got "${s.src[s.pos] ?? 'EOF'}". Predicates must close their outer paren before "{".`);
   }
   s.pos++; // consume ')'
   return expr;
 };
 
-const _parsePredOr = (s: _ScanState, className: string): PredicateExpr => {
-  const left = _parsePredAnd(s, className);
+const _parsePredOr = (s: _ScanState, className: string, vars?: VarTable): PredicateExpr => {
+  const left = _parsePredAnd(s, className, vars);
   const operands: PredicateExpr[] = [left];
   while (true) {
     _skipWs(s);
     if (s.src[s.pos] === '|' && s.src[s.pos + 1] === '|') {
       s.pos += 2;
       _skipWs(s);
-      operands.push(_parsePredAnd(s, className));
+      operands.push(_parsePredAnd(s, className, vars));
       continue;
     }
     break;
@@ -959,15 +1202,15 @@ const _parsePredOr = (s: _ScanState, className: string): PredicateExpr => {
   return operands.length === 1 ? operands[0] : { Kind: 'Or', Exprs: operands };
 };
 
-const _parsePredAnd = (s: _ScanState, className: string): PredicateExpr => {
-  const left = _parsePredNot(s, className);
+const _parsePredAnd = (s: _ScanState, className: string, vars?: VarTable): PredicateExpr => {
+  const left = _parsePredNot(s, className, vars);
   const operands: PredicateExpr[] = [left];
   while (true) {
     _skipWs(s);
     if (s.src[s.pos] === '&' && s.src[s.pos + 1] === '&') {
       s.pos += 2;
       _skipWs(s);
-      operands.push(_parsePredNot(s, className));
+      operands.push(_parsePredNot(s, className, vars));
       continue;
     }
     break;
@@ -975,23 +1218,112 @@ const _parsePredAnd = (s: _ScanState, className: string): PredicateExpr => {
   return operands.length === 1 ? operands[0] : { Kind: 'And', Exprs: operands };
 };
 
-const _parsePredNot = (s: _ScanState, className: string): PredicateExpr => {
+const _parsePredNot = (s: _ScanState, className: string, vars?: VarTable): PredicateExpr => {
   _skipWs(s);
   if (s.src[s.pos] === '!') {
     s.pos++;
     _skipWs(s);
-    return { Kind: 'Not', Expr: _parsePredNot(s, className) };
+    return { Kind: 'Not', Expr: _parsePredNot(s, className, vars) };
   }
-  return _parsePredAtom(s, className);
+  return _parsePredAtom(s, className, vars);
 };
 
-const _parsePredAtom = (s: _ScanState, className: string): PredicateExpr => {
+const _COMPARE_OPS: readonly CompareOp[] = ['>=', '<=', '==', '!=', '>', '<'];
+
+/** Read a comparison operator (`>=`, `<=`, `==`, `!=`, `>`, `<`) or null. */
+const _tryReadCompareOp = (s: _ScanState): CompareOp | null => {
+  for (const op of _COMPARE_OPS) {
+    if (s.src.startsWith(op, s.pos)) { s.pos += op.length; return op; }
+  }
+  return null;
+};
+
+/** Read a viewport-comparison threshold token — a number literal or a
+ *  `@Var` reference. Stops at whitespace, ')', or a boolean operator. */
+const _readThresholdToken = (s: _ScanState): string => {
+  const start = s.pos;
+  while (s.pos < s.src.length) {
+    const c = s.src[s.pos];
+    if (/\s/.test(c) || c === ')' || c === '&' || c === '|') break;
+    s.pos++;
+  }
+  return s.src.slice(start, s.pos).trim();
+};
+
+/** Resolve a threshold token to a px number. Numeric literal (optional `px`)
+ *  or a `@Var` chain that bottoms out in a number. Vars must be declared
+ *  above the rule (forward references throw, like extends). */
+const _resolveThreshold = (token: string, vars: VarTable | undefined, className: string): number => {
+  let t = token;
+  const seen = new Set<string>();
+  while (t.startsWith('@')) {
+    const nm = t.slice(1);
+    if (seen.has(nm)) throw new Error(`[Jaui] "${className}" @If threshold has a variable cycle at "@${nm}"`);
+    seen.add(nm);
+    const v = vars?.[nm];
+    if (v === undefined) {
+      throw new Error(`[Jaui] "${className}" @If references unknown variable "@${nm}" — declare it above the rule.`);
+    }
+    t = v.trim();
+  }
+  const n = parseFloat(t.replace(/px$/, ''));
+  if (Number.isNaN(n)) {
+    throw new Error(`[Jaui] "${className}" @If threshold must resolve to a number (px), got "${token}"`);
+  }
+  return n;
+};
+
+/** Parse `Width|Height <op> <threshold>` (the tail after a scope) into a
+ *  Compare node carrying `scope` (absent ⇒ viewport). */
+const _parseCompareTail = (
+  s: _ScanState, className: string, vars: VarTable | undefined, scope: SizeScope | undefined,
+): PredicateExpr => {
+  const axis = _readIdent(s);
+  if (axis !== 'Width' && axis !== 'Height') {
+    throw new Error(`[Jaui] "${className}" — expected Width or Height, got "${axis}".`);
+  }
+  _skipWs(s);
+  const op = _tryReadCompareOp(s);
+  if (!op) {
+    throw new Error(`[Jaui] "${className}" — expected a comparison operator after ${axis}.`);
+  }
+  _skipWs(s);
+  const value = _resolveThreshold(_readThresholdToken(s), vars, className);
+  return scope ? { Kind: 'Compare', Scope: scope, Metric: axis, Op: op, Value: value }
+               : { Kind: 'Compare', Metric: axis, Op: op, Value: value };
+};
+
+/** Parse a `(Class)` group then an optional `.Width`/`.Height` (→ scoped
+ *  Compare) or `:State` (→ Ancestor with state) or nothing (→ bare Ancestor).
+ *  `direct` distinguishes `Parent(X)` from `Ancestor(X)`. */
+const _parseAncestorTail = (
+  s: _ScanState, className: string, direct: boolean, vars?: VarTable,
+): PredicateExpr => {
+  _expect(s, '(');
+  _skipWs(s);
+  const cls = _readIdent(s);
+  _skipWs(s);
+  _expect(s, ')');
+  if (s.src[s.pos] === '.') {
+    s.pos++;
+    return _parseCompareTail(s, className, vars, { Kind: 'Ancestor', Class: cls });
+  }
+  let state: string | undefined;
+  if (s.src[s.pos] === ':') {
+    s.pos++;
+    state = _readIdent(s);
+  }
+  return state ? { Kind: 'Ancestor', Class: cls, Direct: direct, State: state }
+               : { Kind: 'Ancestor', Class: cls, Direct: direct };
+};
+
+const _parsePredAtom = (s: _ScanState, className: string, vars?: VarTable): PredicateExpr => {
   _skipWs(s);
   // Nested group — `(expr)` inside the outer predicate.
   if (s.src[s.pos] === '(') {
     s.pos++;
     _skipWs(s);
-    const inner = _parsePredOr(s, className);
+    const inner = _parsePredOr(s, className, vars);
     _skipWs(s);
     if (s.src[s.pos] !== ')') {
       throw new Error(`[Jaui] "${className}:(...)" — unbalanced parens in predicate at position ${s.pos}`);
@@ -999,14 +1331,49 @@ const _parsePredAtom = (s: _ScanState, className: string): PredicateExpr => {
     s.pos++;
     return inner;
   }
-  // State-name atom. Identifier rules match `_readIdent` (PascalCase
-  // alpha-numeric + underscore). No validation against a closed list —
-  // any name the author wants becomes a state, and the runtime evaluator
-  // returns false for names that aren't currently set on the element.
   if (!/[A-Za-z_]/.test(s.src[s.pos] ?? '')) {
-    throw new Error(`[Jaui] "${className}:(...)" — expected state name at position ${s.pos}, got "${s.src[s.pos] ?? 'EOF'}"`);
+    throw new Error(`[Jaui] "${className}:(...)" — expected a state, size comparison, or ancestor at position ${s.pos}, got "${s.src[s.pos] ?? 'EOF'}"`);
   }
   const name = _readIdent(s);
+
+  // Scope-prefixed size comparisons: `Self.Width`, `Parent.Height`, `Viewport.Width`.
+  if (name === 'Self' || name === 'Parent' || name === 'Viewport') {
+    if (s.src[s.pos] === '.') {
+      s.pos++;
+      const scope: SizeScope | undefined =
+        name === 'Self' ? { Kind: 'Self' } : name === 'Parent' ? { Kind: 'Parent' } : undefined;
+      return _parseCompareTail(s, className, vars, scope);
+    }
+    // `Parent(Class)` — direct-parent context predicate.
+    if (name === 'Parent' && s.src[s.pos] === '(') {
+      return _parseAncestorTail(s, className, true, vars);
+    }
+    throw new Error(`[Jaui] "${className}" — "${name}" must be followed by ".Width"/".Height"${name === 'Parent' ? ' or "(Class)"' : ''}.`);
+  }
+
+  // `Ancestor(Class)`, `Ancestor(Class).Width`, `Ancestor(Class):State`.
+  if (name === 'Ancestor') {
+    if (s.src[s.pos] !== '(') {
+      throw new Error(`[Jaui] "${className}" — Ancestor requires "(Class)".`);
+    }
+    return _parseAncestorTail(s, className, false, vars);
+  }
+
+  // Bare viewport comparison: `Width`/`Height` <op> <threshold>.
+  if (name === 'Width' || name === 'Height') {
+    const save = s.pos;
+    _skipWs(s);
+    const op = _tryReadCompareOp(s);
+    if (op) {
+      _skipWs(s);
+      const value = _resolveThreshold(_readThresholdToken(s), vars, className);
+      return { Kind: 'Compare', Metric: name, Op: op, Value: value };
+    }
+    s.pos = save; // bare `Width`/`Height` with no operator — fall through to a state atom
+  }
+
+  // State-name atom. No validation against a closed list — any name becomes
+  // a state; the runtime evaluator returns false for names not currently set.
   return { Kind: 'State', Name: name };
 };
 

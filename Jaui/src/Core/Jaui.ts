@@ -25,6 +25,7 @@ import type { Renderer, GpuTextureHandle, BgPaint } from './Renderer';
 import { ImageCache } from '../Image/Image.Cache';
 import { BrowserPlatform, type Platform } from './Platform';
 import type { MaterialType } from '../Jiv/Jiv.Types';
+import { SetPredicateViewport } from '../Jss/Jss.Predicate';
 
 /** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
  *  materials like ProgressiveBlur are compositing overlays — they don't have
@@ -483,6 +484,15 @@ export class Canvas implements DirtyTracker {
   ResizeFromBridge = (cssWidth: number, cssHeight: number): void => {
     this._pendingResize = { width: cssWidth, height: cssHeight };
     requestAnimationFrame(() => this._resize());
+  };
+
+  /** Walk the tree re-materializing each Jiv's `@If` layout overrides for the
+   *  current viewport. A cheap no-op for every node without layout-bearing
+   *  predicates; called from `_resize` before the solve. */
+  private _recomputeResponsiveLayout = (node: JauiElement): void => {
+    (node as Jiv).RecomputeResponsiveLayout?.();
+    const kids = node.Children;
+    for (let i = 0; i < kids.length; i++) this._recomputeResponsiveLayout(kids[i]);
   };
 
   /** Internal — register an engine handler for `kind`. Returns disposer.
@@ -1156,18 +1166,18 @@ export class Canvas implements DirtyTracker {
           // eslint-disable-next-line no-console
           console.log(`[Jaui.surf] PBLUR rect=${Math.round(pw)}x${Math.round(ph)} scissor=${scissor.w}x${scissor.h} (${(scissor.w * scissor.h / 1e6).toFixed(2)}Mpx) frost=${maxFeatherSigma}pt dir=${dir} maxLod=${maxLod.toFixed(1)} bgOpaque=${bgOpaque}`);
         }
-        const baseBlurCssPx = 1;
         // Snapshot only this pblur's footprint + blur margin (same scissor the
-        // blur uses) instead of the whole canvas — the shader samples u_Scene
+        // blur uses) instead of the whole canvas — the shader samples the pyramid
         // only within the panel, so the rest of the snapshot is never read.
         const sceneSnap = r.SnapshotScreen(scissor);
-        // Don't force deeper pyramid here: forcing depth > natural radius
-        // over-blurs level 0 itself, which the shader uses as the "clear"
-        // end of the gradient. The visible progression (clear → heavy) only
-        // works when level 0 is LIGHTLY blurred (σ≈3-4) and higher LODs
-        // stack on top via mip sampling.
-        lastBackdrop = r.ComputeBlur(sceneSnap, w, h, baseBlurCssPx * d, undefined, scissor);
-        lastBaseFrostLod = Math.log2(Math.max(1, baseBlurCssPx * d));
+        // Sharp-root pyramid: radius 0 makes BlurPass seed mip 0 with the RAW
+        // scene (a 1-tap copy, no dual-filter pre-blur), then GenerateBlurMipmap
+        // builds the Gaussian stack from it. The shader samples ONE continuous
+        // LOD from mip 0 (truly clear, σ=0) up to u_MaxLod (heavy) — true
+        // progression with no sharp/blurred crossfade, and one fewer pass than
+        // the dual filter.
+        lastBackdrop = r.ComputeBlur(sceneSnap, w, h, 0, undefined, scissor);
+        lastBaseFrostLod = 0;
         // Cap mip build at this pblur's max sampled LOD — the shader does
         // textureLod(u_Pyramid, uv, ramp²·maxLod), so it never reads past
         // maxLod. Building deeper levels is pure fragment-fill waste on
@@ -2103,6 +2113,12 @@ export class Canvas implements DirtyTracker {
     // taken by the matchMedia DPR change handler).
     this.Element.width = Math.round(this._width * this._dpr);
     this.Element.height = Math.round(this._height * this._dpr);
+
+    // Responsive `@If`: publish the live viewport so style/text predicates
+    // (which read the shared module viewport) see it, then re-materialize any
+    // layout-bearing `@If` overrides before the solve below picks them up.
+    SetPredicateViewport(this._width, this._height);
+    this._recomputeResponsiveLayout(this.Root);
 
     // Re-rasterize cached SVGs if we just zoomed in — texture resolution is
     // baked at rasterization time, so without this logos stay pixelated at

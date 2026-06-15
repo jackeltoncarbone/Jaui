@@ -6,8 +6,11 @@ import type { TextStyle } from '../Text/Text.Types';
 import type { SpringConfig, AnimationApplication, AnimationDefinition } from '../Animation/Animation.Types';
 import { Element, type CursorStyle } from '../Element/Element';
 import { DirtyFlag } from '../Core/Types';
-import type { PredicateStyle } from '../Jss/Jss.Parser';
-import { EvaluatePredicate } from '../Jss/Jss.Predicate';
+import type { PredicateStyle, PredicateExpr } from '../Jss/Jss.Parser';
+import {
+  EvaluatePredicate, PredicateViewportWidth, PredicateViewportHeight,
+  type PredicateContext, type PredicateElement,
+} from '../Jss/Jss.Predicate';
 import { AssignStyleWithFilterMerge } from '../Core/Filter.Parse';
 
 /**
@@ -49,6 +52,25 @@ export class Jiv extends Element {
    *  the Jiv's live state set (`_states`) and Object.assigns matches in
    *  source order. Populated by SetPredicateStyles at class-apply time. */
   PredicateStyles: readonly PredicateStyle[] | null = null;
+
+  /** True when any PredicateStyles entry carries a Layout/ChildLayout patch
+   *  (an `@If` responsive block touched layout). Gates the eager re-
+   *  materialization below so non-responsive Jivs pay nothing. Computed in
+   *  _setPredicateStylesInternal. */
+  private _hasLayoutPredicates = false;
+
+  /** True when any predicate references the element's box or ancestry
+   *  (`Self`/`Parent`/`Ancestor` size, or an `Ancestor()` context). Gates
+   *  the element-context build in _predicateCtx so plain viewport/state
+   *  predicates keep the zero-alloc fast path (a bare state Set). */
+  private _hasScopedPredicates = false;
+
+  /** Snapshots of the class-applied (pre-`@If`) Layout / ChildLayout. The
+   *  worker captures these on apply (before any overlay); Recompute-
+   *  ResponsiveLayout resets to them before overlaying matching predicate
+   *  patches, so successive viewport changes never compound. */
+  private _baseLayout: Partial<LayoutConfig> | null = null;
+  private _baseChildLayout: Partial<ChildLayout> | null = null;
 
   /** Live state set — the source of truth for predicate evaluation.
    *  Pointer-driven states (Hover, Active, Focus, GroupHover) are kept in
@@ -284,15 +306,78 @@ export class Jiv extends Element {
   private _setPredicateStylesInternal = (list: readonly PredicateStyle[] | null): void => {
     this.PredicateStyles = list;
     let hasText = false;
+    let hasLayout = false;
+    let hasScoped = false;
     if (list) {
       for (const entry of list) {
-        if (entry.TextStyle && Object.keys(entry.TextStyle).length > 0) {
-          hasText = true;
-          break;
-        }
+        if (entry.TextStyle && Object.keys(entry.TextStyle).length > 0) hasText = true;
+        if ((entry.Layout && Object.keys(entry.Layout).length > 0) ||
+            (entry.ChildLayout && Object.keys(entry.ChildLayout).length > 0)) hasLayout = true;
+        if (!hasScoped && _predicateNeedsElement(entry.Predicate)) hasScoped = true;
       }
     }
     this._hasTextPredicates = hasText;
+    this._hasLayoutPredicates = hasLayout;
+    this._hasScopedPredicates = hasScoped;
+  };
+
+  /** Live state set (read-only view) — exposed for the predicate-element
+   *  adapter so ancestor-state queries (`Ancestor(X):Hover`) can read it. */
+  get StateSet(): ReadonlySet<string> { return this._states; }
+
+  /** Build the evaluation context for this Jiv's predicates. Fast path: a
+   *  bare state Set (the evaluator pairs it with the shared module viewport).
+   *  Scoped path: a full context carrying the live viewport + an element
+   *  adapter so Self/Parent/Ancestor size + ancestor-context resolve. */
+  private _predicateCtx = (): PredicateContext | ReadonlySet<string> => {
+    if (!this._hasScopedPredicates) return this._states;
+    return {
+      States: this._states,
+      ViewportW: PredicateViewportWidth(),
+      ViewportH: PredicateViewportHeight(),
+      Element: _wrapPredicateElement(this),
+    };
+  };
+
+  // ── Responsive (@If) layout materialization ──
+  // Style/TextStyle `@If` rides EffectiveStyle/EffectiveTextStyle (lazy, the
+  // predicate viewport is read from the shared module). Layout/ChildLayout
+  // can't — the solver reads the fields directly — so they're re-materialized
+  // eagerly: capture the class base on apply, then overlay matching predicate
+  // patches whenever the viewport (or state) changes.
+
+  /** Snapshot the just-applied base Layout. Called by the worker registry
+   *  right after assigning the class's Layout, before any overlay. */
+  SetBaseLayout = (): void => { this._baseLayout = { ...this.Layout }; };
+
+  /** Snapshot the just-applied base ChildLayout (see SetBaseLayout). */
+  SetBaseChildLayout = (): void => { this._baseChildLayout = { ...this.ChildLayout }; };
+
+  /** Re-materialize Layout/ChildLayout from the captured base plus every
+   *  matching `@If` predicate patch (evaluated against the live state set +
+   *  the shared module viewport). No-op when this Jiv has no layout-bearing
+   *  predicates. Returns true if it touched layout (so callers can batch a
+   *  dirty/relayout). */
+  RecomputeResponsiveLayout = (): boolean => {
+    if (!this._hasLayoutPredicates || !this.PredicateStyles) return false;
+    const ctx = this._predicateCtx();
+    let touched = false;
+    if (this._baseLayout) {
+      Object.assign(this.Layout, this._baseLayout);
+      for (const e of this.PredicateStyles) {
+        if (e.Layout && EvaluatePredicate(e.Predicate, ctx)) Object.assign(this.Layout, e.Layout);
+      }
+      touched = true;
+    }
+    if (this._baseChildLayout) {
+      Object.assign(this.ChildLayout, this._baseChildLayout);
+      for (const e of this.PredicateStyles) {
+        if (e.ChildLayout && EvaluatePredicate(e.Predicate, ctx)) Object.assign(this.ChildLayout, e.ChildLayout);
+      }
+      touched = true;
+    }
+    if (touched) this.MarkLayoutDirty();
+    return touched;
   };
 
   /** Final render-time style. Walks PredicateStyles in source order,
@@ -312,9 +397,10 @@ export class Jiv extends Element {
    *  declared later in source.  */
   EffectiveStyle = (): JivStyle => {
     if (!this.PredicateStyles || this.PredicateStyles.length === 0) return this.Style;
+    const ctx = this._predicateCtx();
     let merged: JivStyle | null = null;
     for (const entry of this.PredicateStyles) {
-      if (entry.Style && EvaluatePredicate(entry.Predicate, this._states)) {
+      if (entry.Style && EvaluatePredicate(entry.Predicate, ctx)) {
         if (!merged) merged = { ...this.Style };
         // Filter properties merge-by-function (concatenate); everything else
         // replaces. So `:Hover { BackdropFilter: Brightness(2) }` keeps the
@@ -335,9 +421,10 @@ export class Jiv extends Element {
    *  visual-only hover effects don't re-measure glyphs. */
   override EffectiveTextStyle = (): TextStyle => {
     if (!this._hasTextPredicates || !this.PredicateStyles) return this.TextStyle;
+    const ctx = this._predicateCtx();
     let merged: TextStyle | null = null;
     for (const entry of this.PredicateStyles) {
-      if (entry.TextStyle && EvaluatePredicate(entry.Predicate, this._states)) {
+      if (entry.TextStyle && EvaluatePredicate(entry.Predicate, ctx)) {
         if (!merged) merged = { ...this.TextStyle };
         Object.assign(merged, entry.TextStyle);
       }
@@ -345,3 +432,38 @@ export class Jiv extends Element {
     return merged ?? this.TextStyle;
   };
 }
+
+const _EMPTY_STATES: ReadonlySet<string> = new Set();
+
+/** True when a predicate tree consults the element itself — a scoped size
+ *  (`Self`/`Parent`/`Ancestor`) or any `Ancestor()` context. Drives the
+ *  `_hasScopedPredicates` gate so plain viewport/state predicates avoid the
+ *  element-adapter allocation. */
+const _predicateNeedsElement = (expr: PredicateExpr): boolean => {
+  switch (expr.Kind) {
+    case 'State':    return false;
+    case 'Compare':  return expr.Scope !== undefined;
+    case 'Ancestor': return true;
+    case 'Not':      return _predicateNeedsElement(expr.Expr);
+    case 'And':
+    case 'Or': {
+      for (const e of expr.Exprs) if (_predicateNeedsElement(e)) return true;
+      return false;
+    }
+  }
+};
+
+/** Lazy adapter presenting an Element as the evaluator's PredicateElement —
+ *  resolved box (LayoutWidth/Height), live ancestry, classes, and states.
+ *  Parent is wrapped on access so an ancestor walk only allocates the depth
+ *  it actually visits. */
+const _wrapPredicateElement = (el: Element | null): PredicateElement | null => {
+  if (!el) return null;
+  return {
+    get Width() { return el.LayoutWidth; },
+    get Height() { return el.LayoutHeight; },
+    get Parent() { return _wrapPredicateElement(el.Parent); },
+    Classes: (el as { Classes?: readonly string[] }).Classes ?? [],
+    States: (el as { StateSet?: ReadonlySet<string> }).StateSet ?? _EMPTY_STATES,
+  };
+};
