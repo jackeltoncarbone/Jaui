@@ -17,6 +17,8 @@ import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceB
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
 import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
+import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
+import { XformBuffer } from '../Transform/Xform.Buffer';
 import type { Renderer, GpuTextureHandle, BgPaint } from './Renderer';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
@@ -76,9 +78,16 @@ export class Canvas implements DirtyTracker {
   private _running: boolean = false;
   private _frameId: number = 0;
   private _lastTime: number = 0;
+  /** Headless render-to-texture mode: no ResizeObserver / DPR watch / DOM-event binds, no swap-chain
+   *  `PresentScene`. The scene renders into the renderer's `_sceneFbo` and the caller samples it (e.g. the
+   *  reality worker binds it as the grass FieldColor). Size is set manually via `SetSizePx`; frames are driven
+   *  manually via `RenderHeadless`. Default false → normal on-screen Canvas, unchanged. */
+  private _headless: boolean = false;
   private _panelBuffer = new JivInstanceBuffer();
   private _textBuffer = new TextInstanceBuffer();
   private _clipBuffer = new ClipStackBuffer();
+  // Per-frame sparse table of 3D homographies (shared by panel/text/jline).
+  private _xformBuffer = new XformBuffer();
   /** JSS `@Name: value` variables in scope. The Angular layer pushes the
    *  active registry's var table in via `SetJssVars`; layout / intrinsic
    *  passes thread it through `ResolveContext.Vars` so `Length.Resolve`
@@ -170,12 +179,13 @@ export class Canvas implements DirtyTracker {
    *  here — callers build a renderer via `Renderer.Factory` (or their own
    *  path) and hand it in. Keeps this class free of concrete-backend
    *  imports so new backends can land without touching Canvas. */
-  constructor(canvas: HTMLCanvasElement, renderer: Renderer, platform: Platform = BrowserPlatform) {
+  constructor(canvas: HTMLCanvasElement, renderer: Renderer, platform: Platform = BrowserPlatform, opts?: { Headless?: boolean }) {
     this.Element = canvas;
     this.Root = new Jiv();
     this.Root.Tracker = this;
     this._renderer = renderer;
     this._platform = platform;
+    this._headless = !!opts?.Headless;
 
     // touch-action:none on the canvas tells the browser "don't intercept
     // drags as scroll/zoom" — without it, pointermove during a touch
@@ -269,9 +279,14 @@ export class Canvas implements DirtyTracker {
     // Chrome's ForcedReflow analyzer). The ResizeObserver below also pushes
     // contentRect into _pendingResize, so most boots will pick up the
     // measured size from RO instead of falling through to clientWidth.
-    this._observeResize();
-    requestAnimationFrame(() => this._resize());
-    this._watchDpr();
+    // Headless render-to-texture instances size themselves manually (SetSizePx) and are driven manually
+    // (RenderHeadless) — skip the auto-resize / ResizeObserver / DPR watch entirely so they neither read DOM
+    // geometry (the canvas is an offscreen shared with a foreign renderer) nor fight the caller's sizing.
+    if (!this._headless) {
+      this._observeResize();
+      requestAnimationFrame(() => this._resize());
+      this._watchDpr();
+    }
     this._listenForScroll();
     this._listenForInteractionStates();
     this._listenForTextSelection();
@@ -404,6 +419,29 @@ export class Canvas implements DirtyTracker {
       this._frameId = 0;
     }
   };
+
+  // ─── Headless render-to-texture (no swap chain) ─────────────────────────
+  // For a Canvas constructed with { Headless: true }: the host owns sizing + the frame clock and samples the
+  // scene FBO directly. Used by the reality worker to render the turf as a real Jaui scene into the grass
+  // FieldColor texture, on the shared GL context, with no on-screen present.
+
+  /** Set the render size directly (device px; dpr fixed at 1). The scene FBO resizes to width×height on the
+   *  next RenderHeadless. Replaces the ResizeObserver path that headless mode skips. */
+  SetSizePx = (width: number, height: number): void => {
+    this._width = Math.max(0, Math.floor(width));
+    this._height = Math.max(0, Math.floor(height));
+    this._dpr = 1;
+  };
+
+  /** Render one frame synchronously into the scene FBO (no present). Drive from the host's frame loop;
+   *  `timeMs` is a monotonic clock (e.g. performance.now()) used for spring/animation dt. */
+  RenderHeadless = (timeMs: number): void => {
+    this._tickInner(timeMs);
+  };
+
+  /** The raw scene-FBO WebGLTexture — bind into a foreign pipeline on the same GL context (THREE
+   *  `ExternalTexture`). Only valid after a RenderHeadless has produced a frame. */
+  get SceneGLTexture(): WebGLTexture { return (this._renderer as WebGL2Renderer).SceneGLTexture; }
 
   get Width(): number { return this._width; }
   get Height(): number { return this._height; }
@@ -926,6 +964,7 @@ export class Canvas implements DirtyTracker {
       r.EnableBlend();
       r.PanelBeginBatch();
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+        r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
       r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
       this._counts.Panels += this._panelBuffer.Count;
@@ -949,6 +988,7 @@ export class Canvas implements DirtyTracker {
       if (!atlas) { this._textBuffer.Begin(); return; }
       r.TextBeginBatch();
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+        r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
       r.TextDrawBatch(w, h, atlas);
       this._counts.Text += 1; // one flushed batch = one draw call
@@ -978,32 +1018,43 @@ export class Canvas implements DirtyTracker {
     // scroll container it is returning into, while still staying under
     // higher-Layer chrome (the scope replays before the next layered sibling
     // paints). Zero-cost when nothing is in flight (one int check per child).
-    interface TeleportScope { Deferred: { N: Jiv; M: Mat2x3 }[]; Stack: ClipStack }
+    // A perspective viewing context established by an ancestor (CSS `perspective`).
+    // D = viewing distance, (Ox, Oy) = vanishing point — both in CANVAS px (the
+    // same frame as the affine `eff`); the GPU stage scales by dpr. Null = no
+    // perspective in scope (the 2D fast path).
+    interface PerspCtx { D: number; Ox: number; Oy: number }
+    interface TeleportScope { Deferred: { N: Jiv; M: Mat2x3; MH: Mat3x3 | null; P: PerspCtx | null }[]; Stack: ClipStack }
 
     const replayScope = (scope: TeleportScope): void => {
       while (scope.Deferred.length > 0) {
         const items = scope.Deferred.sort((a, b) => a.N.TeleportSeq - b.N.TeleportSeq);
         scope.Deferred = [];
-        for (const d of items) renderNode(d.N, d.M, scope.Stack, scope);
+        for (const d of items) renderNode(d.N, d.M, scope.Stack, scope, d.MH, d.P);
       }
     };
 
-    const descendChildren = (node: Jiv, eff: Mat2x3, stack: ClipStack, scope: TeleportScope): void => {
+    const descendChildren = (node: Jiv, eff: Mat2x3, stack: ClipStack, scope: TeleportScope, effH: Mat3x3 | null, persp: PerspCtx | null): void => {
       const boxClip = this._boxClip(node, eff);
       const childM = this._descendOffset(node, eff);
+      // Mirror the scroll translate onto the homography so descendants of a
+      // 3D-tilted scroll container scroll along the tilted plane.
+      let childMH = effH;
+      if (effH !== null && node.Overflow === 'Scroll') {
+        childMH = mat3Mul(effH, mat3FromAffine([1, 0, 0, 1, -node.ScrollX, -node.ScrollY]));
+      }
       for (const child of orderedChildren(node)) {
         const clip = this._childClip(node, stack, boxClip, child);
         if (child.TeleportSeq !== 0) {
-          scope.Deferred.push({ N: child, M: childM });
+          scope.Deferred.push({ N: child, M: childM, MH: childMH, P: persp });
           continue;
         }
         if (child.RenderStyle.Layer !== 0) {
           const childScope: TeleportScope = { Deferred: [], Stack: clip };
-          renderNode(child, childM, clip, childScope);
+          renderNode(child, childM, clip, childScope, childMH, persp);
           replayScope(childScope);
           continue;
         }
-        renderNode(child, childM, clip, scope);
+        renderNode(child, childM, clip, scope, childMH, persp);
       }
     };
 
@@ -1015,13 +1066,19 @@ export class Canvas implements DirtyTracker {
     // Identity (cx=cy=1, ox=oy=0) at the root is the no-transform path.
     // VisualScale on an ancestor composes into the effective tuple so
     // descendants ride along, just like CSS transform on a parent.
-    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope): void => {
+    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
       // Compose own's transform onto the inherited matrix. Order: rotation
       // (outermost, about Transform.Origin) then VisualScale/Translate (about
       // VisualOrigin). Both ride the inherited matrix so they CASCADE to
       // descendants — rotation now flows to children exactly like scale/translate.
       // Pivots are in NATURAL coords (jiv.X/Y as the layout solver assigned).
+      //
+      // `effH` is the parallel 3D homography — null on the 2D fast path (then this
+      // function is byte-identical to before). Once an ancestor (or this node)
+      // introduces perspective, the affine deltas mirror onto `effH` so the
+      // tilted plane keeps cascading; STEP C below folds in the actual tilt.
       let eff: Mat2x3 = m;
+      let effH: Mat3x3 | null = mH;
       // STEP A — rotation about Transform.Origin (the new cascading behavior).
       const rotDeg = node.RenderStyle.Transform.Rotation;
       if (rotDeg !== 0) {
@@ -1029,7 +1086,9 @@ export class Canvas implements DirtyTracker {
         const rc = Math.cos(th), rs = Math.sin(th);
         const rpx = node.X + node.Width * node.RenderStyle.Transform.OriginX;
         const rpy = node.Y + node.Height * node.RenderStyle.Transform.OriginY;
-        eff = matMul(eff, [rc, rs, -rs, rc, rpx * (1 - rc) + rpy * rs, rpy * (1 - rc) - rpx * rs]);
+        const rMat: Mat2x3 = [rc, rs, -rs, rc, rpx * (1 - rc) + rpy * rs, rpy * (1 - rc) - rpx * rs];
+        eff = matMul(eff, rMat);
+        if (effH !== null) effH = mat3Mul(effH, mat3FromAffine(rMat));
       }
       // STEP B — VisualScale/Translate about VisualOrigin (matches the legacy
       // formula exactly when rotation is absent; now stacks onto rotation).
@@ -1040,9 +1099,37 @@ export class Canvas implements DirtyTracker {
       if (sx !== 1 || sy !== 1 || tx !== 0 || ty !== 0) {
         const pivotX = node.X + node.Width * node.RenderStyle.VisualOriginX;
         const pivotY = node.Y + node.Height * node.RenderStyle.VisualOriginY;
-        eff = matMul(eff, [sx, 0, 0, sy, pivotX * (1 - sx) + tx, pivotY * (1 - sy) + ty]);
+        const vMat: Mat2x3 = [sx, 0, 0, sy, pivotX * (1 - sx) + tx, pivotY * (1 - sy) + ty];
+        eff = matMul(eff, vMat);
+        if (effH !== null) effH = mat3Mul(effH, mat3FromAffine(vMat));
       }
-      if (!this._isInsideClipStack(node, eff, stack)) {
+      // STEP C — 3D: fold this node's RotateX/RotateY/TranslateZ into a homography
+      // (projecting toward the inherited perspective's vanishing point), and
+      // establish a perspective context for THIS node's descendants if it sets
+      // `Perspective`. Pure no-op on the 2D fast path (no 3D transform, no
+      // ancestor/own perspective → effH stays null, childPersp stays persp).
+      let childPersp: PerspCtx | null = persp;
+      {
+        const tf = node.RenderStyle.Transform;
+        if ((tf.RotateX !== 0 || tf.RotateY !== 0 || tf.TranslateZ !== 0) && persp !== null) {
+          const o3x = node.X + node.Width * tf.OriginX;
+          const o3y = node.Y + node.Height * tf.OriginY;
+          const base: Mat3x3 = effH ?? mat3FromAffine(eff);
+          const tilt = mat3Project3D({
+            RotateXDeg: tf.RotateX, RotateYDeg: tf.RotateY, TranslateZ: tf.TranslateZ,
+            PivotX: matApplyX(eff, o3x, o3y), PivotY: matApplyY(eff, o3x, o3y),
+            Perspective: persp.D, OriginX: persp.Ox, OriginY: persp.Oy,
+          });
+          effH = mat3Mul(tilt, base);
+        }
+        const pv = node.RenderStyle.Perspective;
+        if (pv > 0) {
+          const pgx = node.X + node.Width * node.RenderStyle.PerspectiveOriginX;
+          const pgy = node.Y + node.Height * node.RenderStyle.PerspectiveOriginY;
+          childPersp = { D: pv, Ox: matApplyX(eff, pgx, pgy), Oy: matApplyY(eff, pgx, pgy) };
+        }
+      }
+      if (!this._isInsideClipStack(node, eff, stack, effH)) {
         // This node's OWN box is outside the clip. If it CLIPS its children
         // (Overflow: Hidden/Scroll), they're bounded by that box and can't be
         // visible either — skip the whole subtree (the cheap, common case).
@@ -1054,7 +1141,7 @@ export class Canvas implements DirtyTracker {
         // viewport edge. So recurse — each child self-culls by its OWN AABB —
         // and just skip drawing this node's own panel/text (it's off-screen).
         if (node.Overflow === 'Hidden' || node.Overflow === 'Scroll') return;
-        descendChildren(node, eff, stack, scope);
+        descendChildren(node, eff, stack, scope, effH, childPersp);
         return;
       }
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
@@ -1074,13 +1161,16 @@ export class Canvas implements DirtyTracker {
       }
 
       if (node.Width <= 0 || node.Height <= 0 || !node.Visible) {
-        descendChildren(node, eff, stack, scope);
+        descendChildren(node, eff, stack, scope, effH, childPersp);
         return;
       }
 
       // Encode the current clip stack into the per-frame buffer so this Jiv's
       // panel/text instances reference it by (offset, count).
       const clipMeta = this._clipBuffer.Encode(stack, this._dpr);
+      // Projective node? Append its homography to the shared table once and pass
+      // the index to whatever this node paints (panel and/or text). -1 = 2D.
+      const xformIndex = effH !== null ? this._xformBuffer.Add(effH, this._dpr) : -1;
 
       const material = node.RenderStyle.Material;
 
@@ -1120,7 +1210,7 @@ export class Canvas implements DirtyTracker {
         const lodMargin = Math.ceil(Math.pow(2, maxLod + 1));
         // AABB of the (possibly rotated) node in canvas px — scissor is an
         // axis-aligned GPU cull, so use the rotated rect's bounding box.
-        const _ab = this._nodeAabb(node, eff);
+        const _ab = this._nodeAabb(node, eff, effH);
         const px = _ab.minX * d;
         const py = _ab.minY * d;
         const pw = (_ab.maxX - _ab.minX) * d;
@@ -1186,6 +1276,7 @@ export class Canvas implements DirtyTracker {
         r.RebindSceneTarget();
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+        r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
         // The shader builds a UNROTATED quad from `Rect` and rotates it about
         // the pivot, so its ramp/feather run along the element's own (rotated)
         // axes. Rect = the element's unrotated device rect (centered on the
@@ -1278,7 +1369,7 @@ export class Canvas implements DirtyTracker {
         const _gRefractMax = (_gThicknessDev + _gBulgeMax) * node.RenderStyle.Refraction;
         const _gCaMax = node.RenderStyle.ChromaticAberration * 3.0;
         const margin = frostCssPx * d + _gRefractMax + _gCaMax + 8 * d;
-        const _ab = this._nodeAabb(node, eff);
+        const _ab = this._nodeAabb(node, eff, effH);
         const px = _ab.minX * d;
         const py = _ab.minY * d;
         const pw = (_ab.maxX - _ab.minX) * d;
@@ -1320,9 +1411,10 @@ export class Canvas implements DirtyTracker {
 
         r.EnableBlend();
         this._panelBuffer.Begin();
-        this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count);
+        this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
         r.PanelBeginBatch();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+        r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         // Always use the MATERIAL_GLASS variant for any standalone panel
         // that needs the pyramid path. Material is *inferred* from Thickness
@@ -1376,17 +1468,18 @@ export class Canvas implements DirtyTracker {
         if (flatBgPaint !== undefined) {
           flushPanels();
           this._panelBuffer.Begin();
-          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count);
+          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
           r.EnableBlend();
           r.PanelBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+        r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
           r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, flatBgPaint);
           this._counts.Panels++;
           if (flatBgPaint.Mode === 'Image') this._counts.Image++;
           this._panelBuffer.Begin();
         } else {
-          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count);
+          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
         }
       }
 
@@ -1401,15 +1494,16 @@ export class Canvas implements DirtyTracker {
       const anim = this._textAnimators.get(node);
       if (anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
-        this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count);
+        this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
       }
 
       // Walk children in Layer order (ties break by tree order)
-      descendChildren(node, eff, stack, scope);
+      descendChildren(node, eff, stack, scope, effH, childPersp);
     };
 
     this._textBuffer.Begin();
     this._clipBuffer.Begin();
+    this._xformBuffer.Begin();
     this._panelBuffer.Begin();
     // Populate _maxFrostBlur from the live tree before the render walk. It
     // sizes the Gaussian mip chain GenerateBlurMipmap builds (Jaui.ts ~1020
@@ -1462,13 +1556,16 @@ export class Canvas implements DirtyTracker {
     // 2-3× faster than the old shader-based Blit(SceneTexture) path on
     // integrated GPUs, and can fuse with InvalidateFrameTransients on
     // tile-based mobile renderers (scene never leaves tile memory).
-    r.PresentScene();
-
-    // Tell the driver we don't need the default framebuffer's depth or the
-    // scene FBO's color for the rest of this frame. On tile-based mobile
-    // GPUs this discards the tile memory instead of writing it back to
-    // main memory — real bandwidth win on iPad / Android.
-    r.InvalidateFrameTransients();
+    // Headless: there is no swap chain — the scene stays in `_sceneFbo` for the caller to sample
+    // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
+    if (!this._headless) {
+      r.PresentScene();
+      // Tell the driver we don't need the default framebuffer's depth or the
+      // scene FBO's color for the rest of this frame. On tile-based mobile
+      // GPUs this discards the tile memory instead of writing it back to
+      // main memory — real bandwidth win on iPad / Android.
+      r.InvalidateFrameTransients();
+    }
 
     r.EndFrame();
   };
@@ -1603,8 +1700,18 @@ export class Canvas implements DirtyTracker {
   /** Canvas-space AABB of `node`'s (possibly rotated) rect under matrix `m` —
    *  the min/max of its four mapped corners. Used for axis-aligned scissor/cull
    *  rects. At rotation 0 this is exactly the node's mapped rect. */
-  private _nodeAabb = (node: Jiv, m: Mat2x3): { minX: number; minY: number; maxX: number; maxY: number } => {
+  private _nodeAabb = (node: Jiv, m: Mat2x3, effH: Mat3x3 | null = null): { minX: number; minY: number; maxX: number; maxY: number } => {
     const x0 = node.X, y0 = node.Y, x1 = node.X + node.Width, y1 = node.Y + node.Height;
+    // Under perspective, the box maps through the homography — project the four
+    // corners (with the divide) and bound them. At no perspective `m` is used.
+    if (effH !== null) {
+      const p0 = mat3ApplyPoint(effH, x0, y0), p1 = mat3ApplyPoint(effH, x1, y0);
+      const p2 = mat3ApplyPoint(effH, x1, y1), p3 = mat3ApplyPoint(effH, x0, y1);
+      return {
+        minX: Math.min(p0[0], p1[0], p2[0], p3[0]), minY: Math.min(p0[1], p1[1], p2[1], p3[1]),
+        maxX: Math.max(p0[0], p1[0], p2[0], p3[0]), maxY: Math.max(p0[1], p1[1], p2[1], p3[1]),
+      };
+    }
     const ax = matApplyX(m, x0, y0), ay = matApplyY(m, x0, y0);
     const bx = matApplyX(m, x1, y0), by = matApplyY(m, x1, y0);
     const cx2 = matApplyX(m, x1, y1), cy2 = matApplyY(m, x1, y1);
@@ -1622,12 +1729,12 @@ export class Canvas implements DirtyTracker {
    *  Uses the cascade-scaled rect so a transformed Jiv's clip cull respects
    *  its actually-rendered bbox. */
   private _isInsideClipStack = (
-    node: Jiv, m: Mat2x3, stack: ClipStack,
+    node: Jiv, m: Mat2x3, stack: ClipStack, effH: Mat3x3 | null = null,
   ): boolean => {
     if (stack.length === 0) return true;
-    // AABB of the (possibly rotated) node — conservative cull (never rejects a
-    // visible pixel). At rotation 0 this is exactly the node's mapped rect.
-    const { minX: nx, minY: ny, maxX: nx2, maxY: ny2 } = this._nodeAabb(node, m);
+    // AABB of the (possibly rotated / perspective-projected) node — conservative
+    // cull (never rejects a visible pixel). At no transform this is the mapped rect.
+    const { minX: nx, minY: ny, maxX: nx2, maxY: ny2 } = this._nodeAabb(node, m, effH);
     for (const c of stack) {
       if (nx2 <= c.X || nx >= c.X + c.W) return false;
       if (ny2 <= c.Y || ny >= c.Y + c.H) return false;
@@ -1722,10 +1829,21 @@ export class Canvas implements DirtyTracker {
     for (const child of node.Children as Jiv[]) this._scanFrostBlur(child);
   };
 
-  private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number): void => {
+  private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number, effH: Mat3x3 | null = null): void => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return;
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
+
+    // 3D path: the node is under a perspective tilt. Project glyphs through the
+    // device homography (effH maps natural→canvas; ×dpr on the output row gives
+    // natural→device). Each glyph is emitted in NATURAL coords + this matrix; the
+    // text vertex does the perspective divide. Null = the ordinary 2D path.
+    const dpr = this._dpr;
+    const H3d: readonly number[] | null = effH
+      ? [effH[0] * dpr, effH[1] * dpr, effH[2] * dpr,
+         effH[3] * dpr, effH[4] * dpr, effH[5] * dpr,
+         effH[6], effH[7], effH[8]]
+      : null;
 
     // Padding is a Length — resolve against this Jiv's ctx (populated by
     // the layout pass). ctx always exists post-layout; fall back to the
@@ -1802,6 +1920,27 @@ export class Canvas implements DirtyTracker {
       const drawH = entry.Height * wordScale * cy;
       const dxCenter = (entry.Width * cx - drawW) / 2 / this._dpr;
       const dyCenter = (entry.Height * cy - drawH) / 2 / this._dpr;
+      if (H3d) {
+        // Glyph rect in NODE-NATURAL coords; the homography + vertex divide
+        // place + foreshorten it on the tilted plane. (entry.* are device px.)
+        const natW = (entry.Width / dpr) * wordScale;
+        const natH = (entry.Height / dpr) * wordScale;
+        const natX = wlx + (entry.Width / dpr - natW) / 2;
+        const natY = wly + (entry.Height / dpr - natH) / 2;
+        this._textBuffer.Push({
+          X: natX, Y: natY, Width: natW, Height: natH,
+          Uv: entry.Uv,
+          Opacity: opacity,
+          ClipOffset: clipOffset,
+          ClipCount: clipCount,
+          TintR: w.TintR.Value,
+          TintG: w.TintG.Value,
+          TintB: w.TintB.Value,
+          TintA: w.TintA.Value,
+          H: H3d,
+        });
+        continue;
+      }
       this._textBuffer.Push({
         X: wx * this._dpr + dxCenter * this._dpr,
         Y: wy * this._dpr + dyCenter * this._dpr,

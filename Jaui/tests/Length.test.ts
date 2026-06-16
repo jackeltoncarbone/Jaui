@@ -32,6 +32,13 @@ describe('Length — resolver', () => {
     expect(Resolve(42, baseCtx, 'W')).toBe(42);
   });
 
+  it('accepts scientific-notation numbers (computed floats stringify that way)', () => {
+    expect(Resolve('-7.68987442984957e-14', baseCtx, 'W')).toBeCloseTo(0, 10);
+    expect(Resolve('1.5e2', baseCtx, 'W')).toBe(150);
+    expect(Resolve('2E-3', baseCtx, 'W')).toBeCloseTo(0.002, 10);
+    expect(Resolve('3e+1pt', baseCtx, 'W')).toBe(30 * 16);
+  });
+
   it('pt resolves against current PointScale', () => {
     expect(Resolve('1pt', baseCtx, 'W')).toBe(16);
     expect(Resolve('2.5pt', baseCtx, 'W')).toBe(40);

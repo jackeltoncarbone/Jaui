@@ -1,6 +1,14 @@
 import type { Jiv } from './Jiv';
 import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
 
+// 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
+// extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
+// When `xformIndex >= 0` the panel is projective: a_Rect (loc 1) carries the
+// panel's NATURAL box (not the device AABB), and a_PanelGeom (loc 2) carries
+// (2.0, xformIndex, halfW, halfH) — the out-of-range cos=2.0 flags the vertex
+// to fetch this panel's homography from the shared u_XformTex by index and
+// project the natural corners. 2D panels are byte-identical to before.
+
 // Per-instance floats (15 vec4 slots = 60 floats = 240 bytes):
 //   loc  1: a_Rect         (x, y, w, h)  — the AABB of the (possibly rotated) panel
 //   loc  2: a_PanelGeom    (cosθ, sinθ, halfW, halfH)
@@ -88,7 +96,7 @@ export class JivInstanceBuffer {
    * (cx=cy=1, ox=oy=0) reduces to the legacy `node.X` placement.
    */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
-          clipOffset: number = 0, clipCount: number = 0): void => {
+          clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1): void => {
     if (this._count >= this._capacity) this._grow();
 
     const style = jiv.RenderStyle;
@@ -152,6 +160,19 @@ export class JivInstanceBuffer {
     data[offset + 5] = sin;
     data[offset + 6] = halfW;
     data[offset + 7] = halfH;
+
+    // 3D (projective) override: a_Rect → the NATURAL box; a_PanelGeom.xy →
+    // (2.0 sentinel, xformIndex). halfW/halfH stay for the SDF's undeformed
+    // panel-local extent. The vertex fetches the homography by index and
+    // projects the natural corners (with the perspective w-divide).
+    if (xformIndex >= 0) {
+      data[offset + 0] = jiv.X;
+      data[offset + 1] = jiv.Y;
+      data[offset + 2] = jiv.Width;
+      data[offset + 3] = jiv.Height;
+      data[offset + 4] = 2.0;
+      data[offset + 5] = xformIndex;
+    }
 
     data[offset + 8] = style.BorderRadius[0] * avgScale * d;
     data[offset + 9] = style.BorderRadius[1] * avgScale * d;

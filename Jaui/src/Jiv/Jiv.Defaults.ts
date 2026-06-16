@@ -44,6 +44,9 @@ export const DefaultJivStyle: JivStyle = {
   VisualScale: '1',
   VisualTranslate: '0',
   VisualOrigin: '0.5',
+  // Perspective context for descendants (CSS `perspective`). '0' = none.
+  Perspective: '0',
+  PerspectiveOrigin: '0.5',
   BorderColor: 'rgba(0, 0, 0, 0)',
   BorderWidth: '0',
   BorderBlur: '0.5',

@@ -156,10 +156,13 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
       const [vsx, vsy] = _parseVisualPair(ResolveTernary(s.VisualScale, ctx), ctx, 1);
       const [vtx, vty] = _parseVisualPair(ResolveTernary(s.VisualTranslate, ctx), ctx, 0);
       const [vox, voy] = _parseVisualPair(ResolveTernary(s.VisualOrigin, ctx), ctx, 0.5);
+      const [pox, poy] = _parseVisualPair(ResolveTernary(s.PerspectiveOrigin, ctx), ctx, 0.5);
       return {
         VisualScaleX: vsx, VisualScaleY: vsy,
         VisualTranslateX: vtx, VisualTranslateY: vty,
         VisualOriginX: vox, VisualOriginY: voy,
+        Perspective: Resolve(ResolveTernary(s.Perspective, ctx), ctx, 'W'),
+        PerspectiveOriginX: pox, PerspectiveOriginY: poy,
       };
     })(),
 

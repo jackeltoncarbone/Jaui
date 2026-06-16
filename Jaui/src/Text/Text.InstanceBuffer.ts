@@ -14,6 +14,12 @@ import type { AtlasUv } from './Text.Cache';
  *  while the glyph atlas raster snaps to the new color (see Text.Animator).
  *  a_Rot rotates the glyph quad about its pivot (device px); (1,0) = unrotated,
  *  so a glyph under a rotated ancestor tilts with the panel instead of resisting.
+ *
+ *  3D perspective reuses this SAME layout via a sentinel — identical to panels,
+ *  no extra attributes. When `XformIndex >= 0` the glyph is projective: a_Rect
+ *  carries the glyph rect in NODE-NATURAL coords and a_Rot = (2.0, XformIndex,
+ *  _, _) — the out-of-range cos=2.0 tells the vertex to fetch the homography
+ *  from the shared u_XformTex by index and project the natural corners.
  */
 export const TEXT_FLOATS_PER_INSTANCE = 20;
 
@@ -36,6 +42,9 @@ export interface TextDrawCommand {
   Sin?: number;
   PivotX?: number;
   PivotY?: number;
+  /** Index into the shared u_XformTex when this glyph is perspective-projected
+   *  (its X/Y/Width/Height are then NODE-NATURAL coords). Absent/-1 = 2D. */
+  XformIndex?: number;
 }
 
 /**
@@ -83,10 +92,19 @@ export class TextInstanceBuffer {
     data[offset + 14] = cmd.TintB;
     data[offset + 15] = cmd.TintA;
 
-    data[offset + 16] = cmd.Cos ?? 1;
-    data[offset + 17] = cmd.Sin ?? 0;
-    data[offset + 18] = cmd.PivotX ?? 0;
-    data[offset + 19] = cmd.PivotY ?? 0;
+    // a_Rot — (cos, sin, pivot) for 2D; (2.0 sentinel, xformIndex, _, _) for 3D.
+    const xi = cmd.XformIndex ?? -1;
+    if (xi >= 0) {
+      data[offset + 16] = 2.0;
+      data[offset + 17] = xi;
+      data[offset + 18] = 0;
+      data[offset + 19] = 0;
+    } else {
+      data[offset + 16] = cmd.Cos ?? 1;
+      data[offset + 17] = cmd.Sin ?? 0;
+      data[offset + 18] = cmd.PivotX ?? 0;
+      data[offset + 19] = cmd.PivotY ?? 0;
+    }
 
     this._count++;
   };

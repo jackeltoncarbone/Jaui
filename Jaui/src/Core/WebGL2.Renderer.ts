@@ -83,6 +83,8 @@ interface _PanelLocs {
   baseFrostLod: WebGLUniformLocation | null;
   specTilt:     WebGLUniformLocation | null;
   clipTex:      WebGLUniformLocation | null;
+  xformTex:     WebGLUniformLocation | null;
+  panelHas3D:   WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -101,6 +103,8 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
   specTilt:     gl.getUniformLocation(p, 'u_SpecularTilt'),
   clipTex:      gl.getUniformLocation(p, 'u_ClipTex'),
+  xformTex:     gl.getUniformLocation(p, 'u_XformTex'),
+  panelHas3D:   gl.getUniformLocation(p, 'u_PanelHas3D'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -137,9 +141,9 @@ const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
 const PANEL_ATTR_COUNT = 15; // locations 1..15 — clip_meta is packed into a_Outline.zw
 const BYTES_PER_VEC4 = 16;
 
-const TEXT_FLOATS_PER_INSTANCE = 20;
+const TEXT_FLOATS_PER_INSTANCE = 32;
 const TEXT_BYTES_PER_INSTANCE = TEXT_FLOATS_PER_INSTANCE * 4;
-const TEXT_ATTR_COUNT = 5; // locations 1..5 — Rect / UvRect / OpacityClip / Tint / Rot
+const TEXT_ATTR_COUNT = 8; // locations 1..8 — Rect / UvRect / OpacityClip / Tint / Rot / H0 / H1 / H2
 
 const STROKE_FLOATS_PER_INSTANCE = 12;            // a_Seg(4) + a_Miter(4) + a_Arc(4)
 const STROKE_BYTES_PER_INSTANCE = STROKE_FLOATS_PER_INSTANCE * 4;
@@ -522,6 +526,14 @@ export class WebGL2Renderer implements Renderer {
   // ── Render Targets ──
 
   get SceneTexture(): GpuTextureHandle { return _wrap(this._sceneFbo.Texture); }
+  /** The raw scene-FBO `WebGLTexture`. For headless render-to-texture consumers that bind the scene output
+   *  into a foreign pipeline on the SAME GL context (e.g. THREE sampling it as a material map via
+   *  `ExternalTexture`) — they need the underlying GL handle, not the wrapped `GpuTextureHandle`. */
+  get SceneGLTexture(): WebGLTexture { return this._sceneFbo.Texture; }
+  /** The raw scene-FBO `WebGLFramebuffer`. Lets a headless host composite foreign passes (THREE, another
+   *  Jaui renderer) ON TOP of this Canvas's rendered scene, into the same target, before sampling
+   *  `SceneGLTexture`. Used during the turf migration to layer the not-yet-ported dynamic content. */
+  get SceneFramebuffer(): WebGLFramebuffer { return this._sceneFbo.Framebuffer; }
   get BlurPyramidTexture(): GpuTextureHandle {
     // BlurPass stores its output internally — the last Blur() call's result
     // is in levels[0].Texture. We don't expose it directly; it's accessed
@@ -903,12 +915,15 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Texture Management ──
 
-  CreateTexture = (width: number, height: number): GpuTextureHandle => {
+  CreateTexture = (width: number, height: number, srgb = false): GpuTextureHandle => {
     const gl = this._gl;
     const tex = gl.createTexture();
     if (!tex) throw new Error('[Jaui] Failed to create texture');
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    // SRGB8_ALPHA8 → the GPU decodes sRGB→linear on every sample, so colour images blit/composite in linear
+    // space (correct for lighting). Plain RGBA8 keeps raw bytes (for masks / already-linear data).
+    const internalFormat = srgb ? gl.SRGB8_ALPHA8 : gl.RGBA;
+    gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);

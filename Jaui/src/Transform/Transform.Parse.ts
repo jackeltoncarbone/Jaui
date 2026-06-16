@@ -115,6 +115,11 @@ const _applyCall = (call: _Call, out: Transform, ctx: ResolveContext): void => {
       out.TranslateY = Resolve(a[0], ctx, 'H');
       return;
     }
+    case 'translatez': {
+      if (a.length !== 1) throw new Error(`[Jaui] translateZ() needs 1 arg, got ${a.length}`);
+      out.TranslateZ = Resolve(a[0], ctx, 'W');
+      return;
+    }
     case 'scale': {
       if (a.length === 1) {
         const s = Resolve(a[0], ctx, 'W');
@@ -130,6 +135,8 @@ const _applyCall = (call: _Call, out: Transform, ctx: ResolveContext): void => {
     case 'scalex': out.ScaleX = Resolve(a[0], ctx, 'W'); return;
     case 'scaley': out.ScaleY = Resolve(a[0], ctx, 'H'); return;
     case 'rotate': out.Rotation = Resolve(a[0], ctx, 'W'); return;
+    case 'rotatex': out.RotateX = Resolve(a[0], ctx, 'W'); return;
+    case 'rotatey': out.RotateY = Resolve(a[0], ctx, 'W'); return;
     case 'skew': {
       if (a.length === 1) { out.SkewX = Resolve(a[0], ctx, 'W'); out.SkewY = 0; }
       else if (a.length === 2) {

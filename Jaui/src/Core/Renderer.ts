@@ -249,8 +249,9 @@ export interface Renderer {
 
   // ── Texture Management ──
 
-  /** Create a 2D texture (e.g. for the text atlas). */
-  CreateTexture(width: number, height: number): GpuTextureHandle;
+  /** Create a 2D texture (e.g. for the text atlas). `srgb` allocates an SRGB8_ALPHA8 texture so the GPU
+   *  decodes sRGB→linear on sample — use for colour images that will be lit/composited in linear space. */
+  CreateTexture(width: number, height: number, srgb?: boolean): GpuTextureHandle;
 
   /** Upload a sub-region of a texture from a canvas, ImageBitmap, or ImageData.
    *  OffscreenCanvas is included so worker-side text/image rasterization can

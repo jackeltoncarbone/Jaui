@@ -181,6 +181,18 @@ export interface JivStyle {
    *  `0.5` = center. Default `'0.5'`. */
   VisualOrigin: string;
 
+  // 3D perspective — CSS `perspective` model. Set on a PARENT to establish a
+  // viewing context; DESCENDANTS' Transform.RotateX/RotateY/TranslateZ project
+  // through it toward the shared PerspectiveOrigin (so a fanned drum converges
+  // on one vanishing point). Every Jiv is a flat quad, so a tilted quad under
+  // perspective is a 2D homography — see Transform/Mat3x3.ts.
+  /** Viewing distance in px established for descendants. `'0'`/none = no
+   *  perspective (descendant 3D transforms project orthographically). */
+  Perspective: string;
+  /** Vanishing point for this node's Perspective, in [0,1] of its box.
+   *  `'0.5'` = center. Shorthand: single value = both axes; `'x y'` = per-axis. */
+  PerspectiveOrigin: string;
+
   // Border
   BorderColor: string;
   BorderWidth: string;
@@ -269,6 +281,12 @@ export interface JivRenderStyle {
   VisualTranslateY: number;
   VisualOriginX: number;
   VisualOriginY: number;
+
+  // Perspective context — px viewing distance + vanishing origin (fraction of
+  // this node's box) established for descendants. 0 = no perspective.
+  Perspective: number;
+  PerspectiveOriginX: number;
+  PerspectiveOriginY: number;
 
   BorderColor: Color;
   BorderWidth: number;

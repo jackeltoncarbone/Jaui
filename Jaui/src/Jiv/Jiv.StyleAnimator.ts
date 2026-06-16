@@ -89,13 +89,22 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // Transform — per-channel (legacy compound; superseded by Visual*).
   ['Transform',              s => s.Transform.TranslateX,         (s, v) => { s.Transform.TranslateX = v; }],
   ['Transform',              s => s.Transform.TranslateY,         (s, v) => { s.Transform.TranslateY = v; }],
+  ['Transform',              s => s.Transform.TranslateZ,         (s, v) => { s.Transform.TranslateZ = v; }],
   ['Transform',              s => s.Transform.ScaleX,             (s, v) => { s.Transform.ScaleX = v; }],
   ['Transform',              s => s.Transform.ScaleY,             (s, v) => { s.Transform.ScaleY = v; }],
   ['Transform',              s => s.Transform.Rotation,           (s, v) => { s.Transform.Rotation = v; }],
+  ['Transform',              s => s.Transform.RotateX,            (s, v) => { s.Transform.RotateX = v; }],
+  ['Transform',              s => s.Transform.RotateY,            (s, v) => { s.Transform.RotateY = v; }],
   ['Transform',              s => s.Transform.SkewX,              (s, v) => { s.Transform.SkewX = v; }],
   ['Transform',              s => s.Transform.SkewY,              (s, v) => { s.Transform.SkewY = v; }],
   ['Transform',              s => s.Transform.OriginX,            (s, v) => { s.Transform.OriginX = v; }],
   ['Transform',              s => s.Transform.OriginY,            (s, v) => { s.Transform.OriginY = v; }],
+
+  // Perspective context — viewing distance + vanishing origin, animatable so a
+  // drum can spring its depth. Bucket `Perspective` / `PerspectiveOrigin`.
+  ['Perspective',            s => s.Perspective,                  (s, v) => { s.Perspective = v; }],
+  ['PerspectiveOrigin',      s => s.PerspectiveOriginX,           (s, v) => { s.PerspectiveOriginX = v; }],
+  ['PerspectiveOrigin',      s => s.PerspectiveOriginY,           (s, v) => { s.PerspectiveOriginY = v; }],
 
   // Visual* — render-time scale/translate around an origin. Each axis
   // springs independently. Author groups via the JSS shorthand:

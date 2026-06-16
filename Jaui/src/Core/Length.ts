@@ -321,6 +321,18 @@ const _tokenize = (raw: string): _Token[] => {
     if ((c >= '0' && c <= '9') || c === '.') {
       let j = i;
       while (j < s.length && ((s[j] >= '0' && s[j] <= '9') || s[j] === '.')) j++;
+      // Scientific-notation exponent — a computed float legitimately stringifies
+      // as `1e-14` (e.g. a near-zero animated angle). Consume `e[+-]?digits` so
+      // the parser doesn't read the `e` as a stray identifier. Only when a digit
+      // actually follows, so a bare `e` keyword/var isn't swallowed.
+      if (j < s.length && (s[j] === 'e' || s[j] === 'E')) {
+        let k = j + 1;
+        if (k < s.length && (s[k] === '+' || s[k] === '-')) k++;
+        if (k < s.length && s[k] >= '0' && s[k] <= '9') {
+          while (k < s.length && s[k] >= '0' && s[k] <= '9') k++;
+          j = k;
+        }
+      }
       const num = parseFloat(s.slice(i, j));
       if (Number.isNaN(num)) {
         throw new Error(`[Jaui] Malformed number in length expression: "${raw}"`);
