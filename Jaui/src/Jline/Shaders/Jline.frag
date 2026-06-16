@@ -42,6 +42,10 @@ void main() {
     float t = mix(v_Arc.x, v_Arc.y, f);
 
     float head = u_Progress + v_Phase * u_Spread; head -= floor(head);
+    // GLSL `fract(1.0) == 0.0`: a head that has reached the very end (progress 1.0) would otherwise wrap
+    // back to the path START, flashing the whole trail as if the move had just begun. A completed move
+    // sits AT the destination, so pin the terminal frame to the end (phase shimmer yields there).
+    if (u_Progress >= 1.0) head = 1.0;
     float s = t - head;                                    // +ahead of head, -behind
     // Cap the window to the VISIBLE path so blur/fade ramp fully across what's actually DRAWN. The default
     // window (e.g. 48 counts) is usually larger than a cue's path; uncapped, `age` never climbs out of the
