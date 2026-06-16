@@ -61,7 +61,13 @@ const _ensureScratch = (n: number): void => {
  * buffer (zero-copy: build straight into the array that gets `bufferData`'d to the GPU), then issues
  * one upload + one draw. Returns the new float offset (= where the next line should write).
  *
- * @throws RangeError if `out` can't hold this line's `(points-1) * 12` floats from `floatOffset`.
+ * @throws RangeError if `out` can't hold this line's `(points-1) * stride` floats from `floatOffset`.
+ *
+ * `stride` (default {@link STROKE_FLOATS_PER_SEGMENT} = 12) is the per-segment float pitch in `out`. Pass a
+ * LARGER stride when the consumer interleaves extra per-segment attributes after the 12 stroke floats (e.g.
+ * the collision-fill buffer adds a 2-float `a_Fill` → stride 14); the 12 stroke floats are written into the
+ * first 12 lanes of each `stride`-sized slot and the caller fills the remainder. Default keeps the comet's
+ * tightly-packed 12-stride layout unchanged.
  */
 export function WriteStrokeInstances(
   points: ReadonlyArray<StrokePoint>,
@@ -71,13 +77,14 @@ export function WriteStrokeInstances(
   floatOffset = 0,
   param: StrokeParam = 'arc',
   pointCount?: number,
+  stride: number = STROKE_FLOATS_PER_SEGMENT,
 ): number {
   // `pointCount` lets callers pass a reused, OVERSIZED scratch array and read only its first N entries
   // (zero per-frame allocation — the turf converts field→px into a persistent scratch each frame).
   const n = pointCount ?? points.length;
   if (n < 2) return floatOffset;
   const segCount = n - 1;
-  const end = floatOffset + segCount * STROKE_FLOATS_PER_SEGMENT;
+  const end = floatOffset + segCount * stride;
   if (end > out.length) throw new RangeError('Jline.WriteStrokeInstances: out buffer too small');
 
   _ensureScratch(n);
@@ -126,7 +133,7 @@ export function WriteStrokeInstances(
     out[o + 9] = tAt(k + 1);
     out[o + 10] = phase;
     out[o + 11] = 0;
-    o += STROKE_FLOATS_PER_SEGMENT;
+    o += stride;
   }
   return end;
 }

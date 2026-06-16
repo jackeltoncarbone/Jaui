@@ -29,17 +29,22 @@ interface _StrokeLocs {
   halfW:       WebGLUniformLocation | null;
   headR:       WebGLUniformLocation | null;
   blur:        WebGLUniformLocation | null;
+  blurFloor:   WebGLUniformLocation | null;
+  blurSharp:   WebGLUniformLocation | null;
   ahead:       WebGLUniformLocation | null;
   behind:      WebGLUniformLocation | null;
   windowUnit:  WebGLUniformLocation | null;
   headA:       WebGLUniformLocation | null;
   floorA:      WebGLUniformLocation | null;
   headFade:    WebGLUniformLocation | null;
+  trailMinA:   WebGLUniformLocation | null;
   spread:      WebGLUniformLocation | null;
   showPrior:   WebGLUniformLocation | null;
+  priorScale:  WebGLUniformLocation | null;
   fwdA:        WebGLUniformLocation | null;
   fwdB:        WebGLUniformLocation | null;
   prior:       WebGLUniformLocation | null;
+  collision:   WebGLUniformLocation | null;
 }
 
 const _extractStrokeLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _StrokeLocs => ({
@@ -48,17 +53,22 @@ const _extractStrokeLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _Strok
   halfW:      gl.getUniformLocation(p, 'u_HalfW'),
   headR:      gl.getUniformLocation(p, 'u_HeadR'),
   blur:       gl.getUniformLocation(p, 'u_Blur'),
+  blurFloor:  gl.getUniformLocation(p, 'u_BlurFloor'),
+  blurSharp:  gl.getUniformLocation(p, 'u_BlurSharp'),
   ahead:      gl.getUniformLocation(p, 'u_Ahead'),
   behind:     gl.getUniformLocation(p, 'u_Behind'),
   windowUnit: gl.getUniformLocation(p, 'u_WindowUnit'),
   headA:      gl.getUniformLocation(p, 'u_HeadA'),
   floorA:     gl.getUniformLocation(p, 'u_FloorA'),
   headFade:   gl.getUniformLocation(p, 'u_HeadFade'),
+  trailMinA:  gl.getUniformLocation(p, 'u_TrailMinA'),
   spread:     gl.getUniformLocation(p, 'u_Spread'),
   showPrior:  gl.getUniformLocation(p, 'u_ShowPrior'),
+  priorScale: gl.getUniformLocation(p, 'u_PriorScale'),
   fwdA:       gl.getUniformLocation(p, 'u_FwdA'),
   fwdB:       gl.getUniformLocation(p, 'u_FwdB'),
   prior:      gl.getUniformLocation(p, 'u_Prior'),
+  collision:  gl.getUniformLocation(p, 'u_CollisionColor'),
 });
 
 // ─── Panel-shader uniform-location bundle ───────────────────────────────────
@@ -731,17 +741,22 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1f(l.halfW, style.HalfWidth);
     gl.uniform1f(l.headR, style.HeadRadius);
     gl.uniform1f(l.blur, style.Blur);
+    gl.uniform1f(l.blurFloor, style.BlurFloor);
+    gl.uniform1f(l.blurSharp, style.BlurSharp);
     gl.uniform1f(l.ahead, style.Ahead);
     gl.uniform1f(l.behind, style.Behind);
     gl.uniform1f(l.windowUnit, style.WindowUnit);
     gl.uniform1f(l.headA, style.HeadAlpha);
     gl.uniform1f(l.floorA, style.FloorAlpha);
     gl.uniform1f(l.headFade, style.HeadFade);
+    gl.uniform1f(l.trailMinA, style.TrailMinAlpha);
     gl.uniform1f(l.spread, style.Spread);
     gl.uniform1f(l.showPrior, style.ShowPrior);
+    gl.uniform1f(l.priorScale, style.PriorScale);
     gl.uniform3f(l.fwdA, style.ForwardA[0], style.ForwardA[1], style.ForwardA[2]);
     gl.uniform3f(l.fwdB, style.ForwardB[0], style.ForwardB[1], style.ForwardB[2]);
     gl.uniform3f(l.prior, style.Prior[0], style.Prior[1], style.Prior[2]);
+    gl.uniform3f(l.collision, style.CollisionColor[0], style.CollisionColor[1], style.CollisionColor[2]);
 
     gl.bindVertexArray(this._strokeVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._strokeInstanceCount);

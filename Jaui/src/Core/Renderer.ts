@@ -52,17 +52,22 @@ export interface StrokeStyle {
   HalfWidth: number;    // line half-width (device px)
   HeadRadius: number;   // head dot radius (device px)
   Blur: number;         // max edge-softness at the dissolved tail (device px)
+  BlurFloor: number;    // min edge-softness at the sharp head (device px) — AA floor (shader: u_BlurFloor)
+  BlurSharp: number;    // fraction (0..1) of the visible trail kept sharp before the blur ramps in
   Ahead: number;        // trail window ahead of head (window-units)
   Behind: number;       // trail window behind head (window-units)
   WindowUnit: number;   // window-unit -> arc-fraction scale
   HeadAlpha: number;
   FloorAlpha: number;
   HeadFade: number;     // head-lobe arc width (fraction)
+  TrailMinAlpha: number; // floor opacity — the trail never fades below this (visible start→end; u_TrailMinA)
   Spread: number;       // 1 = apply per-line phase offset, 0 = synced
   ShowPrior: number;    // 1 = show prior (behind-head) ghost
+  PriorScale: number;   // opacity multiplier for the behind (history) trail (u_PriorScale)
   ForwardA: readonly [number, number, number];
   ForwardB: readonly [number, number, number];
   Prior: readonly [number, number, number];
+  CollisionColor: readonly [number, number, number]; // colour the line takes where a collision occurs (u_CollisionColor)
 }
 
 export interface ProgressiveBlurParams {
