@@ -446,6 +446,11 @@ export class Canvas implements DirtyTracker {
   get Width(): number { return this._width; }
   get Height(): number { return this._height; }
 
+  /** True while any spring/animation was still active as of the last frame (the value `StepFrame` last
+   *  computed). A headless host driving `RenderHeadless` reads this to decide whether to keep its own
+   *  composite loop alive until the engine's animations settle. */
+  get IsAnimating(): boolean { return this._animationManager.IsRunning; }
+
   // ─── Event ingestion (worker mode) ──────────────────────────────────────
   // The engine no longer binds DOM listeners on its canvas — `this.Element`
   // is an OffscreenCanvas and isn't an EventTarget for pointer/wheel/key
