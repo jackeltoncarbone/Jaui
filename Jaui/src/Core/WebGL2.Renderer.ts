@@ -84,7 +84,6 @@ interface _PanelLocs {
   specTilt:     WebGLUniformLocation | null;
   clipTex:      WebGLUniformLocation | null;
   xformTex:     WebGLUniformLocation | null;
-  panelHas3D:   WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -104,7 +103,6 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   specTilt:     gl.getUniformLocation(p, 'u_SpecularTilt'),
   clipTex:      gl.getUniformLocation(p, 'u_ClipTex'),
   xformTex:     gl.getUniformLocation(p, 'u_XformTex'),
-  panelHas3D:   gl.getUniformLocation(p, 'u_PanelHas3D'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -141,9 +139,9 @@ const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
 const PANEL_ATTR_COUNT = 15; // locations 1..15 — clip_meta is packed into a_Outline.zw
 const BYTES_PER_VEC4 = 16;
 
-const TEXT_FLOATS_PER_INSTANCE = 32;
+const TEXT_FLOATS_PER_INSTANCE = 20;
 const TEXT_BYTES_PER_INSTANCE = TEXT_FLOATS_PER_INSTANCE * 4;
-const TEXT_ATTR_COUNT = 8; // locations 1..8 — Rect / UvRect / OpacityClip / Tint / Rot / H0 / H1 / H2
+const TEXT_ATTR_COUNT = 5; // locations 1..5 — Rect / UvRect / OpacityClip / Tint / Rot
 
 const STROKE_FLOATS_PER_INSTANCE = 12;            // a_Seg(4) + a_Miter(4) + a_Arc(4)
 const STROKE_BYTES_PER_INSTANCE = STROKE_FLOATS_PER_INSTANCE * 4;
@@ -322,6 +320,12 @@ export class WebGL2Renderer implements Renderer {
   private _clipLastFloatsUploaded: number = 0;
   // (panel clip-tex loc moved into _panelLocsGlass / _panelLocsNone)
   private _textClipTexLoc!: WebGLUniformLocation | null;
+  private _textXformTexLoc!: WebGLUniformLocation | null;
+
+  // Shared 3D-transform texture (RGBA32F row; 3 texels per homography entry,
+  // indexed by texelFetch in the panel/text vertex shaders).
+  private _xformTex!: WebGLTexture;
+  private _xformTexWidth: number = 64;
 
   private _width: number = 0;
   private _height: number = 0;
@@ -415,6 +419,38 @@ export class WebGL2Renderer implements Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+
+    // Shared 3D-transform texture — RGBA32F, one row, 3 texels per homography.
+    const xformTex = gl.createTexture();
+    if (!xformTex) throw new Error('[Jaui] failed to create xform texture');
+    this._xformTex = xformTex;
+    gl.bindTexture(gl.TEXTURE_2D, xformTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, this._xformTexWidth, 1, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  };
+
+  /** Upload the 3D-homography table (shared by panel + text draws). The table
+   *  holds only projective instances, so it's tiny — we re-upload the whole
+   *  thing each call (no cross-frame staleness, entries are 12 floats = 3 whole
+   *  texels). A 2D-only frame uploads nothing. */
+  SetXformBuffer = (data: Float32Array, floatCount: number): void => {
+    if (floatCount === 0) return;
+    const gl = this._gl;
+    const texels = Math.ceil(floatCount / 4);
+    if (texels > this._xformTexWidth) {
+      let w = this._xformTexWidth * 2;
+      while (w < texels) w *= 2;
+      this._xformTexWidth = w;
+      gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, 1, 0, gl.RGBA, gl.FLOAT, null);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, texels, 1, gl.RGBA, gl.FLOAT, data.subarray(0, texels * 4));
     gl.bindTexture(gl.TEXTURE_2D, null);
   };
 
@@ -629,6 +665,12 @@ export class WebGL2Renderer implements Renderer {
     gl.activeTexture(gl.TEXTURE3);
     this._bindBgPaint(locs, bgPaint);
 
+    // Shared 3D-transform texture (unit 4) — fetched in the vertex for the rare
+    // projective instance; 2D instances never sample it (cos != 2.0 sentinel).
+    gl.uniform1i(locs.xformTex, 4);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
+
     gl.bindVertexArray(this._panelVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
   };
@@ -708,11 +750,14 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform2f(this._textResolutionLoc, canvasWidth, canvasHeight);
     gl.uniform1i(this._textAtlasLoc, 0);
     gl.uniform1i(this._textClipTexLoc, 1);
+    gl.uniform1i(this._textXformTexLoc, 2);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(atlas));
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
 
     gl.bindVertexArray(this._textVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._textInstanceCount);
@@ -1074,6 +1119,7 @@ export class WebGL2Renderer implements Renderer {
     this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
     this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');
+    this._textXformTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_XformTex');
 
     // Dedicated VAO for text rendering (separate from panel)
     this._textVao = this._createInstancedVao(gl, this._textInstanceBuffer, TEXT_ATTR_COUNT, TEXT_BYTES_PER_INSTANCE);

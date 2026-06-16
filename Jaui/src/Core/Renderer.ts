@@ -271,6 +271,9 @@ export interface Renderer {
    *  Called before each draw that depends on the current clip set. The
    *  implementation should avoid re-uploading when `floatCount` hasn't grown. */
   SetClipBuffer(data: Float32Array, floatCount: number): void;
+  /** Upload the per-frame 3D-homography table (shared by panel + text draws).
+   *  Instances reference an entry by index; only projective instances do. */
+  SetXformBuffer(data: Float32Array, floatCount: number): void;
 
   // ── Render State ──
 

@@ -216,6 +216,10 @@ export class WebGPURenderer implements Renderer {
     this._lastClipFloatsUploaded = 0;
   };
 
+  // 3D perspective is implemented on the WebGL2 path; the WebGPU backend
+  // ignores the homography table for now (panels/text render 2D).
+  SetXformBuffer = (_data: Float32Array, _floatCount: number): void => {};
+
   SetClipBuffer = (data: Float32Array, floatCount: number): void => {
     const device = this._gpu!.Device;
     // Grow the storage buffer if needed — minimum is a small placeholder so

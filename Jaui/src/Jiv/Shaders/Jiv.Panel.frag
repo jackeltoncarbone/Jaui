@@ -4,6 +4,8 @@ precision highp float;
 in vec2 v_PixelPos;
 flat in vec4 v_PanelGeom;      // cx, cy, halfW, halfH
 flat in vec4 v_Rot;            // cosθ, sinθ, centerX, centerY — panel rotation basis + pivot
+in vec2 v_Local;              // 3D: perspective-correct panel-local coord (undeformed)
+flat in float v_Is3D;         // 1.0 ⇒ projective panel — take pLocal from v_Local
 flat in vec4 v_Radii;
 flat in vec4 v_Tint;
 flat in vec4 v_BorderColor;
@@ -621,12 +623,20 @@ void main() {
     // whole rounded-rect SDF + border + shadow + fill geometry below evaluates as
     // if axis-aligned. Screen-space samples (clip distance, backdrop/refraction
     // UVs, dither) keep the original v_PixelPos. Identity when (cos,sin)=(1,0).
-    vec2 _rel = v_PixelPos - v_Rot.zw;
-    // Inverse rotation R(-θ): [ cos  sin; -sin  cos ].
-    vec2 pLocal = vec2(
-        _rel.x * v_Rot.x + _rel.y * v_Rot.y,
-        -_rel.x * v_Rot.y + _rel.y * v_Rot.x
-    ) + v_Rot.zw;
+    vec2 pLocal;
+    if (v_Is3D > 0.5) {
+        // Projective panel: the undeformed panel-local coord comes interpolated
+        // (perspective-correct) from the vertex. panelCenter is 0 for 3D, so the
+        // SDF's `pLocal - panelCenter` below is exactly v_Local.
+        pLocal = panelCenter + v_Local;
+    } else {
+        vec2 _rel = v_PixelPos - v_Rot.zw;
+        // Inverse rotation R(-θ): [ cos  sin; -sin  cos ].
+        pLocal = vec2(
+            _rel.x * v_Rot.x + _rel.y * v_Rot.y,
+            -_rel.x * v_Rot.y + _rel.y * v_Rot.x
+        ) + v_Rot.zw;
+    }
     vec2 shadowOffset = v_ShadowParams.xy;
     float shadowBlur = v_ShadowParams.z;
     float borderWidth = v_ShadowParams.w;

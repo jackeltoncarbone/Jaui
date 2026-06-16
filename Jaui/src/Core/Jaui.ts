@@ -1829,21 +1829,17 @@ export class Canvas implements DirtyTracker {
     for (const child of node.Children as Jiv[]) this._scanFrostBlur(child);
   };
 
-  private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number, effH: Mat3x3 | null = null): void => {
+  private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number = -1): void => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return;
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
 
-    // 3D path: the node is under a perspective tilt. Project glyphs through the
-    // device homography (effH maps natural→canvas; ×dpr on the output row gives
-    // natural→device). Each glyph is emitted in NATURAL coords + this matrix; the
-    // text vertex does the perspective divide. Null = the ordinary 2D path.
+    // 3D path: this node is under a perspective tilt. Its homography already
+    // lives in the shared table at `xformIndex`; each glyph is emitted in
+    // NATURAL coords + that index, and the text vertex fetches + projects it
+    // (perspective divide) just like a 3D panel. -1 = the ordinary 2D path.
     const dpr = this._dpr;
-    const H3d: readonly number[] | null = effH
-      ? [effH[0] * dpr, effH[1] * dpr, effH[2] * dpr,
-         effH[3] * dpr, effH[4] * dpr, effH[5] * dpr,
-         effH[6], effH[7], effH[8]]
-      : null;
+    const is3D = xformIndex >= 0;
 
     // Padding is a Length — resolve against this Jiv's ctx (populated by
     // the layout pass). ctx always exists post-layout; fall back to the
@@ -1920,9 +1916,9 @@ export class Canvas implements DirtyTracker {
       const drawH = entry.Height * wordScale * cy;
       const dxCenter = (entry.Width * cx - drawW) / 2 / this._dpr;
       const dyCenter = (entry.Height * cy - drawH) / 2 / this._dpr;
-      if (H3d) {
-        // Glyph rect in NODE-NATURAL coords; the homography + vertex divide
-        // place + foreshorten it on the tilted plane. (entry.* are device px.)
+      if (is3D) {
+        // Glyph rect in NODE-NATURAL coords; the shared homography + vertex
+        // divide place + foreshorten it on the tilted plane. (entry.* are device.)
         const natW = (entry.Width / dpr) * wordScale;
         const natH = (entry.Height / dpr) * wordScale;
         const natX = wlx + (entry.Width / dpr - natW) / 2;
@@ -1937,7 +1933,7 @@ export class Canvas implements DirtyTracker {
           TintG: w.TintG.Value,
           TintB: w.TintB.Value,
           TintA: w.TintA.Value,
-          H: H3d,
+          XformIndex: xformIndex,
         });
         continue;
       }
