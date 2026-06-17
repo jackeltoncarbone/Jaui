@@ -37,6 +37,21 @@ export type BackgroundValue =
  *  this are evenly resampled in the parser before being uploaded. */
 export const MAX_GRADIENT_STOPS = 8;
 
+/** A progressive-blur spectrum stop. At `Position` (0..1 along the element's
+ *  ramp axis — 0 = top for vertical, left for horizontal) the blur + tint reach
+ *  `Value` (0 = clear/sharp, 1 = max blur). `Easing` is the exponent on the
+ *  segment FROM this stop to the next (1 = linear, <1 = fast-in, >1 = slow-in).
+ *  Lets the blur follow the same multi-stop spectrum as a color gradient
+ *  instead of a single linear feather. */
+export interface BlurStop {
+  Position: number;
+  Value: number;
+  Easing: number;
+}
+
+/** Max progressive-blur spectrum stops shipped to the shader per draw. */
+export const MAX_BLUR_STOPS = 12;
+
 /** Derived at resolve time from which props the author set. Not authorable —
  *  Jiv infers the render pipeline from what you're actually using:
  *    • Thickness > 0                   → 'LiquidGlass' (glass pipeline, refraction)
@@ -88,6 +103,18 @@ export interface JivStyle {
    *  blur only kicks in near the blurred edge. Affects blur LOD, backdrop
    *  grading, and background-tint mix together. */
   ProgressiveBlurEasing: string;
+
+  /** Optional gradient-driven blur spectrum, authored with the same readable
+   *  syntax as `Background` — `LinearGradient(angle, <stop>, …)` — except each
+   *  stop carries a scalar BLUR amount instead of a color:
+   *    `LinearGradient(180deg, 1 0%, 0 28% ease 1.6, 1 56%, 0 80%, 1 100%)`
+   *  Each stop is `<amount 0..1> <position> [ease <e>]` (0 = clear, 1 = max
+   *  blur; position accepts 0..1 or `%`). When set it overrides the single
+   *  linear feather and drives blur + tint + grading together, so blur can
+   *  cycle (frosted → clear reality → frosted) in lockstep with a color
+   *  gradient. The angle picks the axis; it also implies the material, so
+   *  `ProgressiveBlurDirection` need not be set. `null` = use the linear feather. */
+  ProgressiveBlur: string | null;
 
   /** Cascading base unit. `1pt` anywhere in this Jiv's subtree resolves to
    *  `N × PointScale`. When resolving PointScale itself, `pt` refers to
@@ -236,6 +263,9 @@ export interface JivRenderStyle {
    *  (default). <1 = more blur, sharper falloff to clear. >1 = more clear,
    *  blur weighted toward the blurred edge. */
   ProgressiveBlurEasing: number;
+  /** Parsed gradient-driven blur spectrum (overrides the linear feather when
+   *  non-null). Stops are sorted ascending by Position, normalized to [0,1]. */
+  ProgressiveBlurStops: BlurStop[] | null;
   PointScale: number;
 
   BorderRadius: [number, number, number, number];          // tl, tr, br, bl

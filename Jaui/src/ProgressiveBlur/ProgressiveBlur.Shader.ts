@@ -75,6 +75,15 @@ uniform vec3 u_Grading;                     // (Brightness, Saturation, Contrast
 uniform sampler2D u_ClipTex;                // per-frame clip-stack texture
 uniform ivec2 u_ClipMeta;                   // (offset, count) into clip stack
 
+// Gradient-driven blur spectrum. When u_HasStops == 1 the ramp is sampled from
+// these stops along the element's axis (with per-segment easing) instead of the
+// single linear feather, so blur + tint can cycle and follow a color gradient.
+uniform int u_HasStops;
+uniform int u_StopCount;                    // active stops (2..12)
+uniform float u_StopPos[12];                // ascending positions along the axis (0 = top/left)
+uniform float u_StopVal[12];                // frostedness at each stop (0 clear → 1 max blur)
+uniform float u_StopEase[12];               // easing exponent for the segment FROM stop i to i+1
+
 out vec4 fragColor;
 
 // Interleaved Gradient Noise (Jimenez 2014). Unlike fract(sin(dot(...))),
@@ -254,22 +263,47 @@ void main() {
         t = clamp(t * axisLen / fe, 0.0, 1.0);
     }
 
-    // Early-out: past the feather AND the background is fully opaque, the
-    // fragment's final color is just u_Background regardless of what's
-    // behind. Skip the pyramid sample + grading + mix entirely — saves a
-    // textureLod + a texture + an apply_grading chain on every solid-zone
-    // fragment. The caller should ALSO scissor the blur pyramid build to
-    // the feather zone in this case (no pyramid content is read here).
-    if (t >= 1.0 && u_Background.a >= 0.999) {
+    // The blur "ramp" (0 clear → 1 max blur). Two ways to get it:
+    //   • gradient stops (u_HasStops) — sample a piecewise spectrum along the
+    //     axis with per-segment easing, so blur cycles + follows a color gradient.
+    //   • linear feather (default) — the smoothstep'd t computed above.
+    float ramp;
+    if (u_HasStops == 1) {
+        // Axis position 0..1 (top→bottom for vertical dirs, left→right for horizontal).
+        float ax = (u_Direction == 0 || u_Direction == 1) ? v_Local.y : v_Local.x;
+        if (ax <= u_StopPos[0]) {
+            ramp = u_StopVal[0];
+        } else if (ax >= u_StopPos[u_StopCount - 1]) {
+            ramp = u_StopVal[u_StopCount - 1];
+        } else {
+            ramp = u_StopVal[u_StopCount - 1];
+            for (int i = 0; i < 12; i++) {
+                if (i + 1 >= u_StopCount) break;
+                float p0 = u_StopPos[i];
+                float p1 = u_StopPos[i + 1];
+                if (ax >= p0 && ax <= p1) {
+                    float seg = (p1 > p0) ? (ax - p0) / (p1 - p0) : 0.0;
+                    seg = pow(clamp(seg, 0.0, 1.0), max(u_StopEase[i], 0.001));
+                    ramp = mix(u_StopVal[i], u_StopVal[i + 1], seg);
+                    break;
+                }
+            }
+        }
+    } else {
+        // Smoothstep the ramp — linear feels like a hard diagonal line over
+        // uniform content; smoothstep is what the eye reads as "feathered".
+        // u_Easing reshapes the curve: 1.0 = unchanged, <1 biases toward blur
+        // (ramp climbs fast, sharp falloff to clear), >1 biases toward clear.
+        ramp = pow(smoothstep(0.0, 1.0, t), u_Easing);
+    }
+
+    // Early-out: fully frosted AND the background is fully opaque → the final
+    // color is just u_Background regardless of the scene. Skip the pyramid
+    // sample + grading + mix entirely.
+    if (ramp >= 0.999 && u_Background.a >= 0.999) {
         fragColor = vec4(u_Background.rgb, u_Opacity * clipAlpha);
         return;
     }
-
-    // Smoothstep the ramp — linear feels like a hard diagonal line over
-    // uniform content; smoothstep is what the eye reads as "feathered".
-    // u_Easing reshapes the curve: 1.0 = unchanged, <1 biases toward blur
-    // (ramp climbs fast, sharp falloff to clear), >1 biases toward clear.
-    float ramp = pow(smoothstep(0.0, 1.0, t), u_Easing);
 
     // Sample the unblurred scene and a mipmap LOD from the blur pyramid.
     // At ramp = 0 show pure scene; quickly crossfade into the pyramid so

@@ -91,6 +91,10 @@ export interface ProgressiveBlurParams {
   Opacity: number;
   Background: { R: number; G: number; B: number; A: number };
   Grading: { Brightness: number; Saturation: number; Contrast: number };
+  /** Optional gradient-driven blur spectrum (overrides the linear Feather/Easing
+   *  ramp when present, ≥2 stops). Each stop's Value drives blur LOD + tint mix +
+   *  grading at its Position; Easing is the per-segment exponent to the next stop. */
+  Stops?: ReadonlyArray<{ Position: number; Value: number; Easing: number }> | null;
   /** Index into the per-frame clip-stack buffer. Count=0 means no clipping. */
   ClipOffset: number;
   ClipCount: number;

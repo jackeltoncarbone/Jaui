@@ -1,4 +1,5 @@
 import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
+import { ParseProgressiveBlur } from '../ProgressiveBlur/ProgressiveBlur.Stops';
 import type { ResolveContext } from './Length';
 import { Resolve, ResolveTernary } from './Length';
 import { ResolveLengthTuple4 } from './Length.Tuple';
@@ -99,12 +100,16 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   const backdrop = ParseFilter(ResolveTernary(s.BackdropFilter, ctx));
   const border = ParseFilter(ResolveTernary(s.BorderFilter, ctx));
   const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
+  // A gradient-driven blur spectrum implies the ProgressiveBlur material and the
+  // ramp axis on its own, so the author doesn't also need ProgressiveBlurDirection.
+  const blurSpec = s.ProgressiveBlur ? ParseProgressiveBlur(s.ProgressiveBlur) : null;
 
   return {
-    Material: _inferMaterial(thickness, s.ProgressiveBlurDirection),
-    ProgressiveBlurDirection: s.ProgressiveBlurDirection ?? 'ToTop',
+    Material: _inferMaterial(thickness, s.ProgressiveBlurDirection ?? blurSpec?.Direction ?? null),
+    ProgressiveBlurDirection: blurSpec?.Direction ?? s.ProgressiveBlurDirection ?? 'ToTop',
     ProgressiveBlurFeather: Resolve(s.ProgressiveBlurFeather, ctx, 'H'),
     ProgressiveBlurEasing: Resolve(s.ProgressiveBlurEasing, ctx, 'W'),
+    ProgressiveBlurStops: blurSpec?.Stops ?? null,
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 
     BorderRadius: borderRadius,

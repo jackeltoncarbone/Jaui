@@ -312,6 +312,11 @@ export class WebGL2Renderer implements Renderer {
     grading: WebGLUniformLocation | null;
     clipTex: WebGLUniformLocation | null;
     clipMeta: WebGLUniformLocation | null;
+    hasStops: WebGLUniformLocation | null;
+    stopCount: WebGLUniformLocation | null;
+    stopPos: WebGLUniformLocation | null;
+    stopVal: WebGLUniformLocation | null;
+    stopEase: WebGLUniformLocation | null;
   };
 
   // Clip-stack texture (RGBA32F row buffer indexed by texelFetch)
@@ -869,6 +874,28 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform3f(this._progBlurLocs.grading,
       params.Grading.Brightness, params.Grading.Saturation, params.Grading.Contrast);
 
+    // Gradient-driven blur spectrum (overrides the linear feather). Pad the
+    // stop arrays to the fixed shader size; u_StopCount bounds the read.
+    const stops = params.Stops;
+    if (stops && stops.length >= 2) {
+      const n = Math.min(stops.length, 12);
+      const pos = new Float32Array(12);
+      const val = new Float32Array(12);
+      const ease = new Float32Array(12);
+      for (let i = 0; i < n; i++) {
+        pos[i] = stops[i].Position;
+        val[i] = stops[i].Value;
+        ease[i] = Math.max(0.001, stops[i].Easing);
+      }
+      gl.uniform1i(this._progBlurLocs.hasStops, 1);
+      gl.uniform1i(this._progBlurLocs.stopCount, n);
+      gl.uniform1fv(this._progBlurLocs.stopPos, pos);
+      gl.uniform1fv(this._progBlurLocs.stopVal, val);
+      gl.uniform1fv(this._progBlurLocs.stopEase, ease);
+    } else {
+      gl.uniform1i(this._progBlurLocs.hasStops, 0);
+    }
+
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(params.Scene));
     gl.activeTexture(gl.TEXTURE1);
@@ -1233,6 +1260,11 @@ export class WebGL2Renderer implements Renderer {
       grading: gl.getUniformLocation(p, 'u_Grading'),
       clipTex: gl.getUniformLocation(p, 'u_ClipTex'),
       clipMeta: gl.getUniformLocation(p, 'u_ClipMeta'),
+      hasStops: gl.getUniformLocation(p, 'u_HasStops'),
+      stopCount: gl.getUniformLocation(p, 'u_StopCount'),
+      stopPos: gl.getUniformLocation(p, 'u_StopPos'),
+      stopVal: gl.getUniformLocation(p, 'u_StopVal'),
+      stopEase: gl.getUniformLocation(p, 'u_StopEase'),
     };
   };
 }

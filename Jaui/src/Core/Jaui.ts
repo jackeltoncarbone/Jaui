@@ -1312,6 +1312,7 @@ export class Canvas implements DirtyTracker {
           Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
           Feather: feather,
           Easing: Math.max(0.001, node.RenderStyle.ProgressiveBlurEasing),
+          Stops: node.RenderStyle.ProgressiveBlurStops,
           Opacity: node.EffectiveOpacity,
           Background: node.RenderStyle.Background.Color,
           Grading: {
