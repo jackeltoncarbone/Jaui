@@ -202,6 +202,10 @@ export interface JivApplyOpts {
    *  are NOT exposed through this map, because their value is derived
    *  from pointer events the worker already owns. */
   States?: Record<string, boolean>;
+  /** Author style vars (`@Name`) applied to the Jiv — keys are var names, values are string/number/
+   *  boolean. Read by `Var` predicates (`@If (@Open) { … }`, `@If (@Mode == 'x') { … }`). Distinct from
+   *  States: these are author-driven conditional values, not interaction pseudo-states. */
+  Vars?: Record<string, string | number | boolean>;
   /** Class names this Jiv carries (parsed from `class="A B C"`). Worker
    *  registers it under each entry that's a group-hover trigger so the
    *  hover dispatcher can fan `_groupHover` out to peers. */

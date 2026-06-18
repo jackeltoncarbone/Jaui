@@ -31,6 +31,8 @@ export interface PredicateElement {
   readonly Parent: PredicateElement | null;
   readonly Classes: readonly string[];
   readonly States: ReadonlySet<string>;
+  /** Author-set runtime style vars (`@Name`), read by `Var` predicates. */
+  readonly Vars?: ReadonlyMap<string, string | number | boolean>;
 }
 
 /** Evaluation context: the element's live states + the current viewport
@@ -43,6 +45,8 @@ export interface PredicateContext {
   ViewportW: number;
   ViewportH: number;
   Element?: PredicateElement | null;
+  /** Author-set runtime style vars (`@Name`), read by `Var` predicates. */
+  Vars?: ReadonlyMap<string, string | number | boolean>;
 }
 
 /** Module-level current viewport (CSS px). The Canvas pushes this on resize
@@ -92,6 +96,16 @@ const _scopeMetric = (
 const _eval = (expr: PredicateExpr, ctx: PredicateContext): boolean => {
   switch (expr.Kind) {
     case 'State': return ctx.States.has(expr.Name);
+    case 'Var': {
+      const v = ctx.Vars?.get(expr.Name);
+      if (expr.Op === undefined) {
+        // Bare `@Name` — truthy: present and not a falsy value.
+        return v !== undefined && v !== false && v !== '' && v !== 0 && v !== 'false' && v !== '0';
+      }
+      // `@Name == value` / `!=` — compare as strings (vars ride the bridge as strings).
+      const eq = String(v ?? '') === String(expr.Value);
+      return expr.Op === '==' ? eq : !eq;
+    }
     case 'Compare': {
       const v = _scopeMetric(expr.Scope, expr.Metric, ctx);
       if (v === null) return false;

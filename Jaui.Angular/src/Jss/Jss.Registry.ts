@@ -245,6 +245,8 @@ const _anyPredicateReferences = (
 const _exprReferences = (expr: PredicateExpr, stateName: string): boolean => {
   switch (expr.Kind) {
     case 'State': return expr.Name === stateName;
+    // Author @vars are not interaction states — they never make a class a group-hover trigger.
+    case 'Var':      return false;
     // Size comparisons carry no state; an Ancestor predicate's optional State
     // is the *ancestor's* state, not this node's — neither participates in
     // self group-hover trigger detection.

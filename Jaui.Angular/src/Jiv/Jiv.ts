@@ -84,6 +84,10 @@ export class Jiv implements OnInit, OnDestroy {
    *  re-materialize on state change. Reserved pointer states (Hover/Active/Focus/GroupHover) are owned
    *  by the worker and must not be set here; `Disabled` has its own `[disabled]` input. */
   readonly states = input<Record<string, boolean> | undefined>(undefined);
+  /** Author style vars (`@Name`) pushed to the worker so JSS `@If (@Name) { … }` / `@If (@Name == 'x')`
+   *  predicates react — including layout (`Width`) overrides, which re-materialize on change. The
+   *  author-driven conditional channel (CSS-custom-property-like); distinct from interaction `[states]`. */
+  readonly vars = input<Record<string, string | number | boolean> | undefined>(undefined);
 
   // ── Semantic mirror inputs (SEO / accessibility projection) ──
   /** Explicit semantic role — overrides the JSS `Semantics:` declaration. */
@@ -355,6 +359,8 @@ export class Jiv implements OnInit, OnDestroy {
         ...customStates,
       };
     }
+    const customVars = this.vars();
+    if (customVars) opts.Vars = customVars;
     if (text !== undefined) opts.Text = text;
     return opts;
   }

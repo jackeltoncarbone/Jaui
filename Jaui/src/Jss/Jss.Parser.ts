@@ -73,6 +73,11 @@ export type SizeScope =
 
 export type PredicateExpr =
   | { Kind: 'State'; Name: string }
+  /** Runtime style var (`@Open`, `@Mode == 'NoSidePanel'`) — set by the author via the element's `[vars]`
+   *  input, read live by the evaluator. Bare `@Name` is truthy-tested; `@Name ==/!= value` compares. This
+   *  is the author-driven conditional (distinct from interaction States like Hover). The `@` prefix is
+   *  consistent with JSS vars elsewhere. */
+  | { Kind: 'Var'; Name: string; Op?: CompareOp; Value?: string | number }
   /** Size comparison vs a px threshold (number literal or `@Var` resolved at
    *  parse time). `Scope` absent ⇒ the viewport. */
   | { Kind: 'Compare'; Scope?: SizeScope; Metric: 'Width' | 'Height'; Op: CompareOp; Value: number }
@@ -1317,6 +1322,28 @@ const _parseAncestorTail = (
                : { Kind: 'Ancestor', Class: cls, Direct: direct };
 };
 
+/** Read the right-hand side of a `@Var == value` comparison: a quoted string, a number, or a bare
+ *  identifier (treated as a string). */
+const _readVarComparand = (s: _ScanState, className: string): string | number => {
+  _skipWs(s);
+  const c = s.src[s.pos];
+  if (c === '"' || c === "'") {
+    s.pos++;
+    const start = s.pos;
+    while (s.pos < s.src.length && s.src[s.pos] !== c) s.pos++;
+    if (s.src[s.pos] !== c) throw new Error(`[Jaui] "${className}" — unterminated string in @var comparison`);
+    const str = s.src.slice(start, s.pos);
+    s.pos++;
+    return str;
+  }
+  if (/[-0-9.]/.test(c ?? '')) {
+    const start = s.pos;
+    while (/[-0-9.]/.test(s.src[s.pos] ?? '')) s.pos++;
+    return Number(s.src.slice(start, s.pos));
+  }
+  return _readIdent(s);
+};
+
 const _parsePredAtom = (s: _ScanState, className: string, vars?: VarTable): PredicateExpr => {
   _skipWs(s);
   // Nested group — `(expr)` inside the outer predicate.
@@ -1331,8 +1358,24 @@ const _parsePredAtom = (s: _ScanState, className: string, vars?: VarTable): Pred
     s.pos++;
     return inner;
   }
+  // Runtime style var atom: `@Name`, `@Name == 'value'`, `@Name != 'value'`. (A compile-time `@Var`
+  // numeric constant only appears AFTER a comparison operator — `Width >= @TabletMin` — a different code
+  // path, so there's no ambiguity.)
+  if (s.src[s.pos] === '@') {
+    s.pos++;
+    const varName = _readIdent(s);
+    const save = s.pos;
+    _skipWs(s);
+    const op = _tryReadCompareOp(s);
+    if (op === '==' || op === '!=') {
+      const value = _readVarComparand(s, className);
+      return { Kind: 'Var', Name: varName, Op: op, Value: value };
+    }
+    s.pos = save;
+    return { Kind: 'Var', Name: varName };
+  }
   if (!/[A-Za-z_]/.test(s.src[s.pos] ?? '')) {
-    throw new Error(`[Jaui] "${className}:(...)" — expected a state, size comparison, or ancestor at position ${s.pos}, got "${s.src[s.pos] ?? 'EOF'}"`);
+    throw new Error(`[Jaui] "${className}:(...)" — expected a state, @var, size comparison, or ancestor at position ${s.pos}, got "${s.src[s.pos] ?? 'EOF'}"`);
   }
   const name = _readIdent(s);
 

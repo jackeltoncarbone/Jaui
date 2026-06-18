@@ -65,6 +65,10 @@ export class Jiv extends Element {
    *  predicates keep the zero-alloc fast path (a bare state Set). */
   private _hasScopedPredicates = false;
 
+  /** True when any predicate references an author `@Var`. Gates the full-context build in _predicateCtx
+   *  (Var predicates need the live var map, not just the state Set) and the re-materialize on SetVar. */
+  private _hasVarPredicates = false;
+
   /** Snapshots of the class-applied (pre-`@If`) Layout / ChildLayout. The
    *  worker captures these on apply (before any overlay); Recompute-
    *  ResponsiveLayout resets to them before overlaying matching predicate
@@ -79,6 +83,9 @@ export class Jiv extends Element {
    *  `SetState(name, on)` — Phase 2 framework hook for the Angular
    *  `[disabled]` input and any future state inputs. */
   private readonly _states: Set<string> = new Set();
+  /** Live author style vars (`@Name`), set via the Angular `[vars]` input → SetVar. Read by `Var`
+   *  predicates. Distinct from interaction states; supports string/number values for `@Name == 'x'`. */
+  private readonly _vars: Map<string, string | number | boolean> = new Map();
   /** Class names this Jiv carries, parsed from the `class="A B C"` attribute.
    *  Used by the canvas's group-state registry to fan `_groupHover` out to
    *  peers sharing a group-trigger class. */
@@ -319,18 +326,38 @@ export class Jiv extends Element {
     let hasText = false;
     let hasLayout = false;
     let hasScoped = false;
+    let hasVar = false;
     if (list) {
       for (const entry of list) {
         if (entry.TextStyle && Object.keys(entry.TextStyle).length > 0) hasText = true;
         if ((entry.Layout && Object.keys(entry.Layout).length > 0) ||
             (entry.ChildLayout && Object.keys(entry.ChildLayout).length > 0)) hasLayout = true;
         if (!hasScoped && _predicateNeedsElement(entry.Predicate)) hasScoped = true;
+        if (!hasVar && _predicateHasVar(entry.Predicate)) hasVar = true;
       }
     }
     this._hasTextPredicates = hasText;
     this._hasLayoutPredicates = hasLayout;
     this._hasScopedPredicates = hasScoped;
+    this._hasVarPredicates = hasVar;
   };
+
+  /** Set/clear an author style var (`@Name`). undefined/null clears it. Re-materializes layout (for
+   *  `@If (@Name) { Width … }`) via the same path as states; style/text predicates re-evaluate live. */
+  SetVar = (name: string, value: string | number | boolean | undefined | null): void => {
+    const cur = this._vars.get(name);
+    if (value === undefined || value === null) {
+      if (!this._vars.has(name)) return;
+      this._vars.delete(name);
+    } else {
+      if (cur === value) return;
+      this._vars.set(name, value);
+    }
+    this._onStateChange();
+  };
+
+  /** Live var map (read-only view) — exposed for the predicate-element adapter. */
+  get VarMap(): ReadonlyMap<string, string | number | boolean> { return this._vars; }
 
   /** Live state set (read-only view) — exposed for the predicate-element
    *  adapter so ancestor-state queries (`Ancestor(X):Hover`) can read it. */
@@ -341,9 +368,12 @@ export class Jiv extends Element {
    *  Scoped path: a full context carrying the live viewport + an element
    *  adapter so Self/Parent/Ancestor size + ancestor-context resolve. */
   private _predicateCtx = (): PredicateContext | ReadonlySet<string> => {
-    if (!this._hasScopedPredicates) return this._states;
+    // Fast path (bare state Set) only when neither scoped sizes nor author @vars are referenced — both
+    // need the full context (the element adapter / the live var map).
+    if (!this._hasScopedPredicates && !this._hasVarPredicates) return this._states;
     return {
       States: this._states,
+      Vars: this._vars,
       ViewportW: PredicateViewportWidth(),
       ViewportH: PredicateViewportHeight(),
       Element: _wrapPredicateElement(this),
@@ -453,12 +483,29 @@ const _EMPTY_STATES: ReadonlySet<string> = new Set();
 const _predicateNeedsElement = (expr: PredicateExpr): boolean => {
   switch (expr.Kind) {
     case 'State':    return false;
+    case 'Var':      return false;
     case 'Compare':  return expr.Scope !== undefined;
     case 'Ancestor': return true;
     case 'Not':      return _predicateNeedsElement(expr.Expr);
     case 'And':
     case 'Or': {
       for (const e of expr.Exprs) if (_predicateNeedsElement(e)) return true;
+      return false;
+    }
+  }
+};
+
+/** True when a predicate tree references an author `@Var` — gates the var-map context + SetVar re-eval. */
+const _predicateHasVar = (expr: PredicateExpr): boolean => {
+  switch (expr.Kind) {
+    case 'Var':      return true;
+    case 'State':    return false;
+    case 'Compare':  return false;
+    case 'Ancestor': return false;
+    case 'Not':      return _predicateHasVar(expr.Expr);
+    case 'And':
+    case 'Or': {
+      for (const e of expr.Exprs) if (_predicateHasVar(e)) return true;
       return false;
     }
   }
@@ -476,5 +523,6 @@ const _wrapPredicateElement = (el: Element | null): PredicateElement | null => {
     get Parent() { return _wrapPredicateElement(el.Parent); },
     Classes: (el as { Classes?: readonly string[] }).Classes ?? [],
     States: (el as { StateSet?: ReadonlySet<string> }).StateSet ?? _EMPTY_STATES,
+    Vars: (el as { VarMap?: ReadonlyMap<string, string | number | boolean> }).VarMap,
   };
 };

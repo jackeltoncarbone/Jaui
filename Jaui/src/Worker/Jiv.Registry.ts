@@ -456,6 +456,9 @@ export class JivRegistry {
         }
       }
     }
+    if (opts.Vars !== undefined) {
+      for (const name of Object.keys(opts.Vars)) core.SetVar(name, opts.Vars[name]);
+    }
   };
 
   private _wireHitHandlers = (id: number, core: JivCore): void => {
