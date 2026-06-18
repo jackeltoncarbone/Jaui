@@ -89,7 +89,7 @@ export class Jiv extends Element {
     if (this._hover === v) return;
     this._hover = v;
     this._syncState('Hover', v);
-    if (this._hasTextPredicates) this._invalidateText();
+    this._onStateChange();
   }
   get Active(): boolean { return this._active; }
   set Active(v: boolean) {
@@ -101,14 +101,14 @@ export class Jiv extends Element {
     // `:Active` or `:(Pressed && !Disabled)` and get the same pointer-
     // driven trigger without confusion.
     this._syncState('Pressed', v);
-    if (this._hasTextPredicates) this._invalidateText();
+    this._onStateChange();
   }
   get Focus(): boolean { return this._focus; }
   set Focus(v: boolean) {
     if (this._focus === v) return;
     this._focus = v;
     this._syncState('Focus', v);
-    if (this._hasTextPredicates) this._invalidateText();
+    this._onStateChange();
   }
   get Disabled(): boolean { return this._disabled; }
   set Disabled(v: boolean) {
@@ -138,14 +138,14 @@ export class Jiv extends Element {
         this._preDisabledCursor = null;
       }
     }
-    if (this._hasTextPredicates) this._invalidateText();
+    this._onStateChange();
   }
   get GroupHover(): boolean { return this._groupHover; }
   set GroupHover(v: boolean) {
     if (this._groupHover === v) return;
     this._groupHover = v;
     this._syncState('GroupHover', v);
-    if (this._hasTextPredicates) this._invalidateText();
+    this._onStateChange();
   }
 
   /** Imperative state setter for predicates beyond the five pointer-driven
@@ -164,7 +164,7 @@ export class Jiv extends Element {
     const has = this._states.has(name);
     if (has === on) return;
     if (on) this._states.add(name); else this._states.delete(name);
-    if (this._hasTextPredicates) this._invalidateText();
+    this._onStateChange();
   };
 
   /** Cached check — does any PredicateStyle entry write into TextStyle?
@@ -192,6 +192,15 @@ export class Jiv extends Element {
   private _invalidateText = (): void => {
     this.Dirty |= DirtyFlag.Text;
     this.MarkLayoutDirty();
+  };
+
+  /** A live state changed (pointer-driven Hover/Active/Focus/Disabled/GroupHover, or a custom state set
+   *  via SetState / the `[states]` input). Re-invalidate text AND re-materialize layout when predicates
+   *  depend on state, so `@If (SomeState) { Width: … }` re-applies reactively — not just style/text.
+   *  Both checks are gated by the cheap `_has*Predicates` flags, so state-only elements pay nothing. */
+  private _onStateChange = (): void => {
+    if (this._hasTextPredicates) this._invalidateText();
+    if (this._hasLayoutPredicates) this.RecomputeResponsiveLayout();
   };
 
   /** Optional style override for text selection highlights. */

@@ -79,6 +79,11 @@ export class Jiv implements OnInit, OnDestroy {
    *  Pointer-driven states (Hover/Active/Focus/GroupHover) come from
    *  pointer events on the worker and don't need an input. */
   readonly disabled = input<boolean | undefined>(undefined);
+  /** Arbitrary custom states pushed to the worker's state set, so JSS `@If (Name) { … }` /
+   *  `:(Name) { … }` predicates react to them — including layout (`Width`) overrides, which now
+   *  re-materialize on state change. Reserved pointer states (Hover/Active/Focus/GroupHover) are owned
+   *  by the worker and must not be set here; `Disabled` has its own `[disabled]` input. */
+  readonly states = input<Record<string, boolean> | undefined>(undefined);
 
   // ── Semantic mirror inputs (SEO / accessibility projection) ──
   /** Explicit semantic role — overrides the JSS `Semantics:` declaration. */
@@ -343,7 +348,13 @@ export class Jiv implements OnInit, OnDestroy {
     // Disabled is plumbed today; future state inputs (Loading, Recording,
     // etc.) follow the same pattern.
     const disabled = this.disabled();
-    if (disabled !== undefined) opts.States = { Disabled: !!disabled };
+    const customStates = this.states();
+    if (disabled !== undefined || customStates) {
+      opts.States = {
+        ...(disabled !== undefined ? { Disabled: !!disabled } : {}),
+        ...customStates,
+      };
+    }
     if (text !== undefined) opts.Text = text;
     return opts;
   }
