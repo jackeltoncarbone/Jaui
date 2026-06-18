@@ -453,62 +453,83 @@ int ShapeMode(vec2 halfSize, vec4 radii) {
     return 0;
 }
 
-float ShapeSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
-    if (mode == 1) {
-        // Pill — pixel-accurate Show Studio Bezier via polyline-SDF
-        return SS_PillSDF(p, halfSize);
-    }
+// ─── Continuous corner field ───
+// The three regimes (Rect / Circle / Pill) used to be a hard 3-way branch, so a
+// corner SNAPPED between them at the classification thresholds. This blends them
+// over bands instead:
+//   • Rect↔Circle is a pure parameter ease — both are the superellipse, so the
+//     exponent slides from the Apple squircle (n≈4.8) toward a true circle (n=2)
+//     as a square-ish corner's radius fills the short axis.
+//   • Rect/Circle↔Pill mixes the superellipse SDF with the fitted Bezier endcap
+//     (SS_Pill*) over the band, since the pill is a different evaluation path.
+// Endpoints are identical to the old discrete modes (sat∈{0,1}, elong∈{0,1});
+// only corners inside a transition band — the ones that used to pop — change.
+const float CORNER_RADIUS_BAND = 10.0;  // px of radius before short-axis fill that the morph spans
+const float CORNER_ASPECT_LO   = 1.30;  // aspect ≤ LO → circle leg
+const float CORNER_ASPECT_HI   = 1.56;  // aspect ≥ HI → pill leg
 
-    vec2 rAxis;
-    float n;
-    if (mode == 2) {
-        // Circle — pure ellipse / circle
-        float r = min(halfSize.x, halfSize.y);
-        rAxis = vec2(r);
-        n = 2.0;
-    } else {
-        // Rect — pick per-corner radius based on which quadrant we're in
-        float r = PickRectRadius(p, radii);
-        r = min(r, min(halfSize.x, halfSize.y));
-        rAxis = vec2(r);
-        n = SmoothnessToExponent(smoothness);
+void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
+                out float distOut, out vec2 gradOut) {
+    float minHalf = min(halfSize.x, halfSize.y);
+    float maxHalf = max(halfSize.x, halfSize.y);
+    float aspect  = maxHalf / max(minHalf, 0.0001);
+    float minR    = min(min(radii.x, radii.y), min(radii.z, radii.w));
+
+    // Saturation of the (smallest) corner radius against the short axis:
+    // 0 → small radius (rect), 1 → radius fills the short axis (circle/pill).
+    float sat   = smoothstep(minHalf - CORNER_RADIUS_BAND, minHalf - 1.0, minR);
+    // Which saturated regime the corner eases toward: 0 = circle, 1 = pill.
+    float elong = smoothstep(CORNER_ASPECT_LO, CORNER_ASPECT_HI, aspect);
+
+    // Superellipse anchor (Rect↔Circle, continuous). Per-corner radius is
+    // preserved via PickRectRadius; the exponent eases to 2 (circle) only for
+    // square-ish saturated corners (circleness), never for the pill leg.
+    float rCorner    = min(PickRectRadius(p, radii), minHalf);
+    float circleness = sat * (1.0 - elong);
+    float n          = mix(SmoothnessToExponent(smoothness), 2.0, circleness);
+    float dSuper     = ShapeSDF_inner(p, halfSize, vec2(rCorner), n);
+
+    // Pill leg: only elongated saturated corners pull toward the Bezier endcap.
+    // Outside the band (pillW 0 or 1) exactly one path runs; only the band pays
+    // for both the superellipse and the polyline pill, then mixes them.
+    float pillW = sat * elong;
+    if (pillW <= 0.0) {
+        distOut = dSuper;
+        gradOut = ShapeGrad_inner(p, halfSize, vec2(rCorner), n);
+        return;
     }
-    return ShapeSDF_inner(p, halfSize, rAxis, n);
+    float dPill; vec2 gPill;
+    SS_PillEval(p, halfSize, dPill, gPill);
+    if (pillW >= 1.0) {
+        distOut = dPill;
+        gradOut = gPill;
+        return;
+    }
+    vec2 gSuper = ShapeGrad_inner(p, halfSize, vec2(rCorner), n);
+    distOut = mix(dSuper, dPill, pillW);
+    gradOut = normalize(mix(gSuper, gPill, pillW));
+}
+
+// Thin wrappers — the discrete `mode` arg is retained for call-site
+// compatibility but is no longer used; CornerEval derives the blend from
+// geometry so Rect / Circle / Pill morph continuously instead of switching.
+float ShapeSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
+    float d; vec2 g;
+    CornerEval(p, halfSize, radii, smoothness, d, g);
+    return d;
 }
 
 vec2 ShapeGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
-    if (mode == 1) {
-        return SS_PillGrad(p, halfSize);
-    }
-
-    vec2 rAxis;
-    float n;
-    if (mode == 2) {
-        float r = min(halfSize.x, halfSize.y);
-        rAxis = vec2(r);
-        n = 2.0;
-    } else {
-        float r = PickRectRadius(p, radii);
-        r = min(r, min(halfSize.x, halfSize.y));
-        rAxis = vec2(r);
-        n = SmoothnessToExponent(smoothness);
-    }
-
-    return ShapeGrad_inner(p, halfSize, rAxis, n);
+    float d; vec2 g;
+    CornerEval(p, halfSize, radii, smoothness, d, g);
+    return g;
 }
 
-// Combined dist + gradient evaluation. Main shape fragments need both — this
-// dispatches to the single-pass pill eval (~4× cheaper than separate SDF+Grad
-// calls on the polyline), or to the rect/circle path (one SDF + one Grad call;
-// rect/circle pows are cheap enough that a merged inner function is overkill).
+// Combined dist + gradient evaluation. Main shape fragments need both; CornerEval
+// returns them in one pass (and only double-evaluates inside the pill blend band).
 void ShapeEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode,
                out float distOut, out vec2 gradOut) {
-    if (mode == 1) {
-        SS_PillEval(p, halfSize, distOut, gradOut);
-        return;
-    }
-    distOut = ShapeSDF(p, halfSize, radii, smoothness, mode);
-    gradOut = ShapeGrad(p, halfSize, radii, smoothness, mode);
+    CornerEval(p, halfSize, radii, smoothness, distOut, gradOut);
 }
 
 // Rec. 709 luma

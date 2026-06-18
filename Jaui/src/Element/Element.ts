@@ -11,7 +11,7 @@
  * without carrying glass/material baggage.
  */
 
-import type { LayoutConfig, ChildLayout, Overflow } from '../Layout/Layout.Types';
+import type { LayoutConfig, ChildLayout, Overflow, Clip } from '../Layout/Layout.Types';
 import { DefaultLayoutConfig, DefaultChildLayout } from '../Layout/Layout.Types';
 import type { TextStyle, TextMeasurement } from '../Text/Text.Types';
 import { DefaultTextStyle } from '../Text/Text.Types';
@@ -48,6 +48,7 @@ export interface ElementOptions {
   PointScale?: string;
   Visible?: boolean;
   Overflow?: Overflow;
+  Clip?: Clip;
   Interactive?: boolean;
   PointerEvents?: 'Auto' | 'None';
   Cursor?: CursorStyle;
@@ -152,6 +153,19 @@ export class Element {
    *  and hit testing but still participate in layout. */
   Visible: boolean = true;
   Overflow: Overflow = 'Visible';
+  /** Clip override; `Auto` derives from Overflow. See `ClipsChildren`. */
+  Clip: Clip = 'Auto';
+
+  /** Single source of truth for "does this node clip its descendants" — every
+   *  clip site (render clip-stack cascade, viewport cull, hit-test) reads this
+   *  so clipping and scrolling stay decoupled. `Clip` overrides; `Auto` falls
+   *  back to the Overflow-derived behavior. */
+  get ClipsChildren(): boolean {
+    return this.Clip === 'Hidden'  ? true
+         : this.Clip === 'Visible' ? false
+         : (this.Overflow === 'Hidden' || this.Overflow === 'Scroll');
+  }
+
   Interactive: boolean = false;
 
   /** Render-time cascaded opacity: ancestors' product × own RenderStyle.Opacity.
@@ -259,6 +273,7 @@ export class Element {
 
     this.Visible = options?.Visible ?? true;
     this.Overflow = options?.Overflow ?? 'Visible';
+    this.Clip = options?.Clip ?? 'Auto';
     this.Interactive = options?.Interactive ?? false;
     this.PointerEvents = options?.PointerEvents ?? 'Auto';
     this.Cursor = options?.Cursor ?? 'Default';

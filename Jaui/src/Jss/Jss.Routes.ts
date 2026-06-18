@@ -36,6 +36,9 @@ const CHILD_LAYOUT_PROPS = new Set([
   'AttachTo', 'AttachMode',
   'AttachTargetAnchor', 'AttachSelfAnchor',
   'AttachOffsetX', 'AttachOffsetY', 'AttachInset',
+  // Per-child clip-escape override. Without this it fell through to Style and
+  // was silently dropped — so `ParentOverflow: Visible` in JSS did nothing.
+  'ParentOverflow',
 ]);
 
 const TEXT_STYLE_PROPS = new Set([

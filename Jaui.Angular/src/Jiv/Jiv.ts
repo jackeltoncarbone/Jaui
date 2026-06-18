@@ -291,7 +291,7 @@ export class Jiv implements OnInit, OnDestroy {
     this._backgroundUrl = ExtractBackgroundUrl(styleBag['Background']);
     const elementProps: JivApplyOpts['ElementProps'] = {};
     for (const key of [
-      'Overflow', 'Visible', 'Interactive', 'PointerEvents',
+      'Overflow', 'Clip', 'Visible', 'Interactive', 'PointerEvents',
       'Cursor', 'UserSelect', 'PointScale',
     ]) {
       if (key in styleBag) {

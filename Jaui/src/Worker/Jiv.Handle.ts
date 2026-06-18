@@ -69,6 +69,7 @@ export class JivHandle {
   private _cursor: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None' = 'Default';
   private _userSelect: 'Auto' | 'None' = 'Auto';
   private _overflow: 'Visible' | 'Hidden' | 'Scroll' = 'Visible';
+  private _clip: 'Auto' | 'Hidden' | 'Visible' = 'Auto';
   private _pointScale = '';
   private _snapLayout = false;
 
@@ -153,6 +154,7 @@ export class JivHandle {
   set UserSelect(v: 'Auto' | 'None') { if (this._userSelect !== v) { this._userSelect = v; this._markDirty(); } }
 
   get Overflow(): 'Visible' | 'Hidden' | 'Scroll' { return this._overflow; }
+  get Clip(): 'Auto' | 'Hidden' | 'Visible' { return this._clip; }
   set Overflow(v: 'Visible' | 'Hidden' | 'Scroll') { if (this._overflow !== v) { this._overflow = v; this._markDirty(); } }
 
   get PointScale(): string { return this._pointScale; }
@@ -368,6 +370,7 @@ export class JivHandle {
       if (ep.Cursor !== undefined) this._cursor = ep.Cursor;
       if (ep.UserSelect !== undefined) this._userSelect = ep.UserSelect;
       if (ep.Overflow !== undefined) this._overflow = ep.Overflow;
+      if (ep.Clip !== undefined) this._clip = ep.Clip;
       if (ep.PointScale !== undefined) this._pointScale = ep.PointScale;
     }
     this._bridge.Enqueue({ K: 'apply', Id: this.Id, Opts: opts });
@@ -412,6 +415,7 @@ export class JivHandle {
       Cursor: this._cursor,
       UserSelect: this._userSelect,
       Overflow: this._overflow,
+      Clip: this._clip,
       SnapLayout: this._snapLayout,
     };
     if (this._pointScale) ep.PointScale = this._pointScale;

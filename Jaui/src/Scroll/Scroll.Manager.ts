@@ -381,11 +381,12 @@ export class ScrollManager implements Animatable {
       ? true
       : lx >= node.X && lx < node.X + node.Width && ly >= node.Y && ly < node.Y + node.Height;
 
-    // Overflow: Visible lets children extend past our rect (Placed/Fixed
-    // or plain flow overflow). Only Hidden/Scroll clip children to us, so
-    // we short-circuit the walk only when the pointer is outside a
-    // clipping node. Otherwise descend and let a child pick the hit.
-    if (!inside && node.Overflow !== 'Visible') return null;
+    // A non-clipping node lets children extend past our rect (Placed/Fixed,
+    // plain flow overflow, or a Scroll box with Clip:Visible). Only a node
+    // that actually clips short-circuits the walk when the pointer is outside
+    // it; otherwise descend and let a child (e.g. a flown-out card) pick the
+    // hit. Reads ClipsChildren so clip stays decoupled from scroll.
+    if (!inside && node.ClipsChildren) return null;
 
     // Scroll = local translate composed into the child matrix (mirrors render's
     // _descendOffset), so children are hit in the scrolled (and rotated) frame.

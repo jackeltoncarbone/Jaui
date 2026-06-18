@@ -1,7 +1,7 @@
 import type { JivStyle, JivRenderStyle } from './Jiv.Types';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { DefaultJivStyle } from './Jiv.Defaults';
-import type { LayoutConfig, ChildLayout, Overflow } from '../Layout/Layout.Types';
+import type { LayoutConfig, ChildLayout, Overflow, Clip } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
 import type { SpringConfig, AnimationApplication, AnimationDefinition } from '../Animation/Animation.Types';
 import { Element, type CursorStyle } from '../Element/Element';
@@ -258,6 +258,7 @@ export class Jiv extends Element {
     TextStyle?: Partial<TextStyle>;
     Visible?: boolean;
     Overflow?: Overflow;
+    Clip?: Clip;
     Interactive?: boolean;
     PointerEvents?: 'Auto' | 'None';
     Cursor?: CursorStyle;
@@ -278,6 +279,7 @@ export class Jiv extends Element {
       PointScale: mergedStyle.PointScale,
       Visible: options?.Visible,
       Overflow: options?.Overflow,
+      Clip: options?.Clip,
       Interactive: options?.Interactive,
       PointerEvents: options?.PointerEvents,
       Cursor: options?.Cursor,

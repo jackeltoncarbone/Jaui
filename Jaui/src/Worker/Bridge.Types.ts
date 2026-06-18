@@ -222,6 +222,7 @@ export interface JivApplyOpts {
   Text?: string | null;
   ElementProps?: {
     Overflow?: 'Visible' | 'Hidden' | 'Scroll';
+    Clip?: 'Auto' | 'Hidden' | 'Visible';
     Visible?: boolean;
     Interactive?: boolean;
     PointerEvents?: 'Auto' | 'None';

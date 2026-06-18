@@ -1145,7 +1145,10 @@ export class Canvas implements DirtyTracker {
         // overflowing rows vanish the instant the (one-row) box passed the
         // viewport edge. So recurse — each child self-culls by its OWN AABB —
         // and just skip drawing this node's own panel/text (it's off-screen).
-        if (node.Overflow === 'Hidden' || node.Overflow === 'Scroll') return;
+        // A clipping box that's off-screen clips its children too → skip the
+        // subtree. A non-clipping box (e.g. Scroll with Clip:Visible) can have
+        // children that overflow its box and remain on-screen, so recurse.
+        if (node.ClipsChildren) return;
         descendChildren(node, eff, stack, scope, effH, childPersp);
         return;
       }
@@ -1817,9 +1820,9 @@ export class Canvas implements DirtyTracker {
     const po = child.ChildLayout.ParentOverflow;
     if (po === 'Visible') return parentIncomingStack;
     if (po === 'Hidden') return [...parentIncomingStack, parentBoxClip];
-    return parent.Overflow === 'Visible'
-      ? parentIncomingStack
-      : [...parentIncomingStack, parentBoxClip];
+    return parent.ClipsChildren
+      ? [...parentIncomingStack, parentBoxClip]
+      : parentIncomingStack;
   };
 
   /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px).
@@ -3215,8 +3218,7 @@ export class Canvas implements DirtyTracker {
     // Update active clip for descendants if this node is a clipping container.
     let childClip = clip;
     if (node instanceof Jiv) {
-      const overflow = node.Overflow;
-      if ((overflow === 'Hidden' || overflow === 'Scroll') && node.Width > 0 && node.Height > 0) {
+      if (node.ClipsChildren && node.Width > 0 && node.Height > 0) {
         const d = this._dpr;
         const px = Math.round((node.X + offsetX) * d);
         const py = Math.round((node.Y + offsetY) * d);

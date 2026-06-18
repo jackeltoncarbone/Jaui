@@ -406,6 +406,7 @@ export class JivRegistry {
     const ep = opts.ElementProps;
     if (!ep) return;
     if (ep.Overflow !== undefined) core.Overflow = ep.Overflow;
+    if (ep.Clip !== undefined) core.Clip = ep.Clip;
     if (ep.Visible !== undefined) core.Visible = ep.Visible;
     if (ep.Interactive !== undefined) core.Interactive = ep.Interactive;
     if (ep.PointerEvents !== undefined) core.PointerEvents = ep.PointerEvents;

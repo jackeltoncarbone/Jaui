@@ -15,6 +15,15 @@ export interface AnchorPoint {
 
 export type Overflow = 'Visible' | 'Hidden' | 'Scroll';
 
+/** Whether a node clips its descendants to its box — decoupled from `Overflow`
+ *  (which owns scroll + layout). Lets a node scroll WITHOUT clipping, or clip
+ *  WITHOUT scrolling.
+ *  - `Auto` (default): clip iff `Overflow` is Hidden/Scroll (back-compat).
+ *  - `Hidden`: always clip, even when `Overflow` is Visible.
+ *  - `Visible`: never clip, even when `Overflow` is Scroll — e.g. a scroll rail
+ *    that must let a teleporting card fly in over its edge un-sheared. */
+export type Clip = 'Auto' | 'Hidden' | 'Visible';
+
 /** Per-child override of the parent's clipping behavior.
  *  - `Inherit` (default): child is clipped iff parent's `Overflow` is Hidden/Scroll.
  *  - `Visible`: child escapes the parent's clip (back to grandparent's clip),
