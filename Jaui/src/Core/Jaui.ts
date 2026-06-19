@@ -1143,11 +1143,16 @@ export class Canvas implements DirtyTracker {
           childPersp = { D: pv, Ox: matApplyX(eff, pgx, pgy), Oy: matApplyY(eff, pgx, pgy) };
         }
       }
-      // Teleported descendants deferred into this layered node's scope should be
-      // clipped by this node's own rounded box when it clips its children (a glass
-      // panel a card flies home into) — append it once, before any descend. Only the
-      // scope-owning layered node passes appendBoxToScope; its descendants don't.
-      if (appendBoxToScope && node.ClipsChildren && node.Width > 0 && node.Height > 0) {
+      // Teleported descendants deferred into this layered node's scope are clipped to
+      // this node's own rounded box when it is an EXPLICIT clip — a deliberate glass
+      // panel (Clip: Hidden) a card flies home into — so the in-flight card traces the
+      // panel edge instead of escaping it and snapping square on settle. Gate on the
+      // authored Clip, NOT ClipsChildren: an Overflow: Hidden/Scroll content surface
+      // (a cue card, a morph host, a scroll container) derives Clip: Auto, and the
+      // teleport-elevation exemption EXISTS precisely so a card flying home over/through
+      // those isn't sheared — appending their box here is the very shear it avoids.
+      // Only the scope-owning layered node passes appendBoxToScope; its descendants don't.
+      if (appendBoxToScope && node.Clip === 'Hidden' && node.Width > 0 && node.Height > 0) {
         scope.Stack = [...scope.Stack, this._boxClip(node, eff)];
       }
       if (!this._isInsideClipStack(node, eff, stack, effH)) {
