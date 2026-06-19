@@ -61,8 +61,35 @@ const LOGO_SVG = `<svg version="1.1" viewBox="150 480 900 350" xmlns="http://www
     <jyle [source]="JssSource" />
 
     <jiv class="Screen">
-      <jiv class="TopBlur" />
+      <!-- Two foreground Filter shapes, visibly distinct:
+           • FilterLinearDemo  — LinearProgressiveBlur(Top, …): DIRECTIONAL
+             one-axis top-edge fade (sharp at bottom, blurred at top).
+           • FilterVignetteDemo — EdgeProgressiveBlur(…): ALL-AROUND symmetric
+             vignette (every edge fades inward, center stays sharp). -->
+      <jiv class="FilterLinearDemo" />
+      <jiv class="FilterVignetteDemo" />
       <jiv class="ContentBlur" />
+
+      <!-- BorderLayer demo — two boxes, identical thick border + a big
+           content tile that overlaps the border ring. LEFT uses
+           BorderLayer:-1 (border BEHIND the content tile); RIGHT uses
+           BorderLayer:1 (border PAINTS OVER the content tile). The content
+           tile is oversized so it spills onto the border ring, making the
+           ordering obvious. -->
+      <jiv class="BorderLayerDemo">
+        <jiv class="BorderLayerBox BorderLayerBehind">
+          <jiv class="BorderLayerFill" />
+          <jext class="BorderLayerTag" text="BorderLayer: -1 (behind)" />
+        </jiv>
+        <jiv class="BorderLayerBox BorderLayerFront">
+          <jiv class="BorderLayerFill" />
+          <jext class="BorderLayerTag" text="BorderLayer: 1 (front)" />
+        </jiv>
+        <jiv class="BorderLayerBox BorderLayerGlass">
+          <jiv class="BorderLayerFill" />
+          <jext class="BorderLayerTag" text="BorderLayer: 10 (glass rim)" />
+        </jiv>
+      </jiv>
 
       <jiv class="ChromeFrame">
         <jiv class="ToolbarRow">

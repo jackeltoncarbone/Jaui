@@ -177,6 +177,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.InnerShadow = target.InnerShadow;
   render.Isolate = target.Isolate;
   render.Layer = target.Layer;
+  render.BorderLayer = target.BorderLayer;
   render.Background = target.Background;
 };
 

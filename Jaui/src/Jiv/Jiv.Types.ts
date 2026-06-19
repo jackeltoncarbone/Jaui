@@ -143,7 +143,19 @@ export interface JivStyle {
   /** Foreground filter — grades the element's composited pixels (fill +
    *  image + text + border) AND cascades to descendants as a group (CSS
    *  `filter`). Stop the cascade into a subtree with `Isolate: true`.
-   *  Animate the whole filter via `@Transition Filter`. */
+   *  Animate the whole filter via `@Transition Filter`.
+   *
+   *  Also accepts foreground BLUR functions — the foreground analog of the
+   *  backdrop progressive blur, composable with the grade functions:
+   *    Blur(<radius>)
+   *      — uniform foreground blur of this element's content.
+   *    LinearProgressiveBlur(<edge|angle>, <radius> [, <feather>] [, <easing>])
+   *    EdgeProgressiveBlur(<edge>,         <radius> [, <feather>] [, <easing>])
+   *      — blur that ramps to <radius> toward <edge> (Top/Bottom/Left/Right)
+   *        over <feather>, clear at the opposite edge. Drives the same
+   *        ProgressiveBlur material/shader as the standalone ProgressiveBlur*
+   *        props (which still win if both are set). See
+   *        ProgressiveBlur/ForegroundFilter.Design.md. */
   Filter: string;
   /** Backdrop filter — frost + grade on the glass/backdrop behind this box
    *  (CSS `backdrop-filter`). Per-box; never inherited. `Blur(len)` is the
@@ -231,6 +243,13 @@ export interface JivStyle {
   BorderBlur: string;
   BorderOffset: string;
   ContainBorder: boolean;
+  /** Where the border stroke paints in this Jiv's own paint stack, RELATIVE
+   *  to its children's `Layer` space. A NUMBER in the same units children
+   *  sort by: negative paints the border BEHIND content/children, positive
+   *  IN FRONT — the border interleaves as if it were a child at this layer.
+   *  Default `'0'`: the border sits with the panel itself, below all
+   *  zero-Layer children — today's behavior. */
+  BorderLayer: string;
 
   // Shadow
   ShadowColor: string;
@@ -324,6 +343,11 @@ export interface JivRenderStyle {
   BorderBackdropBlur: number;
   BorderOffset: number;
   ContainBorder: boolean;
+  /** Resolved border paint position in the child-`Layer` space. Default 0:
+   *  border draws with the panel, below all zero-Layer children. A value
+   *  greater than a child's Layer paints the border in front of that child;
+   *  lower paints it behind. See JivStyle.BorderLayer. */
+  BorderLayer: number;
 
   BorderBrightness: number;
   BorderSaturation: number;

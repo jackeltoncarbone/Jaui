@@ -1,4 +1,4 @@
-import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
+import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop } from '../Jiv/Jiv.Types';
 import { ParseProgressiveBlur } from '../ProgressiveBlur/ProgressiveBlur.Stops';
 import type { ResolveContext } from './Length';
 import { Resolve, ResolveTernary } from './Length';
@@ -81,6 +81,30 @@ export { _resolveBound as ResolveBound };
  *  values. ProgressiveBlurDirection wins (it's unique to the feather); a
  *  positive Thickness routes the Jiv through the glass pipeline; everything
  *  else is a plain panel. */
+/** Build the SYMMETRIC stops profile for `EdgeProgressiveBlur`: fully blurred
+ *  at both ends of the axis (every selected edge), clear across the central
+ *  band, with a smooth ramp of depth `band` (a fraction 0..0.5 of the axis) at
+ *  each end. `featherRaw` is read as a FRACTION (`0.2` or `20%`) — stop
+ *  positions are normalized, so Edge's band is fraction-based (distinct from
+ *  Linear's px feather). Omitted/invalid → 0.5 (ramps meet in the center).
+ *  `easing` carries through as the per-segment exponent into the blur. */
+const _edgeStops = (featherRaw: string | null, easing: number): BlurStop[] => {
+  let band = 0.5;
+  if (featherRaw !== null) {
+    const t = featherRaw.trim();
+    const v = t.endsWith('%') ? parseFloat(t.slice(0, -1)) / 100 : parseFloat(t);
+    if (!Number.isNaN(v) && v > 0) band = Math.min(Math.max(v, 0.001), 0.5);
+  }
+  const e = Math.max(easing, 0.001);
+  // 1 at each edge → 0 at the inner band boundary → 0 across center → mirror.
+  return [
+    { Position: 0,        Value: 1, Easing: e },
+    { Position: band,     Value: 0, Easing: 1 },
+    { Position: 1 - band, Value: 0, Easing: e },
+    { Position: 1,        Value: 1, Easing: 1 },
+  ];
+};
+
 const _inferMaterial = (thickness: number, direction: ProgressiveBlurDirection | null): MaterialType => {
   if (direction !== null) return 'ProgressiveBlur';
   if (thickness > 0) return 'LiquidGlass';
@@ -96,7 +120,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // the per-zone scalar render fields the shader already consumes. Blur()'s
   // arg stays a Length and resolves under ctx (frost px for BackdropFilter,
   // LOD octave offset for BorderFilter); a missing Blur() = 0.
-  const fg = ParseFilter(ResolveTernary(s.Filter, ctx));
+  const fg = ParseFilter(ResolveTernary(s.Filter, ctx), 'foreground');
   const backdrop = ParseFilter(ResolveTernary(s.BackdropFilter, ctx));
   const border = ParseFilter(ResolveTernary(s.BorderFilter, ctx));
   const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
@@ -104,12 +128,42 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // ramp axis on its own, so the author doesn't also need ProgressiveBlurDirection.
   const blurSpec = s.ProgressiveBlur ? ParseProgressiveBlur(s.ProgressiveBlur) : null;
 
+  // Foreground `Filter: Blur()/LinearProgressiveBlur()/EdgeProgressiveBlur()` —
+  // the foreground analog of the backdrop pblur. It drives the SAME resolved
+  // ProgressiveBlur* render fields (and forces the ProgressiveBlur material), so
+  // the entire pblur shader + orchestration is reused. A uniform `Blur()` becomes
+  // a flat 2-stop ramp (full blur everywhere); the progressive variants ramp
+  // toward their edge over the feather. Explicit ProgressiveBlur* props still win.
+  const fgBlur = fg.ForegroundBlur;
+  // Edge mode is the all-around generalization: a SYMMETRIC stops profile
+  // (blurred at both ends of the axis, clear in the middle band) realized over
+  // the existing pblur Stops machinery. `Edges` selects the axis: Vertical →
+  // ToBottom (y), Horizontal → ToRight (x), All → vertical (one axis per node;
+  // both-axis vignette = nest a Vertical veil inside a Horizontal one).
+  const fgDir: ProgressiveBlurDirection | null =
+    fgBlur === null ? null
+      : fgBlur.Mode === 'edge' ? (fgBlur.Edges === 'Horizontal' ? 'ToRight' : 'ToBottom')
+        : fgBlur.Direction;
+  const fgFeather = fgBlur && fgBlur.Mode !== 'edge' && fgBlur.FeatherRaw !== null
+    ? Resolve(fgBlur.FeatherRaw, ctx, 'H')
+    : null;
+  const fgFrost = fgBlur ? Resolve(fgBlur.RadiusRaw, ctx, 'W') : 0;
+  const fgStops = fgBlur
+    ? (fgBlur.Uniform
+        ? [{ Position: 0, Value: 1, Easing: 1 }, { Position: 1, Value: 1, Easing: 1 }]
+        : fgBlur.Mode === 'edge'
+          ? _edgeStops(fgBlur.FeatherRaw, fgBlur.Easing)
+          : null)
+    : null;
+
+  const effDirection = blurSpec?.Direction ?? s.ProgressiveBlurDirection ?? fgDir ?? null;
+
   return {
-    Material: _inferMaterial(thickness, s.ProgressiveBlurDirection ?? blurSpec?.Direction ?? null),
-    ProgressiveBlurDirection: blurSpec?.Direction ?? s.ProgressiveBlurDirection ?? 'ToTop',
-    ProgressiveBlurFeather: Resolve(s.ProgressiveBlurFeather, ctx, 'H'),
-    ProgressiveBlurEasing: Resolve(s.ProgressiveBlurEasing, ctx, 'W'),
-    ProgressiveBlurStops: blurSpec?.Stops ?? null,
+    Material: _inferMaterial(thickness, effDirection),
+    ProgressiveBlurDirection: effDirection ?? 'ToTop',
+    ProgressiveBlurFeather: fgFeather !== null ? fgFeather : Resolve(s.ProgressiveBlurFeather, ctx, 'H'),
+    ProgressiveBlurEasing: fgBlur && !fgBlur.Uniform ? fgBlur.Easing : Resolve(s.ProgressiveBlurEasing, ctx, 'W'),
+    ProgressiveBlurStops: blurSpec?.Stops ?? fgStops,
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 
     BorderRadius: borderRadius,
@@ -120,7 +174,10 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BlendMode: s.BlendMode,
 
     Frost: Resolve(s.Frost, ctx, 'W'),
-    BackdropFrostBlur: resolveBlur(backdrop.BlurRaw),
+    // Heavy-end frost sigma for the pblur material: the foreground Filter blur
+    // radius drives it when present, else the backdrop frost. The pblur shader
+    // reads this as the ramp's max blur.
+    BackdropFrostBlur: fgBlur ? fgFrost : resolveBlur(backdrop.BlurRaw),
     Thickness: thickness,
     Fillet: Resolve(s.Fillet, ctx, 'W'),
     Refraction: Resolve(s.Refraction, ctx, 'W'),
@@ -177,6 +234,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderBackdropBlur: resolveBlur(border.BlurRaw),
     BorderOffset: Resolve(s.BorderOffset, ctx, 'W'),
     ContainBorder: s.ContainBorder,
+    BorderLayer: Resolve(s.BorderLayer, ctx, 'W'),
 
     BorderBrightness: border.Brightness,
     BorderSaturation: border.Saturation,

@@ -95,8 +95,26 @@ export class JivInstanceBuffer {
    * walker is the source of truth, and Push just consumes. Identity
    * (cx=cy=1, ox=oy=0) reduces to the legacy `node.X` placement.
    */
+  /** `borderMode` controls how this instance treats its border stroke, used
+   *  by the `BorderLayer` paint-ordering feature:
+   *    • 'Normal'      — border painted with the panel (default, today's path).
+   *    • 'Suppress'    — panel drawn with NO border; the border is emitted
+   *                      separately as a 'BorderOnly' instance interleaved
+   *                      among children at the node's BorderLayer position.
+   *    • 'BorderOnly'  — only the border stroke paints: background, shadow,
+   *                      and (non-glass) fill are zeroed so the instance is a
+   *                      transparent quad carrying just the stroke.
+   *    • 'GlassBorderOnly' — re-emits the FULL glass rim (refiltered backdrop +
+   *                      BorderColor/BorderFilter grading) on a transparent
+   *                      interior. Keeps Thickness + the backdrop filter intact
+   *                      (the rim must sample the real backdrop) and zeroes only
+   *                      fill + shadow; the shader's border-only flag (signalled
+   *                      by a NEGATIVE borderEdgeAa) skips interior fill/effects
+   *                      but still runs the glass border zone. Drawn with the
+   *                      glass shader + a real scene snapshot by emitBorderOverlay. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
-          clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1): void => {
+          clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
+          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'GlassBorderOnly' = 'Normal'): void => {
     if (this._count >= this._capacity) this._grow();
 
     const style = jiv.RenderStyle;
@@ -254,6 +272,42 @@ export class JivInstanceBuffer {
     data[offset + 57] = style.BorderSaturation;
     data[offset + 58] = style.BorderContrast;
     data[offset + 59] = style.BorderBackdropBlur;
+
+    // ── BorderLayer paint-ordering overrides ──
+    // 'Suppress' draws the panel WITHOUT its border (the border re-appears as a
+    // separate 'BorderOnly' instance interleaved among children). 'BorderOnly'
+    // strips everything BUT the stroke: transparent background + no shadow, and
+    // Thickness=0 so the frag takes the plain non-glass border composite (a
+    // glass refraction/rim pass over a transparent fill would draw nothing
+    // useful, and we want a clean stroke regardless of the host material).
+    if (borderMode === 'Suppress') {
+      data[offset + 27] = 0;  // borderWidth
+      data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0; // BorderColor
+    } else if (borderMode === 'BorderOnly') {
+      data[offset + 15] = 0;  // Background alpha → no fill
+      data[offset + 23] = 0;  // ShadowColor alpha → no shadow
+      data[offset + 36] = 0;  // Thickness → non-glass stroke path
+      // Neutralize the backdrop filter too — without this, a host with a
+      // BackdropFilter (every JwiftGlass surface) keeps hasBackdropFilter==true
+      // on the stroke-only quad, and emitBorderOverlay draws it with a NULL
+      // backdrop (the dummy BLACK texture), so the frag fills the WHOLE panel
+      // interior with graded black ≈ flat grey OVER the glass. The overlay must
+      // carry ONLY the stroke.
+      data[offset + 32] = 1;  // BackdropBrightness → identity
+      data[offset + 33] = 1;  // BackdropSaturation → identity
+      data[offset + 34] = 1;  // BackdropContrast → identity
+      data[offset + 35] = 0;  // frost LOD → no backdrop sample
+    } else if (borderMode === 'GlassBorderOnly') {
+      // Glass rim over children: keep Thickness + the backdrop filter (the rim
+      // samples the REAL backdrop), zero only fill + shadow, and set the
+      // shader's border-only flag by NEGATING borderEdgeAa (offset 28). The
+      // frag abs()'s it for the feather and treats the sign as "skip interior".
+      data[offset + 15] = 0;  // Background alpha → no fill
+      data[offset + 23] = 0;  // ShadowColor alpha → no shadow
+      // Border-only flag. Carry a tiny magnitude when the feather is 0 so the
+      // sign survives (−0 is not < 0 in GLSL); the rim AA stays effectively crisp.
+      data[offset + 28] = -Math.max(borderEdgeAa, 1e-3);
+    }
 
     this._count++;
   };

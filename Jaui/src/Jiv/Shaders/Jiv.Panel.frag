@@ -658,7 +658,12 @@ void main() {
     vec2 shadowOffset = v_ShadowParams.xy;
     float shadowBlur = v_ShadowParams.z;
     float borderWidth = v_ShadowParams.w;
-    float borderEdgeAa = v_StyleParams.x;
+    // Border-only flag: BorderLayer's glass overlay encodes "paint ONLY the
+    // glass border, skip fill/shadow" as a NEGATIVE borderEdgeAa (the feather
+    // is otherwise always >= 0). The frag still needs the magnitude for the
+    // stroke feather, so abs() it immediately and keep the sign as the flag.
+    float borderOnly = v_StyleParams.x < 0.0 ? 1.0 : 0.0;
+    float borderEdgeAa = abs(v_StyleParams.x);
     float smoothness = v_StyleParams.y;
     float opacity = v_StyleParams.z;
     // materialType is a compile-time constant when built as a shader variant
@@ -980,6 +985,16 @@ void main() {
         : vec3(0.0);
     vec4 result = vec4(outRGB, outA);
 
+    // Border-only overlay (BorderLayer glass rim drawn OVER children): start
+    // from a fully transparent interior — no fill, no shadow — and zero the
+    // fill-coupled alpha so every interior glass effect (rim glow, edge light,
+    // bevel/rim specular) contributes nothing. Only the border zone below will
+    // paint, sampling the real backdrop with its BorderFilter grading.
+    if (borderOnly == 1.0) {
+        result = vec4(0.0);
+        fillAlpha = 0.0;
+    }
+
     // Composite order for glass:
     //   1) Wide rim glow (vibrant backdrop pickup, inward fade) — the optical
     //      "light gathering" along the bevel
@@ -1130,9 +1145,14 @@ void main() {
             vec3 borderRgb = mix(borderBackdrop, strokeTint, v_BorderColor.a * strokeBrightness);
 
             // Replace the panel result in the border zone (alpha-blended by mask).
-            // borderBase is the antialiased annulus; result alpha follows panel.
+            // borderBase is the antialiased annulus. Normally the rim alpha
+            // follows the panel fill (so a rim never extends past a faded panel);
+            // but in border-only mode the fill is intentionally transparent, so
+            // drive the rim straight from borderBase — that's the whole point of
+            // the overlay (a glass rim floating over the children).
+            float borderZoneAlpha = mix(fillAlpha, 1.0, borderOnly);
             result.rgb = mix(result.rgb, borderRgb, borderBase);
-            result.a = max(result.a, borderBase * fillAlpha);
+            result.a = max(result.a, borderBase * borderZoneAlpha);
         }
     } else {
         float borderOuter = smoothstep(-aa, aa, dist);

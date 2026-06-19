@@ -82,6 +82,38 @@ TopBlur {
   Layer: 5
 }
 
+// DIRECTIONAL foreground filter — `LinearProgressiveBlur(Top, 24pt, 200pt, 1)`
+// ramps blur to a 24pt radius AT the top edge, clear toward the bottom, over a
+// 200pt feather. One-axis, one-sided. The foreground analog of `BackdropFilter`.
+FilterLinearDemo {
+  Position: Fixed
+  Width: 100vw
+  Height: 200pt
+  Left: 0pt
+  Top: 0pt
+  Filter: LinearProgressiveBlur(Top, 24pt, 200pt, 1)
+  Background: rgba(0, 0, 0, 0)
+  PointerEvents: None
+  Layer: 4
+}
+
+// ALL-AROUND foreground filter — `EdgeProgressiveBlur(24pt, 0.22, 1)` fades the
+// border band inward SYMMETRICALLY (top AND bottom here — one node drives one
+// axis; nest a Horizontal veil for the other) while the center stays sharp. No
+// direction; the 0.22 band is a fraction of the axis. Visibly different from the
+// Linear top-only fade: both ends feather, the middle is clear.
+FilterVignetteDemo {
+  Position: Fixed
+  Width: 100vw
+  Height: 100vh
+  Left: 0pt
+  Top: 0pt
+  Filter: EdgeProgressiveBlur(24pt, 0.22, 1)
+  Background: rgba(0, 0, 0, 0)
+  PointerEvents: None
+  Layer: 4
+}
+
 HeroStub {
   Direction: Column
   Justify: Center
@@ -409,4 +441,78 @@ TabLabel {
 TabLabelActive : TabLabel {
   FontWeight: 600
   Color: rgba(255, 255, 255, 0.95)
+}
+
+/* ── BorderLayer demo ──
+   Both boxes share BorderLayerBox: a thick semi-transparent white border and
+   a child fill tile (BorderLayerFill) sized LARGER than the box so it spills
+   onto the border ring. Only BorderLayer differs between the two:
+     • Behind  (-1): border draws under the fill → fill covers the ring.
+     • Front    (1): border draws over the fill → ring sits on top of the tile.
+   The orange fill vs white ring makes the stacking unmistakable. */
+BorderLayerDemo {
+  Position: Fixed
+  Top: 120pt
+  Left: 0pt
+  Width: 100vw
+  Direction: Row
+  Justify: Center
+  Align: Center
+  Gap: 40pt
+  Layer: 40
+  PointerEvents: None
+}
+
+BorderLayerBox {
+  Width: 150pt
+  Height: 150pt
+  BorderRadius: 28pt
+  BorderColor: rgba(255, 255, 255, 0.92)
+  BorderWidth: 16pt
+  Background: rgba(20, 20, 24, 1)
+  Justify: Center
+  Align: Center
+  Overflow: Visible
+}
+
+BorderLayerFill {
+  Width: 130pt
+  Height: 130pt
+  BorderRadius: 18pt
+  Background: rgb(255, 138, 0)
+  Layer: 0
+}
+
+BorderLayerBehind {
+  BorderLayer: -1
+}
+
+BorderLayerFront {
+  BorderLayer: 1
+}
+
+/* Glass rim over children: a LiquidGlass box whose FULL glass border
+   (refiltered backdrop + BorderFilter grading) re-emits at BorderLayer 10,
+   ON TOP of the oversized orange fill tile that reaches the box edge. The
+   rim should read as a real light-gathering glass edge over the tile, not a
+   flat stroke. */
+BorderLayerGlass {
+  BorderLayer: 10
+  Material: LiquidGlass
+  Thickness: 12pt
+  Background: rgba(255, 255, 255, 0.04)
+  BorderColor: rgba(255, 255, 255, 0.5)
+  BorderWidth: 18pt
+  BackdropFrostBlur: 6pt
+  BorderBrightness: 1.5
+  BorderSaturation: 1.4
+}
+
+BorderLayerTag {
+  Position: Fixed
+  Bottom: -26pt
+  Left: 0pt
+  Width: 150pt
+  FontSize: 11pt
+  Color: rgba(255, 255, 255, 0.8)
 }

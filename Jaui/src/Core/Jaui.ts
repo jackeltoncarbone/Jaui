@@ -1047,7 +1047,97 @@ export class Canvas implements DirtyTracker {
       if (effH !== null && node.Overflow === 'Scroll') {
         childMH = mat3Mul(effH, mat3FromAffine([1, 0, 0, 1, -node.ScrollX, -node.ScrollY]));
       }
+
+      // ── BorderLayer overlay ──
+      // When this node's border was SUPPRESSED on its fused panel (BorderLayer
+      // non-zero + a visible border), draw it here as a standalone stroke
+      // interleaved among the children at the node's BorderLayer position: it
+      // paints AFTER every child whose Layer is strictly below BorderLayer and
+      // BEFORE the rest, so negative BorderLayer lands behind content and a
+      // value past every child's Layer lands on top. Painted in the node's OWN
+      // transform/clip (`eff`, `stack`) — the border belongs to the node, not
+      // the child offset frame. Zero work for the default (no suppressed border).
+      const borderSuppressed =
+        node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)
+        && node.Visible && node.Width > 0 && node.Height > 0;
+      const borderLayer = node.RenderStyle.BorderLayer;
+      let borderEmitted = !borderSuppressed;
+      const emitBorderOverlay = (): void => {
+        if (borderEmitted) return;
+        borderEmitted = true;
+        flushPanels();
+        flushText();
+        const ownClip = this._clipBuffer.Encode(stack, this._dpr);
+        const ownXform = effH !== null ? this._xformBuffer.Add(effH, this._dpr) : -1;
+        r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+        r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
+
+        const overlayGlass = _isGlass(node.RenderStyle.Material);
+        if (overlayGlass) {
+          // ── Glass border overlay ──
+          // Re-emit the node's FULL glass rim ON TOP of its children. We can't
+          // reuse the flat 'BorderOnly' stroke (a faint glass rim is invisible
+          // as a solid color), so snapshot the scene exactly as a standalone
+          // glass panel does (SnapshotScreen + ComputeBlur + mipmap, then
+          // RebindSceneTarget), and draw a glass instance with the BORDER-ONLY
+          // flag: the shader skips fill/shadow but still runs the glass border
+          // zone, so the rim samples the REAL backdrop (the children at the
+          // edge) with its BorderFilter grading. Mirror of the glass panel
+          // draw at ~Jaui.ts:1466-1489 — self-contained at the overlay point.
+          const d = this._dpr;
+          const frostCssPx = Math.max(1, node.RenderStyle.BackdropFrostBlur);
+          const _gsx = matScaleX(eff), _gsy = matScaleY(eff);
+          const _gAvgScale = (_gsx + _gsy) * 0.5;
+          const _gMinHalf = Math.min(node.Width * _gsx, node.Height * _gsy) * d * 0.5;
+          const _gThicknessDev = node.RenderStyle.Thickness * _gAvgScale * d;
+          const _gBulgeMax = node.RenderStyle.Fillet * _gMinHalf * 0.25 * 0.7;
+          const _gRefractMax = (_gThicknessDev + _gBulgeMax) * node.RenderStyle.Refraction;
+          const _gCaMax = node.RenderStyle.ChromaticAberration * 3.0;
+          const margin = frostCssPx * d + _gRefractMax + _gCaMax + 8 * d;
+          const _ab = this._nodeAabb(node, eff, effH);
+          const px = _ab.minX * d, py = _ab.minY * d;
+          const pw = (_ab.maxX - _ab.minX) * d, ph = (_ab.maxY - _ab.minY) * d;
+          const scissor = {
+            x: Math.max(0, Math.floor(px - margin)),
+            y: Math.max(0, Math.floor(py - margin)),
+            w: Math.min(w, Math.ceil(pw + margin * 2)),
+            h: Math.min(h, Math.ceil(ph + margin * 2)),
+          };
+          const sceneSnap = r.SnapshotScreen(scissor);
+          const lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
+          const lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
+          r.GenerateBlurMipmap(5);
+          r.RebindSceneTarget();
+
+          this._panelBuffer.Begin();
+          this._panelBuffer.Push(node, this._dpr, eff, ownClip.Offset, ownClip.Count, ownXform, 'GlassBorderOnly');
+          r.EnableBlend();
+          r.PanelBeginBatch();
+          r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+          r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
+          r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+          const glassBgPaint = this._computeBgPaint(node);
+          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, true, sceneSnap, glassBgPaint);
+          this._counts.Glass++;
+          this._panelBuffer.Begin();
+        } else {
+          this._panelBuffer.Begin();
+          this._panelBuffer.Push(node, this._dpr, eff, ownClip.Offset, ownClip.Count, ownXform, 'BorderOnly');
+          r.EnableBlend();
+          r.PanelBeginBatch();
+          r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+          r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
+          r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+          r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null);
+          this._counts.Panels++;
+          this._panelBuffer.Begin();
+        }
+      };
+
       for (const child of orderedChildren(node)) {
+        // Drop the border in at its layer slot, just before the first child
+        // that sits at or above BorderLayer (children are Layer-sorted asc).
+        if (!borderEmitted && child.RenderStyle.Layer >= borderLayer) emitBorderOverlay();
         const clip = this._childClip(node, stack, boxClip, child);
         if (child.TeleportSeq !== 0) {
           scope.Deferred.push({ N: child, M: childM, MH: childMH, P: persp });
@@ -1070,6 +1160,9 @@ export class Canvas implements DirtyTracker {
         }
         renderNode(child, childM, clip, scope, childMH, persp);
       }
+      // BorderLayer sits above every child (or there were no children) — paint
+      // the stroke on top, after all content.
+      if (!borderEmitted) emitBorderOverlay();
     };
 
     // Single tree walk — renders everything in z-order. The (cx, cy,
@@ -1202,6 +1295,15 @@ export class Canvas implements DirtyTracker {
       const xformIndex = effH !== null ? this._xformBuffer.Add(effH, this._dpr) : -1;
 
       const material = node.RenderStyle.Material;
+
+      // BorderLayer: when this Jiv asks for its border to paint at a non-zero
+      // position in its children's Layer space, suppress the border on the
+      // fused panel here and re-emit it as a standalone BorderOnly instance
+      // interleaved among the children (see descendChildren). Default
+      // (BorderLayer 0, or no visible border) keeps the border fused — today's
+      // paint order, zero cost.
+      const ownBorderMode: 'Normal' | 'Suppress' =
+        (node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)) ? 'Suppress' : 'Normal';
 
       if (material === 'ProgressiveBlur' && !this._diagNoPblur) {
         // Flush both pending batches: the pblur snapshots the scene and
@@ -1441,7 +1543,7 @@ export class Canvas implements DirtyTracker {
 
         r.EnableBlend();
         this._panelBuffer.Begin();
-        this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+        this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
         r.PanelBeginBatch();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
@@ -1498,7 +1600,7 @@ export class Canvas implements DirtyTracker {
         if (flatBgPaint !== undefined) {
           flushPanels();
           this._panelBuffer.Begin();
-          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
           r.EnableBlend();
           r.PanelBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -1770,6 +1872,14 @@ export class Canvas implements DirtyTracker {
       if (ny2 <= c.Y || ny >= c.Y + c.H) return false;
     }
     return true;
+  };
+
+  /** True when `node` actually paints a visible border stroke (non-zero width
+   *  AND a non-transparent BorderColor). Gates the BorderLayer reordering —
+   *  there's nothing to interleave for a borderless Jiv. */
+  private _hasPaintedBorder = (node: Jiv): boolean => {
+    const s = node.RenderStyle;
+    return s.BorderWidth > 0 && s.BorderColor.A > 0.001;
   };
 
   /** Build the rounded-rect ClipShape for `node` — its box plus its
