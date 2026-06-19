@@ -379,6 +379,10 @@ vec2 SS_PillGrad(vec2 p, vec2 halfSize) {
 // Master SDF — operates on a shape defined by halfSize + cornerBox (rx, ry) + exponent n.
 // qc is the corner-offset vector (positive in the corner region, zero in the flat zone).
 float ShapeSDF_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
+    // Floor the corner semi-axes: a zero-radius corner (sharp rect, common for
+    // overflow clips) would divide by rAxis below. 1e-3 px is a sub-pixel arc —
+    // visually a square corner — and keeps the gradient finite.
+    rAxis = max(rAxis, vec2(1e-3));
     vec2 q = abs(p) - halfSize + rAxis;
 
     if (q.x <= 0.0 && q.y <= 0.0) {
@@ -413,6 +417,7 @@ float ShapeSDF_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
 // Direction of ∇F = (uv.x^(n−1)/rx, uv.y^(n−1)/ry), sign from p.
 // Magnitude falls out when normalized.
 vec2 ShapeGrad_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
+    rAxis = max(rAxis, vec2(1e-3));
     vec2 q = abs(p) - halfSize + rAxis;
     vec2 qc = max(q, vec2(0.0));
     vec2 uv = qc / rAxis;
@@ -464,9 +469,10 @@ int ShapeMode(vec2 halfSize, vec4 radii) {
 //     (SS_Pill*) over the band, since the pill is a different evaluation path.
 // Endpoints are identical to the old discrete modes (sat∈{0,1}, elong∈{0,1});
 // only corners inside a transition band — the ones that used to pop — change.
-const float CORNER_RADIUS_BAND = 10.0;  // px of radius before short-axis fill that the morph spans
-const float CORNER_ASPECT_LO   = 1.30;  // aspect ≤ LO → circle leg
-const float CORNER_ASPECT_HI   = 1.56;  // aspect ≥ HI → pill leg
+const float CORNER_SAT_FRAC    = 0.12;  // fraction of the short half-axis the radius morph spans
+                                        // (scale-invariant: a tiny card and a huge card snap alike)
+const float CORNER_ASPECT_LO   = 1.40;  // aspect ≤ LO → circle leg
+const float CORNER_ASPECT_HI   = 1.52;  // aspect ≥ HI → pill leg
 
 void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
                 out float distOut, out vec2 gradOut) {
@@ -477,7 +483,10 @@ void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
 
     // Saturation of the (smallest) corner radius against the short axis:
     // 0 → small radius (rect), 1 → radius fills the short axis (circle/pill).
-    float sat   = smoothstep(minHalf - CORNER_RADIUS_BAND, minHalf - 1.0, minR);
+    // Band is a fraction of minHalf so the morph spans the same proportion of
+    // the radius at every size; floored at 1px so sub-tiny shapes don't hard-snap.
+    float satBand = max(minHalf * CORNER_SAT_FRAC, 1.0);
+    float sat   = smoothstep(minHalf - satBand, minHalf - 1.0, minR);
     // Which saturated regime the corner eases toward: 0 = circle, 1 = pill.
     float elong = smoothstep(CORNER_ASPECT_LO, CORNER_ASPECT_HI, aspect);
 
@@ -569,32 +578,20 @@ vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
 //  Clip stack — CSS-style overflow clipping, rounded-rect per ancestor.
 // ────────────────────────────────────────────────────────────────────────────
 
-float pickClipRadius(vec2 p, vec4 radii) {
-    // radii = (tl, tr, br, bl). p relative to clip center.
-    if (p.x >= 0.0) {
-        return p.y <= 0.0 ? radii.y : radii.z;
-    }
-    return p.y <= 0.0 ? radii.x : radii.w;
-}
-
 // Signed distance to the rounded-rect clip boundary. Negative inside,
-// positive outside, in device pixels. Replaces the old boolean inside-test
-// so callers can produce a 1-pixel smoothstep at the clip edge instead of
-// a hard discard (which hard-cut AA'd borders and glyphs).
-// n = 2 + 6*smoothness. smoothness=0 → pure circle corners; higher → squircle.
+// positive outside, in device pixels. Callers smoothstep this for a 1-pixel
+// feather at the clip edge instead of a hard discard (which hard-cut AA'd
+// borders and glyphs).
+//
+// Routes through the SAME continuous corner field (CornerEval, via ShapeSDF)
+// as the panel silhouette and border — so a clip mask and the shape it masks
+// agree corner-for-corner across the Rect↔Circle↔Pill morph. No parallel
+// superellipse here: one implementation, two callers. The `mode` arg is
+// vestigial (CornerEval derives the regime from geometry) so pass 0.
 float clipShapeDistance(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
     vec2 center = rect.xy + rect.zw * 0.5;
     vec2 halfSize = rect.zw * 0.5;
-    vec2 qSigned = pixel - center;
-    vec2 qAbs = abs(qSigned);
-    float r = pickClipRadius(qSigned, radii);
-    vec2 cornerP = qAbs - (halfSize - vec2(r));
-    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) {
-        return max(qAbs.x - halfSize.x, qAbs.y - halfSize.y);
-    }
-    float n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
-    float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
-    return r * (pow(max(L, 0.0), 1.0 / n) - 1.0);
+    return ShapeSDF(pixel - center, halfSize, radii, smoothness, 0);
 }
 
 // Loop bounded by a constant so drivers with stricter GLSL ES 3.00 loop

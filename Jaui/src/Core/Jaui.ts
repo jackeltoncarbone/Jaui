@@ -2182,6 +2182,14 @@ export class Canvas implements DirtyTracker {
           animator.SnapToTargets();
         } else if (needsKick) {
           this._animationManager.Kick();
+        } else if (node.TeleportSeq !== 0) {
+          // A node mid-teleport renders clip-free + elevated until JivAnimator.Tick
+          // sees its rect spring settle and clears TeleportSeq. But when the home
+          // target lands within Spring.Set's deadband, needsKick is false: no Kick,
+          // so the loop never wakes, Tick never runs, and the elevation never drops —
+          // the card stays unclipped forever. There's nothing to animate (it's already
+          // home), so retire the elevation now.
+          node.TeleportSeq = 0;
         }
       }
     }
