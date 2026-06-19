@@ -1055,7 +1055,16 @@ export class Canvas implements DirtyTracker {
         }
         if (child.RenderStyle.Layer !== 0) {
           const childScope: TeleportScope = { Deferred: [], Stack: clip };
-          renderNode(child, childM, clip, childScope, childMH, persp);
+          // A teleported descendant deferred into THIS layered scope is painted with
+          // `childScope.Stack` — the clip ABOVE this node — so a card flying home over
+          // a scrolled rail isn't sheared by it. But when this layered node itself
+          // CLIPS its children (a Clip:Hidden glass panel the card is returning INTO),
+          // that exemption is wrong: the in-flight card escapes the panel's rounded box
+          // and snaps to it only when its spring settles (a late, wrong-shape pop).
+          // `renderNode` appends this node's own box clip to the scope so deferred
+          // descendants trace the panel edge throughout the flight. No-op for
+          // Clip:Visible destinations (rail/stage) — ClipsChildren is false there.
+          renderNode(child, childM, clip, childScope, childMH, persp, true);
           replayScope(childScope);
           continue;
         }
@@ -1071,7 +1080,7 @@ export class Canvas implements DirtyTracker {
     // Identity (cx=cy=1, ox=oy=0) at the root is the no-transform path.
     // VisualScale on an ancestor composes into the effective tuple so
     // descendants ride along, just like CSS transform on a parent.
-    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
+    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null, appendBoxToScope: boolean = false): void => {
       // Compose own's transform onto the inherited matrix. Order: rotation
       // (outermost, about Transform.Origin) then VisualScale/Translate (about
       // VisualOrigin). Both ride the inherited matrix so they CASCADE to
@@ -1133,6 +1142,13 @@ export class Canvas implements DirtyTracker {
           const pgy = node.Y + node.Height * node.RenderStyle.PerspectiveOriginY;
           childPersp = { D: pv, Ox: matApplyX(eff, pgx, pgy), Oy: matApplyY(eff, pgx, pgy) };
         }
+      }
+      // Teleported descendants deferred into this layered node's scope should be
+      // clipped by this node's own rounded box when it clips its children (a glass
+      // panel a card flies home into) — append it once, before any descend. Only the
+      // scope-owning layered node passes appendBoxToScope; its descendants don't.
+      if (appendBoxToScope && node.ClipsChildren && node.Width > 0 && node.Height > 0) {
+        scope.Stack = [...scope.Stack, this._boxClip(node, eff)];
       }
       if (!this._isInsideClipStack(node, eff, stack, effH)) {
         // This node's OWN box is outside the clip. If it CLIPS its children
