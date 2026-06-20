@@ -1451,7 +1451,15 @@ export class Canvas implements DirtyTracker {
         });
         this._counts.PBlur++;
 
-      } else if ((_isGlass(material) || _hasBackdropFilter(node)) && material !== 'ProgressiveBlur' && !this._diagNoGlass) {
+      } else if (((_isGlass(material) && node.RenderStyle.Refraction !== 0) || _hasBackdropFilter(node)) && material !== 'ProgressiveBlur' && !this._diagNoGlass) {
+        // ── Glass FILL vs glass BORDER are decoupled ──
+        // A glass slab (Thickness > 0 → Material LiquidGlass) only takes the glass FILL
+        // pipeline (refraction + backdrop sampling) when it actually has a glass-fill
+        // effect to show: a non-zero Refraction, or a backdrop frost/grade. A slab with
+        // Refraction 0 and no backdrop has nothing to refract or frost, so its FILL renders
+        // as a plain (solid) panel here — while its beveled, fresnel-lit glass BORDER still
+        // renders via the BorderLayer overlay (gated on _isGlass(Material), see ~Jaui.ts:1075).
+        // That's what lets ANY jiv carry a glass OUTLINE without its fill becoming glass.
         // Flush pending batches: same reason as pblur — backdrop-filter
         // panels (glass or flat) read the scene (indirectly via the blur
         // pyramid), so the scene must be current. Flat panels with
