@@ -66,4 +66,11 @@ export class Janvas extends Jiv {
 
   /** Internal — marks the renderer as initialised. */
   MarkInited(): void { this._inited = true; }
+
+  /** Internal — force a re-Init on the next frame. The render loop calls
+   *  `Renderer.Init(gl, …)` again because `IsInited()` is now false. Used by the
+   *  WebGL context-loss recovery: when the context is restored, every foreign
+   *  renderer's GPU resources are gone and must be re-acquired against the new
+   *  context. Also marks dirty so the re-init'd renderer paints a frame. */
+  MarkUninited(): void { this._inited = false; this._dirty = true; }
 }

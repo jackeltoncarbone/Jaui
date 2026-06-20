@@ -121,6 +121,13 @@ export const BootJauiWorker = (): void => {
 
       bridge.AttachCanvas(canvas);
 
+      // Forward GL context loss/restore to main so the eviction watchdog can self-heal:
+      // the worker recovers the context IN PLACE (Canvas._onContextRestored), and these
+      // tell the watchdog whether that happened — so it only reloads when it truly must
+      // (the worker was killed and will never post `context-restored`).
+      canvas.ContextLostRelay = () => post({ T: 'context-lost' });
+      canvas.ContextRestoredRelay = () => post({ T: 'context-restored' });
+
       const registry = new JivRegistry(canvas.Root, post);
       // Wire the rAF kick so class-swap `@Animation` re-applies can wake
       // the loop. Without this, the AnimationManager parks itself when

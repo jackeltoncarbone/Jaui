@@ -294,6 +294,16 @@ export class Canvas implements DirtyTracker {
     this._listenForFontLoad();
     void this._listenForSpecularTilt;
 
+    // ── WebGL context-loss recovery ──
+    // iOS (and any platform under GPU memory pressure) kills a backgrounded tab's
+    // WebGL context — the browser fires `webglcontextlost`. Without `preventDefault()`
+    // it is NEVER restored, so the canvas is black until a manual reload. We pause the
+    // loop on loss and, on restore, rebuild EVERY GPU resource (renderer + text atlas +
+    // image textures) and re-render. The canvas is both an HTMLCanvasElement and an
+    // OffscreenCanvas EventTarget, so this works in main-thread AND worker mode.
+    this.Element.addEventListener('webglcontextlost', this._onContextLost as EventListener, false);
+    this.Element.addEventListener('webglcontextrestored', this._onContextRestored as EventListener, false);
+
     // Main-thread mode: bind real DOM listeners on the canvas that
     // translate to `IngestEvent` calls. The engine's `_listenForX`
     // methods register internal handlers via `_on(...)` — without this
@@ -634,9 +644,64 @@ export class Canvas implements DirtyTracker {
   RequestFrame = (): void => {
   };
 
+  // ── WebGL context-loss / restore ──
+  private _contextLost = false;
+  /** True while the GL context is lost (paused). Consumers can read it. */
+  get ContextLost(): boolean { return this._contextLost; }
+  /** Optional relays so the worker bridge can forward context-loss/restore to the
+   *  main thread (for an eviction watchdog: if the worker is killed entirely, only a
+   *  reload recovers — these never fire in that case, which is the watchdog's cue). */
+  ContextLostRelay: (() => void) | null = null;
+  ContextRestoredRelay: (() => void) | null = null;
+
+  private _onContextLost = (e: Event): void => {
+    // REQUIRED: tells the browser we will restore — without it the context is gone for
+    // good and the canvas stays black. Pause the loop; _tick bails on _contextLost.
+    e.preventDefault();
+    this._contextLost = true;
+    this._running = false;
+    if (this._frameId) { cancelAnimationFrame(this._frameId); this._frameId = 0; }
+    this.ContextLostRelay?.();
+  };
+
+  private _onContextRestored = (): void => {
+    // Every GPU resource died with the old context. Re-create the renderer's own
+    // (Init re-runs context + shaders + FBOs + clip/xform textures), then drop the
+    // external caches so the next FULL render re-creates them against the restored
+    // context: the text atlas (Dispose → re-allocated + re-rasterized) and image
+    // textures (Clear → re-uploaded). The render walk re-emits the whole tree each
+    // frame, so one frame repopulates everything.
+    // Init is on the Renderer interface — WebGL2 re-acquires the context and rebuilds its
+    // shaders / FBOs / clip+xform textures (WebGPU re-acquires its device the same way).
+    void Promise.resolve(this._renderer.Init(this.Element)).then(() => {
+      this._textCache.Dispose();
+      this._imageCache.Clear();
+      // Foreign 3D <janvas> renderers (e.g. the home hero field) lost their GPU
+      // resources too — flag every one for re-Init so the next render re-runs
+      // `Renderer.Init(gl, …)` against the restored context.
+      this._resetJanvasesForRestore(this.Root);
+      this._contextLost = false;
+      this.ContextRestoredRelay?.();
+      if (!this._running) {
+        this._running = true;
+        this._frameId = requestAnimationFrame(this._tick);
+      }
+    }).catch((err: unknown) => {
+      // Re-init failed (e.g. the context didn't truly come back) — leave it paused;
+      // the main-thread watchdog reloads as the last resort.
+      console.error('[Jaui] WebGL context restore failed:', err);
+    });
+  };
+
+  /** Walk the tree and flag every Janvas for re-Init (post context-restore). */
+  private _resetJanvasesForRestore = (node: JauiElement): void => {
+    if (node instanceof Janvas) node.MarkUninited();
+    for (const child of node.Children) this._resetJanvasesForRestore(child);
+  };
+
   private _tickErrorCount = 0;
   private _tick = (time: number): void => {
-    if (!this._running) return;
+    if (!this._running || this._contextLost) return;
     this._frameId = requestAnimationFrame(this._tick);
     try {
       this._tickInner(time);
@@ -1146,15 +1211,13 @@ export class Canvas implements DirtyTracker {
         if (child.RenderStyle.Layer !== 0) {
           const childScope: TeleportScope = { Deferred: [], Stack: clip };
           // A teleported descendant deferred into THIS layered scope is painted with
-          // `childScope.Stack` — the clip ABOVE this node — so a card flying home over
-          // a scrolled rail isn't sheared by it. But when this layered node itself
-          // CLIPS its children (a Clip:Hidden glass panel the card is returning INTO),
-          // that exemption is wrong: the in-flight card escapes the panel's rounded box
-          // and snaps to it only when its spring settles (a late, wrong-shape pop).
-          // `renderNode` appends this node's own box clip to the scope so deferred
-          // descendants trace the panel edge throughout the flight. No-op for
-          // Clip:Visible destinations (rail/stage) — ClipsChildren is false there.
-          renderNode(child, childM, clip, childScope, childMH, persp, true);
+          // `childScope.Stack` — the clip ABOVE this node — so a card flying home stays
+          // WHOLE during the flight: it is not sheared by the box it is flying INTO, even a
+          // Clip:Hidden glass panel like the library drawer. It clips to the destination only
+          // once it SETTLES (TeleportSeq clears → normal render under the parent's own clip),
+          // i.e. after it has reached its target position — never while it slides in from
+          // outside. (Clipping mid-flight cut the card off against the panel edge as it flew.)
+          renderNode(child, childM, clip, childScope, childMH, persp);
           replayScope(childScope);
           continue;
         }
@@ -1173,7 +1236,7 @@ export class Canvas implements DirtyTracker {
     // Identity (cx=cy=1, ox=oy=0) at the root is the no-transform path.
     // VisualScale on an ancestor composes into the effective tuple so
     // descendants ride along, just like CSS transform on a parent.
-    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null, appendBoxToScope: boolean = false): void => {
+    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
       // Compose own's transform onto the inherited matrix. Order: rotation
       // (outermost, about Transform.Origin) then VisualScale/Translate (about
       // VisualOrigin). Both ride the inherited matrix so they CASCADE to
@@ -1235,18 +1298,6 @@ export class Canvas implements DirtyTracker {
           const pgy = node.Y + node.Height * node.RenderStyle.PerspectiveOriginY;
           childPersp = { D: pv, Ox: matApplyX(eff, pgx, pgy), Oy: matApplyY(eff, pgx, pgy) };
         }
-      }
-      // Teleported descendants deferred into this layered node's scope are clipped to
-      // this node's own rounded box when it is an EXPLICIT clip — a deliberate glass
-      // panel (Clip: Hidden) a card flies home into — so the in-flight card traces the
-      // panel edge instead of escaping it and snapping square on settle. Gate on the
-      // authored Clip, NOT ClipsChildren: an Overflow: Hidden/Scroll content surface
-      // (a cue card, a morph host, a scroll container) derives Clip: Auto, and the
-      // teleport-elevation exemption EXISTS precisely so a card flying home over/through
-      // those isn't sheared — appending their box here is the very shear it avoids.
-      // Only the scope-owning layered node passes appendBoxToScope; its descendants don't.
-      if (appendBoxToScope && node.Clip === 'Hidden' && node.Width > 0 && node.Height > 0) {
-        scope.Stack = [...scope.Stack, this._boxClip(node, eff)];
       }
       if (!this._isInsideClipStack(node, eff, stack, effH)) {
         // This node's OWN box is outside the clip. If it CLIPS its children

@@ -28,6 +28,7 @@ import type {
   WheelPayload,
   KeyPayload,
 } from './Bridge.Types';
+import { ContextWatchdog } from './Context.Watchdog';
 
 const ROOT_ID = 0;
 
@@ -60,6 +61,10 @@ export interface BridgeOptions {
    *  has to live inside the Jaui package for the bundler to detect it.
    *  Consumers receive that helper from Jaui core. */
   Worker: Worker;
+  /** Self-heal callback for the eviction watchdog — invoked when the worker is
+   *  unrecoverable (iOS killed the whole background tab's worker, so it can't recover
+   *  in place and will never post `context-restored`). Defaults to `location.reload()`. */
+  Reload?: () => void;
 }
 
 /** Hit-handler functions that Angular `<jiv>` registers per Jiv id. */
@@ -104,9 +109,24 @@ export class MainBridge {
   private _ready = false;
   private _eventBacklog: M2W[] = [];
 
+  /** Main-thread eviction self-heal — see Context.Watchdog. */
+  private readonly _watchdog: ContextWatchdog;
+
   constructor(opts: BridgeOptions) {
     this.Canvas = opts.Canvas;
     this.Worker = opts.Worker;
+
+    // ── Eviction self-heal ── The worker recovers a lost GL context in place; this only
+    // fires the reload when the worker itself is gone (it can't ping back / never restores).
+    this._watchdog = new ContextWatchdog({
+      PostPing: () => this.PostMessage({ T: 'ping' }),
+      Reload: opts.Reload ?? (() => { if (typeof location !== 'undefined') location.reload(); }),
+    });
+    const onVisible = (): void => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') this._watchdog.OnVisible();
+    };
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
+    if (typeof window !== 'undefined') window.addEventListener('pageshow', onVisible);
 
     if (_DEBUG) console.log('[Jaui.MainBridge] constructed; canvas=', this.Canvas, 'worker=', this.Worker);
 
@@ -235,6 +255,9 @@ export class MainBridge {
       case 'janvas-event':  return this._onJanvasEvent(m);
       case 'fps':           return this._onFps(m);
       case 'selection-text': this._selectedText = m.Text; return;
+      case 'pong':              return this._watchdog.OnPong();
+      case 'context-lost':      return this._watchdog.OnContextLost();
+      case 'context-restored':  return this._watchdog.OnContextRestored();
     }
   };
 

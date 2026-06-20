@@ -342,8 +342,14 @@ export interface M2W_JanvasInput {
   Payload: unknown;
 }
 
+/** Main → worker liveness probe (the eviction watchdog). A live worker answers `pong`. */
+export interface M2W_Ping {
+  T: 'ping';
+}
+
 export type M2W =
   | M2W_Init
+  | M2W_Ping
   | M2W_PointerEvent
   | M2W_WheelEvent
   | M2W_TouchStart
@@ -465,6 +471,21 @@ export interface W2M_SelectionText {
   Text: string;
 }
 
+/** Worker → main: reply to a `ping` — proves the worker is alive (not evicted). */
+export interface W2M_Pong {
+  T: 'pong';
+}
+
+/** Worker → main: the WebGL context was lost. The watchdog starts its restore clock. */
+export interface W2M_ContextLost {
+  T: 'context-lost';
+}
+
+/** Worker → main: the WebGL context was restored IN PLACE — in-worker recovery succeeded. */
+export interface W2M_ContextRestored {
+  T: 'context-restored';
+}
+
 export type W2M =
   | W2M_Ready
   | W2M_Cursor
@@ -475,7 +496,10 @@ export type W2M =
   | W2M_SvgRerasterize
   | W2M_JanvasEvent
   | W2M_FpsSample
-  | W2M_SelectionText;
+  | W2M_SelectionText
+  | W2M_Pong
+  | W2M_ContextLost
+  | W2M_ContextRestored;
 
 // ─── Helpers shared by both sides ─────────────────────────────────────────
 

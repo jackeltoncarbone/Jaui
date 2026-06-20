@@ -33,6 +33,7 @@ import {
   type M2W_ImageBitmap,
   type M2W_FontFace,
   type M2W_Kick,
+  type M2W_Ping,
   type M2W_JanvasInput,
   type W2M,
   type PointerPayload,
@@ -145,6 +146,9 @@ export class WorkerBridge {
     if (isMessage<M2W_ImageBitmap>(m, 'image-bitmap')) return this._onImageBitmap(m);
     if (isMessage<M2W_FontFace>(m, 'font-face')) return this._onFontFace(m);
     if (isMessage<M2W_Kick>(m, 'kick')) return this._onKick();
+    // Liveness probe from the main-thread eviction watchdog — answer immediately so it
+    // knows the worker is alive (a dead worker can't reply, which is the watchdog's cue).
+    if (isMessage<M2W_Ping>(m, 'ping')) { this._post({ T: 'pong' }); return; }
   };
 
   private _onImageBitmap = (m: M2W_ImageBitmap): void => {

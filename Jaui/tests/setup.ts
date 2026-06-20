@@ -22,6 +22,14 @@
  * faithful Canvas2D shim. The fake here is intentionally small and fast.
  */
 
+// `self` polyfill — `@jaui/Core/Jaui` re-exports worker entry points (BootJauiWorker
+// from Worker.Boot) whose module top-level reads `self` (the worker/browser global).
+// Node has no `self`, so importing the engine for a Canvas test throws
+// `ReferenceError: self is not defined` before any test runs. Alias it to globalThis.
+if (typeof (globalThis as { self?: unknown }).self === 'undefined') {
+  (globalThis as { self?: unknown }).self = globalThis;
+}
+
 class FakeOffscreenCanvasRenderingContext2D {
   public canvas: FakeOffscreenCanvas;
   public font = '';
@@ -75,12 +83,16 @@ class FakeOffscreenCanvasRenderingContext2D {
   }
 }
 
-class FakeOffscreenCanvas {
+// Extends EventTarget so the engine's WebGL context-loss listeners
+// (`webglcontextlost` / `webglcontextrestored`) can be added and tests can
+// `dispatchEvent` them — a real OffscreenCanvas is an EventTarget too.
+class FakeOffscreenCanvas extends EventTarget {
   public width: number;
   public height: number;
   private _ctx: FakeOffscreenCanvasRenderingContext2D | null = null;
 
   constructor(width: number, height: number) {
+    super();
     this.width = width;
     this.height = height;
   }
