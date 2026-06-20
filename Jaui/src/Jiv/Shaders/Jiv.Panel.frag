@@ -1122,12 +1122,24 @@ void main() {
         float borderBase = (1.0 - borderOuter) * borderInner;
 
         if (borderBase > 0.001) {
-            // Re-sample backdrop with border-zone grading. Same UV (no extra
-            // refraction offset — the border is the rim, refraction already
-            // applied via `refractOffset`). Apply LOD offset for sharper or
-            // blurrier border vs the panel.
+            // Re-sample backdrop with border-zone grading. Apply LOD offset for
+            // sharper or blurrier border vs the panel.
             float bLod = max(0.0, lodBoost + v_BorderFilter.w);
-            vec3 bSample = sampleBackdrop(baseUv, bLod, frostLod);
+            // SOLID-slab rim gather. A slab with Refraction 0 renders a SOLID
+            // (opaque) fill, so it OCCLUDES whatever is behind the card — the rim
+            // must gather from the card's OWN content at the edge, not the scene
+            // behind it. Sampling straight down (baseUv) lets the rim's tap —
+            // especially a blurred BorderFilter — straddle the silhouette and pull
+            // in the occluded exterior, which BorderFilter Brightness/Saturate then
+            // amplifies (a black card over a green field gets a bright green rim).
+            // Offset the tap INWARD along the normal so it lands fully inside the
+            // content, mirroring the wide rim glow's inward `rimUv`. Scaled by
+            // `solidness` so refractive (see-through) glass is byte-identical: its
+            // rim legitimately gathers from behind via the refracted baseUv.
+            float solidness = 1.0 - smoothstep(0.0, 4.0, refractionStrength);
+            float borderInset = (max(bezelWidth * 0.75, 6.0) * 1.2 + localBorderWidth) * solidness;
+            vec2 bUv = baseUv + vec2(-normal.x, normal.y) * (borderInset / u_Resolution);
+            vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);
             vec3 borderBackdrop = applyGrading(
                 bSample,
                 brightness * v_BorderFilter.x,
