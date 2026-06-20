@@ -2899,11 +2899,9 @@ export class Canvas implements DirtyTracker {
       // it as scroll. Let it bubble to the browser's zoom handler.
       if (e.ctrlKey) return;
 
-      // Route to the topmost Jiv's OnWheel first (z-ordered) so a consumer
-      // that binds `(wheel)` — e.g. the drill field — only gets the wheel
-      // when it's genuinely on top, never through an overlay/chrome above it.
-      // Independent of scroll: scroll containers below still handle their own
-      // wheel via ResolveScrollTarget, and non-scroll consumers use OnWheel.
+      // Route to the topmost Jiv's OnWheel (z-ordered) so a consumer that binds
+      // `(wheel)` — e.g. the drill field — only gets the wheel when it's genuinely
+      // on top, never through an overlay/chrome above it.
       const wheelHit = this._topmostAt(e.clientX, e.clientY);
       if (wheelHit?.OnWheel) wheelHit.OnWheel(e);
 
