@@ -2365,6 +2365,21 @@ export class Canvas implements DirtyTracker {
           }
         }
       } else {
+        // Teleport across a scroll-frame change: re-base the rect spring's CURRENT value by the cumulative
+        // scroll delta captured at reparent, so the flight starts from where the node visually sits (not
+        // its unscrolled layout position). Consumed once. Fixes the drag pickup/drop "hop" that scales
+        // with the library's scroll offset.
+        if (node.TeleportScrollDeltaX !== 0 || node.TeleportScrollDeltaY !== 0) {
+          animator.Springs.X.Value += node.TeleportScrollDeltaX;
+          animator.Springs.Y.Value += node.TeleportScrollDeltaY;
+          // Also commit to the Element's rendered position THIS pass — the render reads node.X/Y, and the
+          // animator's Tick (which normally writes them) runs after layout. Without this, the teleport
+          // frame paints once at the old unscrolled position before the spring catches up: a 1-frame hop.
+          node.X = animator.Springs.X.Value;
+          node.Y = animator.Springs.Y.Value;
+          node.TeleportScrollDeltaX = 0;
+          node.TeleportScrollDeltaY = 0;
+        }
         const needsKick = animator.SetTargets({
           X: result.X, Y: result.Y, Width: result.Width, Height: result.Height,
         });

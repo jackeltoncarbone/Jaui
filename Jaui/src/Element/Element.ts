@@ -148,6 +148,13 @@ export class Element {
    *  into; the most recent teleport paints topmost. */
   TeleportSeq: number = 0;
 
+  /** Cumulative scroll-offset CHANGE across a live reparent (old ancestor chain − new ancestor chain),
+   *  captured by `AddChild` and consumed once by the layout pass to re-base the rect spring's CURRENT
+   *  value. Without it, a node that teleports into/out of a scrolled container snaps to its UNSCROLLED
+   *  layout position and then animates — the drag "hop" that scales with scroll offset. Cleared after use. */
+  TeleportScrollDeltaX: number = 0;
+  TeleportScrollDeltaY: number = 0;
+
   // ── Appearance / Interaction ──
   /** Whether this element is visible. Hidden elements are skipped by rendering
    *  and hit testing but still participate in layout. */
@@ -320,6 +327,28 @@ export class Element {
     // recency seq so the render walk elevates the in-flight subtree until its
     // rect springs settle. Same-parent re-adds (reorders) don't stamp.
     const teleporting = child.Parent !== null && child.Parent !== this;
+    // Capture how much cumulative scroll the node is leaving vs entering, BEFORE the reparent (so the old
+    // ancestor chain is still intact). The layout pass re-bases the rect spring by this so the flight
+    // starts from where the node visually IS, not its unscrolled layout position.
+    if (teleporting) {
+      let oldX = 0, oldY = 0;
+      for (let p: Element | null = child.Parent; p; p = p.Parent) { oldX += p.ScrollX; oldY += p.ScrollY; }
+      let newX = 0, newY = 0;
+      for (let p: Element | null = this; p; p = p.Parent) { newX += p.ScrollX; newY += p.ScrollY; }
+      // The render subtracts cumulative scroll, so to keep the visual position fixed the spring's value
+      // must shift by (newScroll − oldScroll): leaving a scrolled list (old>0, new=0) subtracts it back.
+      // Rect springs are positioned in root-absolute space, so EVERY node in the teleported subtree needs
+      // the same re-base — re-basing only the reparented node moves its frame but leaves its content
+      // (the card face) flying in from the unscrolled spot.
+      const dX = newX - oldX, dY = newY - oldY;
+      const stack: Element[] = [child];
+      while (stack.length > 0) {
+        const n = stack.pop()!;
+        n.TeleportScrollDeltaX = dX;
+        n.TeleportScrollDeltaY = dY;
+        for (const c of n.Children) stack.push(c);
+      }
+    }
     if (child.Parent) child.Parent.RemoveChild(child);
     child.Parent = this;
     this.Children.push(child);
