@@ -68,9 +68,12 @@ const SETTLE_V = 1;
  *      from the actual recent finger speed (no perceived acceleration).
  *  ~50 ms ≈ 3 frames @60fps; matches iOS's native flick-window. */
 const RELEASE_WINDOW_MS = 50;
-/** Wheel-ease retention per second. 0.005/s ⇒ half-life ≈ 130 ms; pos reaches
- *  ~95 % of target in ~250 ms. Matches a snappy browser smooth-scroll feel. */
-const WHEEL_EASE_PER_SEC = 0.005;
+/** Wheel-ease retention per second — for the SMOOTH (mouse-wheel) path ONLY.
+ *  Trackpads / touch take the instant path (ApplyDeltaInstant) and never ease.
+ *  1e-6/s ⇒ half-life ≈ 50 ms; a ~100px wheel click animates over ~120 ms —
+ *  snappy like a browser's mouse-wheel smooth-scroll, not a floaty spring
+ *  (was 0.005/s ≈ 130 ms half-life, which read as laggy). */
+const WHEEL_EASE_PER_SEC = 1e-6;
 /** Distance below which wheel ease snaps to target (px). */
 const WHEEL_SETTLE_PX = 0.5;
 
@@ -94,6 +97,23 @@ export class ScrollManager implements Animatable {
     s.targetY = Math.max(0, Math.min(maxY, s.targetY + dy));
     // Wheel cancels any leftover drag-flick momentum so the two inputs don't
     // fight each other (e.g. user flicks then immediately wheels — wheel wins).
+    s.velX = 0;
+    s.velY = 0;
+  };
+
+  /** Instant delta — trackpad / precise-pointer scrolling. The OS already
+   *  streams smoothed momentum deltas, so we move the position 1:1 with ZERO
+   *  ease for a fully-responsive, native feel. Position and target advance
+   *  together (no pending ease); _syncJiv commits it on the kicked tick.
+   *  Mouse wheels use ApplyDelta's smooth path instead. */
+  ApplyDeltaInstant = (jiv: Jiv, dx: number, dy: number): void => {
+    const s = this._ensureState(jiv);
+    const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
+    const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
+    s.targetX = Math.max(0, Math.min(maxX, s.targetX + dx));
+    s.targetY = Math.max(0, Math.min(maxY, s.targetY + dy));
+    s.posX = s.targetX;
+    s.posY = s.targetY;
     s.velX = 0;
     s.velY = 0;
   };

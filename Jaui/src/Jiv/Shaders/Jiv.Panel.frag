@@ -845,10 +845,23 @@ void main() {
         // Scale by glassiness so rim blur fades with Thickness rather than
         // disappearing the instant the shader variant flips to MATERIAL_NONE.
         lodBoost = (rimBoost * 1.5 + innerBlur * 1.0) * glassiness + refractLod;
-        vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
-        vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
-        vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
-        backdrop = vec3(sR.r, sG.g, sB.b);
+        // Chromatic aberration splits the R/B taps by ±caStep along the normal.
+        // caStep = normal * (ca * hump * 3) — and `hump` is ~0 across the entire
+        // flat interior (decays to <2e-4 by x=3·bezel). So for the vast interior
+        // of a panel/modal the three channel taps sample the SAME uv and the
+        // fringe is sub-pixel. Collapse to ONE backdrop read there: pixel-
+        // identical output, but 2 fewer mipmapped backdrop samples on millions
+        // of interior fragments (the dominant cost of a full-screen glass modal).
+        // The full 3-tap CA still runs in the thin rim band where it's visible.
+        float caSpreadPx = chromaticAberration * hump * 3.0; // = length(caStep)
+        if (caSpreadPx < 0.5) {
+            backdrop = sampleBackdrop(baseUv, lodBoost, frostLod);
+        } else {
+            vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
+            vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
+            vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
+            backdrop = vec3(sR.r, sG.g, sB.b);
+        }
 
         backdrop = applyGrading(backdrop, brightness, saturation, contrast);
     } else if (hasBackdropFilter) {
@@ -888,7 +901,12 @@ void main() {
     //      BorderColor. Defines the silhouette under the rim glow.
     float edgeLightAlpha = 0.0;
     vec3 edgeLightRgb = vec3(0.0);
-    if (materialType == 1.0 && fillAlpha > 0.0) {
+    // Edge light only exists within `rimBand` of the outline — edgeProximity
+    // (and thus edgeLightAlpha) is exactly 0 once dist <= -rimBand. Skip the
+    // whole block (incl. its extra rim backdrop tap) in the deep interior:
+    // edgeLightAlpha stays 0 → the composite below is a no-op. Pixel-identical,
+    // saves one mipmapped backdrop read across the entire panel/modal interior.
+    if (materialType == 1.0 && fillAlpha > 0.0 && dist > -max(bezelWidth * 0.75, 6.0)) {
         // Wide rim band — at LEAST 6 px so the glow is actually visible,
         // scaled up with bezelWidth (the optical "thickness" of the glass).
         float rimBand = max(bezelWidth * 0.75, 6.0);
@@ -1100,15 +1118,21 @@ void main() {
         float rimSpecAlign = dot(normal, specLightDirRim);
         float rimSpecDir = pow(max(rimSpecAlign, 0.0), 3.0);
         float rimSpecAlpha = rimSpecBand * rimSpecDir * specIntensity * fillAlpha;
-        // Color: vibrant-boosted backdrop (sampled at the rim) mixed toward white.
-        // LOD offset slightly sharper than the panel so the rim highlight reads
-        // as "specular reflection of crisper nearby content."
-        vec3 rimSpecBackdrop = sampleBackdrop(baseUv, max(0.0, lodBoost - 0.5), frostLod);
-        float rimSpecLuma = dot(rimSpecBackdrop, LUMA);
-        vec3 rimSpecVibrant = clamp(mix(vec3(rimSpecLuma), rimSpecBackdrop, 1.8) * 1.4, 0.0, 1.0);
-        vec3 rimSpecRgb = mix(rimSpecVibrant, vec3(1.0), 0.45);
-        result.rgb = result.rgb * (1.0 - rimSpecAlpha) + rimSpecRgb * rimSpecAlpha;
-        result.a = result.a * (1.0 - rimSpecAlpha) + rimSpecAlpha;
+        // rimSpecAlpha is 0 once dist <= -rimSpecW (the thin rim band) — i.e. the
+        // entire interior. Skip the vibrant-rim backdrop tap + composite there:
+        // a no-op composite anyway. Pixel-identical, saves the second per-pixel
+        // backdrop read across the whole interior.
+        if (rimSpecAlpha > 0.0) {
+            // Color: vibrant-boosted backdrop (sampled at the rim) mixed toward white.
+            // LOD offset slightly sharper than the panel so the rim highlight reads
+            // as "specular reflection of crisper nearby content."
+            vec3 rimSpecBackdrop = sampleBackdrop(baseUv, max(0.0, lodBoost - 0.5), frostLod);
+            float rimSpecLuma = dot(rimSpecBackdrop, LUMA);
+            vec3 rimSpecVibrant = clamp(mix(vec3(rimSpecLuma), rimSpecBackdrop, 1.8) * 1.4, 0.0, 1.0);
+            vec3 rimSpecRgb = mix(rimSpecVibrant, vec3(1.0), 0.45);
+            result.rgb = result.rgb * (1.0 - rimSpecAlpha) + rimSpecRgb * rimSpecAlpha;
+            result.a = result.a * (1.0 - rimSpecAlpha) + rimSpecAlpha;
+        }
 
         // ── Border zone backdrop refilter ───────────────────────────────
         // Apple's glass rim isn't a flat color — it's an optical zone where

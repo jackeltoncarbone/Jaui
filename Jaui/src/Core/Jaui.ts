@@ -2977,11 +2977,25 @@ export class Canvas implements DirtyTracker {
         if (yTarget) dy *= yTarget.Height;
       }
 
+      // Input-type routing for a browser-native feel:
+      //   • Trackpad / precise pointer — pixel-mode deltas that are small or
+      //     fractional. The OS already streams smoothed momentum, so apply 1:1
+      //     INSTANT (no ease) — maximally responsive.
+      //   • Mouse wheel — line-mode, or large integer pixel steps (~100+ on
+      //     Chrome/Mac). Smooth the discrete jump so it animates instead of
+      //     teleporting. Bias is intentional: large+integer ⇒ never mistaken
+      //     for trackpad, so wheel always smooths and trackpad stays instant.
+      const ad = Math.max(Math.abs(e.deltaX), Math.abs(e.deltaY));
+      const precise = e.deltaMode === 0
+        && (ad < 40 || (e.deltaY % 1 !== 0) || (e.deltaX % 1 !== 0));
+      const apply = precise
+        ? this._scrollManager.ApplyDeltaInstant
+        : this._scrollManager.ApplyDelta;
       if (xTarget && xTarget === yTarget) {
-        this._scrollManager.ApplyDelta(xTarget, dx, dy);
+        apply(xTarget, dx, dy);
       } else {
-        if (xTarget) this._scrollManager.ApplyDelta(xTarget, dx, 0);
-        if (yTarget) this._scrollManager.ApplyDelta(yTarget, 0, dy);
+        if (xTarget) apply(xTarget, dx, 0);
+        if (yTarget) apply(yTarget, 0, dy);
       }
       this._animationManager.Kick();
       e.preventDefault();

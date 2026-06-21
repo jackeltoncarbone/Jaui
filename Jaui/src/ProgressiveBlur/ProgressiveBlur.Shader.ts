@@ -354,9 +354,25 @@ void main() {
     // LOD keeps the clear edge pixel-crisp; the block-free cubic B-spline folds
     // in as LOD grows (the heavy end magnifies tiny mips, where plain bilinear
     // would show soft blocks). texSize = pyramid res at this LOD = res / 2^lod.
-    vec3 sharpRgb  = textureLod(u_Pyramid, safeUv, lod).rgb;
-    vec3 smoothRgb = textureBicubicLod(u_Pyramid, safeUv, lod, u_Resolution / exp2(lod));
-    vec3 rgb = mix(sharpRgb, smoothRgb, smoothstep(1.0, 3.0, lod));
+    // The blend weight is 0 below lod 1 and 1 above lod 3 — outside that window
+    // one of these two samples is scaled by 0 and discarded. Gate on the weight
+    // so we don't pay for the unused sample (PIXEL-IDENTICAL output):
+    //   • clear end  (lod < 1): 1 trilinear tap instead of 5  (~40% of the ramp)
+    //   • heavy end  (lod > 3): 4 bicubic taps instead of 5
+    //   • transition (1..3):    both, as before
+    // LOD varies smoothly across the gradient, so the branch is spatially
+    // coherent — negligible divergence cost, real bandwidth win.
+    float cubicBlend = smoothstep(1.0, 3.0, lod);
+    vec3 rgb;
+    if (cubicBlend <= 0.0) {
+        rgb = textureLod(u_Pyramid, safeUv, lod).rgb;
+    } else if (cubicBlend >= 1.0) {
+        rgb = textureBicubicLod(u_Pyramid, safeUv, lod, u_Resolution / exp2(lod));
+    } else {
+        vec3 sharpRgb  = textureLod(u_Pyramid, safeUv, lod).rgb;
+        vec3 smoothRgb = textureBicubicLod(u_Pyramid, safeUv, lod, u_Resolution / exp2(lod));
+        rgb = mix(sharpRgb, smoothRgb, cubicBlend);
+    }
 
     // Backdrop grading — each factor ramps from 1 (identity, clear end) to
     // its authored value (blurred end). Doing this per-pixel keeps the

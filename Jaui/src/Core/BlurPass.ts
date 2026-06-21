@@ -111,6 +111,10 @@ export class BlurPass {
   /** Single FBO reused for the attach-mip-and-blit dance in
    *  GenerateOutputMipmap. Created lazily on first use. */
   private _mipBlitFbo: WebGLFramebuffer | null = null;
+  /** Ping-pong scratch FBOs for the σ-adaptive base downsample (band-limit
+   *  optimization). Created lazily the first time a large blur downsamples. */
+  private _preA: Framebuffer | null = null;
+  private _preB: Framebuffer | null = null;
   get LastDepth(): number { return this._lastDepth; }
 
   private _downTexLoc: WebGLUniformLocation | null;
@@ -202,6 +206,71 @@ export class BlurPass {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       this._lastDepth = 0;
       return this._levels[0].Texture;
+    }
+
+    // ── σ-adaptive base downsample (band-limit optimization) ──────────────
+    // A blur of σ pixels destroys every detail finer than ~σ px. So running
+    // the whole pyramid on a backdrop pre-downsampled by k ≈ σ/4 throws away
+    // ONLY information the blur was about to erase — pixel-faithful output —
+    // while cutting fragment fill ~k×. This makes a heavy full-screen modal
+    // blur cost roughly the same as a light one instead of scaling with σ.
+    //
+    // Guarded to LARGE-area blurs (full-screen modals/scrims): small scissored
+    // glass panels are already cheap and keep their exact prior pixels (k=1),
+    // and their tight scissor margins make boundary reads on a downsample
+    // risky — so we only re-base when the sampled area is a big fraction of
+    // the canvas, where margins are ample and the win is real.
+    {
+      const BASE_SIGMA = 4;   // keep ≥ this much σ in base space (k ≤ σ/4 ≪ σ/2 → invisible)
+      const K_MAX = 8;
+      const fullArea = width * height;
+      const area = scissor ? scissor.w * scissor.h : fullArea;
+      let k = radius > BASE_SIGMA
+        ? Math.min(K_MAX, 1 << Math.floor(Math.log2(radius / BASE_SIGMA)))
+        : 1;
+      if (k > 1 && area >= 0.15 * fullArea) {
+        if (!this._preA) this._preA = new Framebuffer(gl, { highPrecision: true });
+        if (!this._preB) this._preB = new Framebuffer(gl, { highPrecision: true });
+        const pp = [this._preA, this._preB];
+        gl.disable(gl.BLEND);
+        if (scissor) gl.enable(gl.SCISSOR_TEST); else gl.disable(gl.SCISSOR_TEST);
+        gl.useProgram(this._down.Program);
+        gl.uniform1i(this._downTexLoc, 0);
+        gl.uniform1f(this._downOffLoc, 1.0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindVertexArray(this._quad.Vao);
+        let srcTex = input, srcW = width, srcH = height;
+        let curW = width, curH = height;
+        const passes = Math.round(Math.log2(k));
+        for (let s = 0; s < passes; s++) {
+          curW = Math.max(1, Math.floor(curW / 2));
+          curH = Math.max(1, Math.floor(curH / 2));
+          const fb = pp[s % 2];
+          fb.Resize(curW, curH);
+          fb.Bind();
+          gl.viewport(0, 0, curW, curH);
+          if (scissor) {
+            const ls = curW / width; // this destination level's scale vs full input
+            const sx = Math.max(0, Math.floor(scissor.x * ls));
+            const sw = Math.min(curW - sx, Math.ceil(scissor.w * ls));
+            const sy = Math.max(0, Math.floor((height * ls) - (scissor.y + scissor.h) * ls));
+            const sh = Math.min(curH - sy, Math.ceil(scissor.h * ls));
+            gl.scissor(sx, sy, Math.max(1, sw), Math.max(1, sh));
+          }
+          gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
+          gl.bindTexture(gl.TEXTURE_2D, srcTex);
+          gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+          srcTex = fb.Texture; srcW = curW; srcH = curH;
+        }
+        if (scissor) gl.disable(gl.SCISSOR_TEST);
+        // Re-base the pyramid onto the downsampled backdrop. The consumer
+        // samples level 0 + its mips via normalized textureLod, so the lower
+        // resolution is transparent to output.
+        input = srcTex;
+        width = curW; height = curH;
+        radius = radius / k;
+        if (scissor) scissor = { x: scissor.x / k, y: scissor.y / k, w: scissor.w / k, h: scissor.h / k };
+      }
     }
 
     // Pick pyramid depth from desired sigma. Each Down/Up pair roughly
