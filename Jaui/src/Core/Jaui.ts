@@ -1156,7 +1156,11 @@ export class Canvas implements DirtyTracker {
           const _gMinHalf = Math.min(node.Width * _gsx, node.Height * _gsy) * d * 0.5;
           const _gThicknessDev = node.RenderStyle.Thickness * _gAvgScale * d;
           const _gBulgeMax = node.RenderStyle.Fillet * _gMinHalf * 0.25 * 0.7;
-          const _gRefractMax = (_gThicknessDev + _gBulgeMax) * node.RenderStyle.Refraction;
+          // MAGNITUDE: refraction displacement reach is |thickness·refraction| (a negative Refraction —
+          // e.g. the pressed selection indicator's -1 — only flips direction). The signed value shrank the
+          // blur/snapshot scissor below the AABB, clipping the rounded refraction to a rectangle. abs() sizes
+          // the scissor to cover the full displaced footprint so the pill refraction reads valid backdrop.
+          const _gRefractMax = (_gThicknessDev + _gBulgeMax) * Math.abs(node.RenderStyle.Refraction);
           const _gCaMax = node.RenderStyle.ChromaticAberration * 3.0;
           const margin = frostCssPx * d + _gRefractMax + _gCaMax + 8 * d;
           const _ab = this._nodeAabb(node, eff, effH);

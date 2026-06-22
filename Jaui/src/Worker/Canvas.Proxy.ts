@@ -111,6 +111,25 @@ export class CanvasProxy {
    *  WorkerPlatform.GetDevicePixelRatio() returns inside the worker. */
   get Dpr(): number { return window.devicePixelRatio || 1; }
 
+  /**
+   * Convert a DOM client-space pointer (a PointerEvent's `clientX`/`clientY`) into the canvas NODE
+   * coordinate space — the DEVICE-pixel space that laid-out `Jiv` rects (`node.X/Y/Width/Height`) live in.
+   *
+   * THE single source of truth for main-thread components that attach their own pointer listeners to the
+   * canvas `Element` and hit-test against node rects (tab bars, the selection indicator, any future drag
+   * tracker). Node rects are CSS × `Dpr`, but `clientX`/`getBoundingClientRect` are CSS px — so a raw
+   * `clientX - rect.left` mis-hits on ≥2× (retina) displays (items past the visual midpoint become
+   * unclickable). This applies the canvas origin AND the device scale once, correctly, everywhere.
+   *
+   * (Fraction-based controls — slider/wheel that divide the pointer by their OWN element rect to get a
+   * 0..1 value — are dpr-independent and do NOT need this.)
+   */
+  ClientToNodePoint(clientX: number, clientY: number): [number, number] {
+    const rect = this.Element.getBoundingClientRect();
+    const d = this.Dpr;
+    return [(clientX - rect.left) * d, (clientY - rect.top) * d];
+  }
+
   SetJssVars = (vars: Map<string, string>): void => {
     this._bridge.PostMessage({ T: 'jss-vars', Entries: Array.from(vars.entries()) });
   };
