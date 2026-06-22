@@ -46,7 +46,7 @@ const _clone = (b: BackgroundValue): BackgroundValue => {
   const colorCopy = _cloneColor(b.Color);
   switch (b.Kind) {
     case 'Color':          return { Kind: 'Color', Color: colorCopy };
-    case 'Image':          return { Kind: 'Image', Color: colorCopy, Url: b.Url, Fit: b.Fit };
+    case 'Image':          return { Kind: 'Image', Color: colorCopy, Url: b.Url, Fit: b.Fit, FocalX: b.FocalX, FocalY: b.FocalY };
     case 'LinearGradient': return {
       Kind: 'LinearGradient', Color: colorCopy,
       AngleRad: b.AngleRad, Stops: _cloneStops(b.Stops),
@@ -88,12 +88,35 @@ const _parseUrl = (s: string): BackgroundValue => {
     throw new Error(`[Jaui] Url() needs at least a path argument: "${s}"`);
   }
   const url = _stripQuotes(args[0]);
-  const fit: FitMode = args.length >= 2 ? _parseFit(args[1]) : 'Cover';
-  const placeholder = args.length >= 3
-    ? ParseColor(args[2])
-    : { R: 0, G: 0, B: 0, A: 0 };
-  return { Kind: 'Image', Color: placeholder, Url: url, Fit: fit };
+  // Args after the path are order-tolerant: a `Cover`/`Contain` token sets Fit,
+  // a `Focal(x, y)` token sets the crop anchor, anything else is the
+  // load-time placeholder color. Keeps the legacy positional form
+  // (Url(path, Fit, color)) working while allowing Focal in any slot.
+  let fit: FitMode = 'Cover';
+  let focalX = 0.5;
+  let focalY = 0.5;
+  let placeholder = { R: 0, G: 0, B: 0, A: 0 };
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i].trim();
+    if (a === 'Cover' || a === 'cover' || a === 'Contain' || a === 'contain') {
+      fit = _parseFit(a);
+    } else if (_startsWithCtor(a, 'Focal')) {
+      const f = _innerArgs(a);
+      if (f.length >= 1) focalX = _parsePercent(f[0], 0.5);
+      // `Focal(0.5 0.2)` (space-separated) or `Focal(0.5, 0.2)` both work.
+      if (f.length >= 2) focalY = _parsePercent(f[1], 0.5);
+      else if (f.length === 1) {
+        const parts = f[0].trim().split(/\s+/);
+        if (parts.length >= 2) { focalX = _parsePercent(parts[0], 0.5); focalY = _parsePercent(parts[1], 0.5); }
+      }
+    } else {
+      placeholder = ParseColor(a);
+    }
+  }
+  return { Kind: 'Image', Color: placeholder, Url: url, Fit: fit, FocalX: _clamp01(focalX), FocalY: _clamp01(focalY) };
 };
+
+const _clamp01 = (n: number): number => (n < 0 ? 0 : n > 1 ? 1 : n);
 
 const _parseLinearGradient = (s: string): BackgroundValue => {
   const args = _innerArgs(s);

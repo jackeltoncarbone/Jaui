@@ -1,6 +1,7 @@
 import { Injectable, InjectionToken, signal } from '@angular/core';
 import {
   ParseJss,
+  MergeRulesets,
   type ParsedJss,
   type Stylesheet,
   type Ruleset,
@@ -108,7 +109,19 @@ export class JssRegistry {
     const anims: Record<string, AnimationDefinition> = isParsed && 'Animations' in (parsed as ParsedJss)
       ? (parsed as ParsedJss).Animations
       : {};
-    for (const [name, ruleset] of Object.entries(sheet)) {
+    for (const [name, incoming] of Object.entries(sheet)) {
+      // FIELD-MERGE when the class already exists, rather than wholesale replace.
+      // A later MergeSource for the SAME class name layers its fields ON TOP of the
+      // current ruleset (Style/Layout/TextStyle field-merge, PredicateStyles concat)
+      // exactly the way `: Base` extends do — so a small overlay sheet can re-tint just
+      // a class's Background or :Hover glow WITHOUT wiping its geometry/backdrop/springs.
+      // This is what makes live, app-wide theme re-tinting (the Version-bump → re-apply
+      // path this registry was built for) work via a partial overlay. Re-merging identical
+      // content is idempotent (the common per-component Ensure case is unaffected: each
+      // component still registers disjoint class names once), and a fresh first registration
+      // hits the `?? incoming` fast path with no merge cost.
+      const existing = this._rules.get(name);
+      const ruleset = existing ? MergeRulesets(existing, incoming) : incoming;
       this._rules.set(name, ruleset);
       // A class is a group-hover trigger iff any of its PredicateStyle
       // entries references the `GroupHover` state name anywhere in its

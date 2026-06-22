@@ -1159,6 +1159,16 @@ const _mergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => ({
     : undefined,
 });
 
+/**
+ * Public field-merge of two rulesets: `b` layered ON TOP of `a` (Style/Layout/
+ * ChildLayout/TextStyle/Springs field-merge with filter-aware Style merge,
+ * Animations + PredicateStyles concatenate base-first). Identical to the internal
+ * merge used for `: Base` extends and duplicate same-name rules within a sheet —
+ * exported so the Angular registry can layer a re-registered class instead of
+ * replacing it (live theme overlays). Pure; allocates a fresh ruleset.
+ */
+export const MergeRulesets = (a: Ruleset, b: Ruleset): Ruleset => _mergeRulesets(a, b);
+
 // ─── Compound predicate parser ──────────────────────────────────────────
 //
 // Grammar for the parenthesized boolean expression in `Foo:(expr) { ... }`:

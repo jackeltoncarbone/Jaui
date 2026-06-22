@@ -29,7 +29,10 @@ export interface GradientStop {
 
 export type BackgroundValue =
   | { Kind: 'Color',          Color: Color }
-  | { Kind: 'Image',          Color: Color, Url: string, Fit: FitMode }
+  /** FocalX/FocalY are the [0,1] crop anchor used when Fit='Cover' (and for the
+   *  inset side under 'Contain'). 0.5 = centered (CSS `object-position: center`).
+   *  Shifts which part of the over-scaled image stays in frame at any aspect. */
+  | { Kind: 'Image',          Color: Color, Url: string, Fit: FitMode, FocalX: number, FocalY: number }
   | { Kind: 'LinearGradient', Color: Color, AngleRad: number, Stops: GradientStop[] }
   | { Kind: 'RadialGradient', Color: Color, CenterX: number, CenterY: number, Radius: number, Stops: GradientStop[] };
 

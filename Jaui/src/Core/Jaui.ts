@@ -1856,13 +1856,17 @@ export class Canvas implements DirtyTracker {
       const elapsed = now - node.BgImageFadeStartMs;
       const alpha = Math.min(1, elapsed / Canvas._BG_IMAGE_FADE_MS);
       if (alpha < 1) this.RequestFrame();
+      // Focal crop anchor (CSS object-position). The cropped axis (scale < 1)
+      // slides the visible window so the focal point stays framed; offset
+      // spans [0, 1-scale], so 0.5 reproduces the legacy centered crop and
+      // the extremes still fully cover the panel (no tint bars under Cover).
       return {
         Mode: 'Image',
         Texture: entry.Texture,
         UvScaleX: scaleX,
         UvScaleY: scaleY,
-        UvOffsetX: (1 - scaleX) * 0.5,
-        UvOffsetY: (1 - scaleY) * 0.5,
+        UvOffsetX: (1 - scaleX) * bg.FocalX,
+        UvOffsetY: (1 - scaleY) * bg.FocalY,
         FadeAlpha: alpha,
       };
     }
@@ -3604,7 +3608,7 @@ export { JivAnimationDriver } from '../Animation/Animation.Driver';
 export type { AccessibilityConfig } from '../Accessibility/Accessibility.Types';
 
 // JSS
-export { ParseJss } from '../Jss/Jss.Parser';
+export { ParseJss, MergeRulesets } from '../Jss/Jss.Parser';
 export type { Stylesheet, Ruleset, ParsedJss, VarTable, AnimationTable, PredicateExpr, PredicateStyle } from '../Jss/Jss.Parser';
 export { EvaluatePredicate } from '../Jss/Jss.Predicate';
 export { SlotFor, type Slot } from '../Jss/Jss.Routes';
