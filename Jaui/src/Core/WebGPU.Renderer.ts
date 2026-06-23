@@ -522,6 +522,13 @@ export class WebGPURenderer implements Renderer {
     throw new Error('[Jaui WebGPU] SnapshotScreen not yet implemented');
   };
 
+  BuildSharedBackdrop = (_width: number, _height: number, _maxLod: number): GpuTextureHandle => {
+    // TODO: mirror WebGL2's dedicated-pass build when the WebGPU backend is
+    // tested on real hardware (glass/pblur already require SnapshotScreen,
+    // which is likewise a stub here).
+    throw new Error('[Jaui WebGPU] BuildSharedBackdrop not yet implemented');
+  };
+
   // ── Blit ──
 
   Blit = (source: GpuTextureHandle): void => {

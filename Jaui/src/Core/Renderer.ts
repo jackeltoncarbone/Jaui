@@ -235,6 +235,15 @@ export interface Renderer {
   /** The pyramid depth from the last ComputeBlur call. */
   readonly LastBlurDepth: number;
 
+  /** Build the shared backdrop pyramid (`?wkr-shared-backdrop`): a sharp-root
+   *  (σ=0) blur of the current scene with a full Gaussian mip chain, in a
+   *  DEDICATED pass that the per-surface pblur / glass-border blurs can't
+   *  clobber. Many glass surfaces then sample it via textureLod at their own
+   *  frost LOD — one build per frame, many cheap samples. `maxLod` sizes the
+   *  chain to the heaviest frost (+ refraction headroom). Restores the scene
+   *  render target before returning. */
+  BuildSharedBackdrop(width: number, height: number, maxLod: number): GpuTextureHandle;
+
   // ── Progressive Blur ──
 
   DrawProgressiveBlur(params: ProgressiveBlurParams): void;

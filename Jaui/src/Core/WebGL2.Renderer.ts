@@ -253,6 +253,11 @@ export class WebGL2Renderer implements Renderer {
   // Render targets
   private _sceneFbo!: Framebuffer;
   private _blur!: BlurPass;
+  /** Dedicated blur pass for the shared backdrop pyramid (`?wkr-shared-backdrop`).
+   *  Separate buffers from `_blur` so the per-surface pblur / glass-border blurs
+   *  can't clobber the once-per-frame shared pyramid that many glass surfaces
+   *  sample. Lazily created on first use. */
+  private _sharedBlur: BlurPass | null = null;
 
   // Panel shader
   // Two compiled variants of the panel shader. `MATERIAL_GLASS` constant-
@@ -848,6 +853,26 @@ export class WebGL2Renderer implements Renderer {
   };
 
   get LastBlurDepth(): number { return this._blur.LastDepth; }
+
+  /** Build the shared backdrop: a sharp-root (σ=0) blur of the current scene
+   *  with a full Gaussian mip chain, into a DEDICATED pass so the per-surface
+   *  pblur / glass-border blurs (which reuse `_blur`'s buffers) can't overwrite
+   *  it mid-frame. Glass surfaces then sample the result via textureLod at their
+   *  own frost LOD — one build per frame, many cheap samples ("fire once, sample
+   *  many"). Level 0 is the raw scene, so the same texture doubles as the
+   *  no-frost LOD-0 fallback. Restores the scene FBO before returning. */
+  BuildSharedBackdrop = (width: number, height: number, maxLod: number): GpuTextureHandle => {
+    const pass = this._sharedBlur ?? (this._sharedBlur = new BlurPass(this._gl));
+    // radius 0 → level 0 is the raw scene (1-tap copy, no dual-filter pre-blur);
+    // GenerateOutputMipmap then builds the Gaussian stack from that sharp root.
+    const tex = pass.Blur(this._sceneFbo.Texture, width, height, 0, undefined, undefined);
+    pass.GenerateOutputMipmap(maxLod);
+    // BlurPass bound its own programs; invalidate the cache like ComputeBlur does.
+    this._lastProgram = null;
+    // Restore the scene FBO so the subsequent glass draws target it.
+    this.RebindSceneTarget();
+    return _wrap(tex);
+  };
 
   // ── Progressive Blur ──
 

@@ -154,6 +154,24 @@ export class Canvas implements DirtyTracker {
   private _frameCount:   number = 0;
   private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
+  /** Per-op CPU time (ms) inside the glass/pblur backdrop pipeline, summed
+   *  per frame. A call that forces a CPU↔GPU sync shows its GPU cost here as
+   *  inflated CPU time — so the dominant op points at the bottleneck. */
+  private _opMs = { Snap: 0, Blur: 0, Mip: 0, Draw: 0 };
+  /** `?wkr-shared-backdrop` — build ONE sharp-root backdrop pyramid per frame
+   *  (game-style: fire once, sample many) and let every glass surface sample it
+   *  at its frost LOD, instead of rebuilding a per-panel blur 50× (the ~759ms).
+   *  Frame-scoped; rebuilt only when the scene changed under a pending surface. */
+  private _sharedBackdrop: boolean = false;
+  private _sharedPyramid: GpuTextureHandle | null = null;
+  private _sharedPyramidValid: boolean = false;
+  /** Footprints (device px, flat [x0,y0,x1,y1,…]) drawn into the scene FBO since
+   *  the shared pyramid was last built. A glass surface reuses the pyramid iff
+   *  its sample rect intersects NONE of these (else it'd be missing fresh content
+   *  in its backdrop). A single union AABB was too coarse — once surfaces spread
+   *  across the canvas it covered everything and forced a full-canvas rebuild per
+   *  surface (slower than the old scissored per-surface blur). */
+  private _sceneDirtyRects: number[] = [];
   /** Frame counter for the one-shot per-surface dump (`?wkr-jaui-prof`). Logs
    *  each glass/pblur surface's rect + scissor fill once on a settled frame so
    *  we can see which surface dominates GPU fill. */
@@ -811,6 +829,7 @@ export class Canvas implements DirtyTracker {
       this._counts.Text = 0;
       this._counts.Image = 0;
       this._counts.PBlur = 0;
+      this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
     }
 
     this._render(dt);
@@ -875,7 +894,8 @@ export class Canvas implements DirtyTracker {
             `[Jaui] ${n}f over ${(tEnd - this._profLastDumpMs).toFixed(0)}ms — avg total ${avg(this._profSum.Total)}ms;` +
             ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
             ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)} | gpu ${gpuStr}` +
-            ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur}`
+            ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur}` +
+            ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
           this._profSum.Render = this._profSum.Total = 0;
@@ -919,6 +939,12 @@ export class Canvas implements DirtyTracker {
     // glass/pblur that used to call SnapshotScreen).
     r.DisableBlend();
     r.BeginScenePass(0, 0, 0);
+
+    // Shared backdrop is rebuilt fresh each frame (no cross-frame caching — the
+    // video-backdrop contract changes the scene every frame). Invalidate now;
+    // the first glass/pblur surface lazily builds it from the scene-so-far.
+    this._sharedPyramidValid = false;
+    this._sceneDirtyRects.length = 0;
 
     // ── Janvas pre-pass ──
     // Foreign WebGL2 renderers (a THREE.js scene, a custom shader app, etc.)
@@ -1588,21 +1614,63 @@ export class Canvas implements DirtyTracker {
         // glass panel's footprint + margin (same rect the blur uses) — the
         // shader only samples the snapshot within the panel, so a full-canvas
         // copy was pure wasted bandwidth scaling with screen size.
-        const sceneSnap = r.SnapshotScreen(scissor);
-        lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
-        // Pyramid is built AT this panel's frost sigma, so set the base LOD to
-        // the panel's frostLod: the shader's main sample (lod = frostLod -
-        // u_BaseFrostLod) lands on LOD 0 (full res). Only the subtle glass
-        // rim/inner boost (≲ 2 LODs) climbs into the now full-sigma mip chain.
-        lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
-        // Headroom for the panel shader's refraction-footprint LOD: strong
-        // refraction folds the backdrop and the shader raises the sampled LOD to
-        // blur the caustic away (see Jiv.Panel.frag refractLod). That can reach
-        // ~4-5; cap mip generation high enough that it ramps smoothly instead of
-        // clamping to a too-shallow deepest mip mid-fold.
-        const glassMaxLod = 5;
-        r.GenerateBlurMipmap(glassMaxLod);
-        r.RebindSceneTarget();
+        let sceneSnap: GpuTextureHandle | null;
+        if (this._sharedBackdrop) {
+          // ── Shared backdrop (fire once, sample many) ──
+          // Build ONE sharp-root pyramid per frame and let every glass surface
+          // sample it at its own frost LOD (frost-as-LOD — exactly how the pblur
+          // path already runs). Rebuild only when the scene changed under THIS
+          // surface's footprint since the last build (fresh content / glass over
+          // glass); otherwise reuse — no per-surface snapshot, blur, or mipmap.
+          let needRebuild = !this._sharedPyramidValid;
+          if (!needRebuild) {
+            // Reuse unless this surface's sample rect overlaps something drawn
+            // into the scene since the pyramid was built (fresh content / glass
+            // over glass). Per-rect test — a coarse union AABB over-triggered.
+            const sx1 = scissor.x + scissor.w, sy1 = scissor.y + scissor.h;
+            const dr = this._sceneDirtyRects;
+            for (let i = 0; i < dr.length; i += 4) {
+              if (scissor.x < dr[i + 2] && sx1 > dr[i] && scissor.y < dr[i + 3] && sy1 > dr[i + 1]) { needRebuild = true; break; }
+            }
+          }
+          if (needRebuild) {
+            // One sharp-root pyramid into a DEDICATED pass (pblur/border can't
+            // clobber it). Depth covers the heaviest frost expressed as a LOD
+            // plus the shader's refraction-footprint boost (~5); `_maxFrostBlur`
+            // is the largest BackdropFrostBlur in the tree, scanned pre-walk,
+            // and BuildSharedBackdrop self-clamps to the pyramid's level count.
+            const _tShared = performance.now();
+            this._sharedPyramid = r.BuildSharedBackdrop(w, h, Math.log2(Math.max(1, this._maxFrostBlur * d)) + 5);
+            this._opMs.Blur += performance.now() - _tShared;  // shared build folds snap+blur+mip into one number
+            this._sharedPyramidValid = true;
+            this._sceneDirtyRects.length = 0;  // snapshot captured the scene-so-far; start fresh
+          }
+          lastBackdrop = this._sharedPyramid;
+          sceneSnap = this._sharedPyramid;  // sharp level 0 doubles as the no-frost LOD-0 fallback (u_Scene)
+          lastBaseFrostLod = 0;             // sharp-rooted at σ=0 → the panel's frost is a pure LOD offset
+        } else {
+          const _tSnap = performance.now();
+          sceneSnap = r.SnapshotScreen(scissor);
+          const _tBlur = performance.now();
+          this._opMs.Snap += _tBlur - _tSnap;
+          lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
+          this._opMs.Blur += performance.now() - _tBlur;
+          // Pyramid is built AT this panel's frost sigma, so set the base LOD to
+          // the panel's frostLod: the shader's main sample (lod = frostLod -
+          // u_BaseFrostLod) lands on LOD 0 (full res). Only the subtle glass
+          // rim/inner boost (≲ 2 LODs) climbs into the now full-sigma mip chain.
+          lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
+          // Headroom for the panel shader's refraction-footprint LOD: strong
+          // refraction folds the backdrop and the shader raises the sampled LOD to
+          // blur the caustic away (see Jiv.Panel.frag refractLod). That can reach
+          // ~4-5; cap mip generation high enough that it ramps smoothly instead of
+          // clamping to a too-shallow deepest mip mid-fold.
+          const glassMaxLod = 5;
+          const _tMip = performance.now();
+          r.GenerateBlurMipmap(glassMaxLod);
+          this._opMs.Mip += performance.now() - _tMip;
+          r.RebindSceneTarget();
+        }
 
         r.EnableBlend();
         this._panelBuffer.Begin();
@@ -1638,7 +1706,9 @@ export class Canvas implements DirtyTracker {
         // of v_Tint when u_BgMode != 0. Border, refraction, frost, rim
         // spec all keep working.
         const glassBgPaint = this._computeBgPaint(node);
+        const _tDraw = performance.now();
         r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
+        this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
         else this._counts.Panels++;
         if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
@@ -1690,6 +1760,17 @@ export class Canvas implements DirtyTracker {
       if (anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
         this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+      }
+
+      // Shared-backdrop dirty tracking: this node has now committed to the
+      // scene FBO, so fold its footprint into the since-build dirty union — a
+      // later glass surface that overlaps it must rebuild rather than reuse a
+      // pyramid taken before this drew. Runs after the material branch above,
+      // so a glass surface never sees its OWN footprint when it checks reuse.
+      if (this._sharedBackdrop) {
+        const dab = this._nodeAabb(node, eff, effH);
+        const dpr = this._dpr;
+        this._sceneDirtyRects.push(dab.minX * dpr, dab.minY * dpr, dab.maxX * dpr, dab.maxY * dpr);
       }
 
       // Walk children in Layer order (ties break by tree order)
@@ -3196,6 +3277,7 @@ export class Canvas implements DirtyTracker {
     if (params.has('no-pblur')) this._diagNoPblur = true;
     if (params.has('no-glass')) this._diagNoGlass = true;
     if (params.has('no-pblur-draw')) this._diagNoPblurDraw = true;
+    if (params.has('wkr-shared-backdrop') || hash.includes('wkr-shared-backdrop')) this._sharedBackdrop = true;
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────
