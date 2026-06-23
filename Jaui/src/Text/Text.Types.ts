@@ -1,5 +1,5 @@
 import type { Color } from '../Core/Types';
-import { Resolve, type ResolveContext } from '../Core/Length';
+import { Resolve, ResolveTernary, ResolveVars, type ResolveContext } from '../Core/Length';
 import { ParseColor } from '../Core/Color.Parse';
 
 export type TextAlign = 'Left' | 'Center' | 'Right' | 'Justify';
@@ -51,7 +51,7 @@ export const ResolveTextStyle = (style: TextStyle, ctx: ResolveContext): Resolve
   FontSize: Resolve(style.FontSize, ctx, 'W'),
   FontWeight: style.FontWeight,
   FontStyle: style.FontStyle,
-  Color: ParseColor(style.Color),
+  Color: ParseColor(ResolveVars(ResolveTernary(style.Color, ctx), ctx)),
   LineHeight: Resolve(style.LineHeight, ctx, 'W'),
   LetterSpacing: Resolve(style.LetterSpacing, ctx, 'W'),
   TextAlign: style.TextAlign,

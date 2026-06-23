@@ -118,15 +118,21 @@ export class MainBridge {
 
     // ── Eviction self-heal ── The worker recovers a lost GL context in place; this only
     // fires the reload when the worker itself is gone (it can't ping back / never restores).
+    // TEMPORARILY DISABLED: auto-reload masks a real crash we're debugging. Flip back to true.
+    const _WatchdogEnabled = false;
     this._watchdog = new ContextWatchdog({
       PostPing: () => this.PostMessage({ T: 'ping' }),
-      Reload: opts.Reload ?? (() => { if (typeof location !== 'undefined') location.reload(); }),
+      Reload: opts.Reload ?? (() => {
+        if (!_WatchdogEnabled) { console.warn('[Jaui.MainBridge] watchdog reload suppressed (disabled for debugging)'); return; }
+        if (typeof location !== 'undefined') location.reload();
+      }),
     });
     const onVisible = (): void => {
+      if (!_WatchdogEnabled) return;
       if (typeof document === 'undefined' || document.visibilityState === 'visible') this._watchdog.OnVisible();
     };
-    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
-    if (typeof window !== 'undefined') window.addEventListener('pageshow', onVisible);
+    if (_WatchdogEnabled && typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
+    if (_WatchdogEnabled && typeof window !== 'undefined') window.addEventListener('pageshow', onVisible);
 
     if (_DEBUG) console.log('[Jaui.MainBridge] constructed; canvas=', this.Canvas, 'worker=', this.Worker);
 

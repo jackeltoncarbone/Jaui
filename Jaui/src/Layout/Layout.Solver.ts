@@ -146,6 +146,20 @@ export const SolveLayout = (
 
 /** Build a child's ResolveContext from its parent's context. Child's
  *  PointScale is resolved against parent's PointScale (ptRefersToParent). */
+/** Merge a node's own `[vars]` over the inherited (parent/global) var map — the JSS-var CASCADE: an
+ *  authored `[vars]` on a subtree root overrides that `@Name` for the subtree's property resolution
+ *  (colors, lengths), the same way CSS custom properties inherit. Unknown nodes (no VarMap) pass the
+ *  parent map through unchanged (no alloc), so the common case is free. */
+const _mergeVars = (
+  base: ReadonlyMap<string, string> | undefined,
+  own: ReadonlyMap<string, string | number | boolean> | undefined,
+): ReadonlyMap<string, string> | undefined => {
+  if (!own || own.size === 0) return base;
+  const out = new Map<string, string>(base);
+  for (const [k, v] of own) out.set(k, String(v));
+  return out;
+};
+
 const _buildChildCtx = (
   child: Element,
   containerWidth: number,
@@ -155,6 +169,8 @@ const _buildChildCtx = (
   viewport: Viewport,
   vars: ReadonlyMap<string, string> | undefined,
 ): ResolveContext => {
+  // Cascade: this child's own `[vars]` override the inherited map for its own + descendants' resolution.
+  const childVars = _mergeVars(vars, (child as { VarMap?: ReadonlyMap<string, string | number | boolean> }).VarMap);
   const seed: ResolveContext = {
     ParentWidth: containerWidth,
     ParentHeight: containerHeight,
@@ -163,7 +179,7 @@ const _buildChildCtx = (
     RootPointScale: rootPointScale,
     ViewportWidth: viewport.Width,
     ViewportHeight: viewport.Height,
-    Vars: vars,
+    Vars: childVars,
   };
   const pointScale = Resolve(child.PointScale, seed, 'W', true);
   return { ...seed, PointScale: pointScale };
@@ -312,7 +328,7 @@ const _solveNode = (
   for (const child of node.Children) {
     const pos = child.ChildLayout.Position;
     if (pos === 'Placed' || pos === 'Fixed' || pos === 'Sticky') {
-      const childCtx = _buildChildCtx(child, width, height, ctx.PointScale, rootPointScale, viewport, vars);
+      const childCtx = _buildChildCtx(child, width, height, ctx.PointScale, rootPointScale, viewport, ctx.Vars);
       child.ResolveCtx = childCtx;
       const declW = _resolveSize(child.ChildLayout.Width, width, childCtx, 'W');
       const declH = _resolveSize(child.ChildLayout.Height, height, childCtx, 'H');
@@ -396,7 +412,7 @@ const _solveNode = (
     const pos = c.ChildLayout.Position;
     if (c.LeaveRequested) continue;
     if (pos === 'Flow' || pos === 'Offset') {
-      const childCtx = _buildChildCtx(c, contentWidth, contentHeight, ctx.PointScale, rootPointScale, viewport, vars);
+      const childCtx = _buildChildCtx(c, contentWidth, contentHeight, ctx.PointScale, rootPointScale, viewport, ctx.Vars);
       c.ResolveCtx = childCtx;
 
       const resolvedW = _resolveSize(c.ChildLayout.Width, contentWidth, childCtx, 'W');

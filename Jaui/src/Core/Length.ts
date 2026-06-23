@@ -181,6 +181,16 @@ export const ResolveTernary = (value: string, ctx: ResolveContext): string => {
   return ResolveTernary(picked, ctx);
 };
 
+/** Substitute `@Name` JSS var references inside a NON-numeric value string (colors, gradients, filters).
+ *  Length expressions resolve `@Name` arithmetically via `_resolveParsed`, but color/background/filter
+ *  values are parsed as strings and never went through that path — so `Background: @GlassTint` reached
+ *  the colour parser literally. This replaces each `@Name` token with its var value from the context
+ *  (registry table + per-node vars), leaving unknown names untouched (parser then warns as before). */
+export const ResolveVars = (value: string, ctx: ResolveContext): string => {
+  if (!ctx.Vars || value.indexOf('@') < 0) return value;
+  return value.replace(/@([A-Za-z_][A-Za-z0-9_]*)/g, (m, name: string) => ctx.Vars!.get(name) ?? m);
+};
+
 /** Missing-var warnings are deduped — one console message per var name
  *  per page load, not one per property that references it. */
 const _warnedMissingVars = new Set<string>();

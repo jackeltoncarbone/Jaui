@@ -98,6 +98,16 @@ export class JssRegistry {
     return this._animations;
   }
 
+  /** Set a JSS `@Name` var at RUNTIME (the "authored in JSS, set from JS" path). Bumping the version
+   *  re-pushes the var table to the worker (see `<jaui>`'s effect) and re-resolves every property that
+   *  references `@Name` — e.g. a glass class authored as `Background: @GlassTint` retints live. Pass the
+   *  same value twice and it no-ops (no needless re-resolve). */
+  SetVar = (name: string, value: string): void => {
+    if (this._vars.get(name) === value) return;
+    this._vars.set(name, value);
+    this._version.update((v) => v + 1);
+  };
+
   /** Add (or replace) a parsed sheet's contents (+ its var declarations)
    *  in this registry. */
   Merge = (parsed: ParsedJss | Stylesheet): void => {

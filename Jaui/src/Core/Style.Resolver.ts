@@ -1,7 +1,7 @@
 import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop } from '../Jiv/Jiv.Types';
 import { ParseProgressiveBlur } from '../ProgressiveBlur/ProgressiveBlur.Stops';
 import type { ResolveContext } from './Length';
-import { Resolve, ResolveTernary } from './Length';
+import { Resolve, ResolveTernary, ResolveVars } from './Length';
 import { ResolveLengthTuple4 } from './Length.Tuple';
 import { ParseColor } from './Color.Parse';
 import { ParseBackground } from './Background.Parse';
@@ -170,7 +170,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     CornerShape: _parseCornerShape(ResolveTernary(s.CornerShape, ctx)),
     BorderRadiusSmoothness: Resolve(s.BorderRadiusSmoothness, ctx, 'W'),
 
-    Background: ParseBackground(ResolveTernary(s.Background, ctx)),
+    Background: ParseBackground(ResolveVars(ResolveTernary(s.Background, ctx), ctx)),
     BlendMode: s.BlendMode,
 
     Frost: Resolve(s.Frost, ctx, 'W'),
@@ -228,7 +228,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
       };
     })(),
 
-    BorderColor: ParseColor(ResolveTernary(s.BorderColor, ctx)),
+    BorderColor: ParseColor(ResolveVars(ResolveTernary(s.BorderColor, ctx), ctx)),
     BorderWidth: Resolve(s.BorderWidth, ctx, 'W'),
     BorderBlur: Resolve(s.BorderBlur, ctx, 'W'),
     BorderBackdropBlur: resolveBlur(border.BlurRaw),
@@ -240,7 +240,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderSaturation: border.Saturation,
     BorderContrast: border.Contrast,
 
-    ShadowColor: ParseColor(ResolveTernary(s.ShadowColor, ctx)),
+    ShadowColor: ParseColor(ResolveVars(ResolveTernary(s.ShadowColor, ctx), ctx)),
     ShadowBlur: Resolve(s.ShadowBlur, ctx, 'W'),
     ShadowOffsetX: Resolve(s.ShadowOffsetX, ctx, 'W'),
     ShadowOffsetY: Resolve(s.ShadowOffsetY, ctx, 'H'),
