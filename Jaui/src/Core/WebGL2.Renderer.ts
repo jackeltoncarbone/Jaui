@@ -1045,8 +1045,11 @@ export class WebGL2Renderer implements Renderer {
     } else {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, source as TexImageSource);
     }
-    const err = gl.getError();
-    if (err !== gl.NO_ERROR) console.warn('[gl] texSubImage2D error:', err);
+    // NB: do NOT call gl.getError() here — it forces a synchronous GPU pipeline
+    // flush (~30ms on software ANGLE/WARP) on EVERY glyph upload. On a GPU-less
+    // host that turns text-atlas population into multi-second stalls (~65 runs ×
+    // ~30ms ≈ 2s, the dominant per-change hitch). texSubImage2D into a
+    // shelf-packed atlas with pre-validated coords doesn't fail in practice.
     gl.bindTexture(gl.TEXTURE_2D, null);
   };
 
