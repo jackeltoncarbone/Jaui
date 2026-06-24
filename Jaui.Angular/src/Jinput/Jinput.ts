@@ -110,7 +110,7 @@ function _withAlpha(color: string, alpha: number): string {
   template: `
     <jyle [source]="JssSource" />
 
-    <jiv [class]="ReadOnly() ? 'JinputRoot JinputReadOnly' : 'JinputRoot'"
+    <jiv [class]="(MultiLine() ? 'JinputRoot' : 'JinputRoot JinputRootSingleLine') + (ReadOnly() ? ' JinputReadOnly' : '')"
       (pointerdown)="onRootPointerDown($event)"
       (contextmenu)="onRootContextMenu($event)">
       <jiv #wrap class="JinputWrap"

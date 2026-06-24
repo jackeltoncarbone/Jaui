@@ -124,10 +124,14 @@ export class CanvasProxy {
    * (Fraction-based controls — slider/wheel that divide the pointer by their OWN element rect to get a
    * 0..1 value — are dpr-independent and do NOT need this.)
    */
+  /** Map a viewport client point into Jaui NODE space. Node coordinates are CSS px (the layout solver
+   *  works in CSS px; paint scales by DPR at draw time, and the worker's own pointer pipeline —
+   *  `MainBridge._toCanvasLocal` — hit-tests in CSS px too). So this is purely a canvas-origin offset,
+   *  NOT a DPR scale: multiplying by DPR returned device px, which mis-hit every node rect on any HiDPI
+   *  display (DPR ≠ 1) — e.g. it made every `<tab-bar>` unclickable at 125% scale. */
   ClientToNodePoint(clientX: number, clientY: number): [number, number] {
     const rect = this.Element.getBoundingClientRect();
-    const d = this.Dpr;
-    return [(clientX - rect.left) * d, (clientY - rect.top) * d];
+    return [clientX - rect.left, clientY - rect.top];
   }
 
   SetJssVars = (vars: Map<string, string>): void => {

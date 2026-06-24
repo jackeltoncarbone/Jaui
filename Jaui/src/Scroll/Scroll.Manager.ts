@@ -48,6 +48,9 @@ interface ScrollState {
    *  lifting, only the slow recent motion contributes, so content can't
    *  briefly outpace your finger after release. */
   samples: DragSample[];
+  /** TEMP demo auto-scroll: seconds left to pause at the current end before
+   *  restarting. 0 = actively scrolling. See ScrollManager.AutoScrollSpeed. */
+  autoHold: number;
 }
 
 /** Drag-momentum velocity retention per second. Smaller = faster decay.
@@ -79,6 +82,14 @@ const WHEEL_SETTLE_PX = 0.5;
 
 export class ScrollManager implements Animatable {
   private _states = new WeakMap<Jiv, ScrollState>();
+
+  /** TEMPORARY demo auto-scroll (for recording product footage). When > 0,
+   *  every Overflow:Scroll box advances toward its end at this many CSS px/sec,
+   *  pauses briefly, then restarts from the top — looping forever. Driven by
+   *  `?autoscroll=NN` on the page URL (see Canvas init). 0 = off (normal). */
+  AutoScrollSpeed = 0;
+  /** Seconds to dwell at each end before restarting — gives the loop a beat. */
+  private _autoHoldSec = 1.2;
 
   constructor(private _root: Jiv) {}
 
@@ -292,6 +303,13 @@ export class ScrollManager implements Animatable {
       const s = this._ensureState(jiv);
       if (s.dragging) return;
 
+      // TEMP demo auto-scroll overrides all physics while enabled.
+      if (this.AutoScrollSpeed > 0) {
+        if (this._autoTick(jiv, s, dt)) active = true;
+        this._syncJiv(jiv, s);
+        return;
+      }
+
       const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
       const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
 
@@ -343,6 +361,40 @@ export class ScrollManager implements Animatable {
     return active;
   };
 
+  /** TEMP demo auto-scroll step for one Overflow:Scroll box. Drives the axis
+   *  that has travel (vertical preferred), holds `_autoHoldSec` at the end,
+   *  then snaps back to the start and loops. Returns true while it wants more
+   *  frames (always, once enabled — so the RAF loop never parks). */
+  private _autoTick = (jiv: Jiv, s: ScrollState, dt: number): boolean => {
+    const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
+    const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
+    const vertical = maxY > 0;
+    const max = vertical ? maxY : maxX;
+    if (max <= 0) return false; // nothing to scroll in this box
+
+    if (s.autoHold > 0) {
+      s.autoHold = Math.max(0, s.autoHold - dt);
+      if (s.autoHold === 0) {
+        // Dwell elapsed — restart from the top/left for the next pass.
+        if (vertical) s.posY = 0; else s.posX = 0;
+      }
+    } else {
+      const adv = this.AutoScrollSpeed * dt;
+      if (vertical) {
+        s.posY += adv;
+        if (s.posY >= maxY) { s.posY = maxY; s.autoHold = this._autoHoldSec; }
+      } else {
+        s.posX += adv;
+        if (s.posX >= maxX) { s.posX = maxX; s.autoHold = this._autoHoldSec; }
+      }
+    }
+    // Keep wheel-ease / momentum targets pinned to the driven position so a
+    // stray input can't yank us back to a stale target mid-loop.
+    s.targetX = s.posX;
+    s.targetY = s.posY;
+    return true;
+  };
+
   private _ensureState = (jiv: Jiv): ScrollState => {
     let s = this._states.get(jiv);
     if (!s) {
@@ -355,6 +407,7 @@ export class ScrollManager implements Animatable {
         velY: 0,
         dragging: false,
         samples: [],
+        autoHold: 0,
       };
       this._states.set(jiv, s);
     }

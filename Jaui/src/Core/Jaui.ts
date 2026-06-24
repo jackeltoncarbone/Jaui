@@ -283,6 +283,21 @@ export class Canvas implements DirtyTracker {
     this._animationManager.OnFrame(() => this.RequestFrame());
     this._scrollManager = new ScrollManager(this.Root);
     this._animationManager.Register(this._scrollManager);
+    // TEMPORARY: `?autoscroll[=NN]` turns on demo auto-scroll — every scroll
+    // box slowly scrolls to its end, pauses, and restarts, forever. Used to
+    // record smooth-scrolling product footage. NN = CSS px/sec (default 60).
+    // Auto-scroll fires no wheel/drag events, so the content extents are never
+    // measured by the input handlers — measure them every frame while it runs.
+    if (!this._headless) {
+      const m = /[?&]autoscroll(?:=([\d.]+))?\b/.exec(this._platform.GetUrlSearch());
+      if (m) {
+        const speed = m[1] ? parseFloat(m[1]) : 60;
+        if (speed > 0) {
+          this._scrollManager.AutoScrollSpeed = speed;
+          this.RegisterPostFrame(() => this._measureScrollContents(this.Root));
+        }
+      }
+    }
     this._animationManager.Register(new PresenceManager(this.Root));
     // Kick once so the very first newly-added Jiv (Presence 0 → 1) starts
     // animating even if nothing else is active. After this, the animation

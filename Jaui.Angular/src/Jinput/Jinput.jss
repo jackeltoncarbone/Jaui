@@ -16,6 +16,14 @@ JinputRoot {
   UserSelect: None
 }
 
+// Single-line inputs center their one line on the box's vertical midline. The root carries a 28pt
+// MinHeight (a comfortable hit/caret area), so a lone 1-line field would otherwise pin its text to the
+// top and read as off-centre inside a taller pill. No-op when the box is already line-height (Justify
+// has no slack to distribute). Multi-line inputs keep Justify: Start so text fills from the top down.
+JinputRootSingleLine : JinputRoot {
+  Justify: Center
+}
+
 // Visual treatment for read-only state. Drops opacity on the whole input so
 // segments + placeholder dim uniformly without per-element overrides, and
 // switches the cursor to the default pointer (no `Cursor: Text`).
