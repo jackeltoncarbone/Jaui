@@ -53,6 +53,7 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer } from './WebGL2.Renderer';
+import { Framebuffer } from './Framebuffer';
 import { Janvas } from '../Janvas/Janvas';
 
 export class Canvas implements DirtyTracker {
@@ -141,6 +142,9 @@ export class Canvas implements DirtyTracker {
   private _diagNoPblur: boolean = false;
   private _diagNoGlass: boolean = false;
   private _diagNoPblurDraw: boolean = false;
+  private _diagNoReality: boolean = false; // [diag ?no-reality] skip the janvas/field pre-pass → UI-only cost
+  private _diagNoUi: boolean = false;       // [diag ?no-ui] skip the Jaui UI tree walk → field-only cost
+  private _diagNoBlur: boolean = false;     // [diag ?no-blur] no-op the backdrop blur build → blur fill cost
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -672,9 +676,86 @@ export class Canvas implements DirtyTracker {
   });
   get Dpr(): number { return this._dpr; }
 
-  /** Request a re-render. When the loop is running, _tick already renders
-   *  every frame — no extra render needed. */
+  /** Set when something changed and the next tick must render. Starts true so
+   *  the first frame always paints. Render-on-demand: _tickInner skips the
+   *  whole _render when this is false AND no layout/animation work is pending,
+   *  so a static scene costs ~0 instead of re-shading every pixel every frame
+   *  (the decisive win on GPU-less software rasterizers). */
+  private _needsRender = true;
+
+  /** Request a re-render on the next tick. Routed here from: janvas MarkDirty
+   *  (the foreign 3D renderer signalling new content), external host code, and
+   *  the AnimationManager's per-frame kick. Layout/text changes and active
+   *  springs are detected directly in _tickInner and don't need this. */
   RequestFrame = (): void => {
+    this._needsRender = true;
+  };
+
+  // ── Retained-mode layer cache (Phase 3) ──
+  // A stable, static subtree that doesn't sample the live scene renders ONCE
+  // into its own FBO, then composites each frame over the everplaying field —
+  // so the heavy static UI (the measured ~8.5s/frame bulk on a GPU-less host)
+  // is reused instead of re-shaded, while the field + glass stay live.
+  /** DISABLED: the capture/composite mis-renders when it actually fires (faint/
+   *  missing panels under force-on — an alpha or capture-bounds bug; the FBO is
+   *  sized to the box, clipping shadow/overflow, and the premultiplied composite
+   *  needs verifying). Pinpoint stands (PERF.jaui-frame-cost.md); fix before
+   *  re-enabling. Gated so it can't break a real static-UI (playback) frame. */
+  private _layerCacheEnabled = false;
+  private _damageTest = false; // [damage] Phase A: gated ?damage-test — cull nodes outside a hardcoded dirty rect to prove the mechanism
+  private _damageRectCss: { x: number; y: number; w: number; h: number } | null = null;
+  private _layerCache = new Map<Jiv, { Fbo: Framebuffer; Valid: boolean; DX: number; DY: number; DW: number; DH: number }>();
+  /** Per-render memo of "subtree samples the live scene → uncacheable". Cleared
+   *  at the top of every _render; real structural/material changes happen under
+   *  !_uiStatic (which drops the whole cache), so it can't go stale mid-static. */
+  private _subtreeDynamicMemo = new Map<Jiv, boolean>();
+  /** True when no UI animation/relayout is pending, so the static caches are
+   *  safe to build + reuse. The everplaying field keeps the loop alive via
+   *  _needsRender (NOT IsRunning), so this stays true in steady state. */
+  private _uiStatic = false;
+  /** Guards the cache hook from re-entering while capturing a subtree. */
+  private _capturing = false;
+
+  /** True if `node`'s subtree contains anything that must re-render every frame
+   *  because it samples the live (everplaying) scene: the 3D field (Janvas), a
+   *  glass or progressive-blur surface, or a backdrop/border filter. Memoized. */
+  private _subtreeSamplesLiveScene = (node: Jiv): boolean => {
+    const memo = this._subtreeDynamicMemo.get(node);
+    if (memo !== undefined) return memo;
+    const s = node.RenderStyle;
+    let dyn = node instanceof Janvas
+      || _isGlass(s.Material) || s.Material === 'ProgressiveBlur'
+      || _hasBackdropFilter(node)
+      || Math.abs(s.BorderBrightness - 1) > 0.001 || Math.abs(s.BorderSaturation - 1) > 0.001
+      || Math.abs(s.BorderContrast - 1) > 0.001 || s.BorderBackdropBlur > 0.001;
+    if (!dyn) {
+      const kids = node.Children as Jiv[];
+      for (let i = 0; i < kids.length; i++) {
+        if (this._subtreeSamplesLiveScene(kids[i])) { dyn = true; break; }
+      }
+    }
+    this._subtreeDynamicMemo.set(node, dyn);
+    return dyn;
+  };
+
+  /** Layer-cache eligibility for a subtree root: bounded, opaque, no OWN
+   *  transform (so capturing at the FBO origin is an exact translate of the
+   *  inherited matrix), axis-aligned, not teleporting, and nothing inside
+   *  samples the live scene. The hook also requires _uiStatic, an empty clip
+   *  stack, and null 3D homography/perspective. Conservative by design: a node
+   *  that fails any check renders normally — never wrong, only un-cached. */
+  private _isLayerCacheRoot = (node: Jiv, eff: Mat2x3): boolean => {
+    if (node === this.Root) return false;
+    if (!node.Visible || node.Width <= 0 || node.Height <= 0) return false;
+    if (node.TeleportSeq !== 0) return false;
+    if (node.EffectiveOpacity < 0.999) return false;
+    if (Math.abs(eff[1]) > 1e-6 || Math.abs(eff[2]) > 1e-6) return false; // rotation/skew
+    const t = node.RenderStyle.Transform;
+    if (t.Rotation !== 0 || t.RotateX !== 0 || t.RotateY !== 0 || t.TranslateZ !== 0) return false;
+    const rs = node.RenderStyle;
+    if (rs.VisualScaleX !== 1 || rs.VisualScaleY !== 1 || rs.VisualTranslateX !== 0 || rs.VisualTranslateY !== 0) return false;
+    if (rs.Perspective > 0) return false;
+    return !this._subtreeSamplesLiveScene(node);
   };
 
   // ── WebGL context-loss / restore ──
@@ -709,6 +790,9 @@ export class Canvas implements DirtyTracker {
     void Promise.resolve(this._renderer.Init(this.Element)).then(() => {
       this._textCache.Dispose();
       this._imageCache.Clear();
+      // The layer-cache FBOs died with the context; drop them so the next
+      // static frame recaptures into fresh FBOs.
+      this._layerCache.clear();
       // Foreign 3D <janvas> renderers (e.g. the home hero field) lost their GPU
       // resources too — flag every one for re-Init so the next render re-runs
       // `Renderer.Init(gl, …)` against the restored context.
@@ -847,12 +931,31 @@ export class Canvas implements DirtyTracker {
       this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
     }
 
-    this._render(dt);
-    this._firePostFrame();
+    // Render-on-demand gate. Skip the entire render (janvas pre-pass + UI tree
+    // walk + present) when nothing changed this frame — the OffscreenCanvas
+    // holds its last committed frame, so an idle scene costs ~0 instead of the
+    // full per-frame re-shade. Every mutation routes into one of these signals:
+    // layout/text → layoutDirty (MarkLayoutDirty bubbles to root); style/spring/
+    // scroll/presence → AnimationManager.IsRunning; janvas content + external +
+    // input → RequestFrame (_needsRender). _firePostFrame still fires every tick
+    // so frame-wait callbacks are never starved.
+    // Layer-cache gate: caches are valid to build/reuse only when no UI
+    // animation or relayout is pending (the field still plays via _needsRender).
+    // When something animates, drop every cache — they recapture once it settles
+    // (v1 whole-cache invalidation; per-subtree dirty-bubbling is a refinement).
+    const uiStatic = !layoutDirty && !this._animationManager.IsRunning;
+    if (!uiStatic) { for (const e of this._layerCache.values()) e.Valid = false; }
+    this._uiStatic = uiStatic;
 
-    // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
-    // `?debug-layout`; no cost when disabled.
-    if (this._debugLayout) this._drawDebugLayout();
+    const shouldRender = this._needsRender || layoutDirty || this._animationManager.IsRunning;
+    this._needsRender = false;
+    if (shouldRender) {
+      this._render(dt);
+      // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
+      // `?debug-layout`; no cost when disabled.
+      if (this._debugLayout) this._drawDebugLayout();
+    }
+    this._firePostFrame();
 
     if (hud) {
       const tEnd = performance.now();
@@ -925,6 +1028,20 @@ export class Canvas implements DirtyTracker {
     const r = this._renderer;
     const w = Math.round(this._width * this._dpr);
     const h = Math.round(this._height * this._dpr);
+    // Retained-mode layer cache: the capture path redirects the panel/text
+    // flush into a stable subtree's own FBO by overriding the projection
+    // resolution (and the bound target). Defaults to the canvas dims, so the
+    // normal full-frame path stays byte-identical.
+    let flushW = w, flushH = h;
+    // Per-frame: reset the dynamic-subtree memo; gate the layer cache on a live
+    // WebGL2 context (the capture binds FBOs + needs GetGL()).
+    this._subtreeDynamicMemo.clear();
+    // [damage] Phase A proof: a small field-only dirty rect; everything outside is culled.
+    this._damageRectCss = this._damageTest
+      ? { x: this._width * 0.10, y: this._height * 0.40, w: this._width * 0.30, h: this._height * 0.25 }
+      : null;
+    const cacheCapable = this._renderer instanceof WebGL2Renderer && this._renderer.GetGL() !== null;
+    if (this._renderer instanceof WebGL2Renderer) this._renderer.DiagNoBlur = this._diagNoBlur;
 
     // Cascade opacity: multiply each Jiv's RenderStyle.Opacity by its
     // ancestors' so children inherit parent dimming (CSS-like). The style
@@ -971,7 +1088,7 @@ export class Canvas implements DirtyTracker {
       const gl = this._renderer.GetGL();
       if (gl) {
         this._pendingJanvasMasks.length = 0;
-        this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt, null);
+        if (!this._diagNoReality) this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt, null);
         // Restore the state Jaui's panel pass expects after the foreign
         // renderer ran. Jaui's draws assume: scene FBO bound, canvas-sized
         // viewport, no scissor, no depth/cull/stencil, no bound program /
@@ -1077,7 +1194,7 @@ export class Canvas implements DirtyTracker {
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
-      r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
+      r.PanelDrawBatch(flushW, flushH, null, 0, this._specTiltX, this._specTiltY);
       this._counts.Panels += this._panelBuffer.Count;
       this._panelBuffer.Begin(); // reset count for the next batch
     };
@@ -1101,7 +1218,7 @@ export class Canvas implements DirtyTracker {
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
-      r.TextDrawBatch(w, h, atlas);
+      r.TextDrawBatch(flushW, flushH, atlas);
       this._counts.Text += 1; // one flushed batch = one draw call
       this._textBuffer.Begin();
     };
@@ -1362,6 +1479,33 @@ export class Canvas implements DirtyTracker {
         descendChildren(node, eff, stack, scope, effH, childPersp);
         return;
       }
+
+      // ── Damage-region cull (Phase A, gated ?damage-test) ──
+      // Skip any node whose AABB doesn't intersect the dirty rect — its
+      // panel/glass/blur draw never runs, so the GPU fill it would have cost
+      // is saved. Mirrors the clip-cull above (clipping subtree → skip whole;
+      // overflow-visible → recurse so overflowing children self-cull).
+      if (this._damageRectCss) {
+        const _dab = this._nodeAabb(node, eff, effH);
+        const _dr = this._damageRectCss;
+        if (_dab.maxX <= _dr.x || _dab.minX >= _dr.x + _dr.w || _dab.maxY <= _dr.y || _dab.minY >= _dr.y + _dr.h) {
+          if (node.ClipsChildren) return;
+          descendChildren(node, eff, stack, scope, effH, childPersp);
+          return;
+        }
+      }
+
+      // ── Retained-mode layer cache hook ──
+      // A stable, static, axis-aligned, unclipped subtree that doesn't sample
+      // the live scene composites from its cached FBO instead of re-shading.
+      // _capturing guards against re-entering while capturing this subtree.
+      if (this._layerCacheEnabled && cacheCapable && this._uiStatic && !this._capturing
+          && effH === null && persp === null && stack === EmptyClipStack
+          && this._isLayerCacheRoot(node, eff)) {
+        compositeOrCapture(node, eff);
+        return;
+      }
+
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
       // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
       // the loaded image. Without this, the node stays at 0 height forever.
@@ -1661,8 +1805,8 @@ export class Canvas implements DirtyTracker {
             this._sceneDirtyRects.length = 0;  // snapshot captured the scene-so-far; start fresh
           }
           lastBackdrop = this._sharedPyramid;
-          sceneSnap = this._sharedPyramid;  // sharp level 0 doubles as the no-frost LOD-0 fallback (u_Scene)
-          lastBaseFrostLod = 0;             // sharp-rooted at σ=0 → the panel's frost is a pure LOD offset
+          sceneSnap = this._sharedPyramid;  // level 0 doubles as the low-frost fallback (u_Scene)
+          lastBaseFrostLod = 2;             // quarter-res shared pyramid: its level 0 ≈ a full-res pyramid's LOD 2
         } else {
           const _tSnap = performance.now();
           sceneSnap = r.SnapshotScreen(scissor);
@@ -1792,6 +1936,66 @@ export class Canvas implements DirtyTracker {
       descendChildren(node, eff, stack, scope, effH, childPersp);
     };
 
+    // Retained-mode layer cache. Capture a stable subtree into its own FBO once,
+    // then composite that texture over the live field each frame. Defined after
+    // renderNode so it can drive a nested capture walk; the hook inside
+    // renderNode calls it. Both only run from the root call below, so the mutual
+    // reference resolves at call time.
+    const r2 = this._renderer as WebGL2Renderer;
+    const compositeOrCapture = (cnode: Jiv, ceff: Mat2x3): void => {
+      const cgl = r2.GetGL();
+      if (!cgl) return;
+      const dpr = this._dpr;
+      const cdw = Math.max(1, Math.round(cnode.Width * matScaleX(ceff) * dpr));
+      const cdh = Math.max(1, Math.round(cnode.Height * matScaleY(ceff) * dpr));
+      const cox = matApplyX(ceff, cnode.X, cnode.Y), coy = matApplyY(ceff, cnode.X, cnode.Y);
+      const cdx = Math.round(cox * dpr), cdy = Math.round(coy * dpr);
+
+      // Drain pending main-walk batches first so z-order holds (earlier siblings
+      // land behind this composite).
+      flushPanels();
+      flushText();
+
+      let entry = this._layerCache.get(cnode);
+      if (!entry) { entry = { Fbo: new Framebuffer(cgl), Valid: false, DX: cdx, DY: cdy, DW: cdw, DH: cdh }; this._layerCache.set(cnode, entry); }
+
+      if (!entry.Valid || entry.DW !== cdw || entry.DH !== cdh) {
+        // ── Capture: render the subtree into its FBO at the origin ──
+        entry.Fbo.Resize(cdw, cdh);
+        entry.Fbo.Bind();
+        cgl.viewport(0, 0, cdw, cdh);
+        cgl.clearColor(0, 0, 0, 0);
+        cgl.clear(cgl.COLOR_BUFFER_BIT);
+        // No own transform (gated) → exact translate of the inherited matrix so
+        // the subtree's top-left maps to (0,0).
+        const capEff: Mat2x3 = [ceff[0], ceff[1], ceff[2], ceff[3], ceff[4] - cox, ceff[5] - coy];
+        const savedW = flushW, savedH = flushH;
+        flushW = cdw; flushH = cdh;
+        const capScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
+        this._capturing = true;
+        renderNode(cnode, capEff, EmptyClipStack, capScope, null, null);
+        replayScope(capScope);
+        flushPanels();
+        flushText();
+        this._capturing = false;
+        flushW = savedW; flushH = savedH;
+        r2.RebindSceneTarget();
+        cgl.viewport(0, 0, w, h);
+        entry.Valid = true; entry.DX = cdx; entry.DY = cdy; entry.DW = cdw; entry.DH = cdh;
+      }
+
+      // ── Composite: the cached texture over the scene FBO at the rect ──
+      // The captured FBO holds PREMULTIPLIED colour (rendered over transparent
+      // with EnableBlend's coverage-alpha), so composite with premultiplied over
+      // (ONE, 1−SRC_ALPHA) — exact, no edge fringe. GL viewport is bottom-left
+      // origin; cdy is from the top, so flip it.
+      cgl.enable(cgl.BLEND);
+      cgl.blendFunc(cgl.ONE, cgl.ONE_MINUS_SRC_ALPHA);
+      r2.BlitTextureRegion(entry.Fbo.Texture, cdx, h - cdy - cdh, cdw, cdh);
+      cgl.viewport(0, 0, w, h);
+      this._counts.Panels++;
+    };
+
     this._textBuffer.Begin();
     this._clipBuffer.Begin();
     this._xformBuffer.Begin();
@@ -1808,7 +2012,7 @@ export class Canvas implements DirtyTracker {
     this._maxFrostBlur = 0;
     this._scanFrostBlur(this.Root);
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
-    renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
+    if (!this._diagNoUi) renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
     // In-flight teleports with no layered ancestor paint last at root level.
     replayScope(rootScope);
     // Trailing flushes — catch anything deferred since the last category
@@ -3292,7 +3496,11 @@ export class Canvas implements DirtyTracker {
     if (params.has('no-pblur')) this._diagNoPblur = true;
     if (params.has('no-glass')) this._diagNoGlass = true;
     if (params.has('no-pblur-draw')) this._diagNoPblurDraw = true;
+    if (params.has('no-reality')) this._diagNoReality = true;
+    if (params.has('no-ui')) this._diagNoUi = true;
+    if (params.has('no-blur')) this._diagNoBlur = true;
     if (params.has('wkr-shared-backdrop') || hash.includes('wkr-shared-backdrop')) this._sharedBackdrop = true;
+    if (params.has('damage-test') || hash.includes('damage-test')) this._damageTest = true;
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────
@@ -3509,7 +3717,11 @@ export class Canvas implements DirtyTracker {
       const renderer = node.Renderer;
       if (renderer && node.Width > 0 && node.Height > 0 && node.Visible) {
         if (!node.IsInited()) {
-          renderer.Init(gl, node.MarkDirty);
+          // Route the foreign renderer's dirty signal through both the janvas
+          // (its own per-field skip) AND RequestFrame, so new 3D content wakes
+          // the render-on-demand loop. Without the RequestFrame, a janvas that
+          // changed while the UI was idle would not repaint.
+          renderer.Init(gl, () => { node.MarkDirty(); this.RequestFrame(); });
           node.MarkInited();
         }
         const d = this._dpr;

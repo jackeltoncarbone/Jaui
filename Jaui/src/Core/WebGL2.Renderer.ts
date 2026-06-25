@@ -589,12 +589,16 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Scene Pass ──
 
-  BeginScenePass = (clearR: number, clearG: number, clearB: number): void => {
+  BeginScenePass = (clearR: number, clearG: number, clearB: number, persist = false): void => {
     const gl = this._gl;
     this._sceneFbo.Bind();
     gl.viewport(0, 0, this._width, this._height);
-    gl.clearColor(clearR, clearG, clearB, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    // Damage-region: when persisting, skip the clear so last frame's pixels
+    // survive; only the dirty rect is re-rendered over them this frame.
+    if (!persist) {
+      gl.clearColor(clearR, clearG, clearB, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   };
@@ -831,11 +835,16 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Blur ──
 
+  /** [diag ?no-blur] When true, ComputeBlur + GenerateBlurMipmap no-op so the
+   *  per-surface backdrop blur fill is removed — measures the blur's GPU cost. */
+  DiagNoBlur = false;
+
   ComputeBlur = (
     input: GpuTextureHandle, width: number, height: number,
     radius: number, minDepth?: number,
     scissor?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle => {
+    if (this.DiagNoBlur) return input;
     const result = this._blur.Blur(_unwrap(input), width, height, radius, minDepth, scissor);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
@@ -845,6 +854,7 @@ export class WebGL2Renderer implements Renderer {
   };
 
   GenerateBlurMipmap = (maxLod?: number): void => {
+    if (this.DiagNoBlur) return;
     this._blur.GenerateOutputMipmap(maxLod);
     // The blit-to-mip path in BlurPass.GenerateOutputMipmap doesn't touch
     // shader programs, but keep the invalidation paired with ComputeBlur
@@ -865,8 +875,12 @@ export class WebGL2Renderer implements Renderer {
     const pass = this._sharedBlur ?? (this._sharedBlur = new BlurPass(this._gl));
     // radius 0 → level 0 is the raw scene (1-tap copy, no dual-filter pre-blur);
     // GenerateOutputMipmap then builds the Gaussian stack from that sharp root.
-    const tex = pass.Blur(this._sceneFbo.Texture, width, height, 0, undefined, undefined);
-    pass.GenerateOutputMipmap(maxLod);
+    // Quarter-res build: blur is low-frequency, so a 1/4-res pyramid upsamples to
+    // a visually identical result with ~16x less fragment fill. Consumers add +2
+    // to their frost LOD (this pyramid's level 0 ≈ a full-res pyramid's LOD 2).
+    const qw = Math.max(1, width >> 2), qh = Math.max(1, height >> 2);
+    const tex = pass.Blur(this._sceneFbo.Texture, qw, qh, 0, undefined, undefined);
+    pass.GenerateOutputMipmap(Math.max(1, maxLod - 2));
     // BlurPass bound its own programs; invalidate the cache like ComputeBlur does.
     this._lastProgram = null;
     // Restore the scene FBO so the subsequent glass draws target it.
@@ -1010,6 +1024,23 @@ export class WebGL2Renderer implements Renderer {
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
   };
 
+  /** Composite a raw FBO colour texture over the CURRENTLY-BOUND target at a
+   *  device-px region (GL bottom-left origin), using the same textured-quad
+   *  blit as `Blit`. The caller owns blend state (call `EnableBlend()` first)
+   *  and restores the viewport afterwards. Used by the retained-mode layer
+   *  cache to draw a captured static subtree over the live scene FBO without
+   *  re-shading it. */
+  BlitTextureRegion = (tex: WebGLTexture, x: number, y: number, w: number, h: number): void => {
+    const gl = this._gl;
+    gl.viewport(x, y, w, h);
+    this._useProgram(this._blitShader.Program);
+    gl.uniform1i(this._blitTexLoc, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.bindVertexArray(this._quad.Vao);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+  };
+
   // ── Texture Management ──
 
   CreateTexture = (width: number, height: number, srgb = false): GpuTextureHandle => {
@@ -1058,7 +1089,13 @@ export class WebGL2Renderer implements Renderer {
   EnableBlend = (): void => {
     const gl = this._gl;
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // RGB: straight source-over (visible result identical to before). Alpha:
+    // accumulate COVERAGE (ONE, 1−SRC_ALPHA) instead of SRC_ALPHA·SRC_ALPHA. The
+    // presented frame ignores scene-FBO alpha, so on screen this is byte-
+    // identical — but it makes the retained-mode layer cache's captured-over-
+    // transparent FBO hold correct premultiplied colour + coverage alpha, so the
+    // premultiplied composite has no edge fringe at rounded corners.
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   };
 
   DisableBlend = (): void => {
@@ -1119,7 +1156,7 @@ export class WebGL2Renderer implements Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   };
 
-  InvalidateFrameTransients = (): void => {
+  InvalidateFrameTransients = (persistScene = false): void => {
     const gl = this._gl;
     // Default framebuffer: we never touch depth for the final blit — tell
     // the driver not to bother preserving it. On tile-based mobile GPUs
@@ -1131,9 +1168,13 @@ export class WebGL2Renderer implements Renderer {
     gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.DEPTH, gl.STENCIL]);
     // Scene FBO: we just blit it out; its contents won't be read again this
     // frame and the next BeginScenePass will clear it. Drop the tile.
-    this._sceneFbo.Bind();
-    gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // Damage-region: when persisting, KEEP the scene colour so next frame can
+    // composite the dirty rect over it instead of re-rendering everything.
+    if (!persistScene) {
+      this._sceneFbo.Bind();
+      gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
   };
 
   SetViewport = (x: number, y: number, width: number, height: number): void => {
