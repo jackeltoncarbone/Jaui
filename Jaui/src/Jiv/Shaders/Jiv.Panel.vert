@@ -21,6 +21,12 @@ layout(location = 14) in vec4 a_Outline;      // borderAlphaVariance, borderFres
 layout(location = 15) in vec4 a_BorderFilter; // brightnessMul, saturationMul, contrastMul, lodOffset
 
 uniform vec2 u_Resolution;
+// Projection sub-window for retained-mode layer capture. Screen-space device
+// pixels in [u_ViewOffset, u_ViewOffset + u_Resolution] map to NDC [-1,1] (the
+// capture FBO viewport). (0,0) for the normal full-canvas pass → no change, so
+// v_PixelPos stays true screen space and the screen-space clip stack matches
+// without any coordinate remapping. Capture sets it to the subtree AABB origin.
+uniform vec2 u_ViewOffset;
 // Shared 3D-transform table (1-row RGBA32F, 3 texels per homography entry).
 uniform sampler2D u_XformTex;
 
@@ -79,7 +85,7 @@ void main() {
         // center = 0 so the fragment's `pLocal - panelCenter` reduces to v_Local.
         v_PanelGeom = vec4(0.0, 0.0, halfSz);
         v_Rot = vec4(1.0, 0.0, 0.0, 0.0);
-        vec2 clip = (screen / u_Resolution) * 2.0 - 1.0;
+        vec2 clip = ((screen - u_ViewOffset) / u_Resolution) * 2.0 - 1.0;
         clip.y = -clip.y;
         gl_Position = vec4(clip * W, 0.0, W);
         return;
@@ -89,7 +95,7 @@ void main() {
     vec2 pos = a_Rect.xy + a_Position * a_Rect.zw;
     v_PixelPos = pos;
 
-    vec2 clip = (pos / u_Resolution) * 2.0 - 1.0;
+    vec2 clip = ((pos - u_ViewOffset) / u_Resolution) * 2.0 - 1.0;
     clip.y = -clip.y;
     gl_Position = vec4(clip, 0.0, 1.0);
 

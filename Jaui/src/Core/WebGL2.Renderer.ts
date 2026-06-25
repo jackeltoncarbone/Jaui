@@ -78,6 +78,7 @@ const _extractStrokeLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _Strok
 // variant-swap a one-liner rather than a ladder of conditionals.
 interface _PanelLocs {
   resolution:   WebGLUniformLocation | null;
+  viewOffset:   WebGLUniformLocation | null;
   backdrop:     WebGLUniformLocation | null;
   scene:        WebGLUniformLocation | null;
   baseFrostLod: WebGLUniformLocation | null;
@@ -97,6 +98,7 @@ interface _PanelLocs {
 
 const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelLocs => ({
   resolution:   gl.getUniformLocation(p, 'u_Resolution'),
+  viewOffset:   gl.getUniformLocation(p, 'u_ViewOffset'),
   backdrop:     gl.getUniformLocation(p, 'u_Backdrop'),
   scene:        gl.getUniformLocation(p, 'u_Scene'),
   baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
@@ -272,6 +274,16 @@ export class WebGL2Renderer implements Renderer {
   // location IDs even when the uniform names match.
   private _panelLocsGlass!: _PanelLocs;
   private _panelLocsNone!: _PanelLocs;
+  // Retained-mode capture view-offset (device px). (0,0) for the normal pass;
+  // compositeOrCapture sets it to the subtree AABB origin so panel/text draws
+  // project into the capture FBO while v_PixelPos stays screen-space (clips
+  // match without remapping). Applied in PanelDrawBatch/TextDrawBatch.
+  private _captureViewOffsetX = 0;
+  private _captureViewOffsetY = 0;
+  SetCaptureViewOffset = (x: number, y: number): void => {
+    this._captureViewOffsetX = x;
+    this._captureViewOffsetY = y;
+  };
   private _panelVao!: WebGLVertexArrayObject;
   private _panelInstanceBuffer!: WebGLBuffer;
   private _panelInstanceData = new Float32Array(0);
@@ -286,6 +298,7 @@ export class WebGL2Renderer implements Renderer {
   private _textInstanceData = new Float32Array(0);
   private _textInstanceCount = 0;
   private _textResolutionLoc!: WebGLUniformLocation | null;
+  private _textViewOffsetLoc!: WebGLUniformLocation | null;
   private _textAtlasLoc!: WebGLUniformLocation | null;
 
   // Jline (stroke) shader — instanced per segment
@@ -655,6 +668,7 @@ export class WebGL2Renderer implements Renderer {
 
     this._useProgram(program.Program);
     gl.uniform2f(locs.resolution, canvasWidth, canvasHeight);
+    gl.uniform2f(locs.viewOffset, this._captureViewOffsetX, this._captureViewOffsetY);
     gl.uniform1i(locs.backdrop, 0);
     gl.uniform1i(locs.clipTex, 1);
     gl.uniform1i(locs.scene, 2);
@@ -762,6 +776,7 @@ export class WebGL2Renderer implements Renderer {
 
     this._useProgram(this._textShader.Program);
     gl.uniform2f(this._textResolutionLoc, canvasWidth, canvasHeight);
+    gl.uniform2f(this._textViewOffsetLoc, this._captureViewOffsetX, this._captureViewOffsetY);
     gl.uniform1i(this._textAtlasLoc, 0);
     gl.uniform1i(this._textClipTexLoc, 1);
     gl.uniform1i(this._textXformTexLoc, 2);
@@ -1213,6 +1228,7 @@ export class WebGL2Renderer implements Renderer {
     this._textInstanceBuffer = buf;
 
     this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
+    this._textViewOffsetLoc = gl.getUniformLocation(this._textShader.Program, 'u_ViewOffset');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
     this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');
     this._textXformTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_XformTex');

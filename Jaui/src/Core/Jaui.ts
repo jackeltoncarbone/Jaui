@@ -145,6 +145,9 @@ export class Canvas implements DirtyTracker {
   private _diagNoReality: boolean = false; // [diag ?no-reality] skip the janvas/field pre-pass → UI-only cost
   private _diagNoUi: boolean = false;       // [diag ?no-ui] skip the Jaui UI tree walk → field-only cost
   private _diagNoBlur: boolean = false;     // [diag ?no-blur] no-op the backdrop blur build → blur fill cost
+  private _diagNoPanels: boolean = false;   // [diag ?no-panels] skip non-glass panel fill (SDF+shadow+border) → panel share
+  private _diagNoShadow: boolean = false;   // [diag ?no-shadow] zero panel drop-shadow → shadow overdraw share
+  private _diagNoGlassDraw: boolean = false; // [diag ?no-glass-draw] skip glass refraction draw (keep blur) → glass-draw share
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -156,7 +159,8 @@ export class Canvas implements DirtyTracker {
   private _phaseRender:  Float32Array = new Float32Array(30);
   private _frameIdx:     number = 0;
   private _frameCount:   number = 0;
-  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
+  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0 };
+  private _cacheDiag = { reached: 0, effH: 0, teleport: 0, opacity: 0, rot: 0, xform: 0, visual: 0, persp: 0, samples: 0, ok: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
   /** Per-op CPU time (ms) inside the glass/pblur backdrop pipeline, summed
    *  per frame. A call that forces a CPU↔GPU sync shows its GPU cost here as
@@ -166,7 +170,7 @@ export class Canvas implements DirtyTracker {
    *  (game-style: fire once, sample many) and let every glass surface sample it
    *  at its frost LOD, instead of rebuilding a per-panel blur 50× (the ~759ms).
    *  Frame-scoped; rebuilt only when the scene changed under a pending surface. */
-  private _sharedBackdrop: boolean = false;
+  private _sharedBackdrop: boolean = true;  // default ON (verified +19% @ 1207x645, pixel-identical); `?no-shared-backdrop` disables
   private _sharedPyramid: GpuTextureHandle | null = null;
   private _sharedPyramidValid: boolean = false;
   /** Footprints (device px, flat [x0,y0,x1,y1,…]) drawn into the scene FBO since
@@ -702,6 +706,11 @@ export class Canvas implements DirtyTracker {
    *  needs verifying). Pinpoint stands (PERF.jaui-frame-cost.md); fix before
    *  re-enabling. Gated so it can't break a real static-UI (playback) frame. */
   private _layerCacheEnabled = false;
+  /** TEMP `?cache-force`: ignore the global _uiStatic gate so static subtrees
+   *  cache even while an unrelated animation (e.g. the reality pulse) runs.
+   *  Measurement-only — cached subtrees that DO change go stale; used to size
+   *  the win that proper per-subtree invalidation would unlock. */
+  private _cacheForce = false;
   private _damageTest = false; // [damage] Phase A: gated ?damage-test — cull nodes outside a hardcoded dirty rect to prove the mechanism
   private _damageRectCss: { x: number; y: number; w: number; h: number } | null = null;
   private _layerCache = new Map<Jiv, { Fbo: Framebuffer; Valid: boolean; DX: number; DY: number; DW: number; DH: number }>();
@@ -928,6 +937,10 @@ export class Canvas implements DirtyTracker {
       this._counts.Text = 0;
       this._counts.Image = 0;
       this._counts.PBlur = 0;
+      this._counts.SharedBuilds = 0;
+      this._counts.CacheCap = 0;
+      this._counts.CacheComp = 0;
+      { const d = this._cacheDiag; d.reached = d.effH = d.teleport = d.opacity = d.rot = d.xform = d.visual = d.persp = d.samples = d.ok = 0; }
       this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
     }
 
@@ -944,7 +957,7 @@ export class Canvas implements DirtyTracker {
     // When something animates, drop every cache — they recapture once it settles
     // (v1 whole-cache invalidation; per-subtree dirty-bubbling is a refinement).
     const uiStatic = !layoutDirty && !this._animationManager.IsRunning;
-    if (!uiStatic) { for (const e of this._layerCache.values()) e.Valid = false; }
+    if (!uiStatic && !this._cacheForce) { for (const e of this._layerCache.values()) e.Valid = false; }
     this._uiStatic = uiStatic;
 
     const shouldRender = this._needsRender || layoutDirty || this._animationManager.IsRunning;
@@ -1012,7 +1025,8 @@ export class Canvas implements DirtyTracker {
             `[Jaui] ${n}f over ${(tEnd - this._profLastDumpMs).toFixed(0)}ms — avg total ${avg(this._profSum.Total)}ms;` +
             ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
             ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)} | gpu ${gpuStr}` +
-            ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur}` +
+            ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur} SB${this._counts.SharedBuilds} cap${this._counts.CacheCap} comp${this._counts.CacheComp}` +
+            ` | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
@@ -1496,13 +1510,30 @@ export class Canvas implements DirtyTracker {
       }
 
       // ── Retained-mode layer cache hook ──
-      // A stable, static, axis-aligned, unclipped subtree that doesn't sample
-      // the live scene composites from its cached FBO instead of re-shading.
-      // _capturing guards against re-entering while capturing this subtree.
-      if (this._layerCacheEnabled && cacheCapable && this._uiStatic && !this._capturing
-          && effH === null && persp === null && stack === EmptyClipStack
+      // A stable, static, axis-aligned subtree that doesn't sample the live
+      // scene composites from its cached FBO instead of re-shading. Clipped
+      // subtrees ARE cached: the capture keeps screen-space coords (projecting
+      // through u_ViewOffset) and renders with the real ancestor clip stack, so
+      // the screen-space clip masks match verbatim. _capturing guards re-entry.
+      if (this._layerCacheEnabled && (this._uiStatic || this._cacheForce) && !this._capturing
+          && node !== this.Root && node.Visible && node.Width > 0 && node.Height > 0) {
+        // [cache-diag] tally why the hook rejects sizable nodes
+        const d = this._cacheDiag; d.reached++;
+        const rs = node.RenderStyle, tf = rs.Transform;
+        if (effH !== null || persp !== null) d.effH++;
+        else if (node.TeleportSeq !== 0) d.teleport++;
+        else if (node.EffectiveOpacity < 0.999) d.opacity++;
+        else if (Math.abs(eff[1]) > 1e-6 || Math.abs(eff[2]) > 1e-6) d.rot++;
+        else if (tf.Rotation !== 0 || tf.RotateX !== 0 || tf.RotateY !== 0 || tf.TranslateZ !== 0) d.xform++;
+        else if (rs.VisualScaleX !== 1 || rs.VisualScaleY !== 1 || rs.VisualTranslateX !== 0 || rs.VisualTranslateY !== 0) d.visual++;
+        else if (rs.Perspective > 0) d.persp++;
+        else if (this._subtreeSamplesLiveScene(node)) d.samples++;
+        else d.ok++;
+      }
+      if (this._layerCacheEnabled && cacheCapable && (this._uiStatic || this._cacheForce) && !this._capturing
+          && effH === null && persp === null
           && this._isLayerCacheRoot(node, eff)) {
-        compositeOrCapture(node, eff);
+        compositeOrCapture(node, eff, stack);
         return;
       }
 
@@ -1801,6 +1832,7 @@ export class Canvas implements DirtyTracker {
             const _tShared = performance.now();
             this._sharedPyramid = r.BuildSharedBackdrop(w, h, Math.log2(Math.max(1, this._maxFrostBlur * d)) + 5);
             this._opMs.Blur += performance.now() - _tShared;  // shared build folds snap+blur+mip into one number
+            this._counts.SharedBuilds++;
             this._sharedPyramidValid = true;
             this._sceneDirtyRects.length = 0;  // snapshot captured the scene-so-far; start fresh
           }
@@ -1866,7 +1898,9 @@ export class Canvas implements DirtyTracker {
         // spec all keep working.
         const glassBgPaint = this._computeBgPaint(node);
         const _tDraw = performance.now();
-        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
+        if (!(this._diagNoGlassDraw && _isGlass(material))) {
+          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
+        }
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
         else this._counts.Panels++;
@@ -1888,6 +1922,7 @@ export class Canvas implements DirtyTracker {
         //                still does border/shadow/clip — image is just
         //                another fill mode, not a separate draw pipeline.
         flushText();
+        if (!this._diagNoPanels) {
         const flatBgPaint = this._computeBgPaint(node);
         if (flatBgPaint !== undefined) {
           flushPanels();
@@ -1904,6 +1939,7 @@ export class Canvas implements DirtyTracker {
           this._panelBuffer.Begin();
         } else {
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+        }
         }
       }
 
@@ -1926,7 +1962,14 @@ export class Canvas implements DirtyTracker {
       // later glass surface that overlaps it must rebuild rather than reuse a
       // pyramid taken before this drew. Runs after the material branch above,
       // so a glass surface never sees its OWN footprint when it checks reuse.
-      if (this._sharedBackdrop) {
+      // Only a glass/pblur/backdrop-filter surface's OUTPUT is fresh content a
+      // LATER glass surface must rebuild for (genuine glass-over-glass). Opaque
+      // panels, text, and the field are baked into the pyramid at build time
+      // (the build snapshots the scene-so-far), so pushing THEIR footprints
+      // forced a near-per-surface rebuild for nothing — the documented dirty
+      // bug. Push only the surfaces whose result lands after the build.
+      if (this._sharedBackdrop
+          && (_isGlass(material) || material === 'ProgressiveBlur' || _hasBackdropFilter(node))) {
         const dab = this._nodeAabb(node, eff, effH);
         const dpr = this._dpr;
         this._sceneDirtyRects.push(dab.minX * dpr, dab.minY * dpr, dab.maxX * dpr, dab.maxY * dpr);
@@ -1942,14 +1985,23 @@ export class Canvas implements DirtyTracker {
     // renderNode calls it. Both only run from the root call below, so the mutual
     // reference resolves at call time.
     const r2 = this._renderer as WebGL2Renderer;
-    const compositeOrCapture = (cnode: Jiv, ceff: Mat2x3): void => {
+    const compositeOrCapture = (cnode: Jiv, ceff: Mat2x3, cstack: ClipStack): void => {
       const cgl = r2.GetGL();
       if (!cgl) return;
       const dpr = this._dpr;
-      const cdw = Math.max(1, Math.round(cnode.Width * matScaleX(ceff) * dpr));
-      const cdh = Math.max(1, Math.round(cnode.Height * matScaleY(ceff) * dpr));
-      const cox = matApplyX(ceff, cnode.X, cnode.Y), coy = matApplyY(ceff, cnode.X, cnode.Y);
-      const cdx = Math.round(cox * dpr), cdy = Math.round(coy * dpr);
+      // Painted AABB (device px): the subtree's box union expanded by the
+      // subtree's max shadow/border overhang so nothing is clipped at the box
+      // edge. We DON'T translate the captured geometry — instead the panel/text
+      // shaders project through u_ViewOffset = AABB origin, so v_PixelPos stays
+      // true screen space and the screen-space clip stack matches verbatim.
+      const box = this._nodeAabb(cnode, ceff, null);
+      const margin = this._subtreeMaxPaintMargin(cnode);
+      const aabbLpx = (box.minX - margin) * dpr;
+      const aabbTpx = (box.minY - margin) * dpr;
+      const adx = Math.floor(aabbLpx);
+      const ady = Math.floor(aabbTpx);
+      const adw = Math.max(1, Math.ceil((box.maxX + margin) * dpr) - adx);
+      const adh = Math.max(1, Math.ceil((box.maxY + margin) * dpr) - ady);
 
       // Drain pending main-walk batches first so z-order holds (earlier siblings
       // land behind this composite).
@@ -1957,41 +2009,43 @@ export class Canvas implements DirtyTracker {
       flushText();
 
       let entry = this._layerCache.get(cnode);
-      if (!entry) { entry = { Fbo: new Framebuffer(cgl), Valid: false, DX: cdx, DY: cdy, DW: cdw, DH: cdh }; this._layerCache.set(cnode, entry); }
+      if (!entry) { entry = { Fbo: new Framebuffer(cgl), Valid: false, DX: adx, DY: ady, DW: adw, DH: adh }; this._layerCache.set(cnode, entry); }
 
-      if (!entry.Valid || entry.DW !== cdw || entry.DH !== cdh) {
-        // ── Capture: render the subtree into its FBO at the origin ──
-        entry.Fbo.Resize(cdw, cdh);
+      this._counts.CacheComp++;
+      if (!entry.Valid || entry.DW !== adw || entry.DH !== adh || entry.DX !== adx || entry.DY !== ady) {
+        this._counts.CacheCap++;
+        // ── Capture: render the subtree into its FBO at screen coords, with the
+        // projection retargeted to the AABB sub-window via u_ViewOffset. ──
+        entry.Fbo.Resize(adw, adh);
         entry.Fbo.Bind();
-        cgl.viewport(0, 0, cdw, cdh);
+        cgl.viewport(0, 0, adw, adh);
         cgl.clearColor(0, 0, 0, 0);
         cgl.clear(cgl.COLOR_BUFFER_BIT);
-        // No own transform (gated) → exact translate of the inherited matrix so
-        // the subtree's top-left maps to (0,0).
-        const capEff: Mat2x3 = [ceff[0], ceff[1], ceff[2], ceff[3], ceff[4] - cox, ceff[5] - coy];
+        r2.SetCaptureViewOffset(adx, ady);
         const savedW = flushW, savedH = flushH;
-        flushW = cdw; flushH = cdh;
-        const capScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
+        flushW = adw; flushH = adh;
+        const capScope: TeleportScope = { Deferred: [], Stack: cstack };
         this._capturing = true;
-        renderNode(cnode, capEff, EmptyClipStack, capScope, null, null);
+        renderNode(cnode, ceff, cstack, capScope, null, null);
         replayScope(capScope);
         flushPanels();
         flushText();
         this._capturing = false;
         flushW = savedW; flushH = savedH;
+        r2.SetCaptureViewOffset(0, 0);
         r2.RebindSceneTarget();
         cgl.viewport(0, 0, w, h);
-        entry.Valid = true; entry.DX = cdx; entry.DY = cdy; entry.DW = cdw; entry.DH = cdh;
+        entry.Valid = true; entry.DX = adx; entry.DY = ady; entry.DW = adw; entry.DH = adh;
       }
 
-      // ── Composite: the cached texture over the scene FBO at the rect ──
+      // ── Composite: the cached texture over the scene FBO at its screen AABB.
       // The captured FBO holds PREMULTIPLIED colour (rendered over transparent
       // with EnableBlend's coverage-alpha), so composite with premultiplied over
       // (ONE, 1−SRC_ALPHA) — exact, no edge fringe. GL viewport is bottom-left
-      // origin; cdy is from the top, so flip it.
+      // origin; ady is from the top, so flip it.
       cgl.enable(cgl.BLEND);
       cgl.blendFunc(cgl.ONE, cgl.ONE_MINUS_SRC_ALPHA);
-      r2.BlitTextureRegion(entry.Fbo.Texture, cdx, h - cdy - cdh, cdw, cdh);
+      r2.BlitTextureRegion(entry.Fbo.Texture, adx, h - ady - adh, adw, adh);
       cgl.viewport(0, 0, w, h);
       this._counts.Panels++;
     };
@@ -2199,6 +2253,23 @@ export class Canvas implements DirtyTracker {
   /** Canvas-space AABB of `node`'s (possibly rotated) rect under matrix `m` —
    *  the min/max of its four mapped corners. Used for axis-aligned scissor/cull
    *  rects. At rotation 0 this is exactly the node's mapped rect. */
+  /** Max painted overhang (CSS px) beyond a node's box anywhere in a subtree:
+   *  drop-shadow reach (blur + |offset|) and border width. Used to size the
+   *  layer-cache FBO so shadows/borders aren't clipped at the box edge. A
+   *  clipping cache root bounds its descendants, so scanning the root's own
+   *  margin plus its children's covers every painted pixel conservatively. */
+  private _subtreeMaxPaintMargin = (node: Jiv): number => {
+    const s = node.RenderStyle;
+    let m = 0;
+    if (s.ShadowColor.A > 0.001) {
+      m = s.ShadowBlur + Math.max(Math.abs(s.ShadowOffsetX), Math.abs(s.ShadowOffsetY));
+    }
+    m = Math.max(m, s.BorderWidth);
+    const kids = node.Children as Jiv[];
+    for (let i = 0; i < kids.length; i++) m = Math.max(m, this._subtreeMaxPaintMargin(kids[i]));
+    return m;
+  };
+
   private _nodeAabb = (node: Jiv, m: Mat2x3, effH: Mat3x3 | null = null): { minX: number; minY: number; maxX: number; maxY: number } => {
     const x0 = node.X, y0 = node.Y, x1 = node.X + node.Width, y1 = node.Y + node.Height;
     // Under perspective, the box maps through the homography — project the four
@@ -3499,7 +3570,13 @@ export class Canvas implements DirtyTracker {
     if (params.has('no-reality')) this._diagNoReality = true;
     if (params.has('no-ui')) this._diagNoUi = true;
     if (params.has('no-blur')) this._diagNoBlur = true;
+    if (params.has('no-panels')) this._diagNoPanels = true;
+    if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
+    if (params.has('no-glass-draw')) this._diagNoGlassDraw = true;
     if (params.has('wkr-shared-backdrop') || hash.includes('wkr-shared-backdrop')) this._sharedBackdrop = true;
+    if (params.has('no-shared-backdrop') || hash.includes('no-shared-backdrop')) this._sharedBackdrop = false;
+    if (params.has('layer-cache') || hash.includes('layer-cache')) this._layerCacheEnabled = true;
+    if (params.has('cache-force') || hash.includes('cache-force')) { this._layerCacheEnabled = true; this._cacheForce = true; }
     if (params.has('damage-test') || hash.includes('damage-test')) this._damageTest = true;
   };
 

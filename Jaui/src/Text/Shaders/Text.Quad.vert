@@ -9,6 +9,10 @@ layout(location = 4) in vec4 a_Tint;        // per-instance: RGBA multiplier (1,
 layout(location = 5) in vec4 a_Rot;         // 2D: cosθ, sinθ, pivotX, pivotY — 3D: (2.0 sentinel, xformIndex, _, _)
 
 uniform vec2 u_Resolution;
+// Projection sub-window for retained-mode layer capture (see Jiv.Panel.vert).
+// (0,0) for the normal pass; capture sets it to the subtree AABB origin so
+// v_PixelPos stays screen-space and the screen-space clip stack matches.
+uniform vec2 u_ViewOffset;
 // Shared 3D-transform table (1-row RGBA32F, 3 texels per homography entry).
 uniform sampler2D u_XformTex;
 
@@ -39,7 +43,7 @@ void main() {
         float X = dot(h0, p), Y = dot(h1, p), W = dot(h2, p);
         vec2 screen = vec2(X, Y) / W;
         v_PixelPos = screen;
-        vec2 clip = (screen / u_Resolution) * 2.0 - 1.0;
+        vec2 clip = ((screen - u_ViewOffset) / u_Resolution) * 2.0 - 1.0;
         clip.y = -clip.y;
         gl_Position = vec4(clip * W, 0.0, W);
         return;
@@ -54,7 +58,7 @@ void main() {
                rel.x * a_Rot.y + rel.y * a_Rot.x) + a_Rot.zw;
     v_PixelPos = pos;
 
-    vec2 clip = (pos / u_Resolution) * 2.0 - 1.0;
+    vec2 clip = ((pos - u_ViewOffset) / u_Resolution) * 2.0 - 1.0;
     clip.y = -clip.y;
 
     gl_Position = vec4(clip, 0.0, 1.0);
