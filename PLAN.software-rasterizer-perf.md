@@ -7,7 +7,7 @@
 
 ## 0. How to use this doc / working protocol
 
-- **Branch:** `jev-jaui-perf` (off `origin/jev`). Isolated. Jaui engine code is the **git submodule** at `ShowStudio.Libraries/Jaui` (its source root is `ShowStudio.Libraries/Jaui/Jaui/src`). App code is `ShowStudio.App`.
+- **Branch:** `jev` (superproject and the Jaui submodule are both on `jev`). The §2 idle‑skip work + this plan are already COMMITTED (superproject `a9050377`, submodule `3159099`). A prior local jev collision‑refactor commit is parked on `jev-backup-collision`. Jaui engine code is the **git submodule** at `ShowStudio.Libraries/Jaui` (its source root is `ShowStudio.Libraries/Jaui/Jaui/src`). App code is `ShowStudio.App`.
 - **Line numbers in this doc are approximate (current tree). Grep the named symbol** — code shifts. All paths are from repo root `C:/Users/jackc/Code/Repositories/show-studio`.
 - **Run the app:** dedupe first (a stale nested Angular breaks the build): `rm -rf ShowStudio.Libraries/Jaui/node_modules` (the repo root is an npm workspace that provides the shared `@angular/*`). Then `cd ShowStudio.App && npm run generate:assets && npx ng serve --host 127.0.0.1 --port 6767 --proxy-config proxy.conf.json --no-hmr`. Target page: `http://127.0.0.1:6767/drill/playground` (localStorage backend, **no API/login needed**). Jaui renders in a **Web Worker** — a full reload (fresh Chrome) is required to pick up Jaui changes, not HMR.
 - **Reproduce the no‑GPU machine locally:** launch Chrome with `--disable-gpu --use-angle=swiftshader --enable-unsafe-swiftshader`. This is genuine software rasterization (SwiftShader) and matches the user's remote PC (which runs Microsoft Basic Render Driver / D3D11‑WARP — see §1).
@@ -34,7 +34,7 @@ So even with the whole 3D background changing every frame: HTML pays `[3D on WAR
 
 ---
 
-## 2. Already done (verified, on this branch, not yet committed)
+## 2. Already done (verified + COMMITTED on `jev`)
 
 **Render‑on‑demand.** Jaui's `_render` was unconditional every frame. Now gated: `renderActive = layoutDirty || _animationManager.IsRunning || _needsRender` with a 3‑frame settle tail (`Jaui.ts` `_tickInner`, ~859). Made `RequestFrame` functional (sets `_needsRender`); wired `Janvas.MarkDirty → Janvas.Invalidate → RequestFrame`; fixed `AnimationManager.StepFrame` firing `OnFrame` (→RequestFrame) every frame regardless of activity; added reality‑worker input change‑detection (`Reality.Worker.Renderer.ts` — camera/poses/progress/drag compared, `_dirty`/`_settleUntil` gate); and **killed a forever‑looping reveal‑pulse `@Animation` (Mirror loop)** in `ShowStudio.App/src/App/Reality/Reveal/RealityReveal.Jaui.ts` (now `@if (IsCovered())` gates the pulse jiv) that kept the canvas re‑rendering every frame even when idle. **Verified:** idle now renders **0 frames** (was 39/s HW, 0.19/s = 5 s/frame SW); resize/drag/playback wake it; screenshots pixel‑identical. This solves the **idle/static** case. This plan attacks the **active** (field‑moving) case.
 
@@ -142,7 +142,7 @@ This keeps it transparent and proven (no black‑box "trust me" summaries — th
 
 ## 9. Rollout (do in this order; each independently verified)
 
-1. **Commit the §2 idle‑skip + pulse fix** (checkpoint the verified win; involves committing the Jaui submodule then pinning it in the superproject).
+1. ~~Commit the §2 idle‑skip + pulse fix~~ — **DONE** (superproject `a9050377`, submodule `3159099`, on `jev`). Start at item 2.
 2. **§5 unified clip‑distance cache** — biggest single per‑pixel win, helps ~80% of fragments. Verify rounded‑clip AA edge is identical.
 3. **§4.1 P1 `MATERIAL_SOLID` + P2 blend‑off** — pixel‑identical, large win on the 237 panels.
 4. **§4.8 F1 (glass‑free FBO/clear/present skip) + F2 (RGBA8, banding‑gated) + F3 (DPR clamp).**
