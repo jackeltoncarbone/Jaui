@@ -33,6 +33,11 @@ export class Janvas extends Jiv {
   /** True once `Renderer.Init` has been called. */
   private _inited: boolean = false;
 
+  /** Canvas-level wake hook. Set by Jaui when the janvas is first rendered so a
+   *  `MarkDirty()` from the foreign renderer (e.g. the drill field on camera/playback
+   *  change) re-arms the render-on-demand loop. Null until wired. */
+  Invalidate: (() => void) | null = null;
+
   constructor(options?: {
     Style?: Partial<JivStyle>;
     Layout?: Partial<LayoutConfig>;
@@ -52,6 +57,9 @@ export class Janvas extends Jiv {
    *  (e.g., when a model the renderer reads from changes). */
   MarkDirty = (): void => {
     this._dirty = true;
+    // Wake the render-on-demand loop: a foreign-renderer change must cause Jaui to
+    // render the next frame even if no Jiv is layout/style/animation dirty.
+    this.Invalidate?.();
   };
 
   /** Internal — used by Jaui's frame loop. Returns true if the renderer

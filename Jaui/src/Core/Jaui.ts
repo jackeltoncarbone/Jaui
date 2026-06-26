@@ -672,9 +672,18 @@ export class Canvas implements DirtyTracker {
   });
   get Dpr(): number { return this._dpr; }
 
-  /** Request a re-render. When the loop is running, _tick already renders
-   *  every frame — no extra render needed. */
+  /** Re-render gate for render-on-demand. The rAF loop keeps ticking (cheap), but the
+   *  expensive `_render` walk is skipped on frames where nothing changed. Starts true so
+   *  the first frames always paint; `RequestFrame` / dirty / animation / janvas-wake re-arm it. */
+  private _needsRender: boolean = true;
+  /** Frames still owed after the last activity — renders a short tail so late-settling
+   *  spring/layout values land before the loop idles. */
+  private _renderHold: number = 0;
+
+  /** Request a re-render on the next loop tick (render-on-demand wake). Cheap + idempotent;
+   *  called by async producers (image decode, janvas/foreign-renderer change, scroll). */
   RequestFrame = (): void => {
+    this._needsRender = true;
   };
 
   // ── WebGL context-loss / restore ──
@@ -837,24 +846,42 @@ export class Canvas implements DirtyTracker {
     }
     if (hud) tTextEnd = performance.now();
 
-    // Reset per-frame counters; _render increments them as it walks.
-    if (hud) {
-      this._counts.Panels = 0;
-      this._counts.Glass = 0;
-      this._counts.Text = 0;
-      this._counts.Image = 0;
-      this._counts.PBlur = 0;
-      this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
+    // ── Render-on-demand gate ──────────────────────────────────────────────
+    // The expensive _render tree-walk (glass/blur fill + janvas field) runs ONLY when
+    // something changed this frame; an idle screen costs ~nothing instead of a full
+    // re-render. Signals: layout/text dirty, any running animation (springs/scroll/
+    // presence via AnimationManager.IsRunning), or an explicit RequestFrame (async image
+    // decode, janvas/foreign-renderer change). A short render-tail (_renderHold) lets
+    // late-settling spring/layout values paint before the loop idles. The rAF loop keeps
+    // ticking (springs StepFrame above run every frame) so the next change repaints with
+    // zero latency. This is what lets Jaui match the DOM on unaccelerated GPUs: a static
+    // page does not repaint, so software-GL cost collapses from full-frame to ~nothing.
+    const renderActive = layoutDirty || this._animationManager.IsRunning || this._needsRender;
+    this._needsRender = false;
+    if (renderActive) this._renderHold = 3; // render this frame + a 2-frame settle tail
+    const shouldRender = this._renderHold > 0;
+    if (shouldRender) {
+      this._renderHold--;
+
+      // Reset per-frame counters; _render increments them as it walks.
+      if (hud) {
+        this._counts.Panels = 0;
+        this._counts.Glass = 0;
+        this._counts.Text = 0;
+        this._counts.Image = 0;
+        this._counts.PBlur = 0;
+        this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
+      }
+
+      this._render(dt);
+      this._firePostFrame();
+
+      // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
+      // `?debug-layout`; no cost when disabled.
+      if (this._debugLayout) this._drawDebugLayout();
     }
 
-    this._render(dt);
-    this._firePostFrame();
-
-    // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
-    // `?debug-layout`; no cost when disabled.
-    if (this._debugLayout) this._drawDebugLayout();
-
-    if (hud) {
+    if (hud && shouldRender) {
       const tEnd = performance.now();
       const i = this._frameIdx;
       const phaseDirty  = tDirtyEnd  - t0;
@@ -3510,6 +3537,10 @@ export class Canvas implements DirtyTracker {
       if (renderer && node.Width > 0 && node.Height > 0 && node.Visible) {
         if (!node.IsInited()) {
           renderer.Init(gl, node.MarkDirty);
+          // Render-on-demand: let this janvas's MarkDirty wake the canvas loop, so a
+          // foreign-renderer change (drill field camera/playback) repaints even when no
+          // Jiv is dirty. Without this the field would freeze once the loop idles.
+          node.Invalidate = this.RequestFrame;
           node.MarkInited();
         }
         const d = this._dpr;

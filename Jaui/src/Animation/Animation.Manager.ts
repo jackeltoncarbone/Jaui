@@ -50,8 +50,11 @@ export class AnimationManager {
       if (a.Tick(dt)) anyActive = true;
     }
     this._running = anyActive;
-    // OnFrame stays wired (currently a no-op RequestFrame) for compatibility.
-    if (this._onFrame) this._onFrame();
+    // Fire OnFrame (→ RequestFrame) ONLY when something actually animated this frame.
+    // It used to fire unconditionally back when RequestFrame was a no-op; now that
+    // RequestFrame drives render-on-demand, an unconditional call would re-arm a render
+    // every frame and defeat idle-skip entirely.
+    if (anyActive && this._onFrame) this._onFrame();
   };
 
   // Schedule-only loop: the host's frame loop now advances the springs via
