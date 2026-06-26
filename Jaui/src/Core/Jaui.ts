@@ -34,6 +34,16 @@ import { SetPredicateViewport } from '../Jss/Jss.Predicate';
  *  a backdrop sample, border, or specular, and they render in their own pass. */
 const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 
+/** DIAGNOSTIC: per-frame tally of which classes render as glass — names the
+ *  surfaces driving the glass cost. Read + cleared once per profiler dump. */
+const _glassClassTally = new Map<string, number>();
+const ReadGlassClassSummary = (): string => {
+  if (_glassClassTally.size === 0) return 'none';
+  const top = [..._glassClassTally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+  _glassClassTally.clear();
+  return top.map(([k, v]) => `${k}×${v}`).join(' | ');
+};
+
 /** True when a non-glass panel has any non-default backdrop filter set
  *  (BackdropBrightness / Saturation / Contrast ≠ 1, BackdropFrostBlur > 0).
  *  These flat panels need the blur pyramid bound and the scene flushed just
@@ -1042,7 +1052,7 @@ export class Canvas implements DirtyTracker {
             ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
             ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)} | gpu ${gpuStr}` +
             ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur} SB${this._counts.SharedBuilds} cap${this._counts.CacheCap} comp${this._counts.CacheComp}` +
-            ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
+            ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} glass[${ReadGlassClassSummary()}] | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
@@ -1918,7 +1928,17 @@ export class Canvas implements DirtyTracker {
           r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
         }
         this._opMs.Draw += performance.now() - _tDraw;
-        if (_isGlass(material)) this._counts.Glass++;
+        if (_isGlass(material)) {
+          this._counts.Glass++;
+          if (this._consoleProfilingEnabled) {
+            const own = (node.Classes && node.Classes.length) ? node.Classes.join('.') : '∅';
+            const par = (node.Parent as { Classes?: readonly string[] } | null)?.Classes;
+            const ps = (par && par.length) ? par.join('.') : '∅';
+            const vis = (node.Width > 0 && node.Height > 0 && node.Visible) ? 'V' : 'h';
+            const sig = `${vis}|${own}<${ps}|${Math.round(node.Width)}x${Math.round(node.Height)}`;
+            _glassClassTally.set(sig, (_glassClassTally.get(sig) ?? 0) + 1);
+          }
+        }
         else this._counts.Panels++;
         if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
         // Reset the shared panel buffer so this glass instance isn't picked
