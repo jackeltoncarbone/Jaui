@@ -5,8 +5,8 @@ import type { SelectionManager } from '../../Selection/Selection.Manager';
 import type { AnimationManager } from '../../Animation/Animation.Manager';
 import type { Jiv } from '../../Jiv/Jiv';
 
-/** Arrow key scroll distance in CSS px — matches Chrome's kPixelsPerLineStep. */
-const LINE_PX = 80;
+/** Arrow key scroll distance in CSS px — Chrome's kPixelsPerLineStep = 40. */
+const LINE_PX = 40;
 
 /** Unified window-level keydown dispatcher. Absorbs selection shortcuts
  *  (Cmd/Ctrl+A, Esc) with no behavior change, and adds scroll-key routing
@@ -86,7 +86,7 @@ export class InputRouter {
     if (!handled || (dx === 0 && dy === 0)) return;
 
     this._focusManager.SetModality('keyboard');
-    this._scrollManager.ApplyDelta(scroller, dx, dy);
+    this._scrollManager.ApplyDeltaInstant(scroller, dx, dy);
     this._animationManager.Kick();
     e.preventDefault();
   };

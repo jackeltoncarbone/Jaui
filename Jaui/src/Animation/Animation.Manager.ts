@@ -46,26 +46,13 @@ export class AnimationManager {
    */
   StepFrame = (dt: number): void => {
     let anyActive = false;
-    this._activeTally.clear();
     for (const a of this._animatables) {
-      if (a.Tick(dt)) {
-        anyActive = true;
-        const n = a.constructor.name;
-        this._activeTally.set(n, (this._activeTally.get(n) ?? 0) + 1);
-      }
+      if (a.Tick(dt)) anyActive = true;
     }
     this._running = anyActive;
     // OnFrame stays wired (currently a no-op RequestFrame) for compatibility.
     if (this._onFrame) this._onFrame();
   };
-
-  /** DIAGNOSTIC: per-frame tally of which animatable kinds are still ticking —
-   *  reveals what's keeping the loop alive (perpetual `ir1`). */
-  private _activeTally = new Map<string, number>();
-  get ActiveSummary(): string {
-    if (this._activeTally.size === 0) return 'none';
-    return [...this._activeTally.entries()].map(([k, v]) => `${k}:${v}`).join(',');
-  }
 
   // Schedule-only loop: the host's frame loop now advances the springs via
   // StepFrame, so this just keeps an rAF armed while animations are running
