@@ -55,6 +55,8 @@ import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { Janvas } from '../Janvas/Janvas';
+import { FocusManager } from './Focus/FocusManager';
+import { InputRouter } from './Input/InputRouter';
 
 export class Canvas implements DirtyTracker {
   readonly Element: HTMLCanvasElement;
@@ -101,6 +103,9 @@ export class Canvas implements DirtyTracker {
 
   /** Public image cache — load images/SVGs here, reference them from Jivs. */
   get Images(): ImageCache { return this._imageCache; }
+  /** Focus and keyboard-modality state — consumers can set FocusedScroller
+   *  to override which scroll container receives keyboard scroll keys. */
+  get Focus(): FocusManager { return this._focusManager; }
   /** Specular tilt offset — added to lightDir for specular computations only. */
   private _specTiltX: number = 0;
   private _specTiltY: number = 0;
@@ -112,6 +117,8 @@ export class Canvas implements DirtyTracker {
   private _textAnimators = new Map<JauiElement, TextAnimator>();
   private _scrollManager!: ScrollManager;
   private _selectionManager!: SelectionManager;
+  private _focusManager!: FocusManager;
+  private _inputRouter!: InputRouter;
   private _maxFrostBlur: number = 0;
 
   // ─── Debug HUD ───
@@ -313,6 +320,15 @@ export class Canvas implements DirtyTracker {
     this._animationManager.Kick();
     this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv), this._animationManager);
     this._selectionManager.OnSelectionTextChanged((text) => this._selectionTextRelay?.(text));
+    this._focusManager = new FocusManager();
+    this._inputRouter = new InputRouter(
+      this._platform,
+      this._scrollManager,
+      this._focusManager,
+      this._selectionManager,
+      this._animationManager,
+      () => this.Root,
+    );
 
     // Defer the first _resize() to a rAF tick so layout is already settled
     // when clientWidth runs as a fallback. Direct construction-time reads
@@ -331,7 +347,7 @@ export class Canvas implements DirtyTracker {
     this._listenForScroll();
     this._listenForInteractionStates();
     this._listenForTextSelection();
-    this._listenForSelectionKeys();
+    this._inputRouter.Listen();
     this._listenForFontLoad();
     void this._listenForSpecularTilt;
 
@@ -1026,7 +1042,7 @@ export class Canvas implements DirtyTracker {
             ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
             ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)} | gpu ${gpuStr}` +
             ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur} SB${this._counts.SharedBuilds} cap${this._counts.CacheCap} comp${this._counts.CacheComp}` +
-            ` | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
+            ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} anim[${this._animationManager.ActiveSummary}] | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
@@ -3293,45 +3309,6 @@ export class Canvas implements DirtyTracker {
     this._on('pointercancel', end);
   };
 
-  /** Keyboard shortcuts on the active selection — Cmd/Ctrl+A select-all
-   *  within the current text Jiv, Escape clears.
-   *
-   *  Listens on `window` (canvas isn't focusable by default). We only act
-   *  when the active element is the body / canvas — so typing Cmd+A inside
-   *  a real <input> on the page still does the native thing. */
-  private _listenForSelectionKeys = (): void => {
-    const selMgr = this._selectionManager;
-    this._platform.AddKeydownListener((e: KeyboardEvent) => {
-      if (this._platform.IsTextInputFocused()) return;
-
-      const meta = e.ctrlKey || e.metaKey;
-      if (meta && (e.key === 'a' || e.key === 'A')) {
-        const first = selMgr.FirstTextJiv(this.Root);
-        const last = selMgr.LastTextJiv(this.Root);
-        if (first && last) {
-          const [, lastChar] = selMgr.FullRange(last);
-          selMgr.Set({
-            AnchorJiv: first, AnchorChar: 0,
-            ExtentJiv: last, ExtentChar: lastChar,
-          }, this.Root);
-          this._animationManager.Kick();
-          e.preventDefault();
-        }
-      // Cmd/Ctrl+C is handled on the main thread via the native `copy`
-      // event (see MainBridge), where the user-gesture activation is still
-      // alive. Calling `navigator.clipboard.writeText` from inside the worker
-      // silently fails because transient activation doesn't ride across
-      // postMessage. The worker mirrors selection text to main on every
-      // selection change via the `selection-text` W2M message instead.
-      } else if (e.key === 'Escape') {
-        if (selMgr.Current) {
-          selMgr.Set(null, this.Root);
-          this._animationManager.Kick();
-          e.preventDefault();
-        }
-      }
-    }, { capture: true });
-  };
 
   /** Wheel + touch/pointer drag — both route through ScrollManager which
    *  handles physics (momentum, rubber-band for drag). Wheel clamps; drag
