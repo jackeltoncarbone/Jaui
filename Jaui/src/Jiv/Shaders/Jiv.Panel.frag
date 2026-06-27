@@ -716,22 +716,6 @@ void main() {
     int mode = ShapeMode(panelHalfSize, v_Radii);
     float effectiveSmooth = smoothness;
 
-    // ── Border-only early discard (the big per-frame glass win) ──
-    // A BorderLayer glass (rim drawn OVER its children) is re-emitted as a SECOND
-    // full glass draw with borderOnly=1 — so every such piece is drawn twice, and
-    // the overlay paints ONLY the thin border band yet otherwise re-shades the
-    // whole interior (SDF + backdrop sample + …) and zeroes it at the very end.
-    // For ~10 glass pieces that's ~10 wasted full-interior re-shades/frame. Kill
-    // it here with a cheap rect-bounds depth test BEFORE the (pill) SDF + the
-    // backdrop sample: deep-interior fragments are transparent in border-only, so
-    // discarding them is pixel-identical. Generous margin preserves the rounded
-    // corner band. This roughly halves total glass fragment cost.
-    if (borderOnly == 1.0) {
-        vec2 _q = panelHalfSize - abs(p);          // per-axis depth inside (rect approx)
-        float _roughDepth = min(_q.x, _q.y);        // ~distance to nearest edge
-        if (_roughDepth > borderWidth * 2.0 + bezelWidth + 8.0) discard;
-    }
-
     // ── SDF + normal ──
     // Single dispatch for pill mode → one polyline scan instead of two
     // separate scans (SDF + Grad). Rect/circle still uses the cheap
@@ -1038,16 +1022,6 @@ void main() {
     //      what makes the outline read as a real bevel catching light, not a
     //      flat CSS border. For non-glass it falls back to a uniform stroke.
     if (materialType == 1.0) {
-      // ── Bezel-band gate (Apple Liquid Glass model, AppleLiquidGlass.md §1.13) ──
-      // Apple's glass is a "flat-topped lozenge with rounded bevel walls": ALL the
-      // rim optics (hemispherical ambient, inner-dark line, specular catchlight)
-      // live in the thin bezel band and vanish in the flat interior. Their masks
-      // (rimMask, hump, innerDarkBand) are already ~0 past the band, so skipping
-      // the per-pixel ALU there is VISUALLY IDENTICAL — but on a software
-      // rasterizer it's the difference between staying under the GPU watchdog and
-      // a STATUS_BREAKPOINT (the interior is the bulk of the glass area).
-      bool _inBezel = dist > -(max(bezelWidth * 3.0, 8.0) + 4.0);
-      if (_inBezel) {
         // ── Hemispherical edge light (rim ambient — top vs bottom bias) ──
         // Apple uses a virtual "sky above, ground below" environment so the
         // top of the rim picks up brighter ambient than the bottom. In screen
@@ -1110,7 +1084,6 @@ void main() {
         result.rgb *= 1.0 - innerDarkAlpha;
         result.rgb = result.rgb * (1.0 - specAlpha) + specRgb * specAlpha;
         result.a = result.a * (1.0 - specAlpha) + specAlpha;
-      } // end bezel-band gate
 
         // ── Rim specular highlight (Apple's chrome-edge catchlight) ─────
         // A SECOND very thin bright line right at the silhouette, on the LIT

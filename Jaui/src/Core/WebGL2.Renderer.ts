@@ -412,12 +412,11 @@ export class WebGL2Renderer implements Renderer {
       premultipliedAlpha: true,
       preserveDrawingBuffer: false,
       powerPreference: 'high-performance',
-      // Low-latency present: lets the browser bypass a layer of compositor
-      // buffering/sync and push the frame more directly to the display. The
-      // present (not render) is the per-frame cost on a no-GPU host; this
-      // targets it directly. May be ignored by the UA; worst case is minor tearing.
-      desynchronized: true,
-    } as WebGLContextAttributes) as WebGL2RenderingContext | null;
+      // NOTE: do NOT set `desynchronized: true`. With render-on-demand + double
+      // buffering it presents an unsynced buffer flip, so the canvas visibly
+      // alternates between the previous and the new frame every tick (the
+      // app-wide jitter). The speculative latency win wasn't worth the tearing.
+    }) as WebGL2RenderingContext | null;
     if (!gl) throw new Error('[Jaui] WebGL2 not supported');
     this._gl = gl;
 
