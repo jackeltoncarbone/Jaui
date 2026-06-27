@@ -17,6 +17,7 @@ import type { TextStyle, TextMeasurement } from '../Text/Text.Types';
 import { DefaultTextStyle } from '../Text/Text.Types';
 import type { ResolveContext } from '../Core/Length';
 import { DirtyFlag, type DirtyFlags } from '../Core/Types';
+import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import { Spring } from '../Animation/Spring';
 
 /** Side-channel from Element to its owning Canvas (or any consumer that wants
@@ -250,6 +251,11 @@ export class Element {
    *  and the engine will hard-remove this element from its parent once the
    *  spring settles at 0. */
   LeaveRequested: boolean = false;
+
+  /** Cached vector-SVG geometry (tessellated fills/strokes) attached via the
+   *  SvgJiv binding's `svg-set` op. When set, the renderer draws it as real GPU
+   *  geometry instead of a rasterized background image. Null for ordinary nodes. */
+  SvgVector: SvgVectorPaint | null = null;
 
   // ── Dirty tracking ──
   Dirty: DirtyFlags = DirtyFlag.Layout;

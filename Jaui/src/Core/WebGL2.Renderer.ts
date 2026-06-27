@@ -20,6 +20,10 @@ import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
 import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
 import strokeVertSrc from '../Jline/Shaders/Jline.vert.gen';
 import strokeFragSrc from '../Jline/Shaders/Jline.frag.gen';
+import svgFillVertSrc from '../Svg/Shaders/Svg.Fill.vert.gen';
+import svgFillFragSrc from '../Svg/Shaders/Svg.Fill.frag.gen';
+import svgStrokeVertSrc from '../Svg/Shaders/Svg.Stroke.vert.gen';
+import svgStrokeFragSrc from '../Svg/Shaders/Svg.Stroke.frag.gen';
 import type { StrokeStyle } from './Renderer';
 
 // ─── Jline (stroke) uniform-location bundle ─────────────────────────────────
@@ -309,6 +313,28 @@ export class WebGL2Renderer implements Renderer {
   private _strokeInstanceData = new Float32Array(0);
   private _strokeInstanceCount = 0;
 
+  // SVG vector fill shader — non-instanced triangle soup [x, y, cov]
+  private _svgFillShader!: ShaderProgram;
+  private _svgFillVao!: WebGLVertexArrayObject;
+  private _svgFillVertBuffer!: WebGLBuffer;
+  private _svgFillLocs!: {
+    resolution: WebGLUniformLocation | null;
+    model0: WebGLUniformLocation | null;
+    model1: WebGLUniformLocation | null;
+    tint: WebGLUniformLocation | null;
+  };
+  // SVG vector stroke shader — instanced miter-quad segments (2 vec4/instance)
+  private _svgStrokeShader!: ShaderProgram;
+  private _svgStrokeVao!: WebGLVertexArrayObject;
+  private _svgStrokeInstanceBuffer!: WebGLBuffer;
+  private _svgStrokeLocs!: {
+    resolution: WebGLUniformLocation | null;
+    model0: WebGLUniformLocation | null;
+    model1: WebGLUniformLocation | null;
+    tint: WebGLUniformLocation | null;
+    halfWidth: WebGLUniformLocation | null;
+  };
+
   // Blit shader
   private _blitShader!: ShaderProgram;
   private _blitTexLoc!: WebGLUniformLocation | null;
@@ -414,6 +440,8 @@ export class WebGL2Renderer implements Renderer {
     this._initPanelShader(gl);
     this._initTextShader(gl);
     this._initStrokeShader(gl);
+    this._initSvgFillShader(gl);
+    this._initSvgStrokeShader(gl);
     this._initBlitShader(gl);
     this._initClipMaskShader(gl);
     this._initProgBlurShader(gl);
@@ -848,6 +876,72 @@ export class WebGL2Renderer implements Renderer {
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._strokeInstanceCount);
   };
 
+  /** Read the current default-framebuffer pixels into a PNG blob. Call IMMEDIATELY after a
+   *  render (preserveDrawingBuffer is false, so the back buffer is valid only until the next
+   *  draw). Rows are flipped (GL is bottom-up) into a 2D OffscreenCanvas, then encoded. */
+  CapturePng = async (): Promise<Blob | null> => {
+    const gl = this._gl;
+    const w = this._width, h = this._height;
+    if (w === 0 || h === 0) return null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const out = new OffscreenCanvas(w, h);
+    const ctx = out.getContext('2d');
+    if (!ctx) return null;
+    const img = ctx.createImageData(w, h);
+    const row = w * 4;
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * row;
+      img.data.set(px.subarray(src, src + row), y * row);
+    }
+    ctx.putImageData(img, 0, 0);
+    return out.convertToBlob({ type: 'image/png' });
+  };
+
+  // ── SVG vector rendering ──
+
+  SvgFillDraw = (
+    verts: Float32Array, vertCount: number,
+    model0: readonly [number, number, number], model1: readonly [number, number, number],
+    tint: readonly [number, number, number, number],
+    canvasWidth: number, canvasHeight: number,
+  ): void => {
+    if (vertCount === 0) return;
+    const gl = this._gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._svgFillVertBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, verts.subarray(0, vertCount * 3), gl.DYNAMIC_DRAW);
+    const l = this._svgFillLocs;
+    this._useProgram(this._svgFillShader.Program);
+    gl.uniform2f(l.resolution, canvasWidth, canvasHeight);
+    gl.uniform3f(l.model0, model0[0], model0[1], model0[2]);
+    gl.uniform3f(l.model1, model1[0], model1[1], model1[2]);
+    gl.uniform4f(l.tint, tint[0], tint[1], tint[2], tint[3]);
+    gl.bindVertexArray(this._svgFillVao);
+    gl.drawArrays(gl.TRIANGLES, 0, vertCount);
+  };
+
+  SvgStrokeDraw = (
+    data: Float32Array, segCount: number,
+    model0: readonly [number, number, number], model1: readonly [number, number, number],
+    tint: readonly [number, number, number, number],
+    halfWidthDev: number, canvasWidth: number, canvasHeight: number,
+  ): void => {
+    if (segCount === 0) return;
+    const gl = this._gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._svgStrokeInstanceBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, segCount * 8), gl.DYNAMIC_DRAW);
+    const l = this._svgStrokeLocs;
+    this._useProgram(this._svgStrokeShader.Program);
+    gl.uniform2f(l.resolution, canvasWidth, canvasHeight);
+    gl.uniform3f(l.model0, model0[0], model0[1], model0[2]);
+    gl.uniform3f(l.model1, model1[0], model1[1], model1[2]);
+    gl.uniform4f(l.tint, tint[0], tint[1], tint[2], tint[3]);
+    gl.uniform1f(l.halfWidth, Math.max(0.5, halfWidthDev));
+    gl.bindVertexArray(this._svgStrokeVao);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, segCount);
+  };
+
   // ── Blur ──
 
   /** [diag ?no-blur] When true, ComputeBlur + GenerateBlurMipmap no-op so the
@@ -1247,6 +1341,46 @@ export class WebGL2Renderer implements Renderer {
 
     // Dedicated VAO (unit quad at loc 0 + 3 per-instance vec4 at locs 1..3)
     this._strokeVao = this._createInstancedVao(gl, this._strokeInstanceBuffer, STROKE_ATTR_COUNT, STROKE_BYTES_PER_INSTANCE);
+  };
+
+  private _initSvgFillShader = (gl: WebGL2RenderingContext): void => {
+    this._svgFillShader = ShaderCompiler.Compile(gl, svgFillVertSrc, svgFillFragSrc);
+    const p = this._svgFillShader.Program;
+    this._svgFillLocs = {
+      resolution: gl.getUniformLocation(p, 'u_Resolution'),
+      model0: gl.getUniformLocation(p, 'u_Model0'),
+      model1: gl.getUniformLocation(p, 'u_Model1'),
+      tint: gl.getUniformLocation(p, 'u_Tint'),
+    };
+    const buf = gl.createBuffer();
+    if (!buf) throw new Error('[Jaui] Failed to create SVG fill vertex buffer');
+    this._svgFillVertBuffer = buf;
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error('[Jaui] Failed to create SVG fill VAO');
+    this._svgFillVao = vao;
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    // a_Vert = vec3(x, y, coverage) at location 0, tightly packed.
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+  };
+
+  private _initSvgStrokeShader = (gl: WebGL2RenderingContext): void => {
+    this._svgStrokeShader = ShaderCompiler.Compile(gl, svgStrokeVertSrc, svgStrokeFragSrc);
+    const p = this._svgStrokeShader.Program;
+    this._svgStrokeLocs = {
+      resolution: gl.getUniformLocation(p, 'u_Resolution'),
+      model0: gl.getUniformLocation(p, 'u_Model0'),
+      model1: gl.getUniformLocation(p, 'u_Model1'),
+      tint: gl.getUniformLocation(p, 'u_Tint'),
+      halfWidth: gl.getUniformLocation(p, 'u_HalfWidthDev'),
+    };
+    const buf = gl.createBuffer();
+    if (!buf) throw new Error('[Jaui] Failed to create SVG stroke instance buffer');
+    this._svgStrokeInstanceBuffer = buf;
+    // Unit quad at loc 0 + 2 per-instance vec4 (a_Seg, a_Miter) at locs 1..2; stride 8 floats.
+    this._svgStrokeVao = this._createInstancedVao(gl, this._svgStrokeInstanceBuffer, 2, 8 * 4);
   };
 
   /** Create a VAO with the unit quad at location 0 + instance attributes at locations 1..N. */

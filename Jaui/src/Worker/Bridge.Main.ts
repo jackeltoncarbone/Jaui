@@ -175,6 +175,15 @@ export class MainBridge {
   /** Post a non-Jiv message immediately (events, resize, JSS vars, etc.).
    *  Backlogs until the worker posts ready. Optional `transfer` hands
    *  Transferables (ImageBitmap, ArrayBuffer) to the worker zero-copy. */
+  private _pendingCapture: ((b: Blob | null) => void) | null = null;
+  /** Debug/screenshot: request a PNG capture of the next worker-rendered frame. */
+  Capture = (): Promise<Blob | null> => {
+    return new Promise(resolve => {
+      this._pendingCapture = resolve;
+      this.PostMessage({ T: 'capture' });
+    });
+  };
+
   PostMessage = (msg: M2W, transfer?: Transferable[]): void => {
     if (!this._ready) {
       this._eventBacklog.push(msg);
@@ -254,6 +263,7 @@ export class MainBridge {
       case 'ready':         return this._onReady(m);
       case 'cursor':        return this._onCursor(m);
       case 'capture':       return this._onCapture(m);
+      case 'capture-result': this._pendingCapture?.(m.Blob); this._pendingCapture = null; return;
       case 'hit':           return this._onHit(m);
       case 'rect':          return this._onRect(m);
       case 'hud':           return; // HUD relocation lands in P1g; no-op for now.

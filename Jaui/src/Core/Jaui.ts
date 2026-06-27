@@ -11,12 +11,13 @@ import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intri
 import { TextCache } from '../Text/Text.Cache';
 import { MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
-import { ResolveTextStyle } from '../Text/Text.Types';
+import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
 import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
+import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
 import { XformBuffer } from '../Transform/Xform.Buffer';
 import type { Renderer, GpuTextureHandle, BgPaint } from './Renderer';
@@ -33,16 +34,6 @@ import { SetPredicateViewport } from '../Jss/Jss.Predicate';
  *  materials like ProgressiveBlur are compositing overlays — they don't have
  *  a backdrop sample, border, or specular, and they render in their own pass. */
 const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
-
-/** DIAGNOSTIC: per-frame tally of which classes render as glass — names the
- *  surfaces driving the glass cost. Read + cleared once per profiler dump. */
-const _glassClassTally = new Map<string, number>();
-const ReadGlassClassSummary = (): string => {
-  if (_glassClassTally.size === 0) return 'none';
-  const top = [..._glassClassTally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
-  _glassClassTally.clear();
-  return top.map(([k, v]) => `${k}×${v}`).join(' | ');
-};
 
 /** True when a non-glass panel has any non-default backdrop filter set
  *  (BackdropBrightness / Saturation / Contrast ≠ 1, BackdropFrostBlur > 0).
@@ -125,6 +116,9 @@ export class Canvas implements DirtyTracker {
   private _nonFiniteWarned = new WeakSet<JauiElement>();
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
   private _textAnimators = new Map<JauiElement, TextAnimator>();
+  // Vector-SVG paint lives on the node (Element.SvgVector), set by the SvgJiv
+  // binding's svg-set op. This is the cache of resolved fill colors by raw string.
+  private _svgColorCache = new Map<string, ReturnType<typeof ParseColor>>();
   private _scrollManager!: ScrollManager;
   private _selectionManager!: SelectionManager;
   private _focusManager!: FocusManager;
@@ -721,6 +715,15 @@ export class Canvas implements DirtyTracker {
     this._needsRender = true;
   };
 
+  private _pendingCapture: ((b: Blob | null) => void) | null = null;
+  /** Force a render and capture the resulting frame as a PNG blob (debug/screenshot). */
+  CaptureFrame = (): Promise<Blob | null> => {
+    return new Promise(resolve => {
+      this._pendingCapture = resolve;
+      this._needsRender = true;
+    });
+  };
+
   // ── Retained-mode layer cache (Phase 3) ──
   // A stable, static subtree that doesn't sample the live scene renders ONCE
   // into its own FBO, then composites each frame over the everplaying field —
@@ -1052,7 +1055,7 @@ export class Canvas implements DirtyTracker {
             ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
             ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)} | gpu ${gpuStr}` +
             ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur} SB${this._counts.SharedBuilds} cap${this._counts.CacheCap} comp${this._counts.CacheComp}` +
-            ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} glass[${ReadGlassClassSummary()}] | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
+            ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
@@ -1928,17 +1931,7 @@ export class Canvas implements DirtyTracker {
           r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
         }
         this._opMs.Draw += performance.now() - _tDraw;
-        if (_isGlass(material)) {
-          this._counts.Glass++;
-          if (this._consoleProfilingEnabled) {
-            const own = (node.Classes && node.Classes.length) ? node.Classes.join('.') : '∅';
-            const par = (node.Parent as { Classes?: readonly string[] } | null)?.Classes;
-            const ps = (par && par.length) ? par.join('.') : '∅';
-            const vis = (node.Width > 0 && node.Height > 0 && node.Visible) ? 'V' : 'h';
-            const sig = `${vis}|${own}<${ps}|${Math.round(node.Width)}x${Math.round(node.Height)}`;
-            _glassClassTally.set(sig, (_glassClassTally.get(sig) ?? 0) + 1);
-          }
-        }
+        if (_isGlass(material)) this._counts.Glass++;
         else this._counts.Panels++;
         if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
         // Reset the shared panel buffer so this glass instance isn't picked
@@ -1991,6 +1984,18 @@ export class Canvas implements DirtyTracker {
       if (anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
         this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+      }
+
+      // Emit this node's vector SVG (tessellated fills) as immediate draws. Like
+      // glass/image, it flushes the pending panel + text batches first so z-order
+      // stays coherent (prior siblings behind, later siblings in front).
+      const svgVec = node.SvgVector;
+      if (svgVec && (svgVec.Fills.length > 0 || svgVec.Strokes.length > 0)
+          && node.Visible && node.Width > 0 && node.Height > 0 && node.EffectiveOpacity > 0.001) {
+        flushPanels();
+        flushText();
+        this._emitSvgFor(node, eff, flushW, flushH);
+        flushText(); // drain SVG <text> glyphs the emit pushed, on top of its fills/strokes
       }
 
       // Shared-backdrop dirty tracking: this node has now committed to the
@@ -2145,6 +2150,13 @@ export class Canvas implements DirtyTracker {
     // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
     if (!this._headless) {
       r.PresentScene();
+      // Screenshot capture: read the freshly-presented swap chain BEFORE the
+      // transient discard below (the back buffer isn't preserved between frames).
+      if (this._pendingCapture) {
+        const cb = this._pendingCapture;
+        this._pendingCapture = null;
+        void r.CapturePng().then(cb);
+      }
       // Tell the driver we don't need the default framebuffer's depth or the
       // scene FBO's color for the rest of this frame. On tile-based mobile
       // GPUs this discards the tile memory instead of writing it back to
@@ -2441,6 +2453,76 @@ export class Canvas implements DirtyTracker {
       this._maxFrostBlur = node.RenderStyle.BackdropFrostBlur;
     }
     for (const child of node.Children as Jiv[]) this._scanFrostBlur(child);
+  };
+
+  /** Resolve an SVG paint string to rgba, cached. Literal colors (rgba/#hex/named)
+   *  cover every current consumer; a JSS-`@var` path can substitute here later. */
+  private _resolveSvgColor = (raw: string): ReturnType<typeof ParseColor> => {
+    let c = this._svgColorCache.get(raw);
+    if (!c) { c = ParseColor(raw); this._svgColorCache.set(raw, c); }
+    return c;
+  };
+
+  /** Draw a node's cached vector-SVG fills. Model = dpr · eff · (viewBox→nodeBox);
+   *  each fill is one immediate triangle-soup draw with its resolved+opacity-folded tint. */
+  private _emitSvgFor = (node: Jiv, eff: Mat2x3, w: number, h: number): void => {
+    const svg = node.SvgVector;
+    if (!svg || (svg.Fills.length === 0 && svg.Strokes.length === 0)) return;
+    const [vx, vy, vw, vh] = svg.ViewBox;
+    if (vw <= 0 || vh <= 0) return;
+    const sx = node.Width / vw, sy = node.Height / vh;
+    const local: Mat2x3 = [sx, 0, 0, sy, -vx * sx, -vy * sy];
+    const dpr = this._dpr;
+    const deff: Mat2x3 = [eff[0] * dpr, eff[1] * dpr, eff[2] * dpr, eff[3] * dpr, eff[4] * dpr, eff[5] * dpr];
+    const m = matMul(deff, local);
+    const model0: [number, number, number] = [m[0], m[2], m[4]];
+    const model1: [number, number, number] = [m[1], m[3], m[5]];
+    const nodeOp = node.EffectiveOpacity;
+    this._renderer.EnableBlend();
+    for (const fill of svg.Fills) {
+      const c = this._resolveSvgColor(fill.ColorRaw);
+      const a = c.A * fill.Opacity * nodeOp;
+      if (a <= 0.001 || fill.VertCount === 0) continue;
+      this._renderer.SvgFillDraw(fill.Verts, fill.VertCount, model0, model1, [c.R, c.G, c.B, a], w, h);
+    }
+    if (svg.Strokes.length > 0) {
+      // viewBox→device scale (geometric mean of the affine's axis scales) → device-px half-width.
+      const scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
+      for (const st of svg.Strokes) {
+        const c = this._resolveSvgColor(st.ColorRaw);
+        const a = c.A * st.Opacity * nodeOp;
+        if (a <= 0.001 || st.SegmentCount === 0) continue;
+        this._renderer.SvgStrokeDraw(st.Data, st.SegmentCount, model0, model1, [c.R, c.G, c.B, a], st.HalfWidth * scale, w, h);
+      }
+    }
+    // SVG <text> runs → rasterized via the glyph cache + pushed to the shared text batch (drained
+    // by the next flushText). Positions/rotation map through the run's transform folded with the
+    // element model; SVG y is the baseline, anchor centers/ends the run.
+    for (const run of svg.Texts) {
+      if (!run.Text) continue;
+      const c = this._resolveSvgColor(run.ColorRaw);
+      const a = c.A * run.Opacity * nodeOp;
+      if (a <= 0.001) continue;
+      const ft = matMul(m, run.Transform as Mat2x3);
+      const fScale = Math.sqrt(Math.abs(ft[0] * ft[3] - ft[1] * ft[2])) || 1;
+      const sizeDev = run.FontSize * fScale;
+      const style: ResolvedTextStyle = {
+        FontFamily: 'Inter', FontSize: sizeDev / this._dpr, FontWeight: run.Weight, FontStyle: 'Normal',
+        Color: c, LineHeight: 1.2, LetterSpacing: 0, // LineHeight is a multiplier, not px
+        TextAlign: 'Left', TextAlignLast: 'Auto', TextOverflow: 'Clip', MaxLines: null,
+      };
+      const entry = this._textCache.Get(run.Text, style, null, this._dpr);
+      const ax = matApplyX(ft, run.X, run.Y), ay = matApplyY(ft, run.X, run.Y);
+      const shift = run.Anchor === 'middle' ? entry.Width / 2 : run.Anchor === 'end' ? entry.Width : 0;
+      this._textBuffer.Push({
+        X: ax - shift, Y: ay - sizeDev * 0.8, // SVG y is baseline; ascent ≈ 0.8·size
+        Width: entry.Width, Height: entry.Height,
+        Uv: entry.Uv, Opacity: a,
+        ClipOffset: 0, ClipCount: 0,
+        TintR: c.R, TintG: c.G, TintB: c.B, TintA: 1,
+        Cos: matCos(ft), Sin: matSin(ft), PivotX: ax, PivotY: ay,
+      });
+    }
   };
 
   private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number = -1): void => {
@@ -3515,6 +3597,15 @@ export class Canvas implements DirtyTracker {
     if (needsKick) this._animationManager.Kick();
   };
 
+  /** Public: drop cached glyph rasters so text re-rasterizes with a newly-registered font. Call
+   *  after a font is registered post-init (the headless turf canvas gets Inter from the reality
+   *  bridge). Light — just clears the text atlas cache; the caller re-renders next frame. Does NOT
+   *  re-layout (the turf's SnapLayout base must not be reset to 0). */
+  RefreshFonts = (): void => {
+    this._textCache.Clear();
+    this._needsRender = true;
+  };
+
   /** Listen for fonts that arrive AFTER the first tick — e.g. a lazy
    *  @font-face registered later, or a network-slow Google Font that
    *  resolved fonts.ready optimistically on a different family.
@@ -3995,6 +4086,12 @@ export { ParseJss, MergeRulesets } from '../Jss/Jss.Parser';
 export type { Stylesheet, Ruleset, ParsedJss, VarTable, AnimationTable, PredicateExpr, PredicateStyle } from '../Jss/Jss.Parser';
 export { EvaluatePredicate } from '../Jss/Jss.Predicate';
 export { SlotFor, type Slot } from '../Jss/Jss.Routes';
+
+// SVG vector renderer — the SvgJiv binding parses a DOM <svg> + tessellates on the
+// main thread, then ships the geometry to the worker via JivHandle.SetSvgVector.
+export { ParseSvgElement, ParseSvgString, FlatnessTol2 } from '../Svg/Svg.Parse';
+export { BuildVectorPaint, type SvgVectorPaint, type SvgFillShape, type SvgStrokeShape, type SvgTextRun } from '../Svg/Svg.VectorPaint';
+export type { ParsedSvg, SvgNode, SvgPathNode, SvgTextNode, SvgContour, SvgFillRule } from '../Svg/Svg.Types';
 
 // Worker boot — apps call CheckBrowserSupport() before mounting Angular.
 export { CheckBrowserSupport, type BrowserSupportResult } from '../Worker/Browser.Support';

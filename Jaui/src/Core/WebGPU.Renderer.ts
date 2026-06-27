@@ -379,6 +379,19 @@ export class WebGPURenderer implements Renderer {
   StrokeBeginBatch = (): void => {};
   StrokeAddInstance = (_data: Float32Array, _offset: number, _count: number): void => {};
   StrokeDrawBatch = (_canvasWidth: number, _canvasHeight: number, _style: StrokeStyle): void => {};
+  SvgFillDraw = (
+    _verts: Float32Array, _vertCount: number,
+    _model0: readonly [number, number, number], _model1: readonly [number, number, number],
+    _tint: readonly [number, number, number, number],
+    _canvasWidth: number, _canvasHeight: number,
+  ): void => {};
+  CapturePng = async (): Promise<Blob | null> => null;
+  SvgStrokeDraw = (
+    _data: Float32Array, _segCount: number,
+    _model0: readonly [number, number, number], _model1: readonly [number, number, number],
+    _tint: readonly [number, number, number, number],
+    _halfWidthDev: number, _canvasWidth: number, _canvasHeight: number,
+  ): void => {};
 
   TextBeginBatch = (): void => {
     this._textInstanceCount = 0;

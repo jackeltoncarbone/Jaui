@@ -12,6 +12,8 @@
  * pen device).
  */
 
+import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
+
 // ─── Main → Worker ────────────────────────────────────────────────────────
 
 /** Canvas + initial Platform state. The OffscreenCanvas is transferred,
@@ -259,7 +261,13 @@ export type JivOp =
    *  custom worker entry). `Config` is structured-cloned and handed to
    *  the factory at construction time. Issued *after* `create`, *before*
    *  `attach`, so the engine first sees the node as a Janvas. */
-  | { K: 'janvas-attach'; Id: number; Key: string; Config?: unknown };
+  | { K: 'janvas-attach'; Id: number; Key: string; Config?: unknown }
+  /** Attach cached vector-SVG geometry (tessellated fills/strokes) to a Jiv, so
+   *  it renders as real GPU geometry instead of a rasterized background image.
+   *  `Paint` is built on the main thread (DOM parse + tessellation) and the
+   *  Float32Arrays are structured-cloned across to the worker. */
+  | { K: 'svg-set'; Id: number; Paint: SvgVectorPaint }
+  | { K: 'svg-clear'; Id: number };
 
 /** Batched Jiv tree ops, flushed once per Angular CD on main. Ordering is
  *  significant: a `create` must precede the `attach` that places it. */
@@ -278,6 +286,11 @@ export interface M2W_ImageLoadUrl {
   T: 'image-url';
   Url: string;
   Dpr: number;
+}
+
+/** Debug/screenshot: request a PNG capture of the next rendered frame. */
+export interface M2W_Capture {
+  T: 'capture';
 }
 
 export interface M2W_ImageLoadSvg {
@@ -368,7 +381,8 @@ export type M2W =
   | M2W_ImageBitmap
   | M2W_FontFace
   | M2W_Kick
-  | M2W_JanvasInput;
+  | M2W_JanvasInput
+  | M2W_Capture;
 
 // ─── Worker → Main ────────────────────────────────────────────────────────
 
@@ -499,7 +513,14 @@ export type W2M =
   | W2M_SelectionText
   | W2M_Pong
   | W2M_ContextLost
-  | W2M_ContextRestored;
+  | W2M_ContextRestored
+  | W2M_CaptureResult;
+
+/** Debug/screenshot: the captured PNG (null on failure). */
+export interface W2M_CaptureResult {
+  T: 'capture-result';
+  Blob: Blob | null;
+}
 
 // ─── Helpers shared by both sides ─────────────────────────────────────────
 
