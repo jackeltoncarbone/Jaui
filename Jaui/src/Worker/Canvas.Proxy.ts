@@ -107,6 +107,9 @@ export class CanvasProxy {
     this.Animations = new CanvasAnimationsProxy(bridge);
   }
 
+  /** Debug/screenshot: capture the next rendered frame as a PNG blob. */
+  Capture = (): Promise<Blob | null> => this._bridge.Capture();
+
   /** Local mirror of `window.devicePixelRatio` — matches what
    *  WorkerPlatform.GetDevicePixelRatio() returns inside the worker. */
   get Dpr(): number { return window.devicePixelRatio || 1; }

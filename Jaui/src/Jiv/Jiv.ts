@@ -182,6 +182,10 @@ export class Jiv extends Element {
 
   private _syncState = (name: string, on: boolean): void => {
     if (on) this._states.add(name); else this._states.delete(name);
+    // Wake the style animator — a `:Hover`/`:Pressed`/… predicate may change the
+    // resolved style, and in the sleep-when-idle model the animator skips its
+    // resolve unless flagged. (Visual-only predicates don't MarkLayoutDirty.)
+    this.StyleAnimator?.Wake();
   };
 
   /** Captured Interactive/Cursor values from BEFORE Disabled was set, so
@@ -199,6 +203,7 @@ export class Jiv extends Element {
   private _invalidateText = (): void => {
     this.Dirty |= DirtyFlag.Text;
     this.MarkLayoutDirty();
+    this.StyleAnimator?.Wake();
   };
 
   /** A live state changed (pointer-driven Hover/Active/Focus/Disabled/GroupHover, or a custom state set
@@ -206,6 +211,7 @@ export class Jiv extends Element {
    *  depend on state, so `@If (SomeState) { Width: … }` re-applies reactively — not just style/text.
    *  Both checks are gated by the cheap `_has*Predicates` flags, so state-only elements pay nothing. */
   private _onStateChange = (): void => {
+    this.StyleAnimator?.Wake();
     if (this._hasTextPredicates) this._invalidateText();
     if (this._hasLayoutPredicates) this.RecomputeResponsiveLayout();
   };
@@ -252,6 +258,7 @@ export class Jiv extends Element {
   StyleAnimator: {
     ReapplyAnimations: (apps: AnimationApplication[] | null, table: Record<string, AnimationDefinition> | null) => void;
     RetuneSprings: (overrides: Record<string, Partial<SpringConfig>> | null) => void;
+    Wake: () => void;
     readonly HasAnimations: boolean;
   } | null = null;
 

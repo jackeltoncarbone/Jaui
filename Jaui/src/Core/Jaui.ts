@@ -11,12 +11,13 @@ import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intri
 import { TextCache } from '../Text/Text.Cache';
 import { MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
-import { ResolveTextStyle } from '../Text/Text.Types';
+import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
 import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
+import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
 import { XformBuffer } from '../Transform/Xform.Buffer';
 import type { Renderer, GpuTextureHandle, BgPaint } from './Renderer';
@@ -53,7 +54,10 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer } from './WebGL2.Renderer';
+import { Framebuffer } from './Framebuffer';
 import { Janvas } from '../Janvas/Janvas';
+import { FocusManager } from './Focus/FocusManager';
+import { InputRouter } from './Input/InputRouter';
 
 export class Canvas implements DirtyTracker {
   readonly Element: HTMLCanvasElement;
@@ -100,6 +104,9 @@ export class Canvas implements DirtyTracker {
 
   /** Public image cache — load images/SVGs here, reference them from Jivs. */
   get Images(): ImageCache { return this._imageCache; }
+  /** Focus and keyboard-modality state — consumers can set FocusedScroller
+   *  to override which scroll container receives keyboard scroll keys. */
+  get Focus(): FocusManager { return this._focusManager; }
   /** Specular tilt offset — added to lightDir for specular computations only. */
   private _specTiltX: number = 0;
   private _specTiltY: number = 0;
@@ -109,8 +116,13 @@ export class Canvas implements DirtyTracker {
   private _nonFiniteWarned = new WeakSet<JauiElement>();
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
   private _textAnimators = new Map<JauiElement, TextAnimator>();
+  // Vector-SVG paint lives on the node (Element.SvgVector), set by the SvgJiv
+  // binding's svg-set op. This is the cache of resolved fill colors by raw string.
+  private _svgColorCache = new Map<string, ReturnType<typeof ParseColor>>();
   private _scrollManager!: ScrollManager;
   private _selectionManager!: SelectionManager;
+  private _focusManager!: FocusManager;
+  private _inputRouter!: InputRouter;
   private _maxFrostBlur: number = 0;
 
   // ─── Debug HUD ───
@@ -141,6 +153,12 @@ export class Canvas implements DirtyTracker {
   private _diagNoPblur: boolean = false;
   private _diagNoGlass: boolean = false;
   private _diagNoPblurDraw: boolean = false;
+  private _diagNoReality: boolean = false; // [diag ?no-reality] skip the janvas/field pre-pass → UI-only cost
+  private _diagNoUi: boolean = false;       // [diag ?no-ui] skip the Jaui UI tree walk → field-only cost
+  private _diagNoBlur: boolean = false;     // [diag ?no-blur] no-op the backdrop blur build → blur fill cost
+  private _diagNoPanels: boolean = false;   // [diag ?no-panels] skip non-glass panel fill (SDF+shadow+border) → panel share
+  private _diagNoShadow: boolean = false;   // [diag ?no-shadow] zero panel drop-shadow → shadow overdraw share
+  private _diagNoGlassDraw: boolean = false; // [diag ?no-glass-draw] skip glass refraction draw (keep blur) → glass-draw share
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -152,7 +170,8 @@ export class Canvas implements DirtyTracker {
   private _phaseRender:  Float32Array = new Float32Array(30);
   private _frameIdx:     number = 0;
   private _frameCount:   number = 0;
-  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
+  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0 };
+  private _cacheDiag = { reached: 0, effH: 0, teleport: 0, opacity: 0, rot: 0, xform: 0, visual: 0, persp: 0, samples: 0, ok: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0 };
   /** Per-op CPU time (ms) inside the glass/pblur backdrop pipeline, summed
    *  per frame. A call that forces a CPU↔GPU sync shows its GPU cost here as
@@ -162,7 +181,7 @@ export class Canvas implements DirtyTracker {
    *  (game-style: fire once, sample many) and let every glass surface sample it
    *  at its frost LOD, instead of rebuilding a per-panel blur 50× (the ~759ms).
    *  Frame-scoped; rebuilt only when the scene changed under a pending surface. */
-  private _sharedBackdrop: boolean = false;
+  private _sharedBackdrop: boolean = true;  // default ON (verified +19% @ 1207x645, pixel-identical); `?no-shared-backdrop` disables
   private _sharedPyramid: GpuTextureHandle | null = null;
   private _sharedPyramidValid: boolean = false;
   /** Footprints (device px, flat [x0,y0,x1,y1,…]) drawn into the scene FBO since
@@ -305,6 +324,15 @@ export class Canvas implements DirtyTracker {
     this._animationManager.Kick();
     this._selectionManager = new SelectionManager(Jiv, (jiv) => this._textAnimators.get(jiv), this._animationManager);
     this._selectionManager.OnSelectionTextChanged((text) => this._selectionTextRelay?.(text));
+    this._focusManager = new FocusManager();
+    this._inputRouter = new InputRouter(
+      this._platform,
+      this._scrollManager,
+      this._focusManager,
+      this._selectionManager,
+      this._animationManager,
+      () => this.Root,
+    );
 
     // Defer the first _resize() to a rAF tick so layout is already settled
     // when clientWidth runs as a fallback. Direct construction-time reads
@@ -323,7 +351,7 @@ export class Canvas implements DirtyTracker {
     this._listenForScroll();
     this._listenForInteractionStates();
     this._listenForTextSelection();
-    this._listenForSelectionKeys();
+    this._inputRouter.Listen();
     this._listenForFontLoad();
     void this._listenForSpecularTilt;
 
@@ -686,6 +714,87 @@ export class Canvas implements DirtyTracker {
     this._needsRender = true;
   };
 
+  private _pendingCapture: ((b: Blob | null) => void) | null = null;
+  /** Force a render and capture the resulting frame as a PNG blob (debug/screenshot). */
+  CaptureFrame = (): Promise<Blob | null> => {
+    return new Promise(resolve => {
+      this._pendingCapture = resolve;
+      this._needsRender = true;
+    });
+  };
+
+  // ── Retained-mode layer cache (Phase 3) ──
+  // A stable, static subtree that doesn't sample the live scene renders ONCE
+  // into its own FBO, then composites each frame over the everplaying field —
+  // so the heavy static UI (the measured ~8.5s/frame bulk on a GPU-less host)
+  // is reused instead of re-shaded, while the field + glass stay live.
+  /** DISABLED: the capture/composite mis-renders when it actually fires (faint/
+   *  missing panels under force-on — an alpha or capture-bounds bug; the FBO is
+   *  sized to the box, clipping shadow/overflow, and the premultiplied composite
+   *  needs verifying). Pinpoint stands (PERF.jaui-frame-cost.md); fix before
+   *  re-enabling. Gated so it can't break a real static-UI (playback) frame. */
+  private _layerCacheEnabled = false;
+  /** TEMP `?cache-force`: ignore the global _uiStatic gate so static subtrees
+   *  cache even while an unrelated animation (e.g. the reality pulse) runs.
+   *  Measurement-only — cached subtrees that DO change go stale; used to size
+   *  the win that proper per-subtree invalidation would unlock. */
+  private _cacheForce = false;
+  private _damageTest = false; // [damage] Phase A: gated ?damage-test — cull nodes outside a hardcoded dirty rect to prove the mechanism
+  private _damageRectCss: { x: number; y: number; w: number; h: number } | null = null;
+  private _layerCache = new Map<Jiv, { Fbo: Framebuffer; Valid: boolean; DX: number; DY: number; DW: number; DH: number }>();
+  /** Per-render memo of "subtree samples the live scene → uncacheable". Cleared
+   *  at the top of every _render; real structural/material changes happen under
+   *  !_uiStatic (which drops the whole cache), so it can't go stale mid-static. */
+  private _subtreeDynamicMemo = new Map<Jiv, boolean>();
+  /** True when no UI animation/relayout is pending, so the static caches are
+   *  safe to build + reuse. The everplaying field keeps the loop alive via
+   *  _needsRender (NOT IsRunning), so this stays true in steady state. */
+  private _uiStatic = false;
+  /** Guards the cache hook from re-entering while capturing a subtree. */
+  private _capturing = false;
+
+  /** True if `node`'s subtree contains anything that must re-render every frame
+   *  because it samples the live (everplaying) scene: the 3D field (Janvas), a
+   *  glass or progressive-blur surface, or a backdrop/border filter. Memoized. */
+  private _subtreeSamplesLiveScene = (node: Jiv): boolean => {
+    const memo = this._subtreeDynamicMemo.get(node);
+    if (memo !== undefined) return memo;
+    const s = node.RenderStyle;
+    let dyn = node instanceof Janvas
+      || _isGlass(s.Material) || s.Material === 'ProgressiveBlur'
+      || _hasBackdropFilter(node)
+      || Math.abs(s.BorderBrightness - 1) > 0.001 || Math.abs(s.BorderSaturation - 1) > 0.001
+      || Math.abs(s.BorderContrast - 1) > 0.001 || s.BorderBackdropBlur > 0.001;
+    if (!dyn) {
+      const kids = node.Children as Jiv[];
+      for (let i = 0; i < kids.length; i++) {
+        if (this._subtreeSamplesLiveScene(kids[i])) { dyn = true; break; }
+      }
+    }
+    this._subtreeDynamicMemo.set(node, dyn);
+    return dyn;
+  };
+
+  /** Layer-cache eligibility for a subtree root: bounded, opaque, no OWN
+   *  transform (so capturing at the FBO origin is an exact translate of the
+   *  inherited matrix), axis-aligned, not teleporting, and nothing inside
+   *  samples the live scene. The hook also requires _uiStatic, an empty clip
+   *  stack, and null 3D homography/perspective. Conservative by design: a node
+   *  that fails any check renders normally — never wrong, only un-cached. */
+  private _isLayerCacheRoot = (node: Jiv, eff: Mat2x3): boolean => {
+    if (node === this.Root) return false;
+    if (!node.Visible || node.Width <= 0 || node.Height <= 0) return false;
+    if (node.TeleportSeq !== 0) return false;
+    if (node.EffectiveOpacity < 0.999) return false;
+    if (Math.abs(eff[1]) > 1e-6 || Math.abs(eff[2]) > 1e-6) return false; // rotation/skew
+    const t = node.RenderStyle.Transform;
+    if (t.Rotation !== 0 || t.RotateX !== 0 || t.RotateY !== 0 || t.TranslateZ !== 0) return false;
+    const rs = node.RenderStyle;
+    if (rs.VisualScaleX !== 1 || rs.VisualScaleY !== 1 || rs.VisualTranslateX !== 0 || rs.VisualTranslateY !== 0) return false;
+    if (rs.Perspective > 0) return false;
+    return !this._subtreeSamplesLiveScene(node);
+  };
+
   // ── WebGL context-loss / restore ──
   private _contextLost = false;
   /** True while the GL context is lost (paused). Consumers can read it. */
@@ -718,6 +827,9 @@ export class Canvas implements DirtyTracker {
     void Promise.resolve(this._renderer.Init(this.Element)).then(() => {
       this._textCache.Dispose();
       this._imageCache.Clear();
+      // The layer-cache FBOs died with the context; drop them so the next
+      // static frame recaptures into fresh FBOs.
+      this._layerCache.clear();
       // Foreign 3D <janvas> renderers (e.g. the home hero field) lost their GPU
       // resources too — flag every one for re-Init so the next render re-runs
       // `Renderer.Init(gl, …)` against the restored context.
@@ -846,6 +958,20 @@ export class Canvas implements DirtyTracker {
     }
     if (hud) tTextEnd = performance.now();
 
+    // Reset per-frame counters; _render increments them as it walks.
+    if (hud) {
+      this._counts.Panels = 0;
+      this._counts.Glass = 0;
+      this._counts.Text = 0;
+      this._counts.Image = 0;
+      this._counts.PBlur = 0;
+      this._counts.SharedBuilds = 0;
+      this._counts.CacheCap = 0;
+      this._counts.CacheComp = 0;
+      { const d = this._cacheDiag; d.reached = d.effH = d.teleport = d.opacity = d.rot = d.xform = d.visual = d.persp = d.samples = d.ok = 0; }
+      this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
+    }
+
     // ── Render-on-demand gate ──────────────────────────────────────────────
     // The expensive _render tree-walk (glass/blur fill + janvas field) runs ONLY when
     // something changed this frame; an idle screen costs ~nothing instead of a full
@@ -856,32 +982,30 @@ export class Canvas implements DirtyTracker {
     // ticking (springs StepFrame above run every frame) so the next change repaints with
     // zero latency. This is what lets Jaui match the DOM on unaccelerated GPUs: a static
     // page does not repaint, so software-GL cost collapses from full-frame to ~nothing.
+    //
+    // Layer-cache gate: caches are valid to build/reuse only when no UI animation or
+    // relayout is pending (the field still plays via _needsRender). When something
+    // animates, drop every cache — they recapture once it settles (v1 whole-cache
+    // invalidation; per-subtree dirty-bubbling is a refinement).
+    const uiStatic = !layoutDirty && !this._animationManager.IsRunning;
+    if (!uiStatic && !this._cacheForce) { for (const e of this._layerCache.values()) e.Valid = false; }
+    this._uiStatic = uiStatic;
+
     const renderActive = layoutDirty || this._animationManager.IsRunning || this._needsRender;
     this._needsRender = false;
     if (renderActive) this._renderHold = 3; // render this frame + a 2-frame settle tail
     const shouldRender = this._renderHold > 0;
     if (shouldRender) {
       this._renderHold--;
-
-      // Reset per-frame counters; _render increments them as it walks.
-      if (hud) {
-        this._counts.Panels = 0;
-        this._counts.Glass = 0;
-        this._counts.Text = 0;
-        this._counts.Image = 0;
-        this._counts.PBlur = 0;
-        this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
-      }
-
       this._render(dt);
-      this._firePostFrame();
-
       // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
       // `?debug-layout`; no cost when disabled.
       if (this._debugLayout) this._drawDebugLayout();
     }
+    // Fire every tick so frame-wait callbacks are never starved on idle frames.
+    this._firePostFrame();
 
-    if (hud && shouldRender) {
+    if (hud) {
       const tEnd = performance.now();
       const i = this._frameIdx;
       const phaseDirty  = tDirtyEnd  - t0;
@@ -936,7 +1060,8 @@ export class Canvas implements DirtyTracker {
             `[Jaui] ${n}f over ${(tEnd - this._profLastDumpMs).toFixed(0)}ms — avg total ${avg(this._profSum.Total)}ms;` +
             ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
             ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)} | gpu ${gpuStr}` +
-            ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur}` +
+            ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur} SB${this._counts.SharedBuilds} cap${this._counts.CacheCap} comp${this._counts.CacheComp}` +
+            ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
@@ -952,6 +1077,20 @@ export class Canvas implements DirtyTracker {
     const r = this._renderer;
     const w = Math.round(this._width * this._dpr);
     const h = Math.round(this._height * this._dpr);
+    // Retained-mode layer cache: the capture path redirects the panel/text
+    // flush into a stable subtree's own FBO by overriding the projection
+    // resolution (and the bound target). Defaults to the canvas dims, so the
+    // normal full-frame path stays byte-identical.
+    let flushW = w, flushH = h;
+    // Per-frame: reset the dynamic-subtree memo; gate the layer cache on a live
+    // WebGL2 context (the capture binds FBOs + needs GetGL()).
+    this._subtreeDynamicMemo.clear();
+    // [damage] Phase A proof: a small field-only dirty rect; everything outside is culled.
+    this._damageRectCss = this._damageTest
+      ? { x: this._width * 0.10, y: this._height * 0.40, w: this._width * 0.30, h: this._height * 0.25 }
+      : null;
+    const cacheCapable = this._renderer instanceof WebGL2Renderer && this._renderer.GetGL() !== null;
+    if (this._renderer instanceof WebGL2Renderer) this._renderer.DiagNoBlur = this._diagNoBlur;
 
     // Cascade opacity: multiply each Jiv's RenderStyle.Opacity by its
     // ancestors' so children inherit parent dimming (CSS-like). The style
@@ -998,7 +1137,7 @@ export class Canvas implements DirtyTracker {
       const gl = this._renderer.GetGL();
       if (gl) {
         this._pendingJanvasMasks.length = 0;
-        this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt, null);
+        if (!this._diagNoReality) this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt, null);
         // Restore the state Jaui's panel pass expects after the foreign
         // renderer ran. Jaui's draws assume: scene FBO bound, canvas-sized
         // viewport, no scissor, no depth/cull/stencil, no bound program /
@@ -1104,7 +1243,7 @@ export class Canvas implements DirtyTracker {
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
-      r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY);
+      r.PanelDrawBatch(flushW, flushH, null, 0, this._specTiltX, this._specTiltY);
       this._counts.Panels += this._panelBuffer.Count;
       this._panelBuffer.Begin(); // reset count for the next batch
     };
@@ -1128,7 +1267,7 @@ export class Canvas implements DirtyTracker {
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.TextAddInstance(this._textBuffer.Data, 0, this._textBuffer.Count * TEXT_FLOATS_PER_INSTANCE);
-      r.TextDrawBatch(w, h, atlas);
+      r.TextDrawBatch(flushW, flushH, atlas);
       this._counts.Text += 1; // one flushed batch = one draw call
       this._textBuffer.Begin();
     };
@@ -1389,6 +1528,50 @@ export class Canvas implements DirtyTracker {
         descendChildren(node, eff, stack, scope, effH, childPersp);
         return;
       }
+
+      // ── Damage-region cull (Phase A, gated ?damage-test) ──
+      // Skip any node whose AABB doesn't intersect the dirty rect — its
+      // panel/glass/blur draw never runs, so the GPU fill it would have cost
+      // is saved. Mirrors the clip-cull above (clipping subtree → skip whole;
+      // overflow-visible → recurse so overflowing children self-cull).
+      if (this._damageRectCss) {
+        const _dab = this._nodeAabb(node, eff, effH);
+        const _dr = this._damageRectCss;
+        if (_dab.maxX <= _dr.x || _dab.minX >= _dr.x + _dr.w || _dab.maxY <= _dr.y || _dab.minY >= _dr.y + _dr.h) {
+          if (node.ClipsChildren) return;
+          descendChildren(node, eff, stack, scope, effH, childPersp);
+          return;
+        }
+      }
+
+      // ── Retained-mode layer cache hook ──
+      // A stable, static, axis-aligned subtree that doesn't sample the live
+      // scene composites from its cached FBO instead of re-shading. Clipped
+      // subtrees ARE cached: the capture keeps screen-space coords (projecting
+      // through u_ViewOffset) and renders with the real ancestor clip stack, so
+      // the screen-space clip masks match verbatim. _capturing guards re-entry.
+      if (this._layerCacheEnabled && (this._uiStatic || this._cacheForce) && !this._capturing
+          && node !== this.Root && node.Visible && node.Width > 0 && node.Height > 0) {
+        // [cache-diag] tally why the hook rejects sizable nodes
+        const d = this._cacheDiag; d.reached++;
+        const rs = node.RenderStyle, tf = rs.Transform;
+        if (effH !== null || persp !== null) d.effH++;
+        else if (node.TeleportSeq !== 0) d.teleport++;
+        else if (node.EffectiveOpacity < 0.999) d.opacity++;
+        else if (Math.abs(eff[1]) > 1e-6 || Math.abs(eff[2]) > 1e-6) d.rot++;
+        else if (tf.Rotation !== 0 || tf.RotateX !== 0 || tf.RotateY !== 0 || tf.TranslateZ !== 0) d.xform++;
+        else if (rs.VisualScaleX !== 1 || rs.VisualScaleY !== 1 || rs.VisualTranslateX !== 0 || rs.VisualTranslateY !== 0) d.visual++;
+        else if (rs.Perspective > 0) d.persp++;
+        else if (this._subtreeSamplesLiveScene(node)) d.samples++;
+        else d.ok++;
+      }
+      if (this._layerCacheEnabled && cacheCapable && (this._uiStatic || this._cacheForce) && !this._capturing
+          && effH === null && persp === null
+          && this._isLayerCacheRoot(node, eff)) {
+        compositeOrCapture(node, eff, stack);
+        return;
+      }
+
       // Set image intrinsic sizes even for zero-size nodes — this breaks the
       // chicken-and-egg: Height:Auto needs IntrinsicHeight, which comes from
       // the loaded image. Without this, the node stays at 0 height forever.
@@ -1684,12 +1867,13 @@ export class Canvas implements DirtyTracker {
             const _tShared = performance.now();
             this._sharedPyramid = r.BuildSharedBackdrop(w, h, Math.log2(Math.max(1, this._maxFrostBlur * d)) + 5);
             this._opMs.Blur += performance.now() - _tShared;  // shared build folds snap+blur+mip into one number
+            this._counts.SharedBuilds++;
             this._sharedPyramidValid = true;
             this._sceneDirtyRects.length = 0;  // snapshot captured the scene-so-far; start fresh
           }
           lastBackdrop = this._sharedPyramid;
-          sceneSnap = this._sharedPyramid;  // sharp level 0 doubles as the no-frost LOD-0 fallback (u_Scene)
-          lastBaseFrostLod = 0;             // sharp-rooted at σ=0 → the panel's frost is a pure LOD offset
+          sceneSnap = this._sharedPyramid;  // level 0 doubles as the low-frost fallback (u_Scene)
+          lastBaseFrostLod = 2;             // quarter-res shared pyramid: its level 0 ≈ a full-res pyramid's LOD 2
         } else {
           const _tSnap = performance.now();
           sceneSnap = r.SnapshotScreen(scissor);
@@ -1749,7 +1933,9 @@ export class Canvas implements DirtyTracker {
         // spec all keep working.
         const glassBgPaint = this._computeBgPaint(node);
         const _tDraw = performance.now();
-        r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
+        if (!(this._diagNoGlassDraw && _isGlass(material))) {
+          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
+        }
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
         else this._counts.Panels++;
@@ -1771,6 +1957,7 @@ export class Canvas implements DirtyTracker {
         //                still does border/shadow/clip — image is just
         //                another fill mode, not a separate draw pipeline.
         flushText();
+        if (!this._diagNoPanels) {
         const flatBgPaint = this._computeBgPaint(node);
         if (flatBgPaint !== undefined) {
           flushPanels();
@@ -1788,6 +1975,7 @@ export class Canvas implements DirtyTracker {
         } else {
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
         }
+        }
       }
 
       // Emit this node's text into the shared text batch. We do NOT flush
@@ -1804,12 +1992,31 @@ export class Canvas implements DirtyTracker {
         this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
       }
 
+      // Emit this node's vector SVG (tessellated fills) as immediate draws. Like
+      // glass/image, it flushes the pending panel + text batches first so z-order
+      // stays coherent (prior siblings behind, later siblings in front).
+      const svgVec = node.SvgVector;
+      if (svgVec && (svgVec.Fills.length > 0 || svgVec.Strokes.length > 0)
+          && node.Visible && node.Width > 0 && node.Height > 0 && node.EffectiveOpacity > 0.001) {
+        flushPanels();
+        flushText();
+        this._emitSvgFor(node, eff, flushW, flushH);
+        flushText(); // drain SVG <text> glyphs the emit pushed, on top of its fills/strokes
+      }
+
       // Shared-backdrop dirty tracking: this node has now committed to the
       // scene FBO, so fold its footprint into the since-build dirty union — a
       // later glass surface that overlaps it must rebuild rather than reuse a
       // pyramid taken before this drew. Runs after the material branch above,
       // so a glass surface never sees its OWN footprint when it checks reuse.
-      if (this._sharedBackdrop) {
+      // Only a glass/pblur/backdrop-filter surface's OUTPUT is fresh content a
+      // LATER glass surface must rebuild for (genuine glass-over-glass). Opaque
+      // panels, text, and the field are baked into the pyramid at build time
+      // (the build snapshots the scene-so-far), so pushing THEIR footprints
+      // forced a near-per-surface rebuild for nothing — the documented dirty
+      // bug. Push only the surfaces whose result lands after the build.
+      if (this._sharedBackdrop
+          && (_isGlass(material) || material === 'ProgressiveBlur' || _hasBackdropFilter(node))) {
         const dab = this._nodeAabb(node, eff, effH);
         const dpr = this._dpr;
         this._sceneDirtyRects.push(dab.minX * dpr, dab.minY * dpr, dab.maxX * dpr, dab.maxY * dpr);
@@ -1817,6 +2024,77 @@ export class Canvas implements DirtyTracker {
 
       // Walk children in Layer order (ties break by tree order)
       descendChildren(node, eff, stack, scope, effH, childPersp);
+    };
+
+    // Retained-mode layer cache. Capture a stable subtree into its own FBO once,
+    // then composite that texture over the live field each frame. Defined after
+    // renderNode so it can drive a nested capture walk; the hook inside
+    // renderNode calls it. Both only run from the root call below, so the mutual
+    // reference resolves at call time.
+    const r2 = this._renderer as WebGL2Renderer;
+    const compositeOrCapture = (cnode: Jiv, ceff: Mat2x3, cstack: ClipStack): void => {
+      const cgl = r2.GetGL();
+      if (!cgl) return;
+      const dpr = this._dpr;
+      // Painted AABB (device px): the subtree's box union expanded by the
+      // subtree's max shadow/border overhang so nothing is clipped at the box
+      // edge. We DON'T translate the captured geometry — instead the panel/text
+      // shaders project through u_ViewOffset = AABB origin, so v_PixelPos stays
+      // true screen space and the screen-space clip stack matches verbatim.
+      const box = this._nodeAabb(cnode, ceff, null);
+      const margin = this._subtreeMaxPaintMargin(cnode);
+      const aabbLpx = (box.minX - margin) * dpr;
+      const aabbTpx = (box.minY - margin) * dpr;
+      const adx = Math.floor(aabbLpx);
+      const ady = Math.floor(aabbTpx);
+      const adw = Math.max(1, Math.ceil((box.maxX + margin) * dpr) - adx);
+      const adh = Math.max(1, Math.ceil((box.maxY + margin) * dpr) - ady);
+
+      // Drain pending main-walk batches first so z-order holds (earlier siblings
+      // land behind this composite).
+      flushPanels();
+      flushText();
+
+      let entry = this._layerCache.get(cnode);
+      if (!entry) { entry = { Fbo: new Framebuffer(cgl), Valid: false, DX: adx, DY: ady, DW: adw, DH: adh }; this._layerCache.set(cnode, entry); }
+
+      this._counts.CacheComp++;
+      if (!entry.Valid || entry.DW !== adw || entry.DH !== adh || entry.DX !== adx || entry.DY !== ady) {
+        this._counts.CacheCap++;
+        // ── Capture: render the subtree into its FBO at screen coords, with the
+        // projection retargeted to the AABB sub-window via u_ViewOffset. ──
+        entry.Fbo.Resize(adw, adh);
+        entry.Fbo.Bind();
+        cgl.viewport(0, 0, adw, adh);
+        cgl.clearColor(0, 0, 0, 0);
+        cgl.clear(cgl.COLOR_BUFFER_BIT);
+        r2.SetCaptureViewOffset(adx, ady);
+        const savedW = flushW, savedH = flushH;
+        flushW = adw; flushH = adh;
+        const capScope: TeleportScope = { Deferred: [], Stack: cstack };
+        this._capturing = true;
+        renderNode(cnode, ceff, cstack, capScope, null, null);
+        replayScope(capScope);
+        flushPanels();
+        flushText();
+        this._capturing = false;
+        flushW = savedW; flushH = savedH;
+        r2.SetCaptureViewOffset(0, 0);
+        r2.RebindSceneTarget();
+        cgl.viewport(0, 0, w, h);
+        entry.Valid = true; entry.DX = adx; entry.DY = ady; entry.DW = adw; entry.DH = adh;
+      }
+
+      // ── Composite: the cached texture over the scene FBO at its screen AABB.
+      // The captured FBO holds PREMULTIPLIED colour (rendered over transparent
+      // with EnableBlend's coverage-alpha), so composite with premultiplied over
+      // (ONE, 1−SRC_ALPHA) — exact, no edge fringe. GL viewport is bottom-left
+      // origin; ady is from the top, so flip it.
+      cgl.enable(cgl.BLEND);
+      cgl.blendFunc(cgl.ONE, cgl.ONE_MINUS_SRC_ALPHA);
+      r2.BlitTextureRegion(entry.Fbo.Texture, adx, h - ady - adh, adw, adh);
+      cgl.viewport(0, 0, w, h);
+      this._counts.Panels++;
     };
 
     this._textBuffer.Begin();
@@ -1835,7 +2113,7 @@ export class Canvas implements DirtyTracker {
     this._maxFrostBlur = 0;
     this._scanFrostBlur(this.Root);
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
-    renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
+    if (!this._diagNoUi) renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
     // In-flight teleports with no layered ancestor paint last at root level.
     replayScope(rootScope);
     // Trailing flushes — catch anything deferred since the last category
@@ -1878,6 +2156,13 @@ export class Canvas implements DirtyTracker {
     // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
     if (!this._headless) {
       r.PresentScene();
+      // Screenshot capture: read the freshly-presented swap chain BEFORE the
+      // transient discard below (the back buffer isn't preserved between frames).
+      if (this._pendingCapture) {
+        const cb = this._pendingCapture;
+        this._pendingCapture = null;
+        void r.CapturePng().then(cb);
+      }
       // Tell the driver we don't need the default framebuffer's depth or the
       // scene FBO's color for the rest of this frame. On tile-based mobile
       // GPUs this discards the tile memory instead of writing it back to
@@ -2022,6 +2307,23 @@ export class Canvas implements DirtyTracker {
   /** Canvas-space AABB of `node`'s (possibly rotated) rect under matrix `m` —
    *  the min/max of its four mapped corners. Used for axis-aligned scissor/cull
    *  rects. At rotation 0 this is exactly the node's mapped rect. */
+  /** Max painted overhang (CSS px) beyond a node's box anywhere in a subtree:
+   *  drop-shadow reach (blur + |offset|) and border width. Used to size the
+   *  layer-cache FBO so shadows/borders aren't clipped at the box edge. A
+   *  clipping cache root bounds its descendants, so scanning the root's own
+   *  margin plus its children's covers every painted pixel conservatively. */
+  private _subtreeMaxPaintMargin = (node: Jiv): number => {
+    const s = node.RenderStyle;
+    let m = 0;
+    if (s.ShadowColor.A > 0.001) {
+      m = s.ShadowBlur + Math.max(Math.abs(s.ShadowOffsetX), Math.abs(s.ShadowOffsetY));
+    }
+    m = Math.max(m, s.BorderWidth);
+    const kids = node.Children as Jiv[];
+    for (let i = 0; i < kids.length; i++) m = Math.max(m, this._subtreeMaxPaintMargin(kids[i]));
+    return m;
+  };
+
   private _nodeAabb = (node: Jiv, m: Mat2x3, effH: Mat3x3 | null = null): { minX: number; minY: number; maxX: number; maxY: number } => {
     const x0 = node.X, y0 = node.Y, x1 = node.X + node.Width, y1 = node.Y + node.Height;
     // Under perspective, the box maps through the homography — project the four
@@ -2157,6 +2459,76 @@ export class Canvas implements DirtyTracker {
       this._maxFrostBlur = node.RenderStyle.BackdropFrostBlur;
     }
     for (const child of node.Children as Jiv[]) this._scanFrostBlur(child);
+  };
+
+  /** Resolve an SVG paint string to rgba, cached. Literal colors (rgba/#hex/named)
+   *  cover every current consumer; a JSS-`@var` path can substitute here later. */
+  private _resolveSvgColor = (raw: string): ReturnType<typeof ParseColor> => {
+    let c = this._svgColorCache.get(raw);
+    if (!c) { c = ParseColor(raw); this._svgColorCache.set(raw, c); }
+    return c;
+  };
+
+  /** Draw a node's cached vector-SVG fills. Model = dpr · eff · (viewBox→nodeBox);
+   *  each fill is one immediate triangle-soup draw with its resolved+opacity-folded tint. */
+  private _emitSvgFor = (node: Jiv, eff: Mat2x3, w: number, h: number): void => {
+    const svg = node.SvgVector;
+    if (!svg || (svg.Fills.length === 0 && svg.Strokes.length === 0)) return;
+    const [vx, vy, vw, vh] = svg.ViewBox;
+    if (vw <= 0 || vh <= 0) return;
+    const sx = node.Width / vw, sy = node.Height / vh;
+    const local: Mat2x3 = [sx, 0, 0, sy, -vx * sx, -vy * sy];
+    const dpr = this._dpr;
+    const deff: Mat2x3 = [eff[0] * dpr, eff[1] * dpr, eff[2] * dpr, eff[3] * dpr, eff[4] * dpr, eff[5] * dpr];
+    const m = matMul(deff, local);
+    const model0: [number, number, number] = [m[0], m[2], m[4]];
+    const model1: [number, number, number] = [m[1], m[3], m[5]];
+    const nodeOp = node.EffectiveOpacity;
+    this._renderer.EnableBlend();
+    for (const fill of svg.Fills) {
+      const c = this._resolveSvgColor(fill.ColorRaw);
+      const a = c.A * fill.Opacity * nodeOp;
+      if (a <= 0.001 || fill.VertCount === 0) continue;
+      this._renderer.SvgFillDraw(fill.Verts, fill.VertCount, model0, model1, [c.R, c.G, c.B, a], w, h);
+    }
+    if (svg.Strokes.length > 0) {
+      // viewBox→device scale (geometric mean of the affine's axis scales) → device-px half-width.
+      const scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
+      for (const st of svg.Strokes) {
+        const c = this._resolveSvgColor(st.ColorRaw);
+        const a = c.A * st.Opacity * nodeOp;
+        if (a <= 0.001 || st.SegmentCount === 0) continue;
+        this._renderer.SvgStrokeDraw(st.Data, st.SegmentCount, model0, model1, [c.R, c.G, c.B, a], st.HalfWidth * scale, w, h);
+      }
+    }
+    // SVG <text> runs → rasterized via the glyph cache + pushed to the shared text batch (drained
+    // by the next flushText). Positions/rotation map through the run's transform folded with the
+    // element model; SVG y is the baseline, anchor centers/ends the run.
+    for (const run of svg.Texts) {
+      if (!run.Text) continue;
+      const c = this._resolveSvgColor(run.ColorRaw);
+      const a = c.A * run.Opacity * nodeOp;
+      if (a <= 0.001) continue;
+      const ft = matMul(m, run.Transform as Mat2x3);
+      const fScale = Math.sqrt(Math.abs(ft[0] * ft[3] - ft[1] * ft[2])) || 1;
+      const sizeDev = run.FontSize * fScale;
+      const style: ResolvedTextStyle = {
+        FontFamily: 'Inter', FontSize: sizeDev / this._dpr, FontWeight: run.Weight, FontStyle: 'Normal',
+        Color: c, LineHeight: 1.2, LetterSpacing: 0, // LineHeight is a multiplier, not px
+        TextAlign: 'Left', TextAlignLast: 'Auto', TextOverflow: 'Clip', MaxLines: null,
+      };
+      const entry = this._textCache.Get(run.Text, style, null, this._dpr);
+      const ax = matApplyX(ft, run.X, run.Y), ay = matApplyY(ft, run.X, run.Y);
+      const shift = run.Anchor === 'middle' ? entry.Width / 2 : run.Anchor === 'end' ? entry.Width : 0;
+      this._textBuffer.Push({
+        X: ax - shift, Y: ay - sizeDev * 0.8, // SVG y is baseline; ascent ≈ 0.8·size
+        Width: entry.Width, Height: entry.Height,
+        Uv: entry.Uv, Opacity: a,
+        ClipOffset: 0, ClipCount: 0,
+        TintR: c.R, TintG: c.G, TintB: c.B, TintA: 1,
+        Cos: matCos(ft), Sin: matSin(ft), PivotX: ax, PivotY: ay,
+      });
+    }
   };
 
   private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number = -1): void => {
@@ -3045,45 +3417,6 @@ export class Canvas implements DirtyTracker {
     this._on('pointercancel', end);
   };
 
-  /** Keyboard shortcuts on the active selection — Cmd/Ctrl+A select-all
-   *  within the current text Jiv, Escape clears.
-   *
-   *  Listens on `window` (canvas isn't focusable by default). We only act
-   *  when the active element is the body / canvas — so typing Cmd+A inside
-   *  a real <input> on the page still does the native thing. */
-  private _listenForSelectionKeys = (): void => {
-    const selMgr = this._selectionManager;
-    this._platform.AddKeydownListener((e: KeyboardEvent) => {
-      if (this._platform.IsTextInputFocused()) return;
-
-      const meta = e.ctrlKey || e.metaKey;
-      if (meta && (e.key === 'a' || e.key === 'A')) {
-        const first = selMgr.FirstTextJiv(this.Root);
-        const last = selMgr.LastTextJiv(this.Root);
-        if (first && last) {
-          const [, lastChar] = selMgr.FullRange(last);
-          selMgr.Set({
-            AnchorJiv: first, AnchorChar: 0,
-            ExtentJiv: last, ExtentChar: lastChar,
-          }, this.Root);
-          this._animationManager.Kick();
-          e.preventDefault();
-        }
-      // Cmd/Ctrl+C is handled on the main thread via the native `copy`
-      // event (see MainBridge), where the user-gesture activation is still
-      // alive. Calling `navigator.clipboard.writeText` from inside the worker
-      // silently fails because transient activation doesn't ride across
-      // postMessage. The worker mirrors selection text to main on every
-      // selection change via the `selection-text` W2M message instead.
-      } else if (e.key === 'Escape') {
-        if (selMgr.Current) {
-          selMgr.Set(null, this.Root);
-          this._animationManager.Kick();
-          e.preventDefault();
-        }
-      }
-    }, { capture: true });
-  };
 
   /** Wheel + touch/pointer drag — both route through ScrollManager which
    *  handles physics (momentum, rubber-band for drag). Wheel clamps; drag
@@ -3270,6 +3603,15 @@ export class Canvas implements DirtyTracker {
     if (needsKick) this._animationManager.Kick();
   };
 
+  /** Public: drop cached glyph rasters so text re-rasterizes with a newly-registered font. Call
+   *  after a font is registered post-init (the headless turf canvas gets Inter from the reality
+   *  bridge). Light — just clears the text atlas cache; the caller re-renders next frame. Does NOT
+   *  re-layout (the turf's SnapLayout base must not be reset to 0). */
+  RefreshFonts = (): void => {
+    this._textCache.Clear();
+    this._needsRender = true;
+  };
+
   /** Listen for fonts that arrive AFTER the first tick — e.g. a lazy
    *  @font-face registered later, or a network-slow Google Font that
    *  resolved fonts.ready optimistically on a different family.
@@ -3319,7 +3661,17 @@ export class Canvas implements DirtyTracker {
     if (params.has('no-pblur')) this._diagNoPblur = true;
     if (params.has('no-glass')) this._diagNoGlass = true;
     if (params.has('no-pblur-draw')) this._diagNoPblurDraw = true;
+    if (params.has('no-reality')) this._diagNoReality = true;
+    if (params.has('no-ui')) this._diagNoUi = true;
+    if (params.has('no-blur')) this._diagNoBlur = true;
+    if (params.has('no-panels')) this._diagNoPanels = true;
+    if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
+    if (params.has('no-glass-draw')) this._diagNoGlassDraw = true;
     if (params.has('wkr-shared-backdrop') || hash.includes('wkr-shared-backdrop')) this._sharedBackdrop = true;
+    if (params.has('no-shared-backdrop') || hash.includes('no-shared-backdrop')) this._sharedBackdrop = false;
+    if (params.has('layer-cache') || hash.includes('layer-cache')) this._layerCacheEnabled = true;
+    if (params.has('cache-force') || hash.includes('cache-force')) { this._layerCacheEnabled = true; this._cacheForce = true; }
+    if (params.has('damage-test') || hash.includes('damage-test')) this._damageTest = true;
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────
@@ -3536,10 +3888,13 @@ export class Canvas implements DirtyTracker {
       const renderer = node.Renderer;
       if (renderer && node.Width > 0 && node.Height > 0 && node.Visible) {
         if (!node.IsInited()) {
-          renderer.Init(gl, node.MarkDirty);
-          // Render-on-demand: let this janvas's MarkDirty wake the canvas loop, so a
-          // foreign-renderer change (drill field camera/playback) repaints even when no
-          // Jiv is dirty. Without this the field would freeze once the loop idles.
+          // Route the foreign renderer's dirty signal through both the janvas
+          // (its own per-field skip) AND RequestFrame, so new 3D content wakes
+          // the render-on-demand loop. Without the RequestFrame, a janvas that
+          // changed while the UI was idle would not repaint.
+          renderer.Init(gl, () => { node.MarkDirty(); this.RequestFrame(); });
+          // Also wake the loop on any external Invalidate() of this janvas (the
+          // foreign-renderer change path that doesn't go through Init's callback).
           node.Invalidate = this.RequestFrame;
           node.MarkInited();
         }
@@ -3740,6 +4095,12 @@ export { ParseJss, MergeRulesets } from '../Jss/Jss.Parser';
 export type { Stylesheet, Ruleset, ParsedJss, VarTable, AnimationTable, PredicateExpr, PredicateStyle } from '../Jss/Jss.Parser';
 export { EvaluatePredicate } from '../Jss/Jss.Predicate';
 export { SlotFor, type Slot } from '../Jss/Jss.Routes';
+
+// SVG vector renderer — the SvgJiv binding parses a DOM <svg> + tessellates on the
+// main thread, then ships the geometry to the worker via JivHandle.SetSvgVector.
+export { ParseSvgElement, ParseSvgString, FlatnessTol2 } from '../Svg/Svg.Parse';
+export { BuildVectorPaint, type SvgVectorPaint, type SvgFillShape, type SvgStrokeShape, type SvgTextRun } from '../Svg/Svg.VectorPaint';
+export type { ParsedSvg, SvgNode, SvgPathNode, SvgTextNode, SvgContour, SvgFillRule } from '../Svg/Svg.Types';
 
 // Worker boot — apps call CheckBrowserSupport() before mounting Angular.
 export { CheckBrowserSupport, type BrowserSupportResult } from '../Worker/Browser.Support';

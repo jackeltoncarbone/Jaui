@@ -206,6 +206,32 @@ export interface Renderer {
   /** Issue the instanced stroke draw with the batch-shared `style`. */
   StrokeDrawBatch(canvasWidth: number, canvasHeight: number, style: StrokeStyle): void;
 
+  /** Capture the current default-framebuffer as a PNG blob (debug/screenshot). Call right
+   *  after a render — the back buffer isn't preserved between frames. */
+  CapturePng(): Promise<Blob | null>;
+
+  // ── SVG vector rendering ──
+
+  /** Draw one tessellated SVG fill shape (triangle soup of [x, y, coverage] vertices)
+   *  immediately. `model0`/`model1` are the rows of the affine map from viewBox units to
+   *  device px (xDev = a*x+c*y+e via model0=(a,c,e); yDev via model1=(b,d,f)). `tint` is
+   *  straight-alpha rgba (alpha folds in element opacity). */
+  SvgFillDraw(
+    verts: Float32Array, vertCount: number,
+    model0: readonly [number, number, number], model1: readonly [number, number, number],
+    tint: readonly [number, number, number, number],
+    canvasWidth: number, canvasHeight: number,
+  ): void;
+
+  /** Draw one SVG stroke shape: per-segment miter-quad instances (8 floats/segment: a_Seg.xyzw,
+   *  a_Miter.xyzw). `halfWidthDev` is the stroke half-width in device px (the SDF coverage edge). */
+  SvgStrokeDraw(
+    data: Float32Array, segCount: number,
+    model0: readonly [number, number, number], model1: readonly [number, number, number],
+    tint: readonly [number, number, number, number],
+    halfWidthDev: number, canvasWidth: number, canvasHeight: number,
+  ): void;
+
   // ── Blur ──
 
   /** Run the dual-filter blur pyramid. Returns handle to the blurred output.

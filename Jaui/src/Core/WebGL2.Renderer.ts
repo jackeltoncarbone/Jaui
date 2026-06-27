@@ -20,6 +20,10 @@ import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
 import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
 import strokeVertSrc from '../Jline/Shaders/Jline.vert.gen';
 import strokeFragSrc from '../Jline/Shaders/Jline.frag.gen';
+import svgFillVertSrc from '../Svg/Shaders/Svg.Fill.vert.gen';
+import svgFillFragSrc from '../Svg/Shaders/Svg.Fill.frag.gen';
+import svgStrokeVertSrc from '../Svg/Shaders/Svg.Stroke.vert.gen';
+import svgStrokeFragSrc from '../Svg/Shaders/Svg.Stroke.frag.gen';
 import type { StrokeStyle } from './Renderer';
 
 // ─── Jline (stroke) uniform-location bundle ─────────────────────────────────
@@ -78,6 +82,7 @@ const _extractStrokeLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _Strok
 // variant-swap a one-liner rather than a ladder of conditionals.
 interface _PanelLocs {
   resolution:   WebGLUniformLocation | null;
+  viewOffset:   WebGLUniformLocation | null;
   backdrop:     WebGLUniformLocation | null;
   scene:        WebGLUniformLocation | null;
   baseFrostLod: WebGLUniformLocation | null;
@@ -97,6 +102,7 @@ interface _PanelLocs {
 
 const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelLocs => ({
   resolution:   gl.getUniformLocation(p, 'u_Resolution'),
+  viewOffset:   gl.getUniformLocation(p, 'u_ViewOffset'),
   backdrop:     gl.getUniformLocation(p, 'u_Backdrop'),
   scene:        gl.getUniformLocation(p, 'u_Scene'),
   baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
@@ -272,6 +278,16 @@ export class WebGL2Renderer implements Renderer {
   // location IDs even when the uniform names match.
   private _panelLocsGlass!: _PanelLocs;
   private _panelLocsNone!: _PanelLocs;
+  // Retained-mode capture view-offset (device px). (0,0) for the normal pass;
+  // compositeOrCapture sets it to the subtree AABB origin so panel/text draws
+  // project into the capture FBO while v_PixelPos stays screen-space (clips
+  // match without remapping). Applied in PanelDrawBatch/TextDrawBatch.
+  private _captureViewOffsetX = 0;
+  private _captureViewOffsetY = 0;
+  SetCaptureViewOffset = (x: number, y: number): void => {
+    this._captureViewOffsetX = x;
+    this._captureViewOffsetY = y;
+  };
   private _panelVao!: WebGLVertexArrayObject;
   private _panelInstanceBuffer!: WebGLBuffer;
   private _panelInstanceData = new Float32Array(0);
@@ -286,6 +302,7 @@ export class WebGL2Renderer implements Renderer {
   private _textInstanceData = new Float32Array(0);
   private _textInstanceCount = 0;
   private _textResolutionLoc!: WebGLUniformLocation | null;
+  private _textViewOffsetLoc!: WebGLUniformLocation | null;
   private _textAtlasLoc!: WebGLUniformLocation | null;
 
   // Jline (stroke) shader — instanced per segment
@@ -295,6 +312,28 @@ export class WebGL2Renderer implements Renderer {
   private _strokeInstanceBuffer!: WebGLBuffer;
   private _strokeInstanceData = new Float32Array(0);
   private _strokeInstanceCount = 0;
+
+  // SVG vector fill shader — non-instanced triangle soup [x, y, cov]
+  private _svgFillShader!: ShaderProgram;
+  private _svgFillVao!: WebGLVertexArrayObject;
+  private _svgFillVertBuffer!: WebGLBuffer;
+  private _svgFillLocs!: {
+    resolution: WebGLUniformLocation | null;
+    model0: WebGLUniformLocation | null;
+    model1: WebGLUniformLocation | null;
+    tint: WebGLUniformLocation | null;
+  };
+  // SVG vector stroke shader — instanced miter-quad segments (2 vec4/instance)
+  private _svgStrokeShader!: ShaderProgram;
+  private _svgStrokeVao!: WebGLVertexArrayObject;
+  private _svgStrokeInstanceBuffer!: WebGLBuffer;
+  private _svgStrokeLocs!: {
+    resolution: WebGLUniformLocation | null;
+    model0: WebGLUniformLocation | null;
+    model1: WebGLUniformLocation | null;
+    tint: WebGLUniformLocation | null;
+    halfWidth: WebGLUniformLocation | null;
+  };
 
   // Blit shader
   private _blitShader!: ShaderProgram;
@@ -373,7 +412,12 @@ export class WebGL2Renderer implements Renderer {
       premultipliedAlpha: true,
       preserveDrawingBuffer: false,
       powerPreference: 'high-performance',
-    }) as WebGL2RenderingContext | null;
+      // Low-latency present: lets the browser bypass a layer of compositor
+      // buffering/sync and push the frame more directly to the display. The
+      // present (not render) is the per-frame cost on a no-GPU host; this
+      // targets it directly. May be ignored by the UA; worst case is minor tearing.
+      desynchronized: true,
+    } as WebGLContextAttributes) as WebGL2RenderingContext | null;
     if (!gl) throw new Error('[Jaui] WebGL2 not supported');
     this._gl = gl;
 
@@ -401,6 +445,8 @@ export class WebGL2Renderer implements Renderer {
     this._initPanelShader(gl);
     this._initTextShader(gl);
     this._initStrokeShader(gl);
+    this._initSvgFillShader(gl);
+    this._initSvgStrokeShader(gl);
     this._initBlitShader(gl);
     this._initClipMaskShader(gl);
     this._initProgBlurShader(gl);
@@ -589,12 +635,16 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Scene Pass ──
 
-  BeginScenePass = (clearR: number, clearG: number, clearB: number): void => {
+  BeginScenePass = (clearR: number, clearG: number, clearB: number, persist = false): void => {
     const gl = this._gl;
     this._sceneFbo.Bind();
     gl.viewport(0, 0, this._width, this._height);
-    gl.clearColor(clearR, clearG, clearB, 1.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    // Damage-region: when persisting, skip the clear so last frame's pixels
+    // survive; only the dirty rect is re-rendered over them this frame.
+    if (!persist) {
+      gl.clearColor(clearR, clearG, clearB, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   };
@@ -651,6 +701,7 @@ export class WebGL2Renderer implements Renderer {
 
     this._useProgram(program.Program);
     gl.uniform2f(locs.resolution, canvasWidth, canvasHeight);
+    gl.uniform2f(locs.viewOffset, this._captureViewOffsetX, this._captureViewOffsetY);
     gl.uniform1i(locs.backdrop, 0);
     gl.uniform1i(locs.clipTex, 1);
     gl.uniform1i(locs.scene, 2);
@@ -758,6 +809,7 @@ export class WebGL2Renderer implements Renderer {
 
     this._useProgram(this._textShader.Program);
     gl.uniform2f(this._textResolutionLoc, canvasWidth, canvasHeight);
+    gl.uniform2f(this._textViewOffsetLoc, this._captureViewOffsetX, this._captureViewOffsetY);
     gl.uniform1i(this._textAtlasLoc, 0);
     gl.uniform1i(this._textClipTexLoc, 1);
     gl.uniform1i(this._textXformTexLoc, 2);
@@ -829,13 +881,84 @@ export class WebGL2Renderer implements Renderer {
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._strokeInstanceCount);
   };
 
+  /** Read the current default-framebuffer pixels into a PNG blob. Call IMMEDIATELY after a
+   *  render (preserveDrawingBuffer is false, so the back buffer is valid only until the next
+   *  draw). Rows are flipped (GL is bottom-up) into a 2D OffscreenCanvas, then encoded. */
+  CapturePng = async (): Promise<Blob | null> => {
+    const gl = this._gl;
+    const w = this._width, h = this._height;
+    if (w === 0 || h === 0) return null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const px = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const out = new OffscreenCanvas(w, h);
+    const ctx = out.getContext('2d');
+    if (!ctx) return null;
+    const img = ctx.createImageData(w, h);
+    const row = w * 4;
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * row;
+      img.data.set(px.subarray(src, src + row), y * row);
+    }
+    ctx.putImageData(img, 0, 0);
+    return out.convertToBlob({ type: 'image/png' });
+  };
+
+  // ── SVG vector rendering ──
+
+  SvgFillDraw = (
+    verts: Float32Array, vertCount: number,
+    model0: readonly [number, number, number], model1: readonly [number, number, number],
+    tint: readonly [number, number, number, number],
+    canvasWidth: number, canvasHeight: number,
+  ): void => {
+    if (vertCount === 0) return;
+    const gl = this._gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._svgFillVertBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, verts.subarray(0, vertCount * 3), gl.DYNAMIC_DRAW);
+    const l = this._svgFillLocs;
+    this._useProgram(this._svgFillShader.Program);
+    gl.uniform2f(l.resolution, canvasWidth, canvasHeight);
+    gl.uniform3f(l.model0, model0[0], model0[1], model0[2]);
+    gl.uniform3f(l.model1, model1[0], model1[1], model1[2]);
+    gl.uniform4f(l.tint, tint[0], tint[1], tint[2], tint[3]);
+    gl.bindVertexArray(this._svgFillVao);
+    gl.drawArrays(gl.TRIANGLES, 0, vertCount);
+  };
+
+  SvgStrokeDraw = (
+    data: Float32Array, segCount: number,
+    model0: readonly [number, number, number], model1: readonly [number, number, number],
+    tint: readonly [number, number, number, number],
+    halfWidthDev: number, canvasWidth: number, canvasHeight: number,
+  ): void => {
+    if (segCount === 0) return;
+    const gl = this._gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._svgStrokeInstanceBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, segCount * 8), gl.DYNAMIC_DRAW);
+    const l = this._svgStrokeLocs;
+    this._useProgram(this._svgStrokeShader.Program);
+    gl.uniform2f(l.resolution, canvasWidth, canvasHeight);
+    gl.uniform3f(l.model0, model0[0], model0[1], model0[2]);
+    gl.uniform3f(l.model1, model1[0], model1[1], model1[2]);
+    gl.uniform4f(l.tint, tint[0], tint[1], tint[2], tint[3]);
+    gl.uniform1f(l.halfWidth, Math.max(0.5, halfWidthDev));
+    gl.bindVertexArray(this._svgStrokeVao);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, segCount);
+  };
+
   // ── Blur ──
+
+  /** [diag ?no-blur] When true, ComputeBlur + GenerateBlurMipmap no-op so the
+   *  per-surface backdrop blur fill is removed — measures the blur's GPU cost. */
+  DiagNoBlur = false;
 
   ComputeBlur = (
     input: GpuTextureHandle, width: number, height: number,
     radius: number, minDepth?: number,
     scissor?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle => {
+    if (this.DiagNoBlur) return input;
     const result = this._blur.Blur(_unwrap(input), width, height, radius, minDepth, scissor);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
@@ -845,6 +968,7 @@ export class WebGL2Renderer implements Renderer {
   };
 
   GenerateBlurMipmap = (maxLod?: number): void => {
+    if (this.DiagNoBlur) return;
     this._blur.GenerateOutputMipmap(maxLod);
     // The blit-to-mip path in BlurPass.GenerateOutputMipmap doesn't touch
     // shader programs, but keep the invalidation paired with ComputeBlur
@@ -865,8 +989,12 @@ export class WebGL2Renderer implements Renderer {
     const pass = this._sharedBlur ?? (this._sharedBlur = new BlurPass(this._gl));
     // radius 0 → level 0 is the raw scene (1-tap copy, no dual-filter pre-blur);
     // GenerateOutputMipmap then builds the Gaussian stack from that sharp root.
-    const tex = pass.Blur(this._sceneFbo.Texture, width, height, 0, undefined, undefined);
-    pass.GenerateOutputMipmap(maxLod);
+    // Quarter-res build: blur is low-frequency, so a 1/4-res pyramid upsamples to
+    // a visually identical result with ~16x less fragment fill. Consumers add +2
+    // to their frost LOD (this pyramid's level 0 ≈ a full-res pyramid's LOD 2).
+    const qw = Math.max(1, width >> 2), qh = Math.max(1, height >> 2);
+    const tex = pass.Blur(this._sceneFbo.Texture, qw, qh, 0, undefined, undefined);
+    pass.GenerateOutputMipmap(Math.max(1, maxLod - 2));
     // BlurPass bound its own programs; invalidate the cache like ComputeBlur does.
     this._lastProgram = null;
     // Restore the scene FBO so the subsequent glass draws target it.
@@ -1010,6 +1138,23 @@ export class WebGL2Renderer implements Renderer {
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
   };
 
+  /** Composite a raw FBO colour texture over the CURRENTLY-BOUND target at a
+   *  device-px region (GL bottom-left origin), using the same textured-quad
+   *  blit as `Blit`. The caller owns blend state (call `EnableBlend()` first)
+   *  and restores the viewport afterwards. Used by the retained-mode layer
+   *  cache to draw a captured static subtree over the live scene FBO without
+   *  re-shading it. */
+  BlitTextureRegion = (tex: WebGLTexture, x: number, y: number, w: number, h: number): void => {
+    const gl = this._gl;
+    gl.viewport(x, y, w, h);
+    this._useProgram(this._blitShader.Program);
+    gl.uniform1i(this._blitTexLoc, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.bindVertexArray(this._quad.Vao);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+  };
+
   // ── Texture Management ──
 
   CreateTexture = (width: number, height: number, srgb = false): GpuTextureHandle => {
@@ -1045,8 +1190,11 @@ export class WebGL2Renderer implements Renderer {
     } else {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, gl.RGBA, gl.UNSIGNED_BYTE, source as TexImageSource);
     }
-    const err = gl.getError();
-    if (err !== gl.NO_ERROR) console.warn('[gl] texSubImage2D error:', err);
+    // NB: do NOT call gl.getError() here — it forces a synchronous GPU pipeline
+    // flush (~30ms on software ANGLE/WARP) on EVERY glyph upload. On a GPU-less
+    // host that turns text-atlas population into multi-second stalls (~65 runs ×
+    // ~30ms ≈ 2s, the dominant per-change hitch). texSubImage2D into a
+    // shelf-packed atlas with pre-validated coords doesn't fail in practice.
     gl.bindTexture(gl.TEXTURE_2D, null);
   };
 
@@ -1055,7 +1203,13 @@ export class WebGL2Renderer implements Renderer {
   EnableBlend = (): void => {
     const gl = this._gl;
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // RGB: straight source-over (visible result identical to before). Alpha:
+    // accumulate COVERAGE (ONE, 1−SRC_ALPHA) instead of SRC_ALPHA·SRC_ALPHA. The
+    // presented frame ignores scene-FBO alpha, so on screen this is byte-
+    // identical — but it makes the retained-mode layer cache's captured-over-
+    // transparent FBO hold correct premultiplied colour + coverage alpha, so the
+    // premultiplied composite has no edge fringe at rounded corners.
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   };
 
   DisableBlend = (): void => {
@@ -1116,7 +1270,7 @@ export class WebGL2Renderer implements Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   };
 
-  InvalidateFrameTransients = (): void => {
+  InvalidateFrameTransients = (persistScene = false): void => {
     const gl = this._gl;
     // Default framebuffer: we never touch depth for the final blit — tell
     // the driver not to bother preserving it. On tile-based mobile GPUs
@@ -1128,9 +1282,13 @@ export class WebGL2Renderer implements Renderer {
     gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.DEPTH, gl.STENCIL]);
     // Scene FBO: we just blit it out; its contents won't be read again this
     // frame and the next BeginScenePass will clear it. Drop the tile.
-    this._sceneFbo.Bind();
-    gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    // Damage-region: when persisting, KEEP the scene colour so next frame can
+    // composite the dirty rect over it instead of re-rendering everything.
+    if (!persistScene) {
+      this._sceneFbo.Bind();
+      gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
   };
 
   SetViewport = (x: number, y: number, width: number, height: number): void => {
@@ -1169,6 +1327,7 @@ export class WebGL2Renderer implements Renderer {
     this._textInstanceBuffer = buf;
 
     this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
+    this._textViewOffsetLoc = gl.getUniformLocation(this._textShader.Program, 'u_ViewOffset');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
     this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');
     this._textXformTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_XformTex');
@@ -1187,6 +1346,46 @@ export class WebGL2Renderer implements Renderer {
 
     // Dedicated VAO (unit quad at loc 0 + 3 per-instance vec4 at locs 1..3)
     this._strokeVao = this._createInstancedVao(gl, this._strokeInstanceBuffer, STROKE_ATTR_COUNT, STROKE_BYTES_PER_INSTANCE);
+  };
+
+  private _initSvgFillShader = (gl: WebGL2RenderingContext): void => {
+    this._svgFillShader = ShaderCompiler.Compile(gl, svgFillVertSrc, svgFillFragSrc);
+    const p = this._svgFillShader.Program;
+    this._svgFillLocs = {
+      resolution: gl.getUniformLocation(p, 'u_Resolution'),
+      model0: gl.getUniformLocation(p, 'u_Model0'),
+      model1: gl.getUniformLocation(p, 'u_Model1'),
+      tint: gl.getUniformLocation(p, 'u_Tint'),
+    };
+    const buf = gl.createBuffer();
+    if (!buf) throw new Error('[Jaui] Failed to create SVG fill vertex buffer');
+    this._svgFillVertBuffer = buf;
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error('[Jaui] Failed to create SVG fill VAO');
+    this._svgFillVao = vao;
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    // a_Vert = vec3(x, y, coverage) at location 0, tightly packed.
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+  };
+
+  private _initSvgStrokeShader = (gl: WebGL2RenderingContext): void => {
+    this._svgStrokeShader = ShaderCompiler.Compile(gl, svgStrokeVertSrc, svgStrokeFragSrc);
+    const p = this._svgStrokeShader.Program;
+    this._svgStrokeLocs = {
+      resolution: gl.getUniformLocation(p, 'u_Resolution'),
+      model0: gl.getUniformLocation(p, 'u_Model0'),
+      model1: gl.getUniformLocation(p, 'u_Model1'),
+      tint: gl.getUniformLocation(p, 'u_Tint'),
+      halfWidth: gl.getUniformLocation(p, 'u_HalfWidthDev'),
+    };
+    const buf = gl.createBuffer();
+    if (!buf) throw new Error('[Jaui] Failed to create SVG stroke instance buffer');
+    this._svgStrokeInstanceBuffer = buf;
+    // Unit quad at loc 0 + 2 per-instance vec4 (a_Seg, a_Miter) at locs 1..2; stride 8 floats.
+    this._svgStrokeVao = this._createInstancedVao(gl, this._svgStrokeInstanceBuffer, 2, 8 * 4);
   };
 
   /** Create a VAO with the unit quad at location 0 + instance attributes at locations 1..N. */

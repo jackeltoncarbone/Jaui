@@ -28,6 +28,7 @@ import { Janvas as JanvasCore } from '../Janvas/Janvas';
 import type { JanvasRenderer } from '../Janvas/Janvas.Renderer';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { TextStyle } from '../Text/Text.Types';
+import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import { DefaultLayoutConfig, DefaultChildLayout } from '../Layout/Layout.Types';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
 import type { SpringConfig } from '../Animation/Animation.Types';
@@ -126,7 +127,23 @@ export class JivRegistry {
       case 'watch-rect':    return this._watchRect(op.Id, op.Watch);
       case 'move-child':    return this._moveChild(op.ParentId, op.ChildId, op.NewIndex);
       case 'janvas-attach': return this._janvasAttach(op.Id, op.Key, op.Config);
+      case 'svg-set':       return this._svgSet(op.Id, op.Paint);
+      case 'svg-clear':     return this._svgClear(op.Id);
     }
+  };
+
+  private _svgSet = (id: number, paint: SvgVectorPaint): void => {
+    const core = this._nodes.get(id);
+    if (!core) { console.warn(`[JivRegistry] svg-set: missing id=${id}`); return; }
+    core.SvgVector = paint;
+    core.MarkLayoutDirty();
+  };
+
+  private _svgClear = (id: number): void => {
+    const core = this._nodes.get(id);
+    if (!core) return;
+    core.SvgVector = null;
+    core.MarkLayoutDirty();
   };
 
   private _janvasAttach = (id: number, key: string, config: unknown): void => {

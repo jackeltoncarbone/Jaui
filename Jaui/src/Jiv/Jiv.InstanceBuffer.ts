@@ -67,6 +67,10 @@ const _packFgGrade = (brightness: number, saturation: number, contrast: number):
  * the Renderer consumes the raw data via PanelAddInstance().
  */
 export class JivInstanceBuffer {
+  /** TEMP `?no-shadow` diag: zero every panel's drop-shadow (blur+offset+alpha)
+   *  so the draw quad isn't expanded by the shadow margin — measures the
+   *  shadow's fill/overdraw share. Set from Jaui's URL-flag parse. */
+  static DiagNoShadow = false;
   private _data: Float32Array;
   private _capacity: number;
   private _count: number = 0;
@@ -140,9 +144,10 @@ export class JivInstanceBuffer {
     const avgScale = (cx + cy) * 0.5;
     const borderWidth = style.BorderWidth * avgScale * d;
     const borderEdgeAa = style.BorderBlur * avgScale * d;
-    const shadowBlur = style.ShadowBlur * avgScale * d;
-    const shadowOffX = style.ShadowOffsetX * avgScale * d;
-    const shadowOffY = style.ShadowOffsetY * avgScale * d;
+    const _ns = JivInstanceBuffer.DiagNoShadow;
+    const shadowBlur = _ns ? 0 : style.ShadowBlur * avgScale * d;
+    const shadowOffX = _ns ? 0 : style.ShadowOffsetX * avgScale * d;
+    const shadowOffY = _ns ? 0 : style.ShadowOffsetY * avgScale * d;
 
     const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
     const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
@@ -210,7 +215,7 @@ export class JivInstanceBuffer {
     data[offset + 20] = style.ShadowColor.R;
     data[offset + 21] = style.ShadowColor.G;
     data[offset + 22] = style.ShadowColor.B;
-    data[offset + 23] = style.ShadowColor.A;
+    data[offset + 23] = _ns ? 0 : style.ShadowColor.A;
 
     data[offset + 24] = shadowOffX;
     data[offset + 25] = shadowOffY;

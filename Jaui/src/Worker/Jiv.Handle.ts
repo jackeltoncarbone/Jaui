@@ -29,6 +29,7 @@ import type { JivApplyOpts, PointerPayload, WheelPayload } from './Bridge.Types'
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { ChildLayout, LayoutConfig } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
+import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 
 export class JivHandle {
   readonly Id: number;
@@ -374,6 +375,17 @@ export class JivHandle {
       if (ep.PointScale !== undefined) this._pointScale = ep.PointScale;
     }
     this._bridge.Enqueue({ K: 'apply', Id: this.Id, Opts: opts });
+  };
+
+  /** Attach tessellated vector-SVG geometry to this jiv (built main-thread by the
+   *  SvgJiv binding). Enqueued as a jiv-op so it's ordered after this jiv's create. */
+  SetSvgVector = (paint: SvgVectorPaint): void => {
+    this._bridge.Enqueue({ K: 'svg-set', Id: this.Id, Paint: paint });
+  };
+
+  /** Detach vector-SVG geometry from this jiv. */
+  ClearSvgVector = (): void => {
+    this._bridge.Enqueue({ K: 'svg-clear', Id: this.Id });
   };
 
   /** Set hit handlers in bulk (Angular `<jiv>` uses this to wire the

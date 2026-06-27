@@ -152,6 +152,7 @@ const DEFAULT_STIFFNESS = 260;
 const DEFAULT_DAMPING = 32;
 const DEFAULT_MASS = 1;
 
+
 /** Copy all non-animated fields from target into render. These snap without
  *  a spring: booleans, enums, and identity-shared nested structures.
  *
@@ -191,6 +192,21 @@ export class JivStyleAnimator implements Animatable {
   private _baseConfigs: Array<{ Stiffness: number; Damping: number; Mass: number }>;
   private _animDriver = new JivAnimationDriver();
 
+  /** Signal-based wake flag. True forces a full resolve+step next Tick. Set by
+   *  every mutation that can change this node's resolved style (class/state/var/
+   *  layout). Cleared after the resolve runs. Starts true (first paint). */
+  private _dirty = true;
+  /** Consecutive at-rest frames skipped; bounds the backstop re-resolve. */
+  private _idleFrames = 0;
+
+  /** Wake this animator — re-resolve its target on the next Tick. Call from any
+   *  mutation that changes what ResolveStyle would produce (state flip, class
+   *  swap, var/theme change, layout-affecting change). Cheap + idempotent. */
+  Wake = (): void => {
+    this._dirty = true;
+    this._idleFrames = 0;
+  };
+
   constructor(private _jiv: Jiv) {
     // Resolve the initial target under the seed ctx (or the Jiv's ctx if
     // it has one already from a prior pass). Springs start settled at the
@@ -221,6 +237,7 @@ export class JivStyleAnimator implements Animatable {
    *  so a stale @Animation Ease override is not preserved across the swap.
    *  Spec: per-class @Spring/@Transition wins over Animation default. */
   RetuneSprings = (overrides: Record<string, Partial<SpringConfig>> | null): void => {
+    this._dirty = true;
     for (let i = 0; i < BINDINGS.length; i++) {
       const prop = BINDINGS[i][0];
       const cfg = _resolveSpringConfig(overrides, prop);
@@ -241,6 +258,7 @@ export class JivStyleAnimator implements Animatable {
     apps: AnimationApplication[] | null,
     table: Record<string, AnimationDefinition> | null,
   ): void => {
+    this._dirty = true;
     this._animDriver.Apply(apps ?? [], table ?? {});
   };
 
@@ -283,6 +301,27 @@ export class JivStyleAnimator implements Animatable {
   };
 
   Tick = (dt: number): boolean => {
+    const hasAnims = this._animDriver.HasAnimations;
+
+    // ── Sleep guard (signal-based) ──
+    // The expensive part of a tick is ResolveStyle (re-resolves the whole JSS
+    // style) + Set/Step on ~60 springs. None of that is needed when nothing
+    // about this node can have changed: not flagged dirty by a wake source
+    // (class/state/var/layout change), no @Animation driving the target, its
+    // Presence at rest (Presence feeds _ctx → resolved target), and every
+    // spring already parked. In that case skip the whole body. The Backstop
+    // re-resolves at most once/sec WHILE the loop is awake, so a missed wake
+    // self-heals within ~60 frames instead of freezing.
+    if (!this._dirty && !hasAnims && !(this._jiv.PresenceSpring && !this._jiv.PresenceSpring.IsSettled)) {
+      let allSettled = true;
+      for (let i = 0; i < this._springs.length; i++) {
+        if (!this._springs[i].IsSettled) { allSettled = false; break; }
+      }
+      if (allSettled && this._idleFrames++ < 60) return false;
+    }
+    this._idleFrames = 0;
+    this._dirty = false;
+
     // Advance any @Animation drivers first so the patched style flows
     // through ResolveStyle alongside the static base. The driver's patch
     // is a Record<string, string> of source-level property values that
@@ -290,7 +329,6 @@ export class JivStyleAnimator implements Animatable {
     // moving target as usual.
     let driverActive = false;
     let patched = this._jiv.EffectiveStyle();
-    const hasAnims = this._animDriver.HasAnimations;
     if (hasAnims) {
       driverActive = this._animDriver.Tick(dt);
       const patch = this._animDriver.Patch();

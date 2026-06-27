@@ -20,6 +20,7 @@ import {
   isMessage,
   type M2W,
   type M2W_Init,
+  type M2W_Capture,
   type M2W_PointerEvent,
   type M2W_WheelEvent,
   type M2W_Resize,
@@ -146,6 +147,10 @@ export class WorkerBridge {
     if (isMessage<M2W_ImageBitmap>(m, 'image-bitmap')) return this._onImageBitmap(m);
     if (isMessage<M2W_FontFace>(m, 'font-face')) return this._onFontFace(m);
     if (isMessage<M2W_Kick>(m, 'kick')) return this._onKick();
+    if (isMessage<M2W_Capture>(m, 'capture')) {
+      void this._canvas?.CaptureFrame().then(blob => this._post({ T: 'capture-result', Blob: blob ?? null }));
+      return;
+    }
     // Liveness probe from the main-thread eviction watchdog — answer immediately so it
     // knows the worker is alive (a dead worker can't reply, which is the watchdog's cue).
     if (isMessage<M2W_Ping>(m, 'ping')) { this._post({ T: 'pong' }); return; }

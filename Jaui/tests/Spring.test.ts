@@ -43,7 +43,11 @@ describe('Spring', () => {
     s.Target = 100;
 
     let maxValue = 0;
-    for (let i = 0; i < 120; i++) {
+    // Run until settled (cap well above the analytic settle time for ζ≈0.38).
+    // The closed-form solver damps exactly per physics — no Euler over-damping —
+    // so this underdamped spring needs ~170 frames to park vs Euler's faster fake
+    // settle; the assertion is unchanged (overshoots, then converges exactly).
+    for (let i = 0; i < 400 && !s.IsSettled; i++) {
       s.Step(1 / 60);
       maxValue = Math.max(maxValue, s.Value);
     }

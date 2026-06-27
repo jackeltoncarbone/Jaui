@@ -48,6 +48,7 @@ export class Framebuffer {
   /** Resize the FBO's texture. Safe to call repeatedly; no-op if already at given size. */
   Resize = (width: number, height: number): void => {
     if (width === this._width && height === this._height) return;
+    const firstAlloc = this._width === 0 && this._height === 0;
     this._width = Math.max(1, Math.floor(width));
     this._height = Math.max(1, Math.floor(height));
 
@@ -77,9 +78,17 @@ export class Framebuffer {
       gl.bindRenderbuffer(gl.RENDERBUFFER, null);
     }
 
-    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-    if (status !== gl.FRAMEBUFFER_COMPLETE) {
-      throw new Error(`[Jaui] Framebuffer incomplete: 0x${status.toString(16)}`);
+    // Validate completeness only on FIRST allocation. The attachment format never
+    // changes across resizes (color + matching depth/stencil stay renderable and
+    // same-sized), so a re-Resize stays complete. checkFramebufferStatus forces a
+    // full GPU sync (~68ms on software ANGLE/WARP); when blur-level FBOs thrash
+    // between surface sizes it fired ~8×/frame — the dominant per-frame stall
+    // (measured 23.6s / 347 calls in a WARP orbit trace). Skip it on resize.
+    if (firstAlloc) {
+      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      if (status !== gl.FRAMEBUFFER_COMPLETE) {
+        throw new Error(`[Jaui] Framebuffer incomplete: 0x${status.toString(16)}`);
+      }
     }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
