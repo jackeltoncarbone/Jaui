@@ -181,7 +181,14 @@ export class Canvas implements DirtyTracker {
    *  (game-style: fire once, sample many) and let every glass surface sample it
    *  at its frost LOD, instead of rebuilding a per-panel blur 50× (the ~759ms).
    *  Frame-scoped; rebuilt only when the scene changed under a pending surface. */
-  private _sharedBackdrop: boolean = true;  // default ON (verified +19% @ 1207x645, pixel-identical); `?no-shared-backdrop` disables
+  // Default OFF: the shared pyramid is built at QUARTER res (BuildSharedBackdrop:
+  // width>>2) AND aliases u_Scene to its level 0, so EVERY glass surface — even
+  // clear / light-frost (e.g. the tab bar over text) — sampled a 1/16-area
+  // backdrop → visibly low-res content through the glass. NOT pixel-identical as
+  // once claimed. Off restores full-res per-panel scissored blur (clear glass
+  // reads the full-res scene; light blur stays crisp). Re-enable only once the
+  // shared pyramid keeps a full-res level 0. `?wkr-shared-backdrop` forces on.
+  private _sharedBackdrop: boolean = false;
   private _sharedPyramid: GpuTextureHandle | null = null;
   private _sharedPyramidValid: boolean = false;
   /** Footprints (device px, flat [x0,y0,x1,y1,…]) drawn into the scene FBO since

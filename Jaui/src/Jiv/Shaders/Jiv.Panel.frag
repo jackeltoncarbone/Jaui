@@ -802,6 +802,17 @@ void main() {
 
         vec2 refractOffset = (edgeDisp + bulgeDisp) * refractionStrength;
 
+        // Clamp the displacement so a strong Thickness×Refraction can't push the
+        // sample past the panel's OWN footprint — beyond it lies the scissored
+        // backdrop's empty border, which CLAMP_TO_EDGE returns as the dark
+        // "cleared" colour (the "no colour"/dark-halo bug when a glass pill
+        // magnifies over text). Cap to the panel's minor half-extent: the bend
+        // saturates to "max" instead of sampling into the void. Generous enough
+        // that normal refraction (offset ≪ half-extent) is untouched.
+        float _maxOff = min(panelHalfSize.x, panelHalfSize.y);
+        float _offLen = length(refractOffset);
+        if (_offLen > _maxOff) refractOffset *= _maxOff / _offLen;
+
         // CA spread along normal, scaled by hump and ca
         float caPx = chromaticAberration * hump * 3.0;
         vec2 caStep = normal * caPx;
@@ -844,7 +855,15 @@ void main() {
         float refractLod = log2(1.0 + refractFp);
         // Scale by glassiness so rim blur fades with Thickness rather than
         // disappearing the instant the shader variant flips to MATERIAL_NONE.
-        lodBoost = (rimBoost * 1.5 + innerBlur * 1.0) * glassiness + refractLod;
+        //
+        // Frost-gated sharpness: the rim + refraction-footprint LOD exists to HIDE
+        // caustics in FROSTED glass. A CLEAR surface (BackdropFilter Blur 0 →
+        // frostLod ≈ u_BaseFrostLod) explicitly asked for a sharp backdrop, so
+        // forcing that blur on it just softens crisp content/refraction (the tab
+        // bar pill's magnified label). Ramp the whole boost in with the requested
+        // frost so clear glass refracts CRISP while frosted glass still hides folds.
+        float frostReq = clamp((frostLod - u_BaseFrostLod) * 4.0, 0.0, 1.0);
+        lodBoost = ((rimBoost * 1.5 + innerBlur * 1.0) * glassiness + refractLod) * frostReq;
         // Chromatic aberration splits the R/B taps by ±caStep along the normal.
         // caStep = normal * (ca * hump * 3) — and `hump` is ~0 across the entire
         // flat interior (decays to <2e-4 by x=3·bezel). So for the vast interior
