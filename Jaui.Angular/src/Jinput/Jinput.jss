@@ -64,7 +64,11 @@ JinputPlaceholder {
 }
 
 JinputCaret {
-  Background: rgba(255, 255, 255, 0.95)
+  Background: rgba(255, 255, 255, 1)
+  // Float above the text segments + placeholder so a focused EMPTY field shows a
+  // clear caret at the start instead of it hiding behind the placeholder's first
+  // glyph. Width is set inline in the template.
+  Layer: 6
 }
 
 // Visual matches Selection.Manager's DEFAULT_SELECTION_STYLE so plain-text

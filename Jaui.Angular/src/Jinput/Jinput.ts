@@ -159,7 +159,7 @@ function _withAlpha(color: string, alpha: number): string {
                 Position: 'Placed',
                 Left: cr.x + 'px',
                 Top: cr.y + 'px',
-                Width: '2px',
+                Width: '2.5px',
                 Height: cr.height + 'px',
               }" />
           }
