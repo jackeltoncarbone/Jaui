@@ -113,7 +113,15 @@ const _inferMaterial = (thickness: number, direction: ProgressiveBlurDirection |
 
 /** Resolve a full JivStyle into a JivRenderStyle under the given context. */
 export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle => {
-  const borderRadius = ResolveLengthTuple4(s.BorderRadius, ctx, ['W', 'W', 'W', 'W']);
+  const rawRadius = ResolveLengthTuple4(s.BorderRadius, ctx, ['W', 'W', 'W', 'W']);
+  const smoothness = Resolve(s.BorderRadiusSmoothness, ctx, 'W');
+  // Superellipse compensation (jev's corner law, scale strength 1.25): a squircle
+  // at nominal r hugs the square corner TIGHTER than a circle, so the drawn radius
+  // grows with smoothness and the APPARENT radius lands on the authored number --
+  // Apple's continuous-corner flare. Saturated pills are untouched: the half-box
+  // clamp and the fullyRounded circle collapse still apply downstream.
+  const cornerScale = 1 + smoothness * 1.25;
+  const borderRadius = rawRadius.map(r => r * cornerScale) as typeof rawRadius;
   const thickness = Resolve(s.Thickness, ctx, 'W');
 
   // Filters — each authored as a CSS-shaped function list, normalized into
@@ -168,7 +176,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
     BorderRadius: borderRadius,
     CornerShape: _parseCornerShape(ResolveTernary(s.CornerShape, ctx)),
-    BorderRadiusSmoothness: Resolve(s.BorderRadiusSmoothness, ctx, 'W'),
+    BorderRadiusSmoothness: smoothness,
 
     Background: ParseBackground(ResolveVars(ResolveTernary(s.Background, ctx), ctx)),
     BlendMode: s.BlendMode,

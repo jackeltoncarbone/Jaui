@@ -3292,6 +3292,14 @@ export class Canvas implements DirtyTracker {
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
       const hit = this._scrollManager.HitTopmost(cssX, cssY);
+      // Web semantics: a drag STARTED inside a UserSelect:None cascade selects
+      // nothing at all — without this gate the nearest-text fallback lets a
+      // drag on an unselectable overlay arm selection in unrelated text.
+      if (hit && !selMgr.IsSelectable(hit)) {
+        selMgr.Set(null, this.Root);
+        this._animationManager.Kick();
+        return;
+      }
       const textJiv = selMgr.NearestTextJiv(this.Root, hit, cssX, cssY);
 
       if (!textJiv || !selMgr.IsSelectable(textJiv)) {
