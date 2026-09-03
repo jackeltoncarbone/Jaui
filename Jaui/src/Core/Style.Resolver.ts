@@ -115,12 +115,13 @@ const _inferMaterial = (thickness: number, direction: ProgressiveBlurDirection |
 export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle => {
   const rawRadius = ResolveLengthTuple4(s.BorderRadius, ctx, ['W', 'W', 'W', 'W']);
   const smoothness = Resolve(s.BorderRadiusSmoothness, ctx, 'W');
-  // Superellipse compensation (jev's corner law, scale strength 1.25): a squircle
-  // at nominal r hugs the square corner TIGHTER than a circle, so the drawn radius
+  // Superellipse compensation (jev's corner law, strength retuned for Jaui's
+  // n = 2+3s superellipse): a squircle at nominal r hugs the square corner
+  // TIGHTER than a circle, so the drawn radius
   // grows with smoothness and the APPARENT radius lands on the authored number --
   // Apple's continuous-corner flare. Saturated pills are untouched: the half-box
   // clamp and the fullyRounded circle collapse still apply downstream.
-  const cornerScale = 1 + smoothness * 1.25;
+  const cornerScale = 1 + smoothness * 2.6;
   const borderRadius = rawRadius.map(r => r * cornerScale) as typeof rawRadius;
   const thickness = Resolve(s.Thickness, ctx, 'W');
 

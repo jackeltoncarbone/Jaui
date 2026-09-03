@@ -365,16 +365,23 @@ export class MainBridge {
     // One post-ready `resize` with the live `getBoundingClientRect` brings
     // the worker to the actually-rendered size — cheap (single message) and
     // idempotent (a same-size RO callback would just no-op the second one).
-    requestAnimationFrame(() => {
-      const rect = this.Canvas.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        this.Worker.postMessage({
-          T: 'resize',
-          Width: rect.width,
-          Height: rect.height,
-        });
-      }
-    });
+    // The init rect is snapshotted before layout flows, so it can be 0 or
+      // stale; if the canvas size then settles WITHOUT changing, the RO never
+      // fires and the OffscreenCanvas stays at its transferred 300x150 default.
+      // Poll until the live rect is real and matches twice, then post it once.
+      let lastW = 0, lastH = 0, tries = 0;
+      const settleSize = (): void => {
+        const rect = this.Canvas.getBoundingClientRect();
+        const w = Math.round(rect.width), h = Math.round(rect.height);
+        if (w > 0 && h > 0 && w === lastW && h === lastH) {
+          this.Worker.postMessage({ T: 'resize', Width: rect.width, Height: rect.height });
+          return;
+        }
+        lastW = w; lastH = h;
+        if (tries++ < 20) requestAnimationFrame(settleSize);
+        else if (w > 0 && h > 0) this.Worker.postMessage({ T: 'resize', Width: rect.width, Height: rect.height });
+      };
+      requestAnimationFrame(settleSize);
   };
 
   private _onCursor = (m: W2M_Cursor): void => {
@@ -606,6 +613,21 @@ export class MainBridge {
       });
     });
     ro.observe(c);
+
+    // The RO only delivers during rendering steps, which a hidden tab never
+    // runs — a window resized while its tab was backgrounded came back with
+    // a stale layout. Window resize + visibility return both re-post the
+    // live rect; the worker side is idempotent on same-size messages.
+    const postLiveSize = (): void => {
+      const rect = c.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        this.PostMessage({ T: 'resize', Width: rect.width, Height: rect.height });
+      }
+    };
+    window.addEventListener('resize', postLiveSize);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) postLiveSize();
+    });
 
     // DPR change watcher — matchMedia '(resolution: Ndppx)' is one-shot;
     // re-arm after each fire, just like the engine used to do directly.

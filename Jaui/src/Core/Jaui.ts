@@ -604,6 +604,10 @@ export class Canvas implements DirtyTracker {
    *  picks it up on its next tick. */
   ResizeFromBridge = (cssWidth: number, cssHeight: number): void => {
     this._pendingResize = { width: cssWidth, height: cssHeight };
+    // Apply NOW, not just on the next animation frame: worker rAF is parked
+    // while the tab is hidden, so an rAF-only resize left a backgrounded tab
+    // laid out at its old size until something else woke the loop.
+    this._resize();
     requestAnimationFrame(() => this._resize());
   };
 

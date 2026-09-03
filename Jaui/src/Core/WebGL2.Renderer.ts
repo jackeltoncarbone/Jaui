@@ -198,7 +198,7 @@ void main() {
     if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) {
         sd = max(qAbs.x - halfSize.x, qAbs.y - halfSize.y);
     } else {
-        float n = 2.0 + 6.0 * clamp(u_Smoothness, 0.0, 1.0);
+        float n = 2.0 + 3.0 * clamp(u_Smoothness, 0.0, 1.0);
         float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
         sd = r * (pow(max(L, 0.0), 1.0 / n) - 1.0);
     }
