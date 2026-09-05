@@ -318,13 +318,18 @@ export class Jinput implements OnDestroy {
   /** Char-index hover. Index is null when hover leaves the text region. */
   readonly PositionHovered = output<{ index: number | null }>();
   readonly FocusChanged = output<boolean>();
-  /** Right-click. Consumer can preventDefault and open their own menu;
-   *  otherwise the browser native menu fires on the offscreen input. */
-  readonly ContextMenuRequested = output<{
-    event: MouseEvent;
+  /** A context-class gesture: right-click, or a touch long-press. The input
+   *  reports THAT it happened and WHERE; what a menu contains is the
+   *  consumer's business, the same philosophy as PositionClicked. The anchor
+   *  is a client-px RECT (a point for mouse, the selection's box for touch)
+   *  so a panel can flip around it instead of covering it. */
+  readonly ContextRequested = output<{
+    source: 'mouse' | 'touch';
+    caretIndex: number;
     selStart: number;
     selEnd: number;
     value: string;
+    anchorRect: { x: number; y: number; width: number; height: number };
   }>();
   /** Enter (without Shift) when not in multi-line mode. Consumer is expected
    *  to use this to commit / submit. Shift+Enter is always ignored — leave
@@ -705,6 +710,13 @@ export class Jinput implements OnDestroy {
     // on its own — without this the soft keyboard stays up after the user
     // leaves the field. Capture phase so we see the tap before it's consumed.
     window.addEventListener('pointerdown', this._onPointerDownDismiss, true);
+    // The soft keyboard can ONLY be summoned inside the native gesture: the
+    // engine's own pointer events are rebuilt from the worker's hit payload,
+    // which lands after the tap's transient activation has expired — focus()
+    // still succeeds there, but no mobile browser raises a keyboard for it.
+    // So a NATIVE capture listener claims focus the moment a touch lands in
+    // this input's rect; the engine's async path then only sets the caret.
+    window.addEventListener('pointerdown', this._onPointerDownSummon, true);
 
     // Re-run layout once the @font-face font lands in the canvas2d font
     // registry — measureText falls back to a wider system font until
@@ -728,6 +740,7 @@ export class Jinput implements OnDestroy {
     window.removeEventListener('resize', this._onWindowResize);
     window.removeEventListener('pointermove', this._onWindowHoverMove);
     window.removeEventListener('pointerdown', this._onPointerDownDismiss, true);
+    window.removeEventListener('pointerdown', this._onPointerDownSummon, true);
     if (this._blinkTimer) clearInterval(this._blinkTimer);
     this._clearLongPressTimer();
     if (this._wrapReadFrame !== null) cancelAnimationFrame(this._wrapReadFrame);
@@ -862,6 +875,31 @@ export class Jinput implements OnDestroy {
     if (!inWrap) this.Blur();
   };
 
+  /** Summon the keyboard from INSIDE the native gesture (see registration).
+   *  Touch only: desktop keyboards need no summoning, and the mouse path's
+   *  burst/anchor logic stays exactly as it was. Runs before the dismiss
+   *  listener can matter — the two are disjoint: this fires only for taps
+   *  INSIDE the wrap, dismissal only for taps outside it. */
+  private _onPointerDownSummon = (e: PointerEvent): void => {
+    if (!e.isTrusted || e.pointerType !== 'touch' || this.ReadOnly()) return;
+    const wrap = this._wrap();
+    const canvasEl = this._jaui?.Canvas?.Element;
+    const input = this._hiddenInput()?.nativeElement;
+    if (!wrap || !canvasEl || !input) return;
+    const cRect = canvasEl.getBoundingClientRect();
+    const localX = e.clientX - cRect.left;
+    const localY = e.clientY - cRect.top;
+    const inWrap = localX >= wrap.Node.X && localX < wrap.Node.X + wrap.Node.Width
+                && localY >= wrap.Node.Y && localY < wrap.Node.Y + wrap.Node.Height;
+    if (!inWrap) return;
+    // Already focused = the keyboard may have been swiped away while DOM
+    // focus stayed; the blur-then-focus in _focusHidden re-summons it. Not
+    // focused = plain focus is enough and keeps this gesture's upcoming
+    // caret placement intact.
+    if (document.activeElement === input) this._focusHidden(input);
+    else input.focus();
+  };
+
   /** Focus the hidden textarea such that the on-screen keyboard reopens
    *  reliably on mobile. The blur step is the linchpin: iOS Safari and
    *  Android Chrome no-op a `focus()` call on an already-focused element,
@@ -925,6 +963,23 @@ export class Jinput implements OnDestroy {
     // back to the original native event.
     const idx = this._indexAtClient(e.clientX, e.clientY);
     if (idx === null) { this.Focus(); return; }
+
+    // Right-click is not a click: natively it never collapses a selection it
+    // lands inside, never joins a double-click burst, and never starts a
+    // drag. Place the caret only OUTSIDE the selection, keep focus, and let
+    // the contextmenu event that follows carry the gesture to the hook.
+    if (e.button === 2) {
+      const input2 = this._hiddenInput()?.nativeElement;
+      if (!input2) return;
+      const lo = Math.min(this._selStart(), this._selEnd());
+      const hi = Math.max(this._selStart(), this._selEnd());
+      if (lo === hi || idx < lo || idx >= hi) {
+        input2.setSelectionRange(idx, idx);
+        this.syncSelection();
+      }
+      this._focusHidden(input2);
+      return;
+    }
 
     // Emit PositionClicked first; consumer can preventDefault to skip caret
     // positioning (e.g. SS tokenizer wrapper opens a token settings popup
@@ -1034,6 +1089,19 @@ export class Jinput implements OnDestroy {
       this._longPressTimer = setTimeout(() => {
         this._longPressTimer = null;
         this._promoteToWordSelection(idx);
+        // iOS long-press = select word + callout. The word is selected above;
+        // the callout is the consumer's, through the same hook as right-click.
+        const hi = this._hiddenInput()?.nativeElement;
+        if (hi) {
+          this.ContextRequested.emit({
+            source: 'touch',
+            caretIndex: idx,
+            selStart: this._selStart(),
+            selEnd: this._selEnd(),
+            value: hi.value,
+            anchorRect: this._selectionClientRect(),
+          });
+        }
       }, Jinput._LongPressMs);
     }
 
@@ -1220,17 +1288,36 @@ export class Jinput implements OnDestroy {
     const input = this._hiddenInput()?.nativeElement;
     if (!input) return;
     // The original DOM contextmenu is already suppressed by Jaui Core's
-    // canvas-level listener (it preventDefaults unconditionally). The
-    // event arriving here is a synthetic clone; preventDefault on it has
-    // no effect on the browser's native menu — so we just pass through
-    // to the consumer.
-    this.ContextMenuRequested.emit({
-      event: e,
+    // canvas-level listener, so the browser menu never shows; this hook is
+    // the only path to a menu, which is the point — the menu is external.
+    this.ContextRequested.emit({
+      source: 'mouse',
+      caretIndex: this._indexAtClient(e.clientX, e.clientY) ?? this._selEnd(),
       selStart: this._selStart(),
       selEnd: this._selEnd(),
       value: input.value,
+      anchorRect: { x: e.clientX, y: e.clientY, width: 1, height: 1 },
     });
   };
+
+  /** The selection's box in client px — the union of its wrap-local rects
+   *  mapped through the canvas rect, the same mapping the caret pinning
+   *  uses. Falls back to a 1x1 rect at the wrap origin with no layout. */
+  private _selectionClientRect(): { x: number; y: number; width: number; height: number } {
+    const canvasEl = this._jaui?.Canvas?.Element;
+    const wrap = this._wrap();
+    if (!canvasEl || !wrap) return { x: 0, y: 0, width: 1, height: 1 };
+    const rect = canvasEl.getBoundingClientRect();
+    const ox = rect.left + wrap.Node.X;
+    const oy = rect.top + wrap.Node.Y;
+    const rects = this.SelectionRects();
+    if (rects.length === 0) return { x: ox, y: oy, width: 1, height: 1 };
+    const x0 = Math.min(...rects.map(r => r.x));
+    const y0 = Math.min(...rects.map(r => r.y));
+    const x1 = Math.max(...rects.map(r => r.x + r.width));
+    const y1 = Math.max(...rects.map(r => r.y + r.height));
+    return { x: ox + x0, y: oy + y0, width: x1 - x0, height: y1 - y0 };
+  }
 
   // ── Caret scroll-into-view ──────────────────────────────────────
   private _scrollCaretIntoView(): void {
