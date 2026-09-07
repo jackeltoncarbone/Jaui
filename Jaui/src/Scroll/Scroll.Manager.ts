@@ -203,8 +203,10 @@ export class ScrollManager implements Animatable {
     // now the code keeps the promise. Integrated in small chunks: resistance
     // depends on how far over you already are, and one fast 60px event
     // evaluated at its start would tunnel straight through the curve.
-    s.posX = _integrateRubber(s.posX, dx, 0, maxX);
-    s.posY = _integrateRubber(s.posY, dy, 0, maxY);
+    // Rubber-band only an axis that actually scrolls; a fixed axis clamps hard
+    // (no bounce on a direction with nowhere to go — the iOS/web rule).
+    s.posX = maxX > 0 ? _integrateRubber(s.posX, dx, 0, maxX) : Math.max(0, Math.min(maxX, s.posX + dx));
+    s.posY = maxY > 0 ? _integrateRubber(s.posY, dy, 0, maxY) : Math.max(0, Math.min(maxY, s.posY + dy));
     // Momentum is still charged only from IN-BOUNDS travel: overscroll
     // stretch is the spring's business, not the fling's.
     const scaledDx = Math.max(0, Math.min(maxX, s.posX)) - Math.max(0, Math.min(maxX, prevX));
@@ -295,11 +297,17 @@ export class ScrollManager implements Animatable {
     if (!hit) return null;
     let cur: Jiv | null = hit;
     while (cur) {
-      if (cur.Overflow === 'Scroll') return cur;
+      if (cur.Overflow === 'Scroll' && this._canScrollEither(cur)) return cur;
       cur = cur.Parent as Jiv | null;
     }
     return null;
   };
+
+  /** Whether a container has anything to scroll on either axis right now.
+   *  A scroll box whose content fits (a single-line input, an empty list) is
+   *  not a scroll target — the gesture belongs to whatever CAN move. */
+  private _canScrollEither = (jiv: Jiv): boolean =>
+    jiv.ContentWidth - jiv.Width > 0.5 || jiv.ContentHeight - jiv.Height > 0.5;
 
   /** Per-axis scroll chaining for wheel input. From the topmost hit we walk UP
    *  the ancestor chain and, for EACH axis independently, pick the nearest

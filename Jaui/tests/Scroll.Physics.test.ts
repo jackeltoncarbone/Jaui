@@ -13,6 +13,8 @@ const makeJiv = (over: Partial<Record<string, unknown>> = {}): Jiv => {
     Width: 400, Height: 600, ContentWidth: 400, ContentHeight: 2000,
     Overflow: 'Scroll', Children: [], Parent: null, Visible: true,
     ChildLayout: { Position: 'Flow' },
+    X: 0, Y: 0, ClipsChildren: true, PointerEvents: 'Auto',
+    RenderStyle: { Transform: { Rotation: 0, OriginX: 0.5, OriginY: 0.5 }, Layer: 0 },
     VarMap: vars,
     SetVar: (name: string, value: string | number | boolean) => { vars.set(name, value); },
     MarkLayoutDirty: () => {},
@@ -125,5 +127,30 @@ describe('ScrollTo and ScrollRectIntoView: the public primitives', () => {
     m.ScrollRectIntoView(jiv, { x: 0, y: 900, width: 100, height: 40 }, 8, 'instant');
     m.Tick(1 / 120);
     expect(jiv.ScrollY).toBe(900 + 40 + 8 - 600); // bottom edge + margin, no more
+  });
+});
+
+describe('no overflow, no scroll — the drill-sentence bug', () => {
+  it('a container whose content fits is not a scroll target', () => {
+    const jiv = makeJiv({ ContentHeight: 600, ContentWidth: 400 }); // == viewport
+    const m = makeManager(jiv);
+    expect(m.ResolveScrollTarget(200, 300)).toBeNull();
+  });
+
+  it('dragging a non-overflowing container moves nothing — no rubber-band', () => {
+    const jiv = makeJiv({ ContentHeight: 600, ContentWidth: 400 });
+    const m = makeManager(jiv);
+    m.DragStart(jiv);
+    m.DragMove(jiv, 0, -80, 1 / 60); // pull hard; there is nowhere to go
+    expect(jiv.ScrollY).toBe(0);
+  });
+
+  it('an axis with no room stays put while the other scrolls', () => {
+    const jiv = makeJiv({ ContentHeight: 2000, ContentWidth: 400 }); // Y scrolls, X does not
+    const m = makeManager(jiv);
+    m.DragStart(jiv);
+    m.DragMove(jiv, -50, 50, 1 / 60);       // pull content up = scroll down
+    expect(jiv.ScrollX).toBe(0);            // X pinned (no room)
+    expect(jiv.ScrollY).toBeGreaterThan(0); // Y moved
   });
 });
