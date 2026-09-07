@@ -327,7 +327,7 @@ const _solveNode = (
   // parent offset.
   for (const child of node.Children) {
     const pos = child.ChildLayout.Position;
-    if (pos === 'Placed' || pos === 'Fixed' || pos === 'Sticky') {
+    if (pos === 'Placed' || pos === 'Fixed' || pos === 'Sticky' || pos === 'Pinned') {
       const childCtx = _buildChildCtx(child, width, height, ctx.PointScale, rootPointScale, viewport, ctx.Vars);
       child.ResolveCtx = childCtx;
       const declW = _resolveSize(child.ChildLayout.Width, width, childCtx, 'W');
@@ -665,7 +665,7 @@ const _simulateWrapHeight = (
   let line: Packed[] = [];
   let lineMain = 0;
   for (const c of row.Children) {
-    if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed') continue;
+    if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed' || c.ChildLayout.Position === 'Pinned') continue;
     if (c.LeaveRequested) continue;
 
     // ResolveCtx is normally seeded by `_solveNode` before that child's own

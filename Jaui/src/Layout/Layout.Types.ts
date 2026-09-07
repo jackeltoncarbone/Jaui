@@ -4,7 +4,11 @@ export type FlexWrap = 'NoWrap' | 'Wrap' | 'WrapReverse';
 export type JustifyContent = 'Start' | 'End' | 'Center' | 'SpaceBetween' | 'SpaceAround' | 'SpaceEvenly';
 export type AlignItems = 'Start' | 'End' | 'Center' | 'Stretch';
 export type AlignContent = 'Start' | 'End' | 'Center' | 'Stretch' | 'SpaceBetween' | 'SpaceAround' | 'SpaceEvenly';
-export type PositionMode = 'Flow' | 'Offset' | 'Placed' | 'Fixed' | 'Sticky' | 'Attach';
+/** `Pinned` = Placed against a SCROLL CONTAINER'S FRAME: it does not ride the
+ *  content translate, which is what a scrollbar, a floating header, or any
+ *  scroll-driven overlay needs. Inside a non-scrolling parent it behaves
+ *  exactly like Placed. */
+export type PositionMode = 'Flow' | 'Offset' | 'Placed' | 'Fixed' | 'Sticky' | 'Attach' | 'Pinned';
 
 export interface AnchorPoint {
   /** 0..1 — horizontal position within the rect (0 = left, 0.5 = center, 1 = right) */

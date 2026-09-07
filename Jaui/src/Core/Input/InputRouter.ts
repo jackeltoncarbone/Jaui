@@ -86,7 +86,9 @@ export class InputRouter {
     if (!handled || (dx === 0 && dy === 0)) return;
 
     this._focusManager.SetModality('keyboard');
-    this._scrollManager.ApplyDeltaInstant(scroller, dx, dy);
+    // Eased, not instant: the browser animates its line and page steps, and a
+    // teleporting Home/End reads as a glitch rather than a jump.
+    this._scrollManager.ApplyDelta(scroller, dx, dy);
     this._animationManager.Kick();
     e.preventDefault();
   };

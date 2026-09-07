@@ -48,18 +48,26 @@ interface ScrollState {
    *  lifting, only the slow recent motion contributes, so content can't
    *  briefly outpace your finger after release. */
   samples: DragSample[];
+  /** performance.now() of the last real scroll activity — drives the
+   *  published @ScrollActive var's idle timeout. */
+  lastActiveAt: number;
   /** TEMP demo auto-scroll: seconds left to pause at the current end before
    *  restarting. 0 = actively scrolling. See ScrollManager.AutoScrollSpeed. */
   autoHold: number;
 }
 
-/** Drag-momentum velocity retention per second. Smaller = faster decay.
- *  0.02/s ⇒ half-life ≈ 0.18 s, full settle ≈ 0.6 s after a flick. */
-const FRICTION_PER_SEC = 0.02;
-/** Elastic spring constant for rubber-band (bigger = stiffer resist). */
+/** Drag-momentum velocity retention per second. UIScrollView's normal
+ *  decelerationRate is 0.998 per millisecond — 0.998^1000 ≈ 0.135/s — which
+ *  is the long, light coast a flick is supposed to buy. The old 0.02/s
+ *  settled everything in ~0.6 s and made long lists a rowing exercise. */
+const FRICTION_PER_SEC = 0.135;
+/** Rubber spring stiffness (1/s²-ish): pulls an overscrolled edge home. */
 const RUBBER_K = 180;
-/** Extra damping when overscrolled, on top of normal friction. */
+/** Velocity retention per second while OVERSCROLLED — much heavier than
+ *  in-bounds friction so the bounce is one soft beat, not a wobble. */
 const OVER_FRICTION = 0.005;
+/** Damping applied to the spring return so it lands without oscillating. */
+const OVER_SETTLE_PX = 0.5;
 /** Velocity magnitude below which we settle to zero (px/s). */
 const SETTLE_V = 1;
 /** Trailing window of DragMove samples used to derive release velocity, ms.
@@ -131,6 +139,40 @@ export class ScrollManager implements Animatable {
 
   /** Start a drag (touch/pointer). Disables physics; caller will push
    *  positions via DragMove until DragEnd. */
+  /** Scroll a container to an ABSOLUTE offset. 'smooth' rides the same ease
+   *  the wheel uses; 'instant' lands this frame. This is the consumer-facing
+   *  primitive the engine never had — callers were poking ScrollY directly,
+   *  bypassing the physics and racing the per-frame sync. */
+  ScrollTo = (jiv: Jiv, x: number | null, y: number | null, behavior: 'smooth' | 'instant' = 'smooth'): void => {
+    const s = this._ensureState(jiv);
+    const dx = x === null ? 0 : x - s.targetX;
+    const dy = y === null ? 0 : y - s.targetY;
+    if (behavior === 'smooth') this.ApplyDelta(jiv, dx, dy);
+    else this.ApplyDeltaInstant(jiv, dx, dy);
+  };
+
+  /** Scroll the nearest scrollable ancestor the minimum distance that brings
+   *  `rect` (container-content coordinates) fully into view, plus a margin —
+   *  the web's scrollIntoView({block:'nearest'}), which focus-reveal and the
+   *  caret both need. */
+  ScrollRectIntoView = (jiv: Jiv, rect: { x: number; y: number; width: number; height: number }, marginPx = 8, behavior: 'smooth' | 'instant' = 'smooth'): void => {
+    // Measure against the PENDING target so stacked reveals compose instead
+    // of re-fighting an ease already in flight.
+    const st = this._ensureState(jiv);
+    const viewTop = st.targetY;
+    const viewBottom = viewTop + jiv.Height;
+    const viewLeft = st.targetX;
+    const viewRight = viewLeft + jiv.Width;
+    let dy = 0, dx = 0;
+    if (rect.y - marginPx < viewTop) dy = rect.y - marginPx - viewTop;
+    else if (rect.y + rect.height + marginPx > viewBottom) dy = rect.y + rect.height + marginPx - viewBottom;
+    if (rect.x - marginPx < viewLeft) dx = rect.x - marginPx - viewLeft;
+    else if (rect.x + rect.width + marginPx > viewRight) dx = rect.x + rect.width + marginPx - viewRight;
+    if (dx === 0 && dy === 0) return;
+    if (behavior === 'smooth') this.ApplyDelta(jiv, dx, dy);
+    else this.ApplyDeltaInstant(jiv, dx, dy);
+  };
+
   DragStart = (jiv: Jiv): void => {
     const s = this._ensureState(jiv);
     s.dragging = true;
@@ -155,13 +197,18 @@ export class ScrollManager implements Animatable {
 
     const prevX = s.posX;
     const prevY = s.posY;
-    s.posX = Math.max(0, Math.min(maxX, s.posX + dx));
-    s.posY = Math.max(0, Math.min(maxY, s.posY + dy));
-    // Effective delta is what actually moved (zero when clamped against an
-    // edge) so velocity / momentum can't be charged from a finger that the
-    // edge swallowed.
-    const scaledDx = s.posX - prevX;
-    const scaledDy = s.posY - prevY;
+    // Past an edge the finger still moves the content — through Apple's
+    // resistance curve, so the stretch asymptotes instead of running away.
+    // The audit found the header PROMISING this while the code hard-clamped;
+    // now the code keeps the promise. Integrated in small chunks: resistance
+    // depends on how far over you already are, and one fast 60px event
+    // evaluated at its start would tunnel straight through the curve.
+    s.posX = _integrateRubber(s.posX, dx, 0, maxX);
+    s.posY = _integrateRubber(s.posY, dy, 0, maxY);
+    // Momentum is still charged only from IN-BOUNDS travel: overscroll
+    // stretch is the spring's business, not the fling's.
+    const scaledDx = Math.max(0, Math.min(maxX, s.posX)) - Math.max(0, Math.min(maxX, prevX));
+    const scaledDy = Math.max(0, Math.min(maxY, s.posY)) - Math.max(0, Math.min(maxY, prevY));
     // Drag is authoritative — keep wheel-ease target locked to current pos
     // so a tap-then-wheel doesn't snap back to a stale target.
     s.targetX = s.posX;
@@ -182,6 +229,18 @@ export class ScrollManager implements Animatable {
    *  total displacement in the window ÷ span. Held-still releases collapse
    *  to zero (samples drained by the prune in DragMove), and decelerated
    *  releases match the actual recent finger speed instead of a stale EMA. */
+  /** Stop a drag with NO momentum — the gesture was claimed by something
+   *  else (a selection handle), so the container must freeze where it is
+   *  rather than flick onward from the finger's speed. */
+  DragCancel = (jiv: Jiv): void => {
+    const s = this._states.get(jiv);
+    if (!s) return;
+    s.dragging = false;
+    s.samples.length = 0;
+    s.velX = 0;
+    s.velY = 0;
+  };
+
   DragEnd = (jiv: Jiv): void => {
     const s = this._states.get(jiv);
     if (!s) return;
@@ -315,32 +374,42 @@ export class ScrollManager implements Animatable {
 
       const hasVel = s.velX !== 0 || s.velY !== 0;
 
-      if (hasVel) {
-        // ─── Drag-flick momentum path (touch / pointer release) ──────────────
-        // No rubber-band: friction-decayed velocity, position hard-clamped to
-        // bounds. When momentum carries into an edge the velocity on that axis
-        // zeroes out so we don't keep accumulating energy against a wall.
-        s.velX *= Math.pow(FRICTION_PER_SEC, dt);
-        s.velY *= Math.pow(FRICTION_PER_SEC, dt);
+      const overX = s.posX < 0 ? s.posX : s.posX > maxX ? s.posX - maxX : 0;
+      const overY = s.posY < 0 ? s.posY : s.posY > maxY ? s.posY - maxY : 0;
+
+      if (hasVel || overX !== 0 || overY !== 0) {
+        // ─── Momentum + rubber-band path (touch release) ─────────────────────
+        // In bounds: friction-decayed coast. Past an edge (a fling carrying
+        // into the wall, or a released stretch): a stiff damped spring pulls
+        // the edge home — the iOS bounce, one soft beat.
+        const inK = Math.pow(FRICTION_PER_SEC, dt);
+        const overK = Math.pow(OVER_FRICTION, dt);
+        s.velX = overX !== 0 ? (s.velX - overX * RUBBER_K * dt) * overK : s.velX * inK;
+        s.velY = overY !== 0 ? (s.velY - overY * RUBBER_K * dt) * overK : s.velY * inK;
 
         s.posX += s.velX * dt;
         s.posY += s.velY * dt;
 
-        if (s.posX <= 0) { s.posX = 0; s.velX = 0; }
-        else if (s.posX >= maxX) { s.posX = maxX; s.velX = 0; }
-        if (s.posY <= 0) { s.posY = 0; s.velY = 0; }
-        else if (s.posY >= maxY) { s.posY = maxY; s.velY = 0; }
+        // A spring never overshoots INTO bounds: once it crosses home, land.
+        if (overX < 0 && s.posX >= 0) { s.posX = 0; s.velX = 0; }
+        if (overX > 0 && s.posX <= maxX) { s.posX = maxX; s.velX = 0; }
+        if (overY < 0 && s.posY >= 0) { s.posY = 0; s.velY = 0; }
+        if (overY > 0 && s.posY <= maxY) { s.posY = maxY; s.velY = 0; }
 
         // Keep wheel-ease target tracking pos so an incoming wheel event
         // doesn't yank position back to a stale value.
-        s.targetX = s.posX;
-        s.targetY = s.posY;
+        s.targetX = Math.max(0, Math.min(maxX, s.posX));
+        s.targetY = Math.max(0, Math.min(maxY, s.posY));
 
-        // Settle: velocity small → zero out so RAF can stop
+        // Settle: slow AND home → zero out so RAF can stop.
+        const nowOverX = s.posX < 0 || s.posX > maxX;
+        const nowOverY = s.posY < 0 || s.posY > maxY;
         const slow = Math.abs(s.velX) < SETTLE_V && Math.abs(s.velY) < SETTLE_V;
-        if (slow) {
+        if (slow && !nowOverX && !nowOverY) {
           s.velX = 0;
           s.velY = 0;
+          if (Math.abs(s.posX - s.targetX) < OVER_SETTLE_PX) s.posX = s.targetX;
+          if (Math.abs(s.posY - s.targetY) < OVER_SETTLE_PX) s.posY = s.targetY;
         } else {
           active = true;
         }
@@ -407,6 +476,7 @@ export class ScrollManager implements Animatable {
         velY: 0,
         dragging: false,
         samples: [],
+        lastActiveAt: 0,
         autoHold: 0,
       };
       this._states.set(jiv, s);
@@ -420,6 +490,37 @@ export class ScrollManager implements Animatable {
     // Keep Target in sync so external code inspecting targets sees the real pos
     jiv.ScrollTargetX = s.posX;
     jiv.ScrollTargetY = s.posY;
+    this._publishVars(jiv, s);
+  };
+
+  /** The container's scroll FACTS, published as element vars that cascade to
+   *  its subtree — so scroll-driven UI is authored in JSS, not hardcoded. A
+   *  scrollbar is one composition of these; a minimap, an edge glow, a
+   *  progress label, a back-to-top pill are others, and none of them need the
+   *  engine to know they exist. Values are rounded so a sub-pixel ease step
+   *  doesn't churn re-resolves; SetVar no-ops on equal values. */
+  private _publishVars = (jiv: Jiv, s: ScrollState): void => {
+    const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
+    const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
+    const before = jiv.VarMap.get('ScrollY');
+    jiv.SetVar('ScrollY', Math.round(s.posY));
+    jiv.SetVar('ScrollX', Math.round(s.posX));
+    jiv.SetVar('ScrollMaxY', Math.round(maxY));
+    jiv.SetVar('ScrollMaxX', Math.round(maxX));
+    jiv.SetVar('ScrollFracY', maxY > 0 ? Math.round((s.posY / maxY) * 1000) / 1000 : 0);
+    jiv.SetVar('ScrollFracX', maxX > 0 ? Math.round((s.posX / maxX) * 1000) / 1000 : 0);
+    jiv.SetVar('ViewportH', Math.round(jiv.Height));
+    jiv.SetVar('ViewportW', Math.round(jiv.Width));
+    jiv.SetVar('ContentH', Math.round(Math.max(1, jiv.ContentHeight)));
+    jiv.SetVar('ContentW', Math.round(Math.max(1, jiv.ContentWidth)));
+    const active = s.dragging || s.velX !== 0 || s.velY !== 0
+      || s.posX !== s.targetX || s.posY !== s.targetY;
+    if (active) s.lastActiveAt = performance.now();
+    // 0/1 — the FADE is the stylesheet's business (`@Transition Opacity`).
+    jiv.SetVar('ScrollActive', active || performance.now() - s.lastActiveAt < 900 ? 1 : 0);
+    // Var-driven LENGTHS in the overlay subtree re-resolve on the next solve;
+    // SetVar wakes styles but not layout, so say it moved.
+    if (jiv.VarMap.get('ScrollY') !== before) jiv.MarkLayoutDirty();
   };
 
   private _stepWalk = (node: Jiv, fn: (j: Jiv) => void): void => {
@@ -487,12 +588,16 @@ export class ScrollManager implements Animatable {
         return dl !== 0 ? dl : b.i - a.i;
       });
       for (let i = 0; i < decorated.length; i++) {
-        const hit = this._hitTopmost(decorated[i].c, px, py, childM);
+        const c = decorated[i].c;
+        const m = c.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll' ? eff : childM;
+        const hit = this._hitTopmost(c, px, py, m);
         if (hit) return hit;
       }
     } else {
       for (let i = children.length - 1; i >= 0; i--) {
-        const hit = this._hitTopmost(children[i], px, py, childM);
+        const c = children[i];
+        const m = c.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll' ? eff : childM;
+        const hit = this._hitTopmost(c, px, py, m);
         if (hit) return hit;
       }
     }
@@ -505,6 +610,19 @@ export class ScrollManager implements Animatable {
 
 /** Rubber-band drag resistance: 1 inside bounds, drops off past bounds so the
  *  content feels elastic — dragging 100 px past the edge only moves ~50 px. */
+/** Advance `pos` by `delta` through the resistance curve, a few px at a time,
+ *  so the curve is honored across the whole travel and not just its start. */
+const _integrateRubber = (pos: number, delta: number, minBound: number, maxBound: number): number => {
+  const STEP = 4;
+  let remaining = delta;
+  while (remaining !== 0) {
+    const step = Math.abs(remaining) <= STEP ? remaining : Math.sign(remaining) * STEP;
+    pos += step * _rubberResistance(pos, minBound, maxBound);
+    remaining -= step;
+  }
+  return pos;
+};
+
 const _rubberResistance = (pos: number, minBound: number, maxBound: number): number => {
   let over = 0;
   if (pos < minBound) over = minBound - pos;
