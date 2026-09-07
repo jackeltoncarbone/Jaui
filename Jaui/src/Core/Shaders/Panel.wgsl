@@ -121,6 +121,13 @@ fn inside_clip_shape(pixel: vec2f, rect: vec4f, radii: vec4f, smoothness: f32) -
   let q_abs = abs(q_signed);
   // Outside the bounding box — definitely outside the shape.
   if (q_abs.x > half_size.x || q_abs.y > half_size.y) { return false; }
+  // A pill's MASK must be the same squircle-stadium the fill paints, not a
+  // plain stadium: when the box classifies as pill, test against the SS-pill
+  // SDF (negative = inside) so children clip to the painted edge, not inside
+  // it. Rect / circle keep the superellipse inequality below.
+  if (shape_mode(half_size, radii) == 1) {
+    return ss_pill_sdf(q_signed, half_size) <= 0.5;
+  }
   let r = pick_rect_radius(q_signed, radii);
   // Inside a "straight" zone (not in any corner box) — inside the shape.
   let corner_p = q_abs - (half_size - vec2f(r, r));
