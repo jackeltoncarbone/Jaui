@@ -1426,8 +1426,14 @@ export class Canvas implements DirtyTracker {
         // that sits at or above BorderLayer (children are Layer-sorted asc).
         if (!borderEmitted && child.RenderStyle.Layer >= borderLayer) emitBorderOverlay();
         const clip = this._childClip(node, stack, boxClip, child);
+        // A Pinned child belongs to the scroller's FRAME, not its content:
+        // it renders in the un-scrolled matrix, which is what a scrollbar, a
+        // floating header, or any scroll-driven overlay is.
+        const pin = child.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll';
+        const cM = pin ? eff : childM;
+        const cMH = pin ? effH : childMH;
         if (child.TeleportSeq !== 0) {
-          scope.Deferred.push({ N: child, M: childM, MH: childMH, P: persp });
+          scope.Deferred.push({ N: child, M: cM, MH: cMH, P: persp });
           continue;
         }
         if (child.RenderStyle.Layer !== 0) {
@@ -1439,11 +1445,11 @@ export class Canvas implements DirtyTracker {
           // once it SETTLES (TeleportSeq clears → normal render under the parent's own clip),
           // i.e. after it has reached its target position — never while it slides in from
           // outside. (Clipping mid-flight cut the card off against the panel edge as it flew.)
-          renderNode(child, childM, clip, childScope, childMH, persp);
+          renderNode(child, cM, clip, childScope, cMH, persp);
           replayScope(childScope);
           continue;
         }
-        renderNode(child, childM, clip, scope, childMH, persp);
+        renderNode(child, cM, clip, scope, cMH, persp);
       }
       // BorderLayer sits above every child (or there were no children) — paint
       // the stroke on top, after all content.
@@ -3198,6 +3204,15 @@ export class Canvas implements DirtyTracker {
       _clickDownJiv = hit;
       _clickDownX = e.clientX;
       _clickDownY = e.clientY;
+      // The web's focused-scroller rule: a press inside a scroll container
+      // makes it the target of the scroll keys. The old DOM app bought this
+      // with tabindex="0" on every scroll box; the canvas has to say it.
+      {
+        const rect = this._pageRect();
+        const scroller = this._scrollManager.ResolveScrollTarget(e.clientX - rect.left, e.clientY - rect.top);
+        if (scroller) this._focusManager.SetFocusedScroller(scroller);
+        this._focusManager.SetModality('pointer');
+      }
       if (!hit) return;
       setStateChain(hit, this._activeJiv, 'Active');
       this._activeJiv = hit;
@@ -3552,6 +3567,15 @@ export class Canvas implements DirtyTracker {
       // from competing, so we don't need to block it imperatively.
     }, { passive: true });
 
+    // A main-thread interaction (a selection-handle drag) claimed this
+    // pointer: freeze the scroll where it is and stop following the finger.
+    this._on('gestureclaim', (e: { pointerId: number }) => {
+      const ctx = drags.get(e.pointerId);
+      if (!ctx) return;
+      this._scrollManager.DragCancel(ctx.target);
+      drags.delete(e.pointerId);
+    });
+
     const finish = (e: PointerEvent): void => {
       const ctx = drags.get(e.pointerId);
       if (!ctx) return;
@@ -3753,7 +3777,10 @@ export class Canvas implements DirtyTracker {
       hits.push({ x: vx, y: vy, w: node.Width, h: node.Height });
       const childSx = node.Overflow === 'Scroll' ? sx - node.ScrollX : sx;
       const childSy = node.Overflow === 'Scroll' ? sy - node.ScrollY : sy;
-      for (const c of node.Children) walk(c as Jiv, childSx, childSy);
+      for (const c of node.Children) {
+        const pin = (c as Jiv).ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll';
+        walk(c as Jiv, pin ? sx : childSx, pin ? sy : childSy);
+      }
     };
     walk(this.Root, 0, 0);
 

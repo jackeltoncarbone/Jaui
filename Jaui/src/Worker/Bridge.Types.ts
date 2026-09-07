@@ -117,6 +117,14 @@ export interface M2W_ContextMenu {
   Payload: PointerPayload;
 }
 
+/** An interactive component on main (a text input's selection-handle drag)
+ *  claims a pointer: the engine's scroll drag for that pointer must stop,
+ *  momentum-free, and ignore its remaining moves. */
+export interface M2W_GestureClaim {
+  T: 'gestureclaim';
+  PointerId: number;
+}
+
 export interface M2W_KeyDown {
   T: 'keydown';
   Payload: KeyPayload;
@@ -367,6 +375,7 @@ export type M2W =
   | M2W_WheelEvent
   | M2W_TouchStart
   | M2W_ContextMenu
+  | M2W_GestureClaim
   | M2W_KeyDown
   | M2W_Resize
   | M2W_DprChange

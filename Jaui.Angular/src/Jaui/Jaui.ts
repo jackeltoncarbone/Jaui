@@ -126,7 +126,39 @@ export class Jaui implements OnInit, OnDestroy {
       this._registry.Version();
       this.Canvas.SetJssVars(this._registry.Vars);
     });
+
+    // ENVIRONMENT INSET: `@KeyboardInset` is always defined — 0px until a real
+    // soft keyboard occludes the viewport — so any stylesheet can put it in
+    // its math unconditionally. It rides the ordinary var path above, which
+    // means it lands as LAYOUT: a surface padded by it moves its hit rects
+    // with it, where a visual translate once moved pixels the taps could not
+    // follow. Sub-threshold viewport gaps are URL-bar and settle noise, not a
+    // keyboard — treating them as one shoves bottom chrome off-screen — and a
+    // real keyboard is always taller than 150px.
+    this._registry.SetVar('KeyboardInset', '0px');
+    this._registry.SetVar('KeyboardUp', '0');
+    const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+    if (vv) {
+      const KEYBOARD_MIN_PX = 150;
+      const publish = (): void => {
+        const raw = window.innerHeight - vv.height - vv.offsetTop;
+        const inset = raw >= KEYBOARD_MIN_PX ? Math.round(raw) : 0;
+        this._registry.SetVar('KeyboardInset', `${inset}px`);
+        // A 0/1 twin for MULTIPLICATIVE styling: lengths have no conditionals,
+        // but `(1 - @KeyboardUp) * height` collapses a row exactly when the
+        // keyboard stands, and animates through the ordinary layout path.
+        this._registry.SetVar('KeyboardUp', inset > 0 ? '1' : '0');
+      };
+      vv.addEventListener('resize', publish);
+      vv.addEventListener('scroll', publish);
+      this._teardownKeyboardInset = () => {
+        vv.removeEventListener('resize', publish);
+        vv.removeEventListener('scroll', publish);
+      };
+    }
   }
+
+  private _teardownKeyboardInset: (() => void) | null = null;
 
   ngOnInit(): void {
     const sheet = this.stylesheet();
@@ -136,6 +168,7 @@ export class Jaui implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this._teardownKeyboardInset?.();
     this.Canvas.Stop();
     this.Bridge.Worker.terminate();
     this._canvasEl.remove();

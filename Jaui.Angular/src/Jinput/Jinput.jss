@@ -63,6 +63,21 @@ JinputPlaceholder {
   FontStyle: Italic
 }
 
+// The touch selection's pins: a bar the height of the line and a round knob,
+// caret-white so the selection primitives read as one family. Layered with
+// the caret, above text.
+JinputHandleBar {
+  Background: rgba(255, 255, 255, 1)
+  BorderRadius: 1.25px
+  Layer: 6
+}
+JinputHandleKnob {
+  Background: rgba(255, 255, 255, 1)
+  BorderRadius: 6px
+  Layer: 6
+  Shadow: 0 1px 3px rgba(0, 0, 0, 0.35)
+}
+
 JinputCaret {
   Background: rgba(255, 255, 255, 1)
   // Float above the text segments + placeholder so a focused EMPTY field shows a

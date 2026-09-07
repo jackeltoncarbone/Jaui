@@ -28,6 +28,7 @@ import {
   type M2W_JssVars,
   type M2W_Control,
   type M2W_ContextMenu,
+  type M2W_GestureClaim,
   type M2W_JivOps,
   type M2W_ImageLoadUrl,
   type M2W_ImageLoadSvg,
@@ -131,6 +132,7 @@ export class WorkerBridge {
     if (isMessage<M2W_WheelEvent>(m, 'wheel')) return this._onWheel(m);
     if (isMessage(m, 'touchstart')) return this._onTouchStart();
     if (isMessage<M2W_ContextMenu>(m, 'contextmenu')) return this._onContextMenu(m);
+    if (isMessage<M2W_GestureClaim>(m, 'gestureclaim')) return this._onGestureClaim(m);
     if (isMessage<M2W_Resize>(m, 'resize')) return this._onResize(m);
     if (isMessage<M2W_DprChange>(m, 'dpr')) {
       // DPR change went through Platform above; the engine's _watchDpr
@@ -279,6 +281,10 @@ export class WorkerBridge {
     this._canvas.IngestEvent('touchstart', {
       preventDefault: () => {}, stopPropagation: () => {},
     });
+  };
+
+  private _onGestureClaim = (m: M2W_GestureClaim): void => {
+    this._canvas?.IngestEvent('gestureclaim', { pointerId: m.PointerId });
   };
 
   private _onContextMenu = (m: M2W_ContextMenu): void => {

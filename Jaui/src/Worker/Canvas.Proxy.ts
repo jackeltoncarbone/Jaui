@@ -137,6 +137,13 @@ export class CanvasProxy {
     return [clientX - rect.left, clientY - rect.top];
   }
 
+  /** Claim a pointer for a main-thread interaction (dragging a selection
+   *  handle): the engine cancels its scroll drag for that pointer so the
+   *  container stops panning under the gesture. */
+  ClaimGesture = (pointerId: number): void => {
+    this._bridge.PostMessage({ T: 'gestureclaim', PointerId: pointerId });
+  };
+
   SetJssVars = (vars: Map<string, string>): void => {
     this._bridge.PostMessage({ T: 'jss-vars', Entries: Array.from(vars.entries()) });
   };

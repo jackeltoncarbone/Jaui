@@ -139,6 +139,26 @@ function _withAlpha(color: string, alpha: number): string {
                 Height: rect.height + 'px',
               }" />
           }
+          @for (h of SelectionHandles(); track h.Key) {
+            <jiv
+              class="JinputHandleBar"
+              [childLayout]="{
+                Position: 'Placed',
+                Left: (h.X - 1.25) + 'px',
+                Top: h.Y + 'px',
+                Width: '2.5px',
+                Height: h.H + 'px',
+              }" />
+            <jiv
+              class="JinputHandleKnob"
+              [childLayout]="{
+                Position: 'Placed',
+                Left: (h.X - 6) + 'px',
+                Top: (h.Knob === 'top' ? h.Y - 12 : h.Y + h.H) + 'px',
+                Width: '12px',
+                Height: '12px',
+              }" />
+          }
           @for (laid of LaidOutSegments(); track laid.Seg.StartIndex + ':' + laid.Row) {
             <jext
               [class]="segmentClass(laid.Seg)"
@@ -243,6 +263,12 @@ function _withAlpha(color: string, alpha: number): string {
       autocomplete="off"
       autocorrect="off"
       spellcheck="false"
+      [attr.inputmode]="InputMode()"
+      [attr.enterkeyhint]="EnterKeyHint()"
+      data-1p-ignore
+      data-lpignore="true"
+      data-bwignore
+      data-form-type="other"
       rows="1"
       [readOnly]="ReadOnly()"
       (input)="onInput($event)"
@@ -313,11 +339,23 @@ export class Jinput implements OnDestroy {
 
   // ── Outputs ─────────────────────────────────────────────────────
   /** Char-index click. Fires before caret positioning; consumers can call
-   *  event.preventDefault() to skip the default caret move. */
-  readonly PositionClicked = output<{ index: number; event: PointerEvent }>();
+   *  event.preventDefault() to skip the default caret move. `summonedFocus`
+   *  marks the tap that BROUGHT THE KEYBOARD UP — a native field spends that
+   *  first tap on focusing, so consumers should hold their token popups and
+   *  menus for the next one. */
+  readonly PositionClicked = output<{ index: number; event: PointerEvent; summonedFocus?: boolean }>();
   /** Char-index hover. Index is null when hover leaves the text region. */
   readonly PositionHovered = output<{ index: number | null }>();
   readonly FocusChanged = output<boolean>();
+
+  // ── What this field IS, to the device ───────────────────────────
+  // Plain prose, never credentials: the static attributes above wave off the
+  // password managers (1Password, LastPass, Bitwarden, and the generic
+  // form-type probe), and these two inputs let a consumer shape the soft
+  // keyboard — 'text' summons the ordinary alphabet, and the enter key reads
+  // whatever the surface's return actually does.
+  readonly InputMode = input<'text' | 'search' | 'none'>('text');
+  readonly EnterKeyHint = input<'enter' | 'done' | 'go' | 'search' | 'send'>('enter');
   /** A context-class gesture: right-click, or a touch long-press. The input
    *  reports THAT it happened and WHERE; what a menu contains is the
    *  consumer's business, the same philosophy as PositionClicked. The anchor
@@ -495,6 +533,26 @@ export class Jinput implements OnDestroy {
       width: r.width + px * 2,
       height: r.height + py * 2,
     }));
+  });
+
+  /** The touch selection's two pins — a bar the height of its line with a
+   *  knob, start knob up, end knob down, iOS-fashion. This is the visual half
+   *  of SS-199's edge-grab: the grab targets existed, invisibly, which made
+   *  them unguessable. Only where the primary pointer is a finger; mouse
+   *  users have precise edges and no pins to expect. */
+  readonly SelectionHandles = computed(() => {
+    // Signals first: a computed that short-circuits on the static check
+    // before reading any signal tracks nothing and never recomputes.
+    const focused = this._focused();
+    const collapsed = this._selStart() === this._selEnd();
+    const rects = this.SelectionRects();
+    if (!Jinput._isMobileTouch() || !focused || collapsed || rects.length === 0) return [];
+    const a = rects[0];
+    const b = rects[rects.length - 1];
+    return [
+      { Key: 'start', X: a.x, Y: a.y, H: a.height, Knob: 'top' as const },
+      { Key: 'end', X: b.x + b.width, Y: b.y, H: b.height, Knob: 'bottom' as const },
+    ];
   });
 
   /** Per-peer caret + selection rects in the same coordinate space as the
@@ -892,13 +950,36 @@ export class Jinput implements OnDestroy {
     const inWrap = localX >= wrap.Node.X && localX < wrap.Node.X + wrap.Node.Width
                 && localY >= wrap.Node.Y && localY < wrap.Node.Y + wrap.Node.Height;
     if (!inWrap) return;
-    // Already focused = the keyboard may have been swiped away while DOM
-    // focus stayed; the blur-then-focus in _focusHidden re-summons it. Not
-    // focused = plain focus is enough and keeps this gesture's upcoming
-    // caret placement intact.
-    if (document.activeElement === input) this._focusHidden(input);
-    else input.focus();
+    // Whether the keyboard is UP decides everything here. Down and unfocused:
+    // plain focus summons it. Down but still DOM-focused (swiped away): the
+    // blur-then-focus re-summons, since focus() on a focused element no-ops.
+    // Already up: an ordinary tap, nothing to summon — and critically no blur,
+    // which would disturb the caret work this same gesture is about to do.
+    // Either summoning tap is stamped so the engine's async pointerdown for
+    // this SAME tap can tell consumers it was spent on focusing.
+    const vv = window.visualViewport;
+    const keyboardUp = vv ? (window.innerHeight - vv.height - vv.offsetTop) >= 150 : false;
+    // The stamp is only meaningful where a soft keyboard exists at all. On a
+    // touch-screen laptop (fine primary pointer, no OSK) the gap never crosses
+    // the threshold, and stamping there would suppress token popups forever.
+    const stampable = !keyboardUp && Jinput._isMobileTouch();
+    if (document.activeElement === input) {
+      if (!keyboardUp) this._focusHidden(input);
+      if (stampable) this._summonStamp = performance.now();
+    } else {
+      input.focus();
+      if (stampable) this._summonStamp = performance.now();
+    }
   };
+
+  /** When a native touch summoned the keyboard, so the engine's pointerdown
+   *  for the same tap can say so. Consumed once; stale stamps expire. */
+  private _summonStamp = 0;
+  private _takeSummoned(): boolean {
+    const fresh = this._summonStamp > 0 && performance.now() - this._summonStamp < 1500;
+    this._summonStamp = 0;
+    return fresh;
+  }
 
   /** Focus the hidden textarea such that the on-screen keyboard reopens
    *  reliably on mobile. The blur step is the linchpin: iOS Safari and
@@ -984,7 +1065,7 @@ export class Jinput implements OnDestroy {
     // Emit PositionClicked first; consumer can preventDefault to skip caret
     // positioning (e.g. SS tokenizer wrapper opens a token settings popup
     // and doesn't want the caret to move).
-    this.PositionClicked.emit({ index: idx, event: e });
+    this.PositionClicked.emit({ index: idx, event: e, summonedFocus: this._takeSummoned() });
 
     const input = this._hiddenInput()?.nativeElement;
     if (!input) return;
@@ -998,16 +1079,17 @@ export class Jinput implements OnDestroy {
       return;
     }
 
-    // SS-199: touch grab of an existing selection's end. The selection edges
-    // themselves are the handles (no drawn knobs) — touching near an end and
-    // dragging moves that end while the opposite end stays anchored.
+    // SS-199: touch grab of a selection's end — now with DRAWN pins (see
+    // SelectionHandles). Grabbing is judged in PIXELS against the pins, with
+    // the old character slop kept as a fallback, and the pointer is CLAIMED
+    // so the scroll container freezes instead of panning under the drag.
     if (e.pointerType === 'touch') {
       const ss = this._selStart();
       const se = this._selEnd();
       if (ss !== se) {
-        const NEAR = 2; // chars of slop for a fingertip near an edge
-        if (Math.abs(idx - ss) <= NEAR || Math.abs(idx - se) <= NEAR) {
-          this._dragAnchor = Math.abs(idx - ss) <= Math.abs(idx - se) ? se : ss;
+        const grabbed = this._grabbedHandle(e, idx, ss, se);
+        if (grabbed !== null) {
+          this._dragAnchor = grabbed === 'start' ? se : ss;
           this._dragGranularity = 'char';
           this._draggingSelectionEnd = true;
           this._dragIsTouch = true;
@@ -1015,6 +1097,7 @@ export class Jinput implements OnDestroy {
           this._pointerDownX = e.clientX;
           this._pointerDownY = e.clientY;
           this._clearLongPressTimer();
+          this._jaui?.Canvas?.ClaimGesture(e.pointerId);
           document.addEventListener('pointermove', this._onDocPointerMove);
           document.addEventListener('pointerup', this._onDocPointerUp);
           document.addEventListener('pointercancel', this._onDocPointerUp);
@@ -1088,6 +1171,7 @@ export class Jinput implements OnDestroy {
       this._clearLongPressTimer();
       this._longPressTimer = setTimeout(() => {
         this._longPressTimer = null;
+        this._jaui?.Canvas?.ClaimGesture(e.pointerId);
         this._promoteToWordSelection(idx);
         // iOS long-press = select word + callout. The word is selected above;
         // the callout is the consumer's, through the same hook as right-click.
@@ -1128,6 +1212,32 @@ export class Jinput implements OnDestroy {
     };
     if (isBridged) applySelection();
     else setTimeout(applySelection, 0);
+  };
+
+  /** Which pin a touch landed on, in pixels — the knob is the target, with a
+   *  finger-sized radius. Falls back to the old two-character slop so a grab
+   *  slightly off the pin still takes the nearer end. */
+  private _grabbedHandle = (e: PointerEvent, idx: number, ss: number, se: number): 'start' | 'end' | null => {
+    const canvasEl = this._jaui?.Canvas?.Element;
+    const wrap = this._wrap();
+    if (canvasEl && wrap) {
+      const cRect = canvasEl.getBoundingClientRect();
+      const lx = e.clientX - cRect.left - wrap.Node.X;
+      const ly = e.clientY - cRect.top - wrap.Node.Y;
+      const R = 26;
+      for (const h of this.SelectionHandles()) {
+        const kx = h.X;
+        const ky = h.Knob === 'top' ? h.Y - 6 : h.Y + h.H + 6;
+        if ((lx - kx) * (lx - kx) + (ly - ky) * (ly - ky) <= R * R) {
+          return h.Key as 'start' | 'end';
+        }
+      }
+    }
+    const NEAR = 2;
+    if (Math.abs(idx - ss) <= NEAR || Math.abs(idx - se) <= NEAR) {
+      return Math.abs(idx - ss) <= Math.abs(idx - se) ? 'start' : 'end';
+    }
+    return null;
   };
 
   private _clearLongPressTimer = (): void => {
