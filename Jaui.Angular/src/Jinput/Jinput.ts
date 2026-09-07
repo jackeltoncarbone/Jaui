@@ -1445,11 +1445,15 @@ export class Jinput implements OnDestroy {
     for (let n: any = w.Node; n && n !== p; n = n.Parent) offsetY += n.Y ?? 0;
     const caretTop = offsetY + rect.y;
     const caretBot = caretTop + rect.height;
-    if (caretTop < visTop) {
-      p.ScrollY = caretTop;
-    } else if (caretBot > visTop + visH) {
-      p.ScrollY = caretBot - visH;
-    }
+    let desired = visTop;
+    if (caretTop < visTop) desired = caretTop;
+    else if (caretBot > visTop + visH) desired = caretBot - visH;
+    // Clamp to the REAL scroll range: you can never scroll past the content,
+    // and a box with no overflow (a single line whose padding lets the caret
+    // geometry poke past the viewport) can't scroll at all. Without this the
+    // caret-reveal wrote a phantom offset and the line drifted with no overflow.
+    const maxScroll = Math.max(0, (p.ContentHeight ?? 0) - visH);
+    p.ScrollY = Math.max(0, Math.min(maxScroll, desired));
   }
 
   // ── Visual-row caret navigation (ArrowUp / ArrowDown) ──────────
