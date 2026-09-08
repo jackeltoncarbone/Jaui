@@ -312,23 +312,32 @@ export class MainBridge {
 
   /** Subscribers for `janvas-event` payloads. Keyed by JivId; a single
    *  consumer per Janvas matches the typical 1:1 main-side service pairing. */
-  private _janvasEventHandlers = new Map<number, (channel: string, payload: unknown) => void>();
+  // MULTIPLE handlers per jiv. A Map<jivId, single handler> silently clobbered
+  // one listener with the next (a drill page's drill-status handler lost to a
+  // later registration, freezing its DurationSec at 0:00). Each registration
+  // is now additive and its unsubscriber removes only itself.
+  private _janvasEventHandlers = new Map<number, Set<(channel: string, payload: unknown) => void>>();
 
   /** Register a handler for events posted by the Janvas's worker-side
    *  renderer at `jivId`. Returns an unsubscriber. Called by show-studio
    *  Reality service to receive selection / loaded / etc. events. */
   OnJanvasEvent = (jivId: number, handler: (channel: string, payload: unknown) => void): () => void => {
-    this._janvasEventHandlers.set(jivId, handler);
+    let set = this._janvasEventHandlers.get(jivId);
+    if (!set) { set = new Set(); this._janvasEventHandlers.set(jivId, set); }
+    set.add(handler);
     return () => {
-      if (this._janvasEventHandlers.get(jivId) === handler) {
-        this._janvasEventHandlers.delete(jivId);
-      }
+      const cur = this._janvasEventHandlers.get(jivId);
+      if (!cur) return;
+      cur.delete(handler);
+      if (cur.size === 0) this._janvasEventHandlers.delete(jivId);
     };
   };
 
   private _onJanvasEvent = (m: { JivId: number; Channel: string; Payload: unknown }): void => {
-    const h = this._janvasEventHandlers.get(m.JivId);
-    h?.(m.Channel, m.Payload);
+    const set = this._janvasEventHandlers.get(m.JivId);
+    if (!set) return;
+    // Snapshot: a handler may unsubscribe (or subscribe) during dispatch.
+    for (const h of [...set]) h(m.Channel, m.Payload);
   };
 
   private _onReady = (_m: W2M_Ready): void => {
