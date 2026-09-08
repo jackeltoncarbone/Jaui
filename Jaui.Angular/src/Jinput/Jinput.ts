@@ -259,10 +259,10 @@ function _withAlpha(color: string, alpha: number): string {
       #hiddenInput
       class="HiddenInput"
       name="JinputHidden"
-      autocapitalize="off"
-      autocomplete="off"
-      autocorrect="off"
-      spellcheck="false"
+      [attr.autocapitalize]="Autocorrect() ? 'sentences' : 'off'"
+      [attr.autocomplete]="Autocorrect() ? 'on' : 'off'"
+      [attr.autocorrect]="Autocorrect() ? 'on' : 'off'"
+      [attr.spellcheck]="Autocorrect() ? 'true' : 'false'"
       [attr.inputmode]="InputMode()"
       [attr.enterkeyhint]="EnterKeyHint()"
       data-1p-ignore
@@ -355,6 +355,11 @@ export class Jinput implements OnDestroy {
   // keyboard — 'text' summons the ordinary alphabet, and the enter key reads
   // whatever the surface's return actually does.
   readonly InputMode = input<'text' | 'search' | 'none'>('text');
+  /** Opt in to the native keyboard's help: QuickType suggestions, autocorrect,
+   *  sentence auto-capitalization, spellcheck. Off by default so command-style
+   *  fields keep a raw keyboard; a prose editor sets it true and honors whatever
+   *  the OS writes back through the normal input event. */
+  readonly Autocorrect = input(false);
   readonly EnterKeyHint = input<'enter' | 'done' | 'go' | 'search' | 'send'>('enter');
   /** A context-class gesture: right-click, or a touch long-press. The input
    *  reports THAT it happened and WHERE; what a menu contains is the
@@ -775,6 +780,11 @@ export class Jinput implements OnDestroy {
     // So a NATIVE capture listener claims focus the moment a touch lands in
     // this input's rect; the engine's async path then only sets the caret.
     window.addEventListener('pointerdown', this._onPointerDownSummon, true);
+    // Tap-vs-scroll: the summon armed on pointerdown only fires on a tap-up, and a
+    // drag past tolerance cancels it so scrolling never yanks the keyboard up.
+    window.addEventListener('pointermove', this._onPointerMoveSummon, true);
+    window.addEventListener('pointerup', this._onPointerUpSummon, true);
+    window.addEventListener('pointercancel', this._onPointerUpSummon, true);
 
     // Re-run layout once the @font-face font lands in the canvas2d font
     // registry — measureText falls back to a wider system font until
@@ -799,6 +809,9 @@ export class Jinput implements OnDestroy {
     window.removeEventListener('pointermove', this._onWindowHoverMove);
     window.removeEventListener('pointerdown', this._onPointerDownDismiss, true);
     window.removeEventListener('pointerdown', this._onPointerDownSummon, true);
+    window.removeEventListener('pointermove', this._onPointerMoveSummon, true);
+    window.removeEventListener('pointerup', this._onPointerUpSummon, true);
+    window.removeEventListener('pointercancel', this._onPointerUpSummon, true);
     if (this._blinkTimer) clearInterval(this._blinkTimer);
     this._clearLongPressTimer();
     if (this._wrapReadFrame !== null) cancelAnimationFrame(this._wrapReadFrame);
@@ -938,7 +951,21 @@ export class Jinput implements OnDestroy {
    *  burst/anchor logic stays exactly as it was. Runs before the dismiss
    *  listener can matter — the two are disjoint: this fires only for taps
    *  INSIDE the wrap, dismissal only for taps outside it. */
+  // A summon is ARMED on the pointerdown inside the input, but the keyboard is
+  // only raised on pointerup IF the finger barely moved (a tap). A pointerdown is
+  // also the start of a scroll, and focusing on scroll-start yanked the keyboard
+  // up under a drag; a pointerup is itself a user activation, so deferring to it
+  // still raises the keyboard for a real tap. The summon STAMP is still set on the
+  // pointerdown so the engine's async pointerdown for the same gesture reliably
+  // reads "spent on focusing".
+  private _summonPending = false;
+  private _summonPointerId = -1;
+  private _summonDownX = 0;
+  private _summonDownY = 0;
+  private static readonly _SummonMoveTolPx = 10;
+
   private _onPointerDownSummon = (e: PointerEvent): void => {
+    this._summonPending = false;
     if (!e.isTrusted || e.pointerType !== 'touch' || this.ReadOnly()) return;
     const wrap = this._wrap();
     const canvasEl = this._jaui?.Canvas?.Element;
@@ -950,25 +977,55 @@ export class Jinput implements OnDestroy {
     const inWrap = localX >= wrap.Node.X && localX < wrap.Node.X + wrap.Node.Width
                 && localY >= wrap.Node.Y && localY < wrap.Node.Y + wrap.Node.Height;
     if (!inWrap) return;
-    // Whether the keyboard is UP decides everything here. Down and unfocused:
-    // plain focus summons it. Down but still DOM-focused (swiped away): the
-    // blur-then-focus re-summons, since focus() on a focused element no-ops.
-    // Already up: an ordinary tap, nothing to summon — and critically no blur,
-    // which would disturb the caret work this same gesture is about to do.
-    // Either summoning tap is stamped so the engine's async pointerdown for
-    // this SAME tap can tell consumers it was spent on focusing.
+    // Arm the summon for this gesture; the actual focus waits for a tap-up.
+    this._summonPending = true;
+    this._summonPointerId = e.pointerId;
+    this._summonDownX = e.clientX;
+    this._summonDownY = e.clientY;
+    // Stamp now (not on up) so the engine's async pointerdown, which may land
+    // before the native pointerup, still sees this gesture as spent on focusing.
+    // Only meaningful where a soft keyboard exists (skip touch-screen laptops).
     const vv = window.visualViewport;
     const keyboardUp = vv ? (window.innerHeight - vv.height - vv.offsetTop) >= 150 : false;
-    // The stamp is only meaningful where a soft keyboard exists at all. On a
-    // touch-screen laptop (fine primary pointer, no OSK) the gap never crosses
-    // the threshold, and stamping there would suppress token popups forever.
-    const stampable = !keyboardUp && Jinput._isMobileTouch();
+    if (!keyboardUp && Jinput._isMobileTouch()) this._summonStamp = performance.now();
+  };
+
+  private _onPointerMoveSummon = (e: PointerEvent): void => {
+    if (!this._summonPending || e.pointerId !== this._summonPointerId) return;
+    // Past the tolerance the finger is scrolling, not tapping: cancel the summon
+    // so the keyboard stays down and the drag scrolls the field/editor.
+    if (Math.abs(e.clientX - this._summonDownX) > Jinput._SummonMoveTolPx
+     || Math.abs(e.clientY - this._summonDownY) > Jinput._SummonMoveTolPx) {
+      this._summonPending = false;
+    }
+  };
+
+  private _onPointerUpSummon = (e: PointerEvent): void => {
+    if (!this._summonPending || e.pointerId !== this._summonPointerId) return;
+    this._summonPending = false;
+    if (e.type === 'pointercancel') return;
+    const input = this._hiddenInput()?.nativeElement;
+    if (!input || this.ReadOnly()) return;
+    // Down and unfocused: plain focus summons the keyboard. Down but still
+    // DOM-focused (swiped away): blur-then-focus re-summons. Already up: nothing
+    // to summon, and no blur that would disturb the caret work in flight.
+    const vv = window.visualViewport;
+    const keyboardUp = vv ? (window.innerHeight - vv.height - vv.offsetTop) >= 150 : false;
     if (document.activeElement === input) {
       if (!keyboardUp) this._focusHidden(input);
-      if (stampable) this._summonStamp = performance.now();
     } else {
       input.focus();
-      if (stampable) this._summonStamp = performance.now();
+    }
+    // Place the caret on the tapped word inside the native gesture, so iOS reads
+    // its autocorrect/prediction context there rather than at the end. Gated to
+    // Autocorrect (the prose editor); raw command fields keep summon-then-caret.
+    if (this.Autocorrect() && !keyboardUp) {
+      const idx = this._indexAtClient(e.clientX, e.clientY);
+      if (idx !== null) {
+        input.setSelectionRange(idx, idx);
+        this._selStart.set(idx);
+        this._selEnd.set(idx);
+      }
     }
   };
 
@@ -1207,6 +1264,24 @@ export class Jinput implements OnDestroy {
       // focused the call no-ops, and setSelectionRange still commits.
       if (document.activeElement !== input) input.focus();
       input.setSelectionRange(selA, selB, dir);
+      // iOS caches the keyboard's autocorrect/prediction context and only re-reads
+      // it on a real keystroke, so a programmatic caret move leaves suggestions
+      // pinned to the OLD caret until the next keypress. When native assist is on
+      // (Autocorrect), bounce focus to force iOS to re-read at the new caret — the
+      // re-set AFTER the blur survives (unlike the pending setSelectionRange the
+      // comment above warns of). Gated to touch + Autocorrect so desktop and raw
+      // command fields keep the plain path. _refreshingContext keeps the transient
+      // blur/focus from surfacing as a real focus change.
+      if (isBridged && this.Autocorrect() && Jinput._isMobileTouch()) {
+        this._refreshingContext = true;
+        try {
+          input.blur();
+          input.focus();
+          input.setSelectionRange(selA, selB, dir);
+        } finally {
+          this._refreshingContext = false;
+        }
+      }
       this.syncSelection();
       this._scrollCaretIntoView();
     };
@@ -1627,7 +1702,13 @@ export class Jinput implements OnDestroy {
     }
   };
 
+  /** True only during the deliberate blur/refocus that re-syncs iOS's keyboard
+   *  context after a canvas caret move — the transient bounce must not surface as
+   *  a real focus change (no FocusChanged, no caret flicker). */
+  private _refreshingContext = false;
+
   onFocus = (): void => {
+    if (this._refreshingContext) return;
     this._focused.set(true);
     this.syncSelection();
     this._restartBlink();
@@ -1635,6 +1716,7 @@ export class Jinput implements OnDestroy {
   };
 
   onBlur = (): void => {
+    if (this._refreshingContext) return;
     this._focused.set(false);
     if (this._blinkTimer) {
       clearInterval(this._blinkTimer);
