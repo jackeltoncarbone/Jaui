@@ -735,6 +735,10 @@ void main() {
     float x = edgeDist / bezelWidth;
     float s = bezelScale;
     float hump = clamp((x / s) * exp(1.0 - x / s), 0.0, 1.0);
+    // The bend lives in the bezel: the pincushion tail is still half its peak at x = 1 and only fades by
+    // x = 2, so a 10pt bezel bent 20pt of the panel and its streaks reached the cells inside a pill.
+    // Fade the hump out over the outer half of the bezel so BezelWidth is the width the bend occupies.
+    hump *= 1.0 - smoothstep(0.45, 1.0, x);
 
     // ── Fill alpha (shape mask) ──
     // Silhouette AA is hardcoded ~0.5px — BorderBlur must NOT fade the
@@ -1186,9 +1190,13 @@ void main() {
             // content, mirroring the wide rim glow's inward `rimUv`. Scaled by
             // `solidness` so refractive (see-through) glass is byte-identical: its
             // rim legitimately gathers from behind via the refracted baseUv.
+            // The rim gathers what lies straight under it, never the panel's own content: the bezel's inward
+            // displacement (baseUv) would pull a BorderLayer overlay's glyphs and text into the stroke.
+            vec2 straightUv = v_PixelPos / u_Resolution;
+            straightUv.y = 1.0 - straightUv.y;
             float solidness = 1.0 - smoothstep(0.0, 4.0, refractionStrength);
             float borderInset = (max(bezelWidth * 0.75, 6.0) * 1.2 + localBorderWidth) * solidness;
-            vec2 bUv = baseUv + vec2(-normal.x, normal.y) * (borderInset / u_Resolution);
+            vec2 bUv = straightUv + vec2(-normal.x, normal.y) * (borderInset / u_Resolution);
             vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);
             vec3 borderBackdrop = applyGrading(
                 bSample,
