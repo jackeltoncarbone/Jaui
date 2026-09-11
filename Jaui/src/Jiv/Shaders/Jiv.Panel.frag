@@ -904,8 +904,14 @@ void main() {
 
     // ── Variable border width along perimeter ──
     // Thicker where the rim's outward normal aligns with the light direction.
-    float alignment = dot(normal, lightDir);            // +1 lit, -1 unlit
-    float widthScale = 1.0 + borderVariance * alignment;
+    // Two lights, as Apple's environment has them: the key light along lightDir and a dimmer bounce
+    // from the opposite side, so the rim reads top-left AND bottom-right. Sides stay unlit.
+    const float GROUND_BOUNCE = 0.45;
+    float keyAlign = dot(normal, lightDir);
+    float alignment = max(keyAlign, -keyAlign * GROUND_BOUNCE); // +1 key-lit, ~0.45 bounce-lit, 0 at the sides
+    // Width scale keeps the signed form so the sides thin out below the base width.
+    float widthAlign = alignment * 2.0 - 1.0;
+    float widthScale = 1.0 + borderVariance * widthAlign;
     float localBorderWidth = borderWidth * widthScale;
     float localBorderEdgeAa = borderEdgeAa * widthScale;
 
@@ -1134,7 +1140,8 @@ void main() {
         // The ambient, edge-light, and border directionality stay fixed to
         // the stylesheet-set LightAngle (via `alignment` above).
         vec2 specLightDirRim = normalize(lightDir + u_SpecularTilt);
-        float rimSpecAlign = dot(normal, specLightDirRim);
+        float rimSpecKey = dot(normal, specLightDirRim);
+        float rimSpecAlign = max(rimSpecKey, -rimSpecKey * GROUND_BOUNCE);
         float rimSpecDir = pow(max(rimSpecAlign, 0.0), 3.0);
         float rimSpecAlpha = rimSpecBand * rimSpecDir * specIntensity * fillAlpha;
         // rimSpecAlpha is 0 once dist <= -rimSpecW (the thin rim band) — i.e. the
