@@ -1066,23 +1066,6 @@ void main() {
             : pow(clamp(1.0 + dist / max(bezelWidth, 0.5), 0.0, 1.0), 2.0);
         vec3 rimAmbientRgb = vec3(hemiAmbient) * rimMask;
 
-        // ── Inner darkening (inset dark ring) ──
-        // Apple's glass has a faint inset dark line — the perceptual boundary
-        // between the bright rim and the flat interior. Position scales with
-        // bezel width (where the refraction band transitions to flat), width
-        // with thickness (a thicker slab shows a wider inner line edge-on).
-        float innerPos = bezelWidth * 0.35;                  // how far inside to place it
-        float innerW   = max(thickness * 0.25, 1.2);         // Gaussian σ (CSS px)
-        // Gaussian falloff instead of triangular |x|/w — the linear shape reads
-        // as a hard 1-px dark line at small widths. Gaussian has no sharp edge
-        // and matches Apple's "soft 1 CSS px, 3–6% α, subtle" spec.
-        float innerD = (dist + innerPos) / innerW;
-        float innerDarkBand = exp(-innerD * innerD);
-        // Scale alpha by glassiness so the dark line fades with Thickness
-        // (the floored 1.2px width keeps the band visible at Thickness=0
-        // otherwise — which would pop the moment the indicator's Thickness
-        // springs to 0).
-        float innerDarkAlpha = innerDarkBand * 0.04 * glassiness;
 
         // ── Blinn-Phong specular catchlight on the bevel ──
         // The bevel has a 3D normal: 2D outward normal (when on the bevel)
@@ -1104,13 +1087,11 @@ void main() {
         // Composite order:
         //   1) hemispherical rim ambient (additive, sub-rim)
         //   2) wide rim glow (vibrant backdrop pickup)
-        //   3) inner darkening (multiplicative subtle dim)
         //   4) Blinn-Phong specular catchlight (additive bright)
         //   5) hairline silhouette stroke
         result.rgb += rimAmbientRgb * fillAlpha;
         result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
         result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;
-        result.rgb *= 1.0 - innerDarkAlpha;
         result.rgb = result.rgb * (1.0 - specAlpha) + specRgb * specAlpha;
         result.a = result.a * (1.0 - specAlpha) + specAlpha;
 
