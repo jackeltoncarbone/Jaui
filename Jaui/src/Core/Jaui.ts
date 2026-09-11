@@ -2302,7 +2302,8 @@ export class Canvas implements DirtyTracker {
       R: s.Color.R, G: s.Color.G, B: s.Color.B, A: s.Color.A,
     }));
     if (bg.Kind === 'LinearGradient') {
-      return { Mode: 'LinearGradient', DirX: Math.cos(bg.AngleRad), DirY: Math.sin(bg.AngleRad), Stops: stops };
+      // CSS angles: 0deg runs to the top, 90deg to the right, 180deg to the bottom (panel y runs down).
+      return { Mode: 'LinearGradient', DirX: Math.sin(bg.AngleRad), DirY: -Math.cos(bg.AngleRad), Stops: stops };
     }
     return { Mode: 'RadialGradient', CenterX: bg.CenterX, CenterY: bg.CenterY, Radius: bg.Radius, Stops: stops };
   };
