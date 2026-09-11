@@ -702,7 +702,11 @@ void main() {
     float specIntensity = v_Specular.x;
     float specSharpness = max(v_Specular.y, 1.0);
     float chromaticAberration = v_Specular.z;
-    float innerBlur = v_Specular.w;
+    // v_Specular.w packs the border's inward fade (device px, quarter steps) above InnerBlur (thousandths).
+    float _blurFadePacked = v_Specular.w;
+    float _fadeUnits = floor(_blurFadePacked / 1024.0);
+    float borderFade = _fadeUnits / 4.0;
+    float innerBlur = (_blurFadePacked - _fadeUnits * 1024.0) / 1000.0;
 
     float edgeLightTop = v_RimEdge.x;
     float edgeLightBottom = v_RimEdge.y;
@@ -1153,7 +1157,10 @@ void main() {
         // This is what gives Apple's rim its "light-gathering" quality
         // without the static UI-border feel.
         float borderOuter = smoothstep(-aa, aa, dist);
-        float borderInner = smoothstep(-aa, aa, dist + localBorderWidth);
+        // The inner edge eases over BorderFade (scaled with the width) past the stroke; with no fade it
+        // feathers by the same aa as the outer edge.
+        float fadeIn = max(borderFade * widthScale, aa);
+        float borderInner = smoothstep(-localBorderWidth - fadeIn, -localBorderWidth + aa, dist);
         float borderBase = (1.0 - borderOuter) * borderInner;
 
         if (borderBase > 0.001) {
@@ -1207,7 +1214,10 @@ void main() {
         }
     } else {
         float borderOuter = smoothstep(-aa, aa, dist);
-        float borderInner = smoothstep(-aa, aa, dist + localBorderWidth);
+        // The inner edge eases over BorderFade (scaled with the width) past the stroke; with no fade it
+        // feathers by the same aa as the outer edge.
+        float fadeIn = max(borderFade * widthScale, aa);
+        float borderInner = smoothstep(-localBorderWidth - fadeIn, -localBorderWidth + aa, dist);
         float borderBase = (1.0 - borderOuter) * borderInner;
         float borderAlpha = borderBase * v_BorderColor.a;
         result.rgb = result.rgb * (1.0 - borderAlpha) + v_BorderColor.rgb * borderAlpha;

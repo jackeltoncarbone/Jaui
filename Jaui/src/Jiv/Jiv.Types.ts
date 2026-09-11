@@ -244,6 +244,11 @@ export interface JivStyle {
    *  default). At `0` the edge is a hard step (aliased). The border-zone
    *  backdrop blur + grade live on `BorderFilter` instead. */
   BorderBlur: string;
+  /** How far the stroke fades INWARD past its width, a length. The outer edge stays as sharp as
+   *  BorderBlur makes it; the inner edge eases from full stroke to nothing over this distance, so a
+   *  rim can be a crisp line at the outline that dissolves into the body. 0 = the inner edge feathers
+   *  by BorderBlur alone. */
+  BorderFade: string;
   BorderOffset: string;
   ContainBorder: boolean;
   /** Where the border stroke paints in this Jiv's own paint stack, RELATIVE
@@ -343,6 +348,7 @@ export interface JivRenderStyle {
   BorderColor: Color;
   BorderWidth: number;
   BorderBlur: number;
+  BorderFade: number;
   BorderBackdropBlur: number;
   BorderOffset: number;
   ContainBorder: boolean;

@@ -28,7 +28,7 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 //   loc  9: a_Grading      (brightness, saturation, contrast, frostLod)
 //   loc 10: a_Refraction   (thickness, bezelWidth, refractionStrength, bezelScale)
 //   loc 11: a_Lighting     (lightDirX, lightDirY, lightIntensity, fresnelStrength)
-//   loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur)
+//   loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur + borderFade packed)
 //   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, bulge)
 //   loc 14: a_Outline      (borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount)
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
@@ -54,6 +54,12 @@ const _q = (v: number, scale: number, max: number): number => {
  *  over [0, 4) (×32). Layout: brightnessCode·16384 + saturationCode·128 +
  *  contrastCode. The panel frag reverses this. Identity (1,1,1) packs to
  *  256·16384 + 32·128 + 32. */
+// InnerBlur (0..1, three decimals) and the border's inward fade (device px, quarter-px steps up to 63.75)
+// share a_Specular.w: fade * 4 * 1024 + innerBlur * 1000, well inside float precision. The fragment shader
+// unpacks it the same way.
+const _packInnerBlurFade = (innerBlur: number, fadePx: number): number =>
+  Math.round(Math.min(63.75, Math.max(0, fadePx)) * 4) * 1024 + Math.round(Math.min(1, Math.max(0, innerBlur)) * 1000);
+
 const _packFgGrade = (brightness: number, saturation: number, contrast: number): number => {
   const b = _q(brightness, 256, 1023);
   const s = _q(saturation, 32, 127);
@@ -261,7 +267,7 @@ export class JivInstanceBuffer {
     data[offset + 44] = style.SpecularIntensity;
     data[offset + 45] = style.SpecularSharpness;
     data[offset + 46] = style.ChromaticAberration;
-    data[offset + 47] = style.InnerBlur;
+    data[offset + 47] = _packInnerBlurFade(style.InnerBlur, style.BorderFade * avgScale * d);
 
     data[offset + 48] = style.EdgeLightTop;
     data[offset + 49] = style.EdgeLightBottom;

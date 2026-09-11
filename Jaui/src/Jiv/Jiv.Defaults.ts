@@ -51,6 +51,7 @@ export const DefaultJivStyle: JivStyle = {
   BorderColor: 'rgba(0, 0, 0, 0)',
   BorderWidth: '0',
   BorderBlur: '0.5',
+  BorderFade: '0',
   BorderOffset: '0',
   ContainBorder: false,
   BorderLayer: '0',

@@ -125,6 +125,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BorderColor',            s => s.BorderColor.A,                (s, v) => { s.BorderColor.A = v; }],
   ['BorderWidth',            s => s.BorderWidth,                  (s, v) => { s.BorderWidth = v; }],
   ['BorderBlur',             s => s.BorderBlur,                   (s, v) => { s.BorderBlur = v; }],
+  ['BorderFade',             s => s.BorderFade,                   (s, v) => { s.BorderFade = v; }],
   ['BorderOffset',           s => s.BorderOffset,                 (s, v) => { s.BorderOffset = v; }],
   // Border-zone backdrop filter — bucket `BorderFilter`.
   ['BorderFilter',           s => s.BorderBackdropBlur,           (s, v) => { s.BorderBackdropBlur = v; }],

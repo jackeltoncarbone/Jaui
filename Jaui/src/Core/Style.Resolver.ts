@@ -240,6 +240,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderColor: ParseColor(ResolveVars(ResolveTernary(s.BorderColor, ctx), ctx)),
     BorderWidth: Resolve(s.BorderWidth, ctx, 'W'),
     BorderBlur: Resolve(s.BorderBlur, ctx, 'W'),
+    BorderFade: Resolve(s.BorderFade, ctx, 'W'),
     BorderBackdropBlur: resolveBlur(border.BlurRaw),
     BorderOffset: Resolve(s.BorderOffset, ctx, 'W'),
     ContainBorder: s.ContainBorder,
