@@ -616,6 +616,7 @@ export class Canvas implements DirtyTracker {
    *  predicates; called from `_resize` before the solve. */
   private _recomputeResponsiveLayout = (node: JauiElement): void => {
     (node as Jiv).RecomputeResponsiveLayout?.();
+    (node as Jiv).RecomputeResponsiveText?.();
     const kids = node.Children;
     for (let i = 0; i < kids.length; i++) this._recomputeResponsiveLayout(kids[i]);
   };

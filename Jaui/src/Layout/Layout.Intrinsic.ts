@@ -116,6 +116,7 @@ const _compute = (node: Element): void => {
     const ancestorBudget = _textWrapBudget(node, true, ctx);
     const wrapBudget = Math.min(
       explicitW !== null ? explicitW : Infinity,
+      _boundOf(node.ChildLayout.MaxWidth, ctx, 'W', true),
       ancestorBudget,
     );
     const unboundedW = node.TextMeasurement.Width + pl + pr;

@@ -92,7 +92,7 @@ export const MeasureText = (
     const lines = _applyMaxLines(rawLines, style, c);
     let width = 0;
     for (const line of lines) {
-      const w = c.measureText(line).width;
+      const w = _lineWidth(line, style, c);
       if (w > width) width = w;
     }
     return { Width: width, MinWidth: minWidth, Height: lines.length * lineHeightPx, Lines: lines };
@@ -107,10 +107,25 @@ export const MeasureText = (
   const clipped = _applyMaxLines(lines, style, c, maxWidth);
   let width = 0;
   for (const line of clipped) {
-    const w = c.measureText(line).width;
+    const w = _lineWidth(line, style, c);
     if (w > width) width = w;
   }
   return { Width: width, MinWidth: minWidth, Height: clipped.length * lineHeightPx, Lines: clipped };
+};
+
+/** A line's width as the renderer will lay it: LayoutWords places word by word and adds a space width
+ *  between them, and that sum can exceed the whole-line measure by a fraction of a pixel (kerning across
+ *  the boundaries, per-word rounding). A box sized from the whole-line measure then wraps its last word.
+ *  The box takes whichever is wider so the words always fit. */
+const _lineWidth = (line: string, style: ResolvedTextStyle, ctx: Ctx2D): number => {
+  const whole = ctx.measureText(line).width;
+  const words = line.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length < 2) return whole;
+  const rawSpace = ctx.measureText(' ').width;
+  const spaceWidth = rawSpace > 0 && Number.isFinite(rawSpace) ? rawSpace : style.FontSize * 0.25;
+  let sum = spaceWidth * (words.length - 1);
+  for (const word of words) sum += ctx.measureText(word).width;
+  return Math.max(whole, sum);
 };
 
 /** Longest individual word's width. Drives min-content sizing — the smallest

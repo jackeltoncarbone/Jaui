@@ -500,7 +500,11 @@ const _solveNode = (
         // Effective wrap width: child's explicit Width caps the parent's
         // budget. A `Width: 500pt` title in a 1200pt-wide parent wraps at
         // 500pt, not 1200pt — match what the renderer actually does.
-        const explicitW = typeof finalW === 'number' ? finalW : Infinity;
+        // The child's MaxWidth caps the wrap width too: the renderer wraps at the clamped LayoutWidth, so a
+        // title with MaxWidth 640pt in a 1050pt column must be measured at 640pt or its box stays one line
+        // tall while the words render on two.
+        const maxBoundW = ResolveBound(c.ChildLayout.MaxWidth, childCtx, 'W');
+        const explicitW = Math.min(typeof finalW === 'number' ? finalW : Infinity, maxBoundW);
         const effectiveCross = Math.max(0, Math.min(explicitW, crossBudget));
         const [tpt, tpr, tpb, tpl] = ResolveLengthTuple4(c.Layout.Padding, childCtx, ['H', 'W', 'H', 'W']);
         const unboundedCross = c.TextMeasurement.Width + tpl + tpr;

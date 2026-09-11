@@ -406,6 +406,12 @@ export class Jiv extends Element {
    *  the shared module viewport). No-op when this Jiv has no layout-bearing
    *  predicates. Returns true if it touched layout (so callers can batch a
    *  dirty/relayout). */
+  /** The viewport moved: a text style behind a `Width < N` rule may now resolve differently, and the
+   *  cached measurement was taken under the old one. */
+  RecomputeResponsiveText = (): void => {
+    if (this._hasTextPredicates) this._invalidateText();
+  };
+
   RecomputeResponsiveLayout = (): boolean => {
     if (!this._hasLayoutPredicates || !this.PredicateStyles) return false;
     const ctx = this._predicateCtx();
