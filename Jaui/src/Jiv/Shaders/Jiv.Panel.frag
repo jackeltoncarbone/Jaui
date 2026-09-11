@@ -734,11 +734,11 @@ void main() {
     // "continuous bevel → flat interior" profile with no boundary ring.
     float x = edgeDist / bezelWidth;
     float s = bezelScale;
-    float hump = clamp((x / s) * exp(1.0 - x / s), 0.0, 1.0);
-    // The bend lives in the bezel: the pincushion tail is still half its peak at x = 1 and only fades by
-    // x = 2, so a 10pt bezel bent 20pt of the panel and its streaks reached the cells inside a pill.
-    // Fade the hump out over the outer half of the bezel so BezelWidth is the width the bend occupies.
-    hump *= 1.0 - smoothstep(0.45, 1.0, x);
+    // A smooth bump that lives inside the bezel: it rises from the outline to its peak at BezelScale of
+    // the width and eases back to flat by the width, with zero slope at both ends. The pincushion tail
+    // bent twice the bezel and reached the cells inside a pill; a hard cutoff drew a line where the
+    // bend stopped. Magnification is the slope of the displacement, so the slope must never jump.
+    float hump = smoothstep(0.0, s, x) * (1.0 - smoothstep(s, 1.0, x));
 
     // ── Fill alpha (shape mask) ──
     // Silhouette AA is hardcoded ~0.5px — BorderBlur must NOT fade the

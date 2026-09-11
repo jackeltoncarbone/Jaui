@@ -61,6 +61,9 @@ export const JAUI_HOST_EL = new WeakMap<JivHandle, HTMLElement>();
 export class Jiv implements OnInit, OnDestroy {
   readonly className = input<string | undefined>(undefined, { alias: 'class' });
   readonly style = input<Partial<JivStyle> | undefined>(undefined);
+  /** The same bag under a name Angular does not intercept: `[style]` on an element is Angular's own style
+   *  binding and never reaches an input, so a computed JSS value binds through `[jivStyle]`. */
+  readonly jivStyle = input<Record<string, string | number> | undefined>(undefined);
   readonly layout = input<Partial<LayoutConfig> | undefined>(undefined);
   readonly childLayout = input<Partial<ChildLayout> | undefined>(undefined);
   readonly text = input<string | null | undefined>(undefined);
@@ -285,7 +288,7 @@ export class Jiv implements OnInit, OnDestroy {
     }
     const text = this.text();
 
-    const styleBag = { ...fromClass?.Style, ...this.style() } as Record<string, unknown>;
+    const styleBag = { ...fromClass?.Style, ...this.style(), ...this.jivStyle() } as Record<string, unknown>;
     // `[image]` sugar — when set and Background wasn't authored explicitly,
     // write a `Url(...)` Background value. The engine's Style.Resolver +
     // ImageCache handle fetch / decode / texture binding on the worker side.
