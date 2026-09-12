@@ -742,7 +742,15 @@ void main() {
     // the width and eases back to flat by the width, with zero slope at both ends. The pincushion tail
     // bent twice the bezel and reached the cells inside a pill; a hard cutoff drew a line where the
     // bend stopped. Magnification is the slope of the displacement, so the slope must never jump.
-    float hump = smoothstep(0.0, s, x) * (1.0 - smoothstep(s, 1.0, x));
+    // The lens edge is signed, as a dome's is. In the first part of the bezel (to BezelScale of the width)
+    // the surface bends light so the outline shows what lies OUTSIDE the panel: measured on the iPhone, a
+    // dark band over a dark page, the icon that sits above the bar. Past it the bend reverses and pulls
+    // the interior toward the edge, easing to flat by the width. About 12px outward at the outline and
+    // 5px inward peaking mid-bezel on the iPhone, so the inward half carries 0.4 of the outward.
+    float outwardBand = smoothstep(0.0, s * 0.4, x) * (1.0 - smoothstep(s * 0.4, s, x));
+    float inwardBand = smoothstep(s, (s + 1.0) * 0.5, x) * (1.0 - smoothstep((s + 1.0) * 0.5, 1.0, x));
+    float bend = 0.4 * inwardBand - outwardBand;
+    float hump = max(inwardBand, outwardBand);
 
     // ── Fill alpha (shape mask) ──
     // Silhouette AA is hardcoded ~0.5px — BorderBlur must NOT fade the
@@ -789,7 +797,7 @@ void main() {
         // then negate to sample INWARD (Show Studio's `-refract * edgeIntensity`).
         vec2 tangent = vec2(-normal.y, normal.x);
         vec2 rotatedNormal = normal * 0.985 + tangent * 0.174; // cos(10°), sin(10°)
-        vec2 edgeDisp = -rotatedNormal * hump * thickness;
+        vec2 edgeDisp = -rotatedNormal * bend * thickness;
 
         // Surface bulge: radial direction from panel center, scaled by dome profile.
         // Magnitude is proportional to the panel's MINOR axis (its thickness),
