@@ -471,8 +471,11 @@ int ShapeMode(vec2 halfSize, vec4 radii) {
 // only corners inside a transition band — the ones that used to pop — change.
 const float CORNER_SAT_FRAC    = 0.12;  // fraction of the short half-axis the radius morph spans
                                         // (scale-invariant: a tiny card and a huge card snap alike)
-const float CORNER_ASPECT_LO   = 1.40;  // aspect ≤ LO → circle leg
-const float CORNER_ASPECT_HI   = 1.52;  // aspect ≥ HI → pill leg
+// A saturated corner is a circle only when the box is square; anything longer is a capsule with
+// semicircle ends and a straight middle, as the iPhone's 78 by 58 tab pill is. The old 1.40 threshold
+// drew every short pill as an ellipse.
+const float CORNER_ASPECT_LO   = 1.02;  // aspect ≤ LO → circle leg
+const float CORNER_ASPECT_HI   = 1.10;  // aspect ≥ HI → pill leg
 
 void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
                 out float distOut, out vec2 gradOut) {
