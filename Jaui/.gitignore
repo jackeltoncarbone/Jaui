@@ -1,0 +1,8 @@
+
+# Generated shader wrappers. `npm run build:shaders` rebuilds these from the
+# .frag/.vert/.glsl/.wgsl sources on every build, so the sources are the truth
+# and these must never be committed or reviewed.
+*.frag.gen.ts
+*.vert.gen.ts
+*.glsl.gen.ts
+*.wgsl.gen.ts

@@ -16,21 +16,12 @@
 
 import { describe, it, expect } from 'vitest';
 
-// ─── Shared polyline (mirror of SS_PILL_CURVE in Jiv.Panel.frag) ───
-const SS_PILL_CURVE: Array<[number, number]> = [
-  [0.000000, 1.000000], [0.071905, 0.999903], [0.141683, 0.999227],
-  [0.209303, 0.997390], [0.274729, 0.993813], [0.337929, 0.987916],
-  [0.398867, 0.979119], [0.457512, 0.966841], [0.513828, 0.950503],
-  [0.567783, 0.929525], [0.619341, 0.903327], [0.668471, 0.871328],
-  [0.715137, 0.832948], [0.759307, 0.787608], [0.800946, 0.734728],
-  [0.840021, 0.673727], [0.874726, 0.607726], [0.889889, 0.574476],
-  [0.904073, 0.540309], [0.917279, 0.505288], [0.929507, 0.469473],
-  [0.940756, 0.432925], [0.951027, 0.395705], [0.960321, 0.357875],
-  [0.968635, 0.319495], [0.975972, 0.280627], [0.982330, 0.241331],
-  [0.987711, 0.201669], [0.992113, 0.161702], [0.995536, 0.121490],
-  [0.997982, 0.081095], [0.999449, 0.040578], [0.999938, 0.000000],
-];
-const SS_PILL_MAXEXTENT = 1.6236;
+// The polyline comes from the SHADER, never a copy. A private mirror is how these
+// tests used to pass while the shader drew something else entirely.
+import { readGlslCurve } from './Pill.Curve.Source';
+const _curve = readGlslCurve();
+const SS_PILL_CURVE: Array<[number, number]> = _curve.points;
+const SS_PILL_MAXEXTENT = _curve.maxExtent;
 
 type Vec2 = [number, number];
 interface Eval { dist: number; grad: Vec2 }

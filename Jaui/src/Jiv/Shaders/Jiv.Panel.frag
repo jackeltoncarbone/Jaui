@@ -235,20 +235,42 @@ float PickRectRadius(vec2 p, vec4 radii) {
 // test to regenerate. 32 segments → sub-pixel accuracy on 60-tall pills.
 const int SS_PILL_POINT_COUNT = 33;
 const vec2 SS_PILL_CURVE[33] = vec2[](
-  vec2(0.000000, 1.000000), vec2(0.071905, 0.999903), vec2(0.141683, 0.999227),
-  vec2(0.209303, 0.997390), vec2(0.274729, 0.993813), vec2(0.337929, 0.987916),
-  vec2(0.398867, 0.979119), vec2(0.457512, 0.966841), vec2(0.513828, 0.950503),
-  vec2(0.567783, 0.929525), vec2(0.619341, 0.903327), vec2(0.668471, 0.871328),
-  vec2(0.715137, 0.832948), vec2(0.759307, 0.787608), vec2(0.800946, 0.734728),
-  vec2(0.840021, 0.673727), vec2(0.874726, 0.607726), vec2(0.889889, 0.574476),
-  vec2(0.904073, 0.540309), vec2(0.917279, 0.505288), vec2(0.929507, 0.469473),
-  vec2(0.940756, 0.432925), vec2(0.951027, 0.395705), vec2(0.960321, 0.357875),
-  vec2(0.968635, 0.319495), vec2(0.975972, 0.280627), vec2(0.982330, 0.241331),
-  vec2(0.987711, 0.201669), vec2(0.992113, 0.161702), vec2(0.995536, 0.121490),
-  vec2(0.997982, 0.081095), vec2(0.999449, 0.040578), vec2(0.999938, 0.000000)
+  vec2(0.00000000, 1.00000000),
+  vec2(0.04265581, 0.99999445),
+  vec2(0.08531159, 0.99993035),
+  vec2(0.12796709, 0.99969402),
+  vec2(0.17062123, 0.99912542),
+  vec2(0.21327087, 0.99802453),
+  vec2(0.25590906, 0.99615489),
+  vec2(0.29852244, 0.99324588),
+  vec2(0.34108789, 0.98899457),
+  vec2(0.38356831, 0.98306800),
+  vec2(0.42590761, 0.97510672),
+  vec2(0.46802503, 0.96473086),
+  vec2(0.50980938, 0.95155004),
+  vec2(0.55111404, 0.93517850),
+  vec2(0.59175424, 0.91525605),
+  vec2(0.63150841, 0.89147416),
+  vec2(0.67012530, 0.86360450),
+  vec2(0.70733754, 0.83152444),
+  vec2(0.74288036, 0.79523315),
+  vec2(0.77651200, 0.75485312),
+  vec2(0.80803128, 0.71061553),
+  vec2(0.83728806, 0.66283306),
+  vec2(0.86418529, 0.61186710),
+  vec2(0.88867327, 0.55809644),
+  vec2(0.91073888, 0.50189257),
+  vec2(0.93039268, 0.44360330),
+  vec2(0.94765574, 0.38354448),
+  vec2(0.96254728, 0.32199785),
+  vec2(0.97507274, 0.25921346),
+  vec2(0.98521039, 0.19541521),
+  vec2(0.99289197, 0.13080918),
+  vec2(0.99796172, 0.06559637),
+  vec2(1.00000000, 0.00000000)
 );
 
-const float SS_PILL_MAXEXTENT = 1.6236; // SS pill max horizontal extent / halfY
+const float SS_PILL_MAXEXTENT = 1.5400; // SS pill max horizontal extent / halfY
 
 // Polyline-based SDF + gradient for the SS pill. Pixel-accurate match to SS's
 // GeneratePillPath (within ~0.05 px on a 60-tall pill at 33 sample points).
@@ -482,14 +504,19 @@ void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
     float minHalf = min(halfSize.x, halfSize.y);
     float maxHalf = max(halfSize.x, halfSize.y);
     float aspect  = maxHalf / max(minHalf, 0.0001);
-    float minR    = min(min(radii.x, radii.y), min(radii.z, radii.w));
 
-    // Saturation of the (smallest) corner radius against the short axis:
-    // 0 → small radius (rect), 1 → radius fills the short axis (circle/pill).
-    // Band is a fraction of minHalf so the morph spans the same proportion of
-    // the radius at every size; floored at 1px so sub-tiny shapes don't hard-snap.
+    // `smoothness` arrives PACKED from the instance buffer: the 0..1 fraction is the smoothness and the
+    // whole part is the AUTHORED corner radius in sixteenths of a device pixel. Split them back apart.
+    float authoredR  = floor(smoothness * 0.5) / 16.0;
+    float smoothAmt  = smoothness - 2.0 * floor(smoothness * 0.5);
+
+    // Saturation of the corner radius against the short axis: 0 → small radius (rect), 1 → radius fills
+    // the short axis (circle/pill). Keyed to the AUTHORED radius, never the drawn one: the drawn radius
+    // carries the superellipse compensation, which on a shallow box reaches into this band and used to
+    // morph a plain rounded rectangle into a capsule. Band is a fraction of minHalf so the morph spans
+    // the same proportion at every size; floored at 1px so sub-tiny shapes don't hard-snap.
     float satBand = max(minHalf * CORNER_SAT_FRAC, 1.0);
-    float sat   = smoothstep(minHalf - satBand, minHalf - 1.0, minR);
+    float sat   = smoothstep(minHalf - satBand, minHalf - 1.0, authoredR);
     // Which saturated regime the corner eases toward: 0 = circle, 1 = pill.
     float elong = smoothstep(CORNER_ASPECT_LO, CORNER_ASPECT_HI, aspect);
 
@@ -498,7 +525,7 @@ void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
     // square-ish saturated corners (circleness), never for the pill leg.
     float rCorner    = min(PickRectRadius(p, radii), minHalf);
     float circleness = sat * (1.0 - elong);
-    float n          = mix(SmoothnessToExponent(smoothness), 2.0, circleness);
+    float n          = mix(SmoothnessToExponent(smoothAmt), 2.0, circleness);
     float dSuper     = ShapeSDF_inner(p, halfSize, vec2(rCorner), n);
 
     // Pill leg: only elongated saturated corners pull toward the Bezier endcap.
@@ -923,9 +950,10 @@ void main() {
 
     // ── Variable border width along perimeter ──
     // Thicker where the rim's outward normal aligns with the light direction.
-    // Two lights, as Apple's environment has them: the key light along lightDir and a dimmer bounce
-    // from the opposite side, so the rim reads top-left AND bottom-right. Sides stay unlit.
-    const float GROUND_BOUNCE = 0.45;
+    // Two lights, as the iPhone's environment has them: the key light along lightDir and a bounce from
+    // the opposite side nearly as bright (measured on a round button over black: 68 at the top left, 58
+    // at the bottom right, 33 at the sides over a 24 body), so the rim reads top-left AND bottom-right.
+    const float GROUND_BOUNCE = 0.95;
     float keyAlign = dot(normal, lightDir);
     float alignment = max(keyAlign, -keyAlign * GROUND_BOUNCE); // +1 key-lit, ~0.45 bounce-lit, 0 at the sides
     // Width scale keeps the signed form so the sides thin out below the base width.
