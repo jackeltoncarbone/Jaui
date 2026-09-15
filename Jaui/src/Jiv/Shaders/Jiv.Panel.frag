@@ -960,7 +960,24 @@ void main() {
     float widthAlign = alignment * 2.0 - 1.0;
     float widthScale = 1.0 + borderVariance * widthAlign;
     float localBorderWidth = borderWidth * widthScale;
-    float localBorderEdgeAa = borderEdgeAa * widthScale;
+
+    // ── Hairline floor ──
+    // The border is point-sampled ONCE per fragment, so an annulus narrower than a device pixel can
+    // fall entirely between pixel centres and paint nothing at all. That is not a faint line, it is an
+    // absent one: at BorderBlur 0 every width below 1 device px has a sample phase at which no pixel on
+    // the edge lights up. BorderVariance makes it worse on purpose, since widthScale bottoms out at
+    // 1 - BorderVariance (0.5x for the glass rim, 0.4x for the toggle), so the rim can render on the
+    // lit side and vanish on the thin sides of the same shape.
+    // So never draw a stroke thinner than a device pixel: draw it AT the floor and carry the width it
+    // lost as coverage. A 0.7px stroke becomes a 1.0px stroke at 0.7 alpha — the same ink, spread over
+    // a footprint the sample grid cannot miss.
+    // The floor sits AFTER BorderVariance deliberately: variance still thins the rim, because coverage
+    // falls with it and the thin side reads thinner and dimmer exactly as authored. What it can no
+    // longer do is delete it. A zero BorderWidth stays zero: coverage is 0, so "no border" is untouched.
+    const float BORDER_MIN_DEVICE_PX = 1.0;
+    float variedBorderWidth = max(localBorderWidth, 0.0);
+    float drawnBorderWidth = max(variedBorderWidth, BORDER_MIN_DEVICE_PX);
+    float borderCoverage = variedBorderWidth / drawnBorderWidth;
 
     // ── Edge lighting (Apple Liquid Glass) ──────────────────────────────
     // Two bands stacked:
@@ -1199,8 +1216,9 @@ void main() {
         // The inner edge eases over BorderFade (scaled with the width) past the stroke; with no fade it
         // feathers by the same aa as the outer edge.
         float fadeIn = max(borderFade * widthScale, aa);
-        float borderInner = smoothstep(-localBorderWidth - fadeIn, -localBorderWidth + aa, dist);
-        float borderBase = (1.0 - borderOuter) * borderInner;
+        float borderInner = smoothstep(-drawnBorderWidth - fadeIn, -drawnBorderWidth + aa, dist);
+        // Drawn at the hairline floor, inked by the width it actually has.
+        float borderBase = (1.0 - borderOuter) * borderInner * borderCoverage;
 
         if (borderBase > 0.001) {
             // Re-sample backdrop with border-zone grading. Apply LOD offset for
@@ -1256,8 +1274,9 @@ void main() {
         // The inner edge eases over BorderFade (scaled with the width) past the stroke; with no fade it
         // feathers by the same aa as the outer edge.
         float fadeIn = max(borderFade * widthScale, aa);
-        float borderInner = smoothstep(-localBorderWidth - fadeIn, -localBorderWidth + aa, dist);
-        float borderBase = (1.0 - borderOuter) * borderInner;
+        float borderInner = smoothstep(-drawnBorderWidth - fadeIn, -drawnBorderWidth + aa, dist);
+        // Drawn at the hairline floor, inked by the width it actually has.
+        float borderBase = (1.0 - borderOuter) * borderInner * borderCoverage;
         float borderAlpha = borderBase * v_BorderColor.a;
         result.rgb = result.rgb * (1.0 - borderAlpha) + v_BorderColor.rgb * borderAlpha;
         result.a = result.a * (1.0 - borderAlpha) + borderAlpha;
