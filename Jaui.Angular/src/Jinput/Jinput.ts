@@ -142,6 +142,7 @@ function _withAlpha(color: string, alpha: number): string {
           @for (h of SelectionHandles(); track h.Key) {
             <jiv
               class="JinputHandleBar"
+              [style]="caretStyle()"
               [childLayout]="{
                 Position: 'Placed',
                 Left: (h.X - 1.25) + 'px',
@@ -151,6 +152,7 @@ function _withAlpha(color: string, alpha: number): string {
               }" />
             <jiv
               class="JinputHandleKnob"
+              [style]="caretStyle()"
               [childLayout]="{
                 Position: 'Placed',
                 Left: (h.X - 6) + 'px',
@@ -175,6 +177,7 @@ function _withAlpha(color: string, alpha: number): string {
           @if (CaretRect(); as cr) {
             <jiv
               class="JinputCaret"
+              [style]="caretStyle()"
               [childLayout]="{
                 Position: 'Placed',
                 Left: cr.x + 'px',
@@ -336,6 +339,11 @@ export class Jinput implements OnDestroy {
    *  `JinputPlaceholder` JSS class); consumers can pass 'Normal' for a
    *  straight placeholder without touching the shared class. */
   readonly PlaceholderFontStyle = input<'Normal' | 'Italic'>('Italic');
+  /** Inks over the JSS defaults, for a host whose ground is not dark. Any colour or `@Var`; null keeps the
+   *  sheet's. `Ink` colours text no span colours; `CaretInk` paints the caret and the selection pins. */
+  readonly Ink = input<string | null>(null);
+  readonly PlaceholderInk = input<string | null>(null);
+  readonly CaretInk = input<string | null>(null);
 
   // ── Outputs ─────────────────────────────────────────────────────
   /** Char-index click. Fires before caret positioning; consumers can call
@@ -633,7 +641,12 @@ export class Jinput implements OnDestroy {
     FontSize: `${this.FontSizePx()}px`,
     FontWeight: s.FontWeight ?? this.FontWeight(),
     LineHeight: String(this.LineHeightRatio()),
-    ...(s.Color ? { Color: s.Color } : {}),
+    ...((s.Color ?? this.Ink()) ? { Color: (s.Color ?? this.Ink())! } : {}),
+  });
+
+  readonly caretStyle = computed<{ Background?: string }>(() => {
+    const ink = this.CaretInk();
+    return ink ? { Background: ink } : {};
   });
 
   segmentClass = (s: RenderedSegment): string =>
@@ -648,12 +661,14 @@ export class Jinput implements OnDestroy {
     FontWeight: number;
     LineHeight: string;
     FontStyle: 'Normal' | 'Italic';
+    Color?: string;
   } => ({
     FontFamily: this.FontFamily(),
     FontSize: `${this.FontSizePx()}px`,
     FontWeight: this.FontWeight(),
     LineHeight: String(this.LineHeightRatio()),
     FontStyle: this.PlaceholderFontStyle(),
+    ...(this.PlaceholderInk() ? { Color: this.PlaceholderInk()! } : {}),
   });
 
   constructor() {
