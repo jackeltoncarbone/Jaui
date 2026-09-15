@@ -267,7 +267,6 @@ Card {
   FlexGrow: 0
   FlexShrink: 0
   Overflow: Hidden
-  FitMode: Cover
 }
 
 CardCompact : Card {
@@ -498,14 +497,18 @@ BorderLayerFront {
    flat stroke. */
 BorderLayerGlass {
   BorderLayer: 10
-  Material: LiquidGlass
+  // Material is DERIVED, never authored: Thickness above 0 is what routes this
+  // through the glass pipeline.
   Thickness: 12pt
   Background: rgba(255, 255, 255, 0.04)
   BorderColor: rgba(255, 255, 255, 0.5)
   BorderWidth: 18pt
-  BackdropFrostBlur: 6pt
-  BorderBrightness: 1.5
-  BorderSaturation: 1.4
+  // The frost and the rim grade are authored as filters. BackdropFrostBlur /
+  // BorderBrightness / BorderSaturation are JivRenderStyle fields — what these
+  // RESOLVE to — and were dead keys here, so this demo has never actually shown
+  // the light-gathering edge the comment above describes. It does now.
+  BackdropFilter: Blur(6pt)
+  BorderFilter: Brightness(1.5) Saturate(1.4)
 }
 
 BorderLayerTag {

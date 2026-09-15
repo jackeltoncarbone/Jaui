@@ -167,6 +167,9 @@ JinputPeerCaretLabel {
   Color: rgba(255, 255, 255, 0.98)
   Padding: 2pt 7pt
   BorderRadius: 999pt
-  WhiteSpace: NoWrap
+  // One line, always: a peer's name is a label on a caret, not a paragraph.
+  // This was `WhiteSpace: NoWrap`, a CSS idiom with no JSS equivalent, so it
+  // did nothing and a long name could wrap the pill onto a second line.
+  MaxLines: 1
   @Transition Opacity { Duration: 140ms }
 }
