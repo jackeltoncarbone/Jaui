@@ -278,6 +278,11 @@ export interface JivStyle {
   ShadowBlur: string;
   ShadowOffsetX: string;
   ShadowOffsetY: string;
+  /** 0..1: how much the backdrop decides the shadow's opacity, as Apple's Liquid Glass does. ShadowColor's
+   *  alpha is the opacity over text and busy content; over a flat light ground it falls to
+   *  `alpha * (1 - ShadowAdaptive)`. Read from the backdrop a glass or backdrop-filter surface already
+   *  samples, never from the theme. Default 0, a fixed shadow. */
+  ShadowAdaptive: string;
   InnerShadow: boolean;
 
   // Appearance
@@ -385,6 +390,7 @@ export interface JivRenderStyle {
   ShadowBlur: number;
   ShadowOffsetX: number;
   ShadowOffsetY: number;
+  ShadowAdaptive: number;
   InnerShadow: boolean;
 
   /** Foreground grade — multiplies the element's FINAL composited rgb

@@ -20,7 +20,7 @@ import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, mat
 import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
 import { XformBuffer } from '../Transform/Xform.Buffer';
-import type { Renderer, GpuTextureHandle, BgPaint } from './Renderer';
+import { SHADOW_EASE_SECONDS, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop } from './Renderer';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
 // `Renderer.Factory.ts` and handed in. Canvas has no opinion about
@@ -34,6 +34,9 @@ import { SetPredicateViewport } from '../Jss/Jss.Predicate';
  *  materials like ProgressiveBlur are compositing overlays — they don't have
  *  a backdrop sample, border, or specular, and they render in their own pass. */
 const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
+/** The finest blur (pt) an adaptive shadow compares the sharp backdrop against, so clear glass still sees
+ *  its text as detail. */
+const SHADOW_DETAIL_MIN_PT = 4;
 
 /** True when a non-glass panel has any non-default backdrop filter set
  *  (BackdropBrightness / Saturation / Contrast ≠ 1, BackdropFrostBlur > 0).
@@ -726,6 +729,10 @@ export class Canvas implements DirtyTracker {
   /** Frames still owed after the last activity — renders a short tail so late-settling
    *  spring/layout values land before the loop idles. */
   private _renderHold: number = 0;
+  /** Whether the last render measured an adaptive shadow, and the clock time its ease has landed by. The
+   *  ease lives on the GPU, so the loop keeps rendering until then after activity stops. */
+  private _adaptiveShadowsDrawn = false;
+  private _shadowSettleUntil = 0;
 
   /** Request a re-render on the next loop tick (render-on-demand wake). Cheap + idempotent;
    *  called by async producers (image decode, janvas/foreign-renderer change, scroll). */
@@ -1017,10 +1024,13 @@ export class Canvas implements DirtyTracker {
 
     const renderActive = layoutDirty || this._animationManager.IsRunning || this._needsRender;
     this._needsRender = false;
-    if (renderActive) this._renderHold = 3; // render this frame + a 2-frame settle tail
-    const shouldRender = this._renderHold > 0;
+    if (renderActive) {
+      this._renderHold = 3; // render this frame + a 2-frame settle tail
+      if (this._adaptiveShadowsDrawn) this._shadowSettleUntil = time + SHADOW_EASE_SECONDS * 3000;
+    }
+    const shouldRender = this._renderHold > 0 || time < this._shadowSettleUntil;
     if (shouldRender) {
-      this._renderHold--;
+      if (this._renderHold > 0) this._renderHold--;
       this._render(dt);
       // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
       // `?debug-layout`; no cost when disabled.
@@ -1097,8 +1107,9 @@ export class Canvas implements DirtyTracker {
     }
   };
 
-  private _render = (_dt: number): void => {
+  private _render = (dt: number): void => {
     const r = this._renderer;
+    this._adaptiveShadowsDrawn = false;
     const w = Math.round(this._width * this._dpr);
     const h = Math.round(this._height * this._dpr);
     // Retained-mode layer cache: the capture path redirects the panel/text
@@ -1161,7 +1172,7 @@ export class Canvas implements DirtyTracker {
       const gl = this._renderer.GetGL();
       if (gl) {
         this._pendingJanvasMasks.length = 0;
-        if (!this._diagNoReality) this._renderJanvases(gl, this.Root, 0, 0, w, h, _dt, null);
+        if (!this._diagNoReality) this._renderJanvases(gl, this.Root, 0, 0, w, h, dt, null);
         // Restore the state Jaui's panel pass expects after the foreign
         // renderer ran. Jaui's draws assume: scene FBO bound, canvas-sized
         // viewport, no scissor, no depth/cull/stencil, no bound program /
@@ -1928,6 +1939,18 @@ export class Canvas implements DirtyTracker {
           r.RebindSceneTarget();
         }
 
+        // Adaptive shadow: read the backdrop this surface just sampled, under its own footprint.
+        let shadowBackdrop: ShadowBackdrop | undefined;
+        const _rs = node.RenderStyle;
+        if (_rs.ShadowAdaptive > 0 && _rs.ShadowColor.A > 0.001 && !JivInstanceBuffer.DiagNoShadow && lastBackdrop && sceneSnap) {
+          const detailLod = Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod;
+          const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, sceneSnap, dt);
+          if (slot >= 0) {
+            shadowBackdrop = { Slot: slot, Adaptive: _rs.ShadowAdaptive };
+            this._adaptiveShadowsDrawn = true;
+          }
+        }
+
         r.EnableBlend();
         this._panelBuffer.Begin();
         this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
@@ -1964,7 +1987,7 @@ export class Canvas implements DirtyTracker {
         const glassBgPaint = this._computeBgPaint(node);
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
-          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint);
+          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop);
         }
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
@@ -2201,6 +2224,7 @@ export class Canvas implements DirtyTracker {
       r.InvalidateFrameTransients();
     }
 
+    r.EndShadowBackdropFrame();
     r.EndFrame();
   };
 

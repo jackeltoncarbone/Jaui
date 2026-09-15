@@ -61,6 +61,7 @@ export const DefaultJivStyle: JivStyle = {
   ShadowBlur: '0',
   ShadowOffsetX: '0',
   ShadowOffsetY: '0',
+  ShadowAdaptive: '0',
   InnerShadow: false,
   // Implicit fade: resolving `Presence` at style-resolution time yields the
   // Jiv's current PresenceSpring value (0 on mount, springing to 1). Authors

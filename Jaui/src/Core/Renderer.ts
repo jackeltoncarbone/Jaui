@@ -27,6 +27,16 @@ export interface GpuBufferHandle {
 
 // ─── Progressive Blur Params ───────────────────────────────────────────────
 
+/** Time constant of the adaptive shadow's ease, in seconds: about 95% of a change lands within three. */
+export const SHADOW_EASE_SECONDS = 0.09;
+
+/** The adaptive shadow for a single-surface panel draw: the state slot MeasureShadowBackdrop returned and
+ *  how much that measurement drives the shadow (the surface's ShadowAdaptive). */
+export interface ShadowBackdrop {
+  Slot: number;
+  Adaptive: number;
+}
+
 /**
  * Per-draw background paint selection for `PanelDrawBatch`. Tagged-union
  * shape mirrors `BackgroundValue` on the data side, but flattened to the
@@ -185,7 +195,25 @@ export interface Renderer {
     useGlassShader?: boolean,
     scene?: GpuTextureHandle | null,
     bgPaint?: BgPaint,
+    shadowBackdrop?: ShadowBackdrop,
   ): void;
+
+  /** Measure the backdrop under an adaptive-shadow surface (`ShadowAdaptive > 0`) into that surface's eased
+   *  state, after its backdrop pyramid is built and before its draw. `key` identifies the surface across
+   *  frames; `dtSeconds` sets how far this frame eases toward the new reading. Returns the state slot to
+   *  hand PanelDrawBatch, or -1 when the backend keeps no state (the shadow then stays at its authored alpha).
+   *  Leaves the scene target bound. */
+  MeasureShadowBackdrop(
+    key: object,
+    rect: { x: number; y: number; w: number; h: number },
+    detailLod: number,
+    backdrop: GpuTextureHandle,
+    scene: GpuTextureHandle,
+    dtSeconds: number,
+  ): number;
+
+  /** Release the state of every surface that was not measured since the previous call. Once per render. */
+  EndShadowBackdropFrame(): void;
 
   // ── Text Rendering (instanced) ──
 

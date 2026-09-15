@@ -295,6 +295,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     ShadowBlur: Resolve(s.ShadowBlur, ctx, 'W'),
     ShadowOffsetX: Resolve(s.ShadowOffsetX, ctx, 'W'),
     ShadowOffsetY: Resolve(s.ShadowOffsetY, ctx, 'H'),
+    ShadowAdaptive: Math.max(0, Math.min(1, Resolve(ResolveTernary(s.ShadowAdaptive, ctx), ctx, 'W'))),
     InnerShadow: s.InnerShadow,
 
     Opacity: Resolve(s.Opacity, ctx, 'W'),

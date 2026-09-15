@@ -29,6 +29,16 @@ uniform vec2 u_Resolution;
 uniform vec2 u_ViewOffset;
 // Shared 3D-transform table (1-row RGBA32F, 3 texels per homography entry).
 uniform sampler2D u_XformTex;
+// Adaptive shadow. One row, one texel per measured surface: R is 0 over a flat light ground and 1 over text
+// or busy content (Jiv.ShadowBackdrop.frag, eased across frames). u_ShadowBackdrop = (slot, adaptive);
+// slot -1 means this draw was not measured and the shadow keeps its authored alpha.
+uniform sampler2D u_ShadowState;
+uniform vec2 u_ShadowBackdrop;
+
+// ShadowColor's alpha is the shadow over busy content; the backdrop lowers it by up to `adaptive`.
+float AdaptiveShadowAlpha(float authoredAlpha, float backdropFactor, float adaptive) {
+    return authoredAlpha * mix(1.0, backdropFactor, adaptive);
+}
 
 out vec2 v_PixelPos;
 flat out vec4 v_PanelGeom;
@@ -55,6 +65,10 @@ void main() {
     v_Tint = a_Tint;
     v_BorderColor = a_BorderColor;
     v_ShadowColor = a_ShadowColor;
+    if (u_ShadowBackdrop.x >= 0.0) {
+        float backdropFactor = texelFetch(u_ShadowState, ivec2(int(u_ShadowBackdrop.x), 0), 0).r;
+        v_ShadowColor.a = AdaptiveShadowAlpha(a_ShadowColor.a, backdropFactor, u_ShadowBackdrop.y);
+    }
     v_ShadowParams = a_ShadowParams;
     v_StyleParams = a_StyleParams;
     v_Grading = a_Grading;

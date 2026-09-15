@@ -7,7 +7,7 @@
  * backend — works on every browser, every GPU, every driver.
  */
 
-import type { Renderer, GpuTextureHandle, ProgressiveBlurParams, BgPaint } from './Renderer';
+import { SHADOW_EASE_SECONDS, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop } from './Renderer';
 import { ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { Framebuffer } from './Framebuffer';
 import { BlurPass } from './BlurPass';
@@ -16,6 +16,7 @@ import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
+import shadowBackdropFragSrc from '../Jiv/Shaders/Jiv.ShadowBackdrop.frag.gen';
 import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
 import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
 import strokeVertSrc from '../Jline/Shaders/Jline.vert.gen';
@@ -89,6 +90,8 @@ interface _PanelLocs {
   specTilt:     WebGLUniformLocation | null;
   clipTex:      WebGLUniformLocation | null;
   xformTex:     WebGLUniformLocation | null;
+  shadowState:    WebGLUniformLocation | null;
+  shadowBackdrop: WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -109,6 +112,8 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   specTilt:     gl.getUniformLocation(p, 'u_SpecularTilt'),
   clipTex:      gl.getUniformLocation(p, 'u_ClipTex'),
   xformTex:     gl.getUniformLocation(p, 'u_XformTex'),
+  shadowState:    gl.getUniformLocation(p, 'u_ShadowState'),
+  shadowBackdrop: gl.getUniformLocation(p, 'u_ShadowBackdrop'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -206,6 +211,9 @@ void main() {
     fragColor = vec4(0.0, 0.0, 0.0, 0.0);
 }
 `;
+
+/** Surfaces whose adaptive shadow can be measured at once; past this a surface keeps its authored shadow. */
+const SHADOW_STATE_SLOTS = 64;
 
 const BLIT_VERT = `#version 300 es
 precision highp float;
@@ -419,6 +427,13 @@ export class WebGL2Renderer implements Renderer {
     }) as WebGL2RenderingContext | null;
     if (!gl) throw new Error('[Jaui] WebGL2 not supported');
     this._gl = gl;
+    // A restored context re-runs Init: the adaptive shadow state belonged to the lost one.
+    this._shadowShader = null;
+    this._shadowLocs = null;
+    this._shadowStateTex = null;
+    this._shadowStateFbo = null;
+    this._shadowSlots.clear();
+    this._shadowFreeSlots.length = 0;
 
     this._quad = new QuadGeometry(gl);
     // depth: true so foreign 3D renderers (THREE) can z-test against it
@@ -678,6 +693,7 @@ export class WebGL2Renderer implements Renderer {
     useGlassShader: boolean = backdrop !== null,
     scene: GpuTextureHandle | null = null,
     bgPaint?: BgPaint,
+    shadowBackdrop?: ShadowBackdrop,
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
@@ -730,6 +746,13 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(locs.xformTex, 4);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
+
+    // Adaptive shadow state (unit 5), read in the vertex. Slot -1 leaves the authored shadow untouched.
+    const shadowSlot = shadowBackdrop && this._shadowStateTex ? shadowBackdrop.Slot : -1;
+    gl.uniform1i(locs.shadowState, 5);
+    gl.uniform2f(locs.shadowBackdrop, shadowSlot, shadowSlot >= 0 ? shadowBackdrop!.Adaptive : 0);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
 
     gl.bindVertexArray(this._panelVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
@@ -999,6 +1022,111 @@ export class WebGL2Renderer implements Renderer {
     // Restore the scene FBO so the subsequent glass draws target it.
     this.RebindSceneTarget();
     return _wrap(tex);
+  };
+
+  // ── Adaptive shadow ──
+
+  private _shadowShader: ShaderProgram | null = null;
+  private _shadowLocs: {
+    scene: WebGLUniformLocation | null;
+    backdrop: WebGLUniformLocation | null;
+    resolution: WebGLUniformLocation | null;
+    rect: WebGLUniformLocation | null;
+    detailLod: WebGLUniformLocation | null;
+  } | null = null;
+  private _shadowStateTex: WebGLTexture | null = null;
+  private _shadowStateFbo: WebGLFramebuffer | null = null;
+  /** Surface → its texel in the state row, and the frame it was last measured in. */
+  private _shadowSlots = new Map<object, { Slot: number; Frame: number }>();
+  private _shadowFreeSlots: number[] = [];
+  private _shadowFrame = 0;
+
+  MeasureShadowBackdrop = (
+    key: object,
+    rect: { x: number; y: number; w: number; h: number },
+    detailLod: number,
+    backdrop: GpuTextureHandle,
+    scene: GpuTextureHandle,
+    dtSeconds: number,
+  ): number => {
+    const gl = this._gl;
+    if (!this._shadowShader) this._initShadowBackdrop(gl);
+    let entry = this._shadowSlots.get(key);
+    const fresh = entry === undefined;
+    if (!entry) {
+      const slot = this._shadowFreeSlots.pop();
+      if (slot === undefined) return -1;
+      entry = { Slot: slot, Frame: this._shadowFrame };
+      this._shadowSlots.set(key, entry);
+    }
+    entry.Frame = this._shadowFrame;
+
+    const program = this._shadowShader!;
+    const locs = this._shadowLocs!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._shadowStateFbo);
+    gl.viewport(entry.Slot, 0, 1, 1);
+    gl.disable(gl.SCISSOR_TEST);
+    // A new surface takes its first reading whole; after that each frame moves a time-based share toward
+    // the new reading, so a scroll eases the shadow rather than stepping it.
+    const ease = fresh ? 1 : 1 - Math.exp(-Math.max(0, dtSeconds) / SHADOW_EASE_SECONDS);
+    if (ease >= 1) {
+      gl.disable(gl.BLEND);
+    } else {
+      gl.enable(gl.BLEND);
+      gl.blendColor(0, 0, 0, ease);
+      gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
+    }
+    this._useProgram(program.Program);
+    gl.uniform1i(locs.scene, 0);
+    gl.uniform1i(locs.backdrop, 1);
+    gl.uniform2f(locs.resolution, this._width, this._height);
+    gl.uniform4f(locs.rect, rect.x, rect.y, rect.w, rect.h);
+    gl.uniform1f(locs.detailLod, Math.max(0, detailLod));
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, _unwrap(scene));
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, _unwrap(backdrop));
+    gl.bindVertexArray(this._quad.Vao);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    gl.blendColor(0, 0, 0, 0);
+    this.RebindSceneTarget();
+    return entry.Slot;
+  };
+
+  EndShadowBackdropFrame = (): void => {
+    for (const [key, entry] of this._shadowSlots) {
+      if (entry.Frame !== this._shadowFrame) {
+        this._shadowSlots.delete(key);
+        this._shadowFreeSlots.push(entry.Slot);
+      }
+    }
+    this._shadowFrame++;
+  };
+
+  private _initShadowBackdrop = (gl: WebGL2RenderingContext): void => {
+    const program = ShaderCompiler.Compile(gl, BLIT_VERT, shadowBackdropFragSrc);
+    this._shadowShader = program;
+    this._shadowLocs = {
+      scene: gl.getUniformLocation(program.Program, 'u_Scene'),
+      backdrop: gl.getUniformLocation(program.Program, 'u_Backdrop'),
+      resolution: gl.getUniformLocation(program.Program, 'u_Resolution'),
+      rect: gl.getUniformLocation(program.Program, 'u_Rect'),
+      detailLod: gl.getUniformLocation(program.Program, 'u_DetailLod'),
+    };
+    // 10-bit so a small per-frame ease still moves the stored value instead of rounding back to it.
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, SHADOW_STATE_SLOTS, 1, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    this._shadowStateTex = tex;
+    this._shadowStateFbo = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._shadowStateFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    for (let slot = SHADOW_STATE_SLOTS - 1; slot >= 0; slot--) this._shadowFreeSlots.push(slot);
   };
 
   // ── Progressive Blur ──

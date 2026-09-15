@@ -143,6 +143,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['ShadowBlur',             s => s.ShadowBlur,                   (s, v) => { s.ShadowBlur = v; }],
   ['ShadowOffsetX',          s => s.ShadowOffsetX,                (s, v) => { s.ShadowOffsetX = v; }],
   ['ShadowOffsetY',          s => s.ShadowOffsetY,                (s, v) => { s.ShadowOffsetY = v; }],
+  ['ShadowAdaptive',         s => s.ShadowAdaptive,               (s, v) => { s.ShadowAdaptive = v; }],
 
   // Appearance
   ['Opacity',                s => s.Opacity,                      (s, v) => { s.Opacity = v; }],

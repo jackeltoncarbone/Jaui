@@ -542,6 +542,11 @@ export class WebGPURenderer implements Renderer {
     throw new Error('[Jaui WebGPU] BuildSharedBackdrop not yet implemented');
   };
 
+  // Adaptive shadows measure the backdrop a glass surface samples, and this backend has no backdrop yet
+  // (see SnapshotScreen), so every shadow keeps its authored alpha here.
+  MeasureShadowBackdrop = (): number => -1;
+  EndShadowBackdropFrame = (): void => {};
+
   // ── Blit ──
 
   Blit = (source: GpuTextureHandle): void => {
