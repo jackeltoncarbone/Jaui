@@ -37,6 +37,7 @@ import {
   type M2W_Kick,
   type M2W_Ping,
   type M2W_JanvasInput,
+  type M2W_ProbeLayout,
   type W2M,
   type PointerPayload,
   type WheelPayload,
@@ -156,6 +157,20 @@ export class WorkerBridge {
     // Liveness probe from the main-thread eviction watchdog — answer immediately so it
     // knows the worker is alive (a dead worker can't reply, which is the watchdog's cue).
     if (isMessage<M2W_Ping>(m, 'ping')) { this._post({ T: 'pong' }); return; }
+    if (isMessage<M2W_ProbeLayout>(m, 'probe-layout')) return this._onProbeLayout(m);
+  };
+
+  // Dev-only; the probe module loads on first request so production never fetches it.
+  private _onProbeLayout = (m: M2W_ProbeLayout): void => {
+    const canvas = this._canvas;
+    const registry = this._registry;
+    if (!canvas || !registry) { this._post({ T: 'probe-layout-result', Nonce: m.Nonce, Snapshot: null }); return; }
+    void import('../Probe/Probe.Layout')
+      .then(({ ProbeLayout }) => this._post({ T: 'probe-layout-result', Nonce: m.Nonce, Snapshot: ProbeLayout(canvas, registry.IdsByNode()) }))
+      .catch((err) => {
+        console.error('[Jaui.Worker] probe-layout failed:', err);
+        this._post({ T: 'probe-layout-result', Nonce: m.Nonce, Snapshot: null });
+      });
   };
 
   private _onImageBitmap = (m: M2W_ImageBitmap): void => {

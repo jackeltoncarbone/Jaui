@@ -13,6 +13,7 @@
  */
 
 import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
+import type { ProbeSnapshot } from '../Probe/Probe.Types';
 
 // ─── Main → Worker ────────────────────────────────────────────────────────
 
@@ -368,8 +369,15 @@ export interface M2W_Ping {
   T: 'ping';
 }
 
+/** Dev-only: dump the laid-out tree. Main sends it only from dev builds. */
+export interface M2W_ProbeLayout {
+  T: 'probe-layout';
+  Nonce: number;
+}
+
 export type M2W =
   | M2W_Init
+  | M2W_ProbeLayout
   | M2W_Ping
   | M2W_PointerEvent
   | M2W_WheelEvent
@@ -523,7 +531,15 @@ export type W2M =
   | W2M_Pong
   | W2M_ContextLost
   | W2M_ContextRestored
-  | W2M_CaptureResult;
+  | W2M_CaptureResult
+  | W2M_ProbeLayoutResult;
+
+/** Dev-only: the layout dump answering `probe-layout`. */
+export interface W2M_ProbeLayoutResult {
+  T: 'probe-layout-result';
+  Nonce: number;
+  Snapshot: ProbeSnapshot | null;
+}
 
 /** Debug/screenshot: the captured PNG (null on failure). */
 export interface W2M_CaptureResult {

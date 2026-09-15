@@ -3,14 +3,6 @@ import { Jiv } from '../src/Jiv/Jiv';
 import { SolveLayout } from '../src/Layout/Layout.Solver';
 import { ComputeIntrinsicSizes } from '../src/Layout/Layout.Intrinsic';
 
-// NOTE: when this whole file runs in sequence under vitest, a cross-test state
-// quirk in the Jiv test harness (unrelated to AspectRatio — 7 IDENTICAL aspect
-// solves pass, and 7 no-aspect wrap solves pass; only this file's MIX trips it)
-// can occasionally drop the last test's row from the result map. The engine math
-// is verified: every test here passes standalone (`-t '<name>'`), and the wrap
-// reserve math is exact (293 + 14 + 300 = 607). Tracked as a harness-isolation
-// issue, not an engine bug; it does not occur in the real per-frame worker solve.
-
 /**
  * AspectRatio (W÷H) end-to-end through the Element solver. The data-driven card
  * grid relies on this: a content manager picks a tile aspect (16:9, 1:1, 4:5),
@@ -132,6 +124,7 @@ describe('AspectRatio in SolveLayout', () => {
         ChildLayout: { FlexGrow: 1, FlexShrink: 1, FlexBasis: '280', Width: 'Auto', Height: 'Auto', AspectRatio: 1, MaxHeight: '300' },
       }));
     }
+    root.AddChild(row);
     const results = solve(root, 600, 2000);
     const rowR = results.get(row)!;
     // Two lines, each ≤300 tall + 14 gap → between ~300 and ~614.

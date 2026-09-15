@@ -29,6 +29,7 @@ import type {
   KeyPayload,
 } from './Bridge.Types';
 import { ContextWatchdog } from './Context.Watchdog';
+import type { ProbeSnapshot } from '../Probe/Probe.Types';
 
 const ROOT_ID = 0;
 
@@ -184,6 +185,15 @@ export class MainBridge {
     });
   };
 
+  private _probeNonce = 0;
+  private _pendingProbes = new Map<number, (snapshot: ProbeSnapshot | null) => void>();
+  /** Dev-only: the worker's laid-out tree. Callers gate on their own dev flag. */
+  ProbeLayout = (): Promise<ProbeSnapshot | null> => new Promise(resolve => {
+    const nonce = ++this._probeNonce;
+    this._pendingProbes.set(nonce, resolve);
+    this.PostMessage({ T: 'probe-layout', Nonce: nonce });
+  });
+
   PostMessage = (msg: M2W, transfer?: Transferable[]): void => {
     if (!this._ready) {
       this._eventBacklog.push(msg);
@@ -264,6 +274,7 @@ export class MainBridge {
       case 'cursor':        return this._onCursor(m);
       case 'capture':       return this._onCapture(m);
       case 'capture-result': this._pendingCapture?.(m.Blob); this._pendingCapture = null; return;
+      case 'probe-layout-result': this._pendingProbes.get(m.Nonce)?.(m.Snapshot); this._pendingProbes.delete(m.Nonce); return;
       case 'hit':           return this._onHit(m);
       case 'rect':          return this._onRect(m);
       case 'hud':           return; // HUD relocation lands in P1g; no-op for now.

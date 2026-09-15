@@ -40,6 +40,17 @@ import { WireTeleportInputs } from '../Teleport/Teleport.Wiring';
  */
 export const JAUI_HOST_EL = new WeakMap<JivHandle, HTMLElement>();
 
+declare const ngDevMode: unknown;
+
+/** Dev-only: stamp a jiv's Angular host with its bridge id and class, so `JauiProbe` can name the node
+ *  (the worker only carries group-trigger classes). */
+export const StampProbeHost = (el: HTMLElement, id: number, className: string | undefined): void => {
+  if (typeof ngDevMode !== 'undefined' && !ngDevMode) return;
+  el.setAttribute('data-jiv', String(id));
+  if (className) el.setAttribute('data-jiv-class', className);
+  else el.removeAttribute('data-jiv-class');
+};
+
 /**
  * `<jiv>` — generic Jaui node.
  *
@@ -192,6 +203,7 @@ export class Jiv implements OnInit, OnDestroy {
     effect(() => {
       this._registry?.Version();
       this.Node.Apply(this._buildOptions());
+      StampProbeHost(this._host.nativeElement, this.Node.Id, this.className());
       this._applyMirror();
     });
 

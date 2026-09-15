@@ -27,6 +27,9 @@ export interface FlexChild {
   Margin: [number | 'Auto', number | 'Auto', number | 'Auto', number | 'Auto'];
   Width: number | 'Auto';
   Height: number | 'Auto';
+  /** Content (hypothetical) cross size of an Auto-cross item: what a stretched item contributes to its
+   *  line in a multi-line container before it stretches to that line. */
+  ContentCross?: number;
   MinWidth: number;
   MaxWidth: number;
   MinHeight: number;
@@ -144,14 +147,21 @@ export const SolveFlex = (container: FlexContainer, children: FlexChild[]): Layo
   // Collect into lines
   const lines = _collectLines(items, container.Wrap, mainAvailable, gap);
 
+  const multiLine = container.Wrap !== 'NoWrap';
+
   // For each line: distribute space, position on main axis
   for (const line of lines) {
     _distributeMainSpace(line, mainAvailable, gap, container, horiz);
-    _resolveCrossSizes(line, crossAvailable, container.Align, horiz);
+    _resolveCrossSizes(line, crossAvailable, container.Align, horiz, multiLine);
   }
 
   // Position lines on cross axis
   _positionLines(lines, crossAvailable, container.AlignContent, _crossGap(container));
+
+  // Multi-line: stretched items take their line's final cross size (CSS flexbox 9.4 step 11).
+  if (multiLine) {
+    for (const line of lines) _stretchToLine(line, container.Align, horiz);
+  }
 
   // Position items on cross axis within each line
   for (const line of lines) {
@@ -355,6 +365,7 @@ const _resolveCrossSizes = (
   crossAvailable: number,
   align: AlignItems,
   horiz: boolean,
+  multiLine: boolean,
 ): void => {
   for (const item of line.Items) {
     const explicitCross = horiz ? item.Child.Height : item.Child.Width;
@@ -364,6 +375,9 @@ const _resolveCrossSizes = (
 
     if (explicitCross !== 'Auto') {
       item.CrossSize = Jath.Clamp(explicitCross, minCross, maxCross);
+    } else if (selfAlign === 'Stretch' && multiLine) {
+      // Contributes its content size to the line; stretches to the line once lines are sized.
+      item.CrossSize = Jath.Clamp(item.Child.ContentCross ?? 0, minCross, maxCross);
     } else if (selfAlign === 'Stretch') {
       const available = crossAvailable - item.MarginCrossBefore - item.MarginCrossAfter;
       item.CrossSize = Jath.Clamp(Math.max(0, available), minCross, maxCross);
@@ -377,6 +391,18 @@ const _resolveCrossSizes = (
   for (const item of line.Items) {
     const total = item.CrossSize + item.MarginCrossBefore + item.MarginCrossAfter;
     if (total > line.CrossSize) line.CrossSize = total;
+  }
+};
+
+const _stretchToLine = (line: _FlexLine, align: AlignItems, horiz: boolean): void => {
+  for (const item of line.Items) {
+    const explicitCross = horiz ? item.Child.Height : item.Child.Width;
+    const selfAlign = item.Child.AlignSelf === 'Auto' ? align : item.Child.AlignSelf;
+    if (explicitCross !== 'Auto' || selfAlign !== 'Stretch') continue;
+    const minCross = horiz ? item.Child.MinHeight : item.Child.MinWidth;
+    const maxCross = horiz ? item.Child.MaxHeight : item.Child.MaxWidth;
+    const available = line.CrossSize - item.MarginCrossBefore - item.MarginCrossAfter;
+    item.CrossSize = Jath.Clamp(Math.max(0, available), minCross, maxCross);
   }
 };
 

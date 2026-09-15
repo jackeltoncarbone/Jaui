@@ -542,6 +542,7 @@ const _solveNode = (
         Margin: [mt, mr, mb, ml],
         Width: finalW,
         Height: finalH,
+        ContentCross: (horiz ? autoH : autoW) ?? 0,
         MinWidth: _r(c.ChildLayout.MinWidth, childCtx, 'W'),
         MaxWidth: ResolveBound(c.ChildLayout.MaxWidth, childCtx, 'W'),
         MinHeight: _r(c.ChildLayout.MinHeight, childCtx, 'H'),

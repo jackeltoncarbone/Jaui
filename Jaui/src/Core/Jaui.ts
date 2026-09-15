@@ -4211,3 +4211,4 @@ export {
 } from '../Worker/Worker.RendererRegistry';
 export type { JanvasFactoryContext } from '../Janvas/Janvas.Renderer';
 export type { JivApplyOpts, JivOp, M2W, W2M, PointerPayload, WheelPayload } from '../Worker/Bridge.Types';
+export type { ProbeNode, ProbeRect, ProbeSnapshot, ProbeText } from '../Probe/Probe.Types';

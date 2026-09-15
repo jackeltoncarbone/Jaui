@@ -65,6 +65,13 @@ export class JivRegistry {
     this._nodes.set(ROOT_ID, root);
   }
 
+  /** Reverse id lookup for the dev layout probe. */
+  IdsByNode = (): Map<JivCore, number> => {
+    const out = new Map<JivCore, number>();
+    for (const [id, node] of this._nodes) out.set(node, id);
+    return out;
+  };
+
   /** Apply a batch of ops in order. */
   ApplyOps = (msg: M2W_JivOps): void => {
     for (const op of msg.Ops) this._apply(op);

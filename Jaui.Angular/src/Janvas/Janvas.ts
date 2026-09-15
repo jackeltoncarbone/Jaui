@@ -14,7 +14,7 @@ import {
   type LayoutConfig,
   type ChildLayout,
 } from 'jaui';
-import { Jiv, JAUI_HOST_EL } from '../Jiv/Jiv';
+import { Jiv, JAUI_HOST_EL, StampProbeHost } from '../Jiv/Jiv';
 import { Jaui } from '../Jaui/Jaui';
 import { JSS_REGISTRY } from '../Jss/Jss.Registry';
 
@@ -89,6 +89,7 @@ export class Janvas implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    StampProbeHost(this._host.nativeElement, this.Node.Id, this.className());
     const fromClass = this._registry?.Resolve(this.className()) ?? null;
     const layoutBag = { ...fromClass?.Layout, ...this.layout() } as Record<string, unknown>;
     const clBag = { ...fromClass?.ChildLayout, ...this.childLayout() } as Record<string, unknown>;

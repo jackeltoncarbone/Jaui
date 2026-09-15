@@ -15,6 +15,8 @@ import {
   THEME_DARK_VAR,
   THEME_LIGHT_VAR,
   type ParsedJss,
+  type ProbeNode,
+  type ProbeSnapshot,
   type Stylesheet,
 } from 'jaui';
 import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
@@ -34,6 +36,11 @@ import { TeleportRegistry, TELEPORT_REGISTRY } from '../Teleport/Teleport.Regist
  *  inputs throw `RequiredInputNotSetError` when read in the constructor,
  *  which is why this isn't an `input.required<Worker>`.) */
 export const JAUI_WORKER = new InjectionToken<Worker>('JAUI_WORKER');
+
+declare const ngDevMode: unknown;
+
+/** Binding elements that are not the component a jiv belongs to. */
+const JAUI_TAGS = new Set(['jiv', 'jext', 'jimage', 'jinput', 'janvas', 'svg-jiv', 'jyle', 'jaui', 'ng-container']);
 
 /** The safe-area edges, named as the host's latched `--Safe*` custom properties name them. */
 const SAFE_EDGES = ['Top', 'Right', 'Bottom', 'Left'] as const;
@@ -137,6 +144,9 @@ export class Jaui implements OnInit, OnDestroy {
     this.Canvas = new CanvasProxy(this.Bridge);
     (window as { __jaui?: { canvas: CanvasProxy } }).__jaui = { canvas: this.Canvas };
     (window as { __jauiSemantics?: () => string }).__jauiSemantics = () => this._mirror.Serialize();
+    if (typeof ngDevMode === 'undefined' || ngDevMode) {
+      (window as { JauiProbe?: () => Promise<ProbeSnapshot | null> }).JauiProbe = this._probe;
+    }
 
     // Push JSS var table to the worker on every registry version bump.
     effect(() => {
@@ -239,6 +249,32 @@ export class Jaui implements OnInit, OnDestroy {
       };
     }
   }
+
+  /** Dev-only layout dump, annotated with each jiv's Angular host (the `data-jiv` attribute Jiv stamps in dev). */
+  private _probe = async (): Promise<ProbeSnapshot | null> => {
+    const snapshot = await this.Bridge.ProbeLayout();
+    if (!snapshot) return null;
+    const hosts = new Map<number, HTMLElement>();
+    for (const el of (this._host.nativeElement as HTMLElement).querySelectorAll<HTMLElement>('[data-jiv]')) hosts.set(Number(el.dataset['jiv']), el);
+    const ng = (window as { ng?: { getListeners?: (el: Element) => { name: string }[] } }).ng;
+    const annotate = (node: ProbeNode): void => {
+      const el = hosts.get(node.Id);
+      if (el) {
+        node.Tag = el.localName;
+        const authored = (el.dataset['jivClass'] ?? '').split(/\s+/).filter(Boolean);
+        node.Classes = [...new Set([...authored, ...node.Classes])];
+        let owner: HTMLElement | null = JAUI_TAGS.has(el.localName) ? el.parentElement : el;
+        while (owner && JAUI_TAGS.has(owner.localName)) owner = owner.parentElement;
+        if (owner) node.Host = owner.localName;
+        const href = el.getAttribute('href') ?? el.getAttribute('ng-reflect-href');
+        if (href) node.Href = href;
+        try { node.Listeners = [...new Set((ng?.getListeners?.(el) ?? []).map(l => l.name))]; } catch { /* dev global absent */ }
+      }
+      for (const child of node.Children) annotate(child);
+    };
+    annotate(snapshot.Root);
+    return snapshot;
+  };
 
   private _teardownKeyboardInset: (() => void) | null = null;
   private _teardownSafeArea: (() => void) | null = null;
