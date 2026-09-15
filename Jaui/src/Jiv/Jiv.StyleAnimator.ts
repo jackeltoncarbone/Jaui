@@ -174,6 +174,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.ProgressiveBlurEasing = target.ProgressiveBlurEasing;
   render.ProgressiveBlurStops = target.ProgressiveBlurStops;
   render.CornerShape = target.CornerShape;
+  render.BorderRadiusRaw = target.BorderRadiusRaw;
   render.BlendMode = target.BlendMode;
   render.ContainBorder = target.ContainBorder;
   render.InnerShadow = target.InnerShadow;

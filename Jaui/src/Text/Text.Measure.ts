@@ -33,10 +33,16 @@ export const PrimeFontInMeasureCtx = (
   ctx.font = prev;
 };
 
+// Chromium caches the resolved face per exact font string for the whole worker, and an entry resolved
+// before a FontFace arrived keeps its fallback in every context. Each font install bumps this, and the
+// bump rides in the size string, a tenth of a thousandth of a pixel at a time, so no string is reused.
+let _fontGeneration = 0;
+export const BumpFontGeneration = (): void => { _fontGeneration++; };
+
 /** Apply style to a 2D context (matches browser font string syntax). */
 export const ApplyTextStyle = (ctx: Ctx2D, style: ResolvedTextStyle, dpr: number = 1): void => {
   const italic = style.FontStyle === 'Italic' ? 'italic ' : '';
-  const size = style.FontSize * dpr;
+  const size = style.FontSize * dpr + _fontGeneration * 1e-4;
   ctx.font = `${italic}${style.FontWeight} ${size}px ${style.FontFamily}`;
   // 'middle' centers the glyph on the draw y-coordinate using the font's
   // em-square middle (midpoint of ascender + descender). Callers pass

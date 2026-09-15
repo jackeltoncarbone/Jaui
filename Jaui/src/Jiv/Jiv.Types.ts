@@ -296,6 +296,8 @@ export interface JivRenderStyle {
   PointScale: number;
 
   BorderRadius: [number, number, number, number];          // tl, tr, br, bl
+  /** The radii as authored, before the smoothness compensation: what decides whether a corner saturates. */
+  BorderRadiusRaw: [number, number, number, number];
   CornerShape: [CornerShape, CornerShape, CornerShape, CornerShape];
   BorderRadiusSmoothness: number;
 

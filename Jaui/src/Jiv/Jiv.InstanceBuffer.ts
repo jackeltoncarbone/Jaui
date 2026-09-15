@@ -203,6 +203,19 @@ export class JivInstanceBuffer {
       data[offset + 5] = xformIndex;
     }
 
+    // The drawn radius carries the smoothness compensation, which on a shallow box lands close to half
+    // the short axis. Whether a corner is a CAPSULE is the author's intent, not a property of that
+    // compensated number, so the shader is handed the authored radius and decides saturation from it.
+    // Capping the drawn radius instead (the previous fix) kept rectangles rectangular but stole the
+    // flare the compensation had just added, so the corner never reached concentric.
+    const halfMin = Math.min(halfW, halfH);
+    const rawMin = Math.min(
+      style.BorderRadiusRaw[0], style.BorderRadiusRaw[1],
+      style.BorderRadiusRaw[2], style.BorderRadiusRaw[3],
+    );
+    // Everything past half the box saturates alike, so clamp before packing and keep the number small.
+    const authoredMin = Math.min(Math.max(rawMin, 0) * avgScale * d, halfMin + 1);
+
     data[offset + 8] = style.BorderRadius[0] * avgScale * d;
     data[offset + 9] = style.BorderRadius[1] * avgScale * d;
     data[offset + 10] = style.BorderRadius[2] * avgScale * d;
@@ -229,7 +242,13 @@ export class JivInstanceBuffer {
     data[offset + 27] = borderWidth;
 
     data[offset + 28] = borderEdgeAa;
-    data[offset + 29] = style.BorderRadiusSmoothness;
+    // Smoothness rides with the authored radius in one float: smoothness is a 0..1 fraction, so the
+    // authored radius sits above it in whole units, in sixteenths of a device pixel. The fragment
+    // shader splits them again in CornerEval. A clip shape passes a bare smoothness and decodes an
+    // authored radius of 0, which is correct for it — the clip encoder flattens smoothness to 0 for
+    // genuinely round shapes and the superellipse draws those exactly.
+    data[offset + 29] = Math.max(0, Math.min(1, style.BorderRadiusSmoothness))
+      + 2 * Math.round(authoredMin * 16);
     // Implicit Presence fade now lives in the default `Opacity: Presence`
     // (Jiv.Defaults) — RenderStyle.Opacity already carries the current
     // spring value. Authors override via `Opacity: 1` for no fade or

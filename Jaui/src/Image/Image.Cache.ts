@@ -17,6 +17,13 @@ export interface ImageEntry {
   Ready: boolean;      // false while loading async
 }
 
+const _HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+const _FETCHABLE_SCHEME = /^(https?|data|blob|file):/i;
+/** Is this source something the network can actually take? A relative path is; so is http/https/data/
+ *  blob/file. `ss-logo:#f09dcc` is NOT — it is an image-cache KEY whose pixels are handed in under that
+ *  key by LoadSvg / LoadBitmap / LoadCanvas, and fetching it can only ever fail. */
+const _isFetchable = (url: string): boolean => !_HAS_SCHEME.test(url) || _FETCHABLE_SCHEME.test(url);
+
 /** Internal — tracks an SVG source so it can be re-rasterized at a new DPR
  *  when the browser zoom / DPR changes. Without this the first rasterization
  *  fixes the texture resolution forever and zoomed-in logos go blurry. */
@@ -34,6 +41,9 @@ export class ImageCache {
    *  from retrying a broken URL every tick (which otherwise spams the console
    *  with thousands of 404s over a few seconds). */
   private _failed = new Set<string>();
+  /** Keys that are not URLs at all (see `_isFetchable`). Held so the per-frame auto-load tests each
+   *  one once rather than re-parsing it every tick. */
+  private _keyed = new Set<string>();
   private _svgSources = new Map<string, _SvgSource>();
   private _lastSvgDpr = new Map<string, number>();
   private _rasterCanvas: OffscreenCanvas | null = null;
@@ -84,6 +94,15 @@ export class ImageCache {
    *  per-frame auto-load doesn't retry. Consumers flip Failed state. */
   set OnLoadFail(callback: ((url: string) => void) | null) { this._onLoadFail = callback; }
 
+  /** A key whose pixels just landed. Clears any Failed verdict left by an earlier fetch and fires
+   *  OnLoadFinish on the TRANSITION only — video frames re-upload under the same key every frame and
+   *  must not walk the tree each time. */
+  private _settle = (key: string, wasReady: boolean): void => {
+    this._failed.delete(key);
+    this._keyed.delete(key);
+    if (!wasReady) this._onLoadFinish?.(key);
+  };
+
   /** Get a cached image entry. Returns null if not cached yet.
    *  Call `Load()` first to trigger async loading. */
   Get = (key: string): ImageEntry | null => {
@@ -102,6 +121,10 @@ export class ImageCache {
     if (this._cache.has(url)) return;
     if (this._loading.has(url)) return;
     if (this._failed.has(url)) return;
+    if (this._keyed.has(url)) return;
+    // An engine KEY, not a URL: its pixels arrive under the key from LoadSvg / LoadBitmap. Fetching it
+    // spends a request and a console error per key, and leaves every Jiv bound to it stuck in Failed.
+    if (!_isFetchable(url)) { this._keyed.add(url); return; }
     // Mark the URL as loading immediately so subsequent LoadUrl calls
     // for the same URL coalesce — even if the actual fetch is sitting
     // in the queue, repeat consumers shouldn't double-enqueue.
@@ -215,6 +238,7 @@ export class ImageCache {
         this._renderer.UploadSubTexture(finalTex, 0, 0, ctx.canvas);
         this._cache.set(key, { Texture: finalTex, Width: pxW, Height: pxH, Ready: true });
         this._lastSvgDpr.set(key, dpr);
+        this._settle(key, existing?.Ready === true);
         this._onLoad?.();
       })
       .catch(err => {
@@ -238,8 +262,10 @@ export class ImageCache {
       // Same dimensions — reuse the GPU texture so the handle (and the Jiv's
       // bound URL) stays identical; only the contents change.
       this._renderer.UploadSubTexture(existing.Texture, 0, 0, bitmap);
+      const wasReady = existing.Ready;
       existing.Ready = true;
       bitmap.close?.();
+      this._settle(key, wasReady);
       this._onLoad?.();
       return;
     }
@@ -247,6 +273,7 @@ export class ImageCache {
     this._renderer.UploadSubTexture(tex, 0, 0, bitmap);
     this._cache.set(key, { Texture: tex, Width: bitmap.width, Height: bitmap.height, Ready: true });
     bitmap.close?.();
+    this._settle(key, false);
     this._onLoad?.();
   };
 
@@ -258,6 +285,7 @@ export class ImageCache {
     const tex = this._renderer.CreateTexture(canvas.width, canvas.height);
     this._renderer.UploadSubTexture(tex, 0, 0, canvas);
     this._cache.set(key, { Texture: tex, Width: canvas.width, Height: canvas.height, Ready: true });
+    this._settle(key, false);
   };
 
   /** Remove a cached entry. */
@@ -266,6 +294,7 @@ export class ImageCache {
     this._svgSources.delete(key);
     this._lastSvgDpr.delete(key);
     this._failed.delete(key);
+    this._keyed.delete(key);
   };
 
   /** Clear all cached entries. */
@@ -274,6 +303,7 @@ export class ImageCache {
     this._svgSources.clear();
     this._lastSvgDpr.clear();
     this._failed.clear();
+    this._keyed.clear();
   };
 
   private _getRasterCtx = (): OffscreenCanvasRenderingContext2D => {

@@ -9,7 +9,7 @@ import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
 import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intrinsic';
 import { TextCache } from '../Text/Text.Cache';
-import { MeasureText } from '../Text/Text.Measure';
+import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
@@ -2174,6 +2174,7 @@ export class Canvas implements DirtyTracker {
     // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
     if (!this._headless) {
       r.PresentScene();
+      if (_firstFrameHook) { const hook = _firstFrameHook; _firstFrameHook = null; hook(); }
       // Screenshot capture: read the freshly-presented swap chain BEFORE the
       // transient discard below (the back buffer isn't preserved between frames).
       if (this._pendingCapture) {
@@ -2413,10 +2414,14 @@ export class Canvas implements DirtyTracker {
     const h = cy * node.Height;
     const avgScale = (cx + cy) * 0.5;
     const maxR = Math.min(w, h) / 2;
-    const rtl = Math.min(radii[0] * avgScale, maxR);
-    const rtr = Math.min(radii[1] * avgScale, maxR);
-    const rbr = Math.min(radii[2] * avgScale, maxR);
-    const rbl = Math.min(radii[3] * avgScale, maxR);
+    // The clip draws the panel's corner verbatim — the compensated radius, clamped to half the box. It
+    // needs no saturation rule of its own: fullyRounded below flattens smoothness to 0 for genuinely
+    // round shapes, and the superellipse at n = 2 is then an exact circle or stadium.
+    const corner = (i: number): number => Math.min(radii[i] * avgScale, maxR);
+    const rtl = corner(0);
+    const rtr = corner(1);
+    const rbr = corner(2);
+    const rbl = corner(3);
     // If every corner is fully rounded (radii saturate at half-dim), the
     // shape is a circle/pill. Force smoothness=0 so the clip's superellipse
     // collapses to n=2 — otherwise the default 0.3 paints a squircle that
@@ -3634,6 +3639,7 @@ export class Canvas implements DirtyTracker {
    *     (intrinsic widths may shift)
    *   - mark layout dirty so reflow propagates */
   private _invalidateAllText = (): void => {
+    BumpFontGeneration();
     this._textCache.Clear();
     let needsKick = false;
     for (const anim of this._textAnimators.values()) {
@@ -4010,6 +4016,10 @@ export class Canvas implements DirtyTracker {
  * For low-level primitives (instance buffers, scroll manager, dirty flags)
  * reach the underlying `Canvas` via `.Canvas`.
  */
+/** Runs once, right after the first frame is presented: a trace mark for the first paint. */
+let _firstFrameHook: (() => void) | null = null;
+export const OnFirstFrame = (hook: () => void): void => { _firstFrameHook = hook; };
+
 export class Jaui {
   /** The underlying canvas — exposed for low-level access. */
   readonly Canvas: Canvas;

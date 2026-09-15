@@ -15,7 +15,7 @@ import type { Canvas } from '../Core/Jaui';
 import { WorkerPlatform, type WorkerPlatformInit } from './Worker.Platform';
 import type { JivRegistry } from './Jiv.Registry';
 import { PrimeFontInSharedCtx } from '../Text/Text.WordLayout';
-import { PrimeFontInMeasureCtx } from '../Text/Text.Measure';
+import { BumpFontGeneration, PrimeFontInMeasureCtx } from '../Text/Text.Measure';
 import {
   isMessage,
   type M2W,
@@ -203,6 +203,7 @@ export class WorkerBridge {
       // throwaway OffscreenCanvas wouldn't cover them.
       PrimeFontInSharedCtx(m.Family, weight, style);
       PrimeFontInMeasureCtx(m.Family, weight, style);
+      BumpFontGeneration();
       // Per-font-face load log used to print here on every webfont arrival —
       // 25+ lines per cold load. Removed unconditionally; if a font fails
       // to load, the canvas falls back to the next family in the stack and

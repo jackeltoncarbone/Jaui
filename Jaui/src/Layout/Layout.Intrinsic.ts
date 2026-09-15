@@ -302,7 +302,13 @@ const _simulateWrapCrossSize = (
     if (c.ChildLayout.Position === 'Placed' || c.ChildLayout.Position === 'Fixed') continue;
     if (c.LeaveRequested) continue;
     const childCtx = c.ResolveCtx!;
-    const explicitW = _intrinsicOf(c.ChildLayout.Width, childCtx, 'W');
+    // A percentage width bin-packs against the budget it will resolve against; falling back to the intrinsic
+    // width let a card whose words ran long take a whole line, and the parent kept that height.
+    const rawW = c.ChildLayout.Width;
+    const percentW = typeof rawW === 'string' && rawW.includes('%') && horiz
+      ? Resolve(rawW, { ...childCtx, ParentWidth: mainBudget }, 'W')
+      : null;
+    const explicitW = percentW ?? _intrinsicOf(c.ChildLayout.Width, childCtx, 'W');
     const explicitH = _intrinsicOf(c.ChildLayout.Height, childCtx, 'H');
     // Same Min/Max clamp as the main intrinsic loop — wrap simulation must
     // see the post-clamp size or it bin-packs against an unbounded child.

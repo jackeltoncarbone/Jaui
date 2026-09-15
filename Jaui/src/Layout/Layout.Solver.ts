@@ -682,9 +682,11 @@ const _simulateWrapHeight = (
     const childCtx = c.ResolveCtx ?? rowCtx;
     const rawW = c.ChildLayout.Width;
     const rawH = c.ChildLayout.Height;
+    // A percentage width is known here too: the row's inner width is the parent width it refers to. Left
+    // unresolved it fell back to the intrinsic width, and a card whose words ran long took a whole line.
     const explicitW = typeof rawW === 'number' ? rawW
-      : (rawW === 'Auto' || rawW === 'MinContent' || rawW === 'MaxContent' || rawW.includes('%')) ? null
-      : Resolve(rawW, childCtx, 'W');
+      : (rawW === 'Auto' || rawW === 'MinContent' || rawW === 'MaxContent') ? null
+      : Resolve(rawW, rawW.includes('%') ? { ...childCtx, ParentWidth: innerMain } : childCtx, 'W');
     const explicitH = typeof rawH === 'number' ? rawH
       : (rawH === 'Auto' || rawH === 'MinContent' || rawH === 'MaxContent' || rawH.includes('%')) ? null
       : Resolve(rawH, childCtx, 'H');

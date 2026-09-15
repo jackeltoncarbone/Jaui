@@ -41,6 +41,11 @@ class CanvasImagesProxy {
   LoadUrl = (url: string, dpr: number = 1): void => {
     this._bridge.PostMessage({ T: 'image-url', Url: url, Dpr: dpr });
   };
+  /** Hand a ready bitmap to the worker under `key`; a second call with the same key and size replaces the
+   *  pixels in place, which is how a video frame reaches the canvas. The bitmap is consumed. */
+  LoadBitmap = (key: string, bitmap: ImageBitmap): void => {
+    this._bridge.PostMessage({ T: 'image-bitmap', Key: key, Bitmap: bitmap });
+  };
   LoadSvg = (key: string, svg: string, width: number, height: number, dpr: number = 1): void => {
     // SVG decoding via `createImageBitmap` doesn't work in Chrome workers
     // (DOM-only). Rasterize here on the main thread using a real <img> +

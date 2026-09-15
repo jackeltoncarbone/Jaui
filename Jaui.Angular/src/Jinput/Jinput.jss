@@ -75,7 +75,10 @@ JinputHandleKnob {
   Background: rgba(255, 255, 255, 1)
   BorderRadius: 6px
   Layer: 6
-  Shadow: 0 1px 3px rgba(0, 0, 0, 0.35)
+  // Was `Shadow: 0 1px 3px rgba(...)`, a CSS shorthand and not a JSS property, so it never drew.
+  ShadowOffsetY: 1px
+  ShadowBlur: 3px
+  ShadowColor: rgba(0, 0, 0, 0.35)
 }
 
 JinputCaret {
