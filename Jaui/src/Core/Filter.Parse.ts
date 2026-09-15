@@ -20,6 +20,11 @@
  *     `Blur(16pt) Brightness(1.25)` + ` Brightness(2)` parses to
  *     blur 16pt + brightness 2 (the base blur persists, brightness overridden).
  *   • `None` / empty string → all identity.
+ *   • A grade argument may be a length expression over vars (`Contrast(0.6 * @Dark + 1 * @Light)`); the
+ *     StyleResolver evaluates it to a number under the live context before this parse.
+ *   • The grade APPLIES in one fixed physical order, not the authored one: Contrast, then Saturate,
+ *     then Brightness (the shaders' applyGrading). Contrast compresses the range first (readability),
+ *     so a Brightness below 1 then scales toward black instead of being pulled back toward grey.
  *
  * The grade args are parsed to numbers here; `Blur`'s arg is kept as a raw
  * Length string (`BlurRaw`) so the StyleResolver can resolve it under the

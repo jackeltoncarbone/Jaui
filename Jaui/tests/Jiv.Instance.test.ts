@@ -46,9 +46,9 @@ describe('JivInstanceBuffer (single unified renderer for every Jiv)', () => {
     expect(d[38]).toBeCloseTo(LiquidGlass.Refraction!);
     expect(d[39]).toBeCloseTo(LiquidGlass.BezelScale!);
 
-    // loc 11 a_Lighting
-    expect(d[40]).toBeCloseTo(Math.cos((LiquidGlass.LightAngle!) * Math.PI / 180), 2);
-    expect(d[41]).toBeCloseTo(-Math.sin((LiquidGlass.LightAngle!) * Math.PI / 180), 2);
+    // loc 11 a_Lighting: the light as its angle in radians, then the signed body tint (none on this preset)
+    expect(d[40]).toBeCloseTo((LiquidGlass.LightAngle!) * Math.PI / 180, 2);
+    expect(d[41]).toBeCloseTo(0);
     expect(d[42]).toBeCloseTo(LiquidGlass.LightIntensity!);
     expect(d[43]).toBeCloseTo(LiquidGlass.FresnelStrength!);
 

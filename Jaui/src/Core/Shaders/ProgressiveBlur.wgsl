@@ -161,10 +161,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let brightness = mix(1.0, uniforms.grading.x, ramp);
   let saturation = mix(1.0, uniforms.grading.y, ramp);
   let contrast = mix(1.0, uniforms.grading.z, ramp);
-  rgb *= brightness;
+  // Contrast, saturation, brightness: the panel shaders' grade order, so darkening lands toward black.
+  rgb = (rgb - 0.5) * contrast + 0.5;
   let luma = dot(rgb, vec3f(0.299, 0.587, 0.114));
   rgb = mix(vec3f(luma), rgb, saturation);
-  rgb = (rgb - 0.5) * contrast + 0.5;
+  rgb *= brightness;
 
   // Background tint — mixed in proportional to ramp so clear end shows none.
   let bg_mix = uniforms.background.a * ramp;

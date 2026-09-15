@@ -105,6 +105,36 @@ const _edgeStops = (featherRaw: string | null, easing: number): BlurStop[] => {
   ];
 };
 
+/** The environment var the host publishes for the active theme: `1` in dark, `0` in light. Jaui.Angular's
+ *  `<jaui>` keeps it always defined (with its `@Light` twin). Unpublished reads as dark, the app's ground. */
+export const THEME_DARK_VAR = 'Dark';
+/** The 0/1 twin of THEME_DARK_VAR, so a sheet can weight a light value without writing (1 - @Dark). */
+export const THEME_LIGHT_VAR = 'Light';
+
+const _GRADE_FN = /(Brightness|Saturate|Contrast)\s*\(([^()]*)\)/gi;
+
+/** A grade argument may be a length expression over vars, so a material can state its per-theme grade in
+ *  one line: `Contrast(0.6 * @Dark + 1 * @Light)`. Those arguments are evaluated to numbers here, before the
+ *  filter parse (which caches by string and reads plain numbers). Literal filters pass through untouched. */
+const _resolveGradeArgs = (raw: string, ctx: ResolveContext): string => {
+  if (raw.indexOf('@') < 0) return raw;
+  return raw.replace(_GRADE_FN, (whole, fn: string, arg: string) =>
+    arg.indexOf('@') < 0 ? whole : `${fn}(${Resolve(arg.trim(), ctx, 'W')})`);
+};
+
+/** `Tint` + `TintTone` → the signed tint the shader reads: negative toward black, positive toward white. */
+const _resolveTint = (s: JivStyle, ctx: ResolveContext): number => {
+  const strength = Math.max(0, Math.min(1, Resolve(ResolveTernary(s.Tint, ctx), ctx, 'W')));
+  if (strength === 0) return 0;
+  const dark = parseFloat(ctx.Vars?.get(THEME_DARK_VAR) ?? '1') >= 0.5;
+  switch (ResolveTernary(s.TintTone, ctx)) {
+    case 'Dark':  return -strength;
+    case 'Light': return strength;
+    case 'Ink':   return dark ? strength : -strength;
+    default:      return dark ? -strength : strength;
+  }
+};
+
 const _inferMaterial = (thickness: number, direction: ProgressiveBlurDirection | null): MaterialType => {
   if (direction !== null) return 'ProgressiveBlur';
   if (thickness > 0) return 'LiquidGlass';
@@ -138,9 +168,9 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // the per-zone scalar render fields the shader already consumes. Blur()'s
   // arg stays a Length and resolves under ctx (frost px for BackdropFilter,
   // LOD octave offset for BorderFilter); a missing Blur() = 0.
-  const fg = ParseFilter(ResolveTernary(s.Filter, ctx), 'foreground');
-  const backdrop = ParseFilter(ResolveTernary(s.BackdropFilter, ctx));
-  const border = ParseFilter(ResolveTernary(s.BorderFilter, ctx));
+  const fg = ParseFilter(_resolveGradeArgs(ResolveTernary(s.Filter, ctx), ctx), 'foreground');
+  const backdrop = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BackdropFilter, ctx), ctx));
+  const border = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BorderFilter, ctx), ctx));
   const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
   // A gradient-driven blur spectrum implies the ProgressiveBlur material and the
   // ramp axis on its own, so the author doesn't also need ProgressiveBlurDirection.
@@ -200,6 +230,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     Thickness: thickness,
     Fillet: Resolve(s.Fillet, ctx, 'W'),
     Refraction: Resolve(s.Refraction, ctx, 'W'),
+    Tint: _resolveTint(s, ctx),
     BackdropBrightness: backdrop.Brightness,
     BackdropSaturation: backdrop.Saturation,
     BackdropContrast: backdrop.Contrast,

@@ -12,6 +12,8 @@ import {
 import {
   MainBridge,
   CanvasProxy,
+  THEME_DARK_VAR,
+  THEME_LIGHT_VAR,
   type ParsedJss,
   type Stylesheet,
 } from 'jaui';
@@ -77,6 +79,12 @@ export class Jaui implements OnInit, OnDestroy {
   /** Default for the semantic-mirror cascade — descendants without their own
    *  `seo` input inherit this. Subtrees flip themselves off with `[seo]="false"`. */
   readonly seo = input<boolean>(true);
+  /** The active theme, fed by the host (Show Studio's ThemeMode). Published as the `@Dark` / `@Light`
+   *  environment vars, which a glass `TintTone: Ground` reads. Defaults to dark until the host says. */
+  readonly dark = input<boolean>(true);
+  /** Host environment vars, published through the same SetVar path as the insets. A theme hands its colour
+   *  tokens in here, so a sheet's `@Ink` re-resolves live when the theme flips. */
+  readonly vars = input<Readonly<Record<string, string>>>({});
   readonly ready = output<CanvasProxy>();
 
   /** Main-thread proxy for the worker-side Canvas. Children inject this
@@ -134,6 +142,23 @@ export class Jaui implements OnInit, OnDestroy {
     effect(() => {
       this._registry.Version();
       this.Canvas.SetJssVars(this._registry.Vars);
+    });
+
+    // ENVIRONMENT THEME: `@Dark` and its `@Light` twin, published like the insets below and always defined
+    // (dark until the host feeds its theme in), so a sheet can weight a value per theme unconditionally:
+    // `0.45 * @Dark + 0.5 * @Light`. JSS has no conditionals, so the twin is what spares `(1 - @Dark)`.
+    // The theme LOGIC stays with the host; this only carries it to the engine. `vars` rides the same path,
+    // and both are runtime vars, so a sheet that mounts later can never put the other theme's value back.
+    this._registry.SetVar(THEME_DARK_VAR, '1');
+    this._registry.SetVar(THEME_LIGHT_VAR, '0');
+    effect(() => {
+      const dark = this.dark();
+      this._registry.SetVar(THEME_DARK_VAR, dark ? '1' : '0');
+      this._registry.SetVar(THEME_LIGHT_VAR, dark ? '0' : '1');
+    });
+    effect(() => {
+      const vars = this.vars();
+      for (const name of Object.keys(vars)) this._registry.SetVar(name, vars[name]);
     });
 
     // ENVIRONMENT INSET: `@KeyboardInset` is always defined — 0px until a real

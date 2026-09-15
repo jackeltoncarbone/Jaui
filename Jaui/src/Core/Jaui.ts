@@ -45,7 +45,8 @@ const _hasBackdropFilter = (node: Jiv): boolean => {
   return Math.abs(s.BackdropBrightness - 1) > 0.001
     || Math.abs(s.BackdropSaturation - 1) > 0.001
     || Math.abs(s.BackdropContrast - 1) > 0.001
-    || s.BackdropFrostBlur > 0.001;
+    || s.BackdropFrostBlur > 0.001
+    || Math.abs(s.Tint) > 0.001;
 };
 import { DirtyFlag } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
@@ -115,6 +116,11 @@ export class Canvas implements DirtyTracker {
   /** Nodes already warned about non-finite layout results (one warn per node). */
   private _nonFiniteWarned = new WeakSet<JauiElement>();
   private _styleAnimators = new Map<Jiv, JivStyleAnimator>();
+  /** Set by SetJssVars. The next layout hands every node a context carrying the new var table, and only
+   *  THEN are the style animators woken: a colour or tint that reads a var (a theme flip) moves only when
+   *  its animator resolves again, and a settled animator sleeps. Waking before that layout would spend the
+   *  wake resolving against the old table, and the animator would sleep through the flip. */
+  private _varsChangedSinceLayout = false;
   private _textAnimators = new Map<JauiElement, TextAnimator>();
   // Vector-SVG paint lives on the node (Element.SvgVector), set by the SvgJiv
   // binding's svg-set op. This is the cache of resolved fill colors by raw string.
@@ -473,6 +479,7 @@ export class Canvas implements DirtyTracker {
       ? new Map(vars)
       : new Map(Object.entries(vars));
     this.Root.MarkLayoutDirty();
+    this._varsChangedSinceLayout = true;
     this._animationManager.Kick();
   };
 
@@ -956,6 +963,11 @@ export class Canvas implements DirtyTracker {
         while (p) { p.Dirty &= ~DirtyFlag.Layout; p = p.Parent; }
       }
       this._dirtyNodes.clear();
+    }
+    if (this._varsChangedSinceLayout && layoutDirty) {
+      this._varsChangedSinceLayout = false;
+      for (const styleAnimator of this._styleAnimators.values()) styleAnimator.Wake();
+      this._animationManager.Kick();
     }
     if (hud) tLayoutEnd = performance.now();
 
@@ -4153,6 +4165,7 @@ export { ParseJss, MergeRulesets } from '../Jss/Jss.Parser';
 export type { Stylesheet, Ruleset, ParsedJss, VarTable, AnimationTable, PredicateExpr, PredicateStyle } from '../Jss/Jss.Parser';
 export { EvaluatePredicate } from '../Jss/Jss.Predicate';
 export { SlotFor, type Slot } from '../Jss/Jss.Routes';
+export { THEME_DARK_VAR, THEME_LIGHT_VAR } from './Style.Resolver';
 
 // SVG vector renderer — the SvgJiv binding parses a DOM <svg> + tessellates on the
 // main thread, then ships the geometry to the worker via JivHandle.SetSvgVector.

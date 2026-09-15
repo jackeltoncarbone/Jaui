@@ -103,10 +103,17 @@ export class JssRegistry {
    *  references `@Name` — e.g. a glass class authored as `Background: @GlassTint` retints live. Pass the
    *  same value twice and it no-ops (no needless re-resolve). */
   SetVar = (name: string, value: string): void => {
+    this._runtimeVars.add(name);
     if (this._vars.get(name) === value) return;
     this._vars.set(name, value);
     this._version.update((v) => v + 1);
   };
+
+  /** Names set at runtime through SetVar. A sheet's `@Name: value` is that name's authored DEFAULT, so a
+   *  sheet merged later (a lazily loaded component registering its styles) never overwrites a value the
+   *  host has already set: without this, the first sheet to mount after a theme flip would put the old
+   *  theme's value back. */
+  private _runtimeVars = new Set<string>();
 
   /** Add (or replace) a parsed sheet's contents (+ its var declarations)
    *  in this registry. */
@@ -145,6 +152,7 @@ export class JssRegistry {
       }
     }
     for (const [name, value] of Object.entries(vars)) {
+      if (this._runtimeVars.has(name)) continue;
       this._vars.set(name, value);
     }
     for (const [name, def] of Object.entries(anims)) {

@@ -15,7 +15,7 @@ flat in vec4 v_StyleParams;    // borderEdgeAa, smoothness, opacity, brightness 
                                // borderEdgeAa: half-width of border/silhouette feather (physical px)
 flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
 flat in vec4 v_Refraction;     // thickness, bezelWidth, refractionStrength, bezelScale
-flat in vec4 v_Lighting;       // lightDirX, lightDirY, lightIntensity, fresnelStrength
+flat in vec4 v_Lighting;       // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
 flat in vec4 v_Specular;       // specIntensity, specSharpness, chromaticAberration, innerBlur
 flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance, bulge
 flat in vec4 v_Outline;        // borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount
@@ -574,12 +574,21 @@ void ShapeEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode,
 // Rec. 709 luma
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
+// Grade order is contrast, saturation, brightness, whatever order the author wrote them in.
+// Contrast compresses the backdrop's range first (the readability guarantee), saturation puts back
+// the colour the compression took, and brightness scales LAST, so darkening lands toward black.
+// Contrast last pulled a darkened backdrop back up toward its 0.5 pivot: the grey wash.
 vec3 applyGrading(vec3 color, float brightness, float saturation, float contrast) {
-    color *= brightness;
+    color = (color - 0.5) * contrast + 0.5;
     float luma = dot(color, LUMA);
     color = mix(vec3(luma), color, saturation);
-    color = (color - 0.5) * contrast + 0.5;
-    return color;
+    return color * brightness;
+}
+
+// The glass body's neutral pigment, after the grade: negative pulls toward black, positive toward
+// white, by |tint|. A mix toward black keeps the hue exactly; there is no grey anywhere on the path.
+vec3 applyTint(vec3 color, float tint) {
+    return mix(color, vec3(step(0.0, tint)), abs(tint));
 }
 
 // Sample the backdrop at per-Jiv blur strength. When the effective LOD is
@@ -725,7 +734,8 @@ void main() {
     float refractionStrength = v_Refraction.z;
     float bezelScale = max(v_Refraction.w, 0.05);
 
-    vec2 lightDir = v_Lighting.xy;
+    vec2 lightDir = vec2(cos(v_Lighting.x), -sin(v_Lighting.x));
+    float bodyTint = v_Lighting.y;
     float lightIntensity = v_Lighting.z;
     float fresnelStrength = v_Lighting.w;
 
@@ -812,7 +822,8 @@ void main() {
     bool hasBackdropFilter = abs(brightness - 1.0) > 0.001
         || abs(saturation - 1.0) > 0.001
         || abs(contrast - 1.0) > 0.001
-        || frostLod > u_BaseFrostLod + 0.001;
+        || frostLod > u_BaseFrostLod + 0.001
+        || abs(bodyTint) > 0.001;
 
     // Continuous glass intensity. Drives every rim/inner effect that would
     // otherwise pop on/off when Thickness flips between 0 and >0 (since the
@@ -928,11 +939,11 @@ void main() {
             backdrop = vec3(sR.r, sG.g, sB.b);
         }
 
-        backdrop = applyGrading(backdrop, brightness, saturation, contrast);
+        backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);
     } else if (hasBackdropFilter) {
         // Flat panel backdrop sampling — no refraction, no CA, no rim boost.
         vec3 s = sampleBackdrop(baseUv, 0.0, frostLod);
-        backdrop = applyGrading(s, brightness, saturation, contrast);
+        backdrop = applyTint(applyGrading(s, brightness, saturation, contrast), bodyTint);
     }
 
     // ── Beer-Lambert tint (multiplicative absorption) ──
@@ -1243,12 +1254,14 @@ void main() {
             float borderInset = (max(bezelWidth * 0.75, 6.0) * 1.2 + localBorderWidth) * solidness;
             vec2 bUv = straightUv + vec2(-normal.x, normal.y) * (borderInset / u_Resolution);
             vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);
-            vec3 borderBackdrop = applyGrading(
+            // The rim looks through the same slab as the body, so it carries the body's tint: a rim
+            // brighter than the body stays brighter in both themes, lifted by BorderFilter and BorderColor.
+            vec3 borderBackdrop = applyTint(applyGrading(
                 bSample,
                 brightness * v_BorderFilter.x,
                 saturation * v_BorderFilter.y,
                 contrast * v_BorderFilter.z
-            );
+            ), bodyTint);
 
             // Optional tint stroke from BorderColor — alpha controls strength
             // of the colored overlay on top of the refiltered backdrop.

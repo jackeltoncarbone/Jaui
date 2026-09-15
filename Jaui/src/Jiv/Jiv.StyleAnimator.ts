@@ -54,6 +54,8 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['Thickness',              s => s.Thickness,                    (s, v) => { s.Thickness = v; }],
   ['Fillet',                 s => s.Fillet,                       (s, v) => { s.Fillet = v; }],
   ['Refraction',             s => s.Refraction,                   (s, v) => { s.Refraction = v; }],
+  // Signed, so a theme flip springs dark tint → clear → light tint and never passes through grey.
+  ['Tint',                   s => s.Tint,                         (s, v) => { s.Tint = v; }],
 
   // Backdrop filter — every channel springs under the `BackdropFilter`
   // bucket, so `@Transition BackdropFilter { ... }` tunes them together.

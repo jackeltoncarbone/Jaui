@@ -30,7 +30,7 @@ struct JivInstance {
   style_params: vec4f,   // borderEdgeAa, smoothness, opacity, materialType
   grading: vec4f,        // brightness, saturation, contrast, frostLod
   refraction: vec4f,     // thickness, bezelWidth, refractionStrength, bezelScale
-  lighting: vec4f,       // lightDirX, lightDirY, lightIntensity, fresnelStrength
+  lighting: vec4f,       // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
   specular: vec4f,       // specIntensity, specSharpness, chromaticAberration, innerBlur
   rim_edge: vec4f,       // edgeLightTop, edgeLightBottom, borderVariance, bulge
   outline: vec4f,        // borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount
@@ -384,12 +384,19 @@ fn shape_eval(p: vec2f, half_size: vec2f, radii: vec4f, smoothness: f32, mode: i
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+// Grade order is contrast, saturation, brightness, as Jiv.Panel.frag's applyGrading (the two must agree):
+// contrast compresses first, saturation restores the colour, brightness scales last so darkening lands
+// toward black instead of being pulled back toward the 0.5 contrast pivot.
 fn apply_grading(color_in: vec3f, brightness: f32, saturation: f32, contrast: f32) -> vec3f {
-  var color = color_in * brightness;
+  var color = (color_in - 0.5) * contrast + 0.5;
   let luma = dot(color, LUMA);
   color = mix(vec3f(luma), color, saturation);
-  color = (color - 0.5) * contrast + 0.5;
-  return color;
+  return color * brightness;
+}
+
+// The glass body's neutral pigment: negative toward black, positive toward white, by |tint|.
+fn apply_tint(color: vec3f, tint: f32) -> vec3f {
+  return mix(color, vec3f(step(0.0, tint)), abs(tint));
 }
 
 fn sample_backdrop(uv: vec2f, extra_lod: f32, frost_lod: f32) -> vec3f {
@@ -430,7 +437,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let refraction_strength = inst.refraction.z;
   let bezel_scale = max(inst.refraction.w, 0.05);
 
-  let light_dir = inst.lighting.xy;
+  let light_dir = vec2f(cos(inst.lighting.x), -sin(inst.lighting.x));
+  let body_tint = inst.lighting.y;
   let light_intensity = inst.lighting.z;
   let fresnel_strength = inst.lighting.w;
 
@@ -476,7 +484,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let has_backdrop_filter = abs(brightness - 1.0) > 0.001
     || abs(saturation - 1.0) > 0.001
     || abs(contrast - 1.0) > 0.001
-    || frost_lod > uniforms.base_frost_lod + 0.001;
+    || frost_lod > uniforms.base_frost_lod + 0.001
+    || abs(body_tint) > 0.001;
 
   if (material_type == 1.0) {
     let tangent = vec2f(-normal.y, normal.x);
@@ -510,10 +519,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let s_g = sample_backdrop(base_uv, lod_boost, frost_lod);
     let s_b = sample_backdrop(vec2f(uv_b.x, 1.0 - uv_b.y), lod_boost, frost_lod);
     backdrop_rgb = vec3f(s_r.r, s_g.g, s_b.b);
-    backdrop_rgb = apply_grading(backdrop_rgb, brightness, saturation, contrast);
+    backdrop_rgb = apply_tint(apply_grading(backdrop_rgb, brightness, saturation, contrast), body_tint);
   } else if (has_backdrop_filter) {
     let s = sample_backdrop(base_uv, 0.0, frost_lod);
-    backdrop_rgb = apply_grading(s, brightness, saturation, contrast);
+    backdrop_rgb = apply_tint(apply_grading(s, brightness, saturation, contrast), body_tint);
   }
 
   // Beer-Lambert tint
@@ -664,12 +673,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     if (border_base > 0.001) {
       let b_lod = max(0.0, lod_boost + inst.border_filter.w);
       let b_sample = sample_backdrop(base_uv, b_lod, frost_lod);
-      let border_backdrop = apply_grading(
+      let border_backdrop = apply_tint(apply_grading(
         b_sample,
         brightness * inst.border_filter.x,
         saturation * inst.border_filter.y,
         contrast * inst.border_filter.z,
-      );
+      ), body_tint);
       let light_facing = max(alignment, 0.0);
       let alpha_floor = 1.0 - inst.outline.x;
       let stroke_brightness = mix(alpha_floor, 1.0, pow(light_facing, 2.0));

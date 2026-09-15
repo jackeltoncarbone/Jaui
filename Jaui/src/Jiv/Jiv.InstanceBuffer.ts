@@ -27,7 +27,9 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 //          repurposed to the foreground Brightness multiplier.
 //   loc  9: a_Grading      (brightness, saturation, contrast, frostLod)
 //   loc 10: a_Refraction   (thickness, bezelWidth, refractionStrength, bezelScale)
-//   loc 11: a_Lighting     (lightDirX, lightDirY, lightIntensity, fresnelStrength)
+//   loc 11: a_Lighting     (lightAngle rad, bodyTint, lightIntensity, fresnelStrength)
+//          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
+//          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur + borderFade packed)
 //   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, bulge)
 //   loc 14: a_Outline      (borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount)
@@ -277,9 +279,8 @@ export class JivInstanceBuffer {
     data[offset + 38] = style.Refraction;
     data[offset + 39] = style.BezelScale;
 
-    const rad = style.LightAngle * (Math.PI / 180);
-    data[offset + 40] = Math.cos(rad);
-    data[offset + 41] = -Math.sin(rad);
+    data[offset + 40] = style.LightAngle * (Math.PI / 180);
+    data[offset + 41] = style.Tint;
     data[offset + 42] = style.LightIntensity;
     data[offset + 43] = style.FresnelStrength;
 
@@ -327,6 +328,7 @@ export class JivInstanceBuffer {
       data[offset + 33] = 1;  // BackdropSaturation → identity
       data[offset + 34] = 1;  // BackdropContrast → identity
       data[offset + 35] = 0;  // frost LOD → no backdrop sample
+      data[offset + 41] = 0;  // body Tint → the stroke quad tints nothing
     } else if (borderMode === 'GlassBorderOnly') {
       // Glass rim over children: keep Thickness + the backdrop filter (the rim
       // samples the REAL backdrop), zero only fill + shadow, and set the

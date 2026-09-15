@@ -66,6 +66,12 @@ export type MaterialType = 'None' | 'LiquidGlass' | 'ProgressiveBlur';
  *  opposite edge is fully clear (unblurred scene shows through). */
 export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRight';
 
+/** Which neutral a glass body's `Tint` pulls its backdrop toward.
+ *    • Ground: the active theme's ground, black in dark and white in light. The material default.
+ *    • Ink:    the opposite neutral, white in dark and black in light (a selection or highlight).
+ *    • Dark / Light: always black / always white, whatever the theme (glass over video or a camera). */
+export type TintTone = 'Ground' | 'Ink' | 'Dark' | 'Light';
+
 export type BlendMode =
   | 'Normal' | 'Multiply' | 'Screen' | 'Overlay'
   | 'Darken' | 'Lighten' | 'ColorDodge' | 'ColorBurn'
@@ -178,6 +184,14 @@ export interface JivStyle {
   Thickness: string;
   Fillet: string;
   Refraction: string;
+  /** The body's neutral pigment, 0..1: how far the graded backdrop is pulled toward the `TintTone`
+   *  neutral. Applied after the BackdropFilter grade and before the Background fill, so it is the
+   *  dimming (or lightening) layer of the material, not a colour. A length expression, so
+   *  `0.3 * @Dark + 0.4 * @Light` gives a material its own strength per theme. Default 0. A
+   *  control with its own colour (an accent CTA) sets `Tint: 0` and paints its Background. */
+  Tint: string;
+  /** Which neutral `Tint` pulls toward. Default `Ground` (black in dark, white in light). */
+  TintTone: TintTone;
 
   // Refraction band geometry
   BezelWidth: string;
@@ -309,6 +323,9 @@ export interface JivRenderStyle {
   Thickness: number;
   Fillet: number;
   Refraction: number;
+  /** Signed body tint: negative pulls toward black, positive toward white, magnitude = strength.
+   *  Signed so a theme flip springs through clear glass rather than through grey. */
+  Tint: number;
   BackdropBrightness: number;
   BackdropSaturation: number;
   BackdropContrast: number;

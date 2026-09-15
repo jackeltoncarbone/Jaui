@@ -24,6 +24,8 @@ export const DefaultJivStyle: JivStyle = {
   Thickness: '0',
   Fillet: '0',
   Refraction: '0',
+  Tint: '0',
+  TintTone: 'Ground',
   BezelWidth: '12',
   BezelScale: '0.35',
   LightAngle: '-45',

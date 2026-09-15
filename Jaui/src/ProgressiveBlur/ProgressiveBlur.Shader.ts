@@ -380,10 +380,11 @@ void main() {
     float brightness = mix(1.0, u_Grading.x, ramp);
     float saturation = mix(1.0, u_Grading.y, ramp);
     float contrast   = mix(1.0, u_Grading.z, ramp);
-    rgb *= brightness;
+    // Contrast, saturation, brightness: the panel shaders' grade order, so darkening lands toward black.
+    rgb = (rgb - 0.5) * contrast + 0.5;
     float luma = dot(rgb, vec3(0.299, 0.587, 0.114));
     rgb = mix(vec3(luma), rgb, saturation);
-    rgb = (rgb - 0.5) * contrast + 0.5;
+    rgb *= brightness;
 
     // Background tint — mixed in with alpha = authored alpha × ramp so the
     // clear end shows none of the background and the blurred end shows the
