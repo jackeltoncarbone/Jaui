@@ -121,6 +121,8 @@ export const LayoutWords = (
   let currentLine = 0;
   let charBase = 0; // running offset into the original content
   let maxLinesHit = false;
+  // Words were left out because MaxLines was reached.
+  let truncated = false;
   for (let p = 0; p < paragraphs.length; p++) {
     if (maxLinesHit) break;
     const paragraph = paragraphs[p];
@@ -139,7 +141,7 @@ export const LayoutWords = (
         currentLine++;
       }
 
-      if (style.MaxLines !== null && currentLine >= style.MaxLines) { maxLinesHit = true; break; }
+      if (style.MaxLines !== null && currentLine >= style.MaxLines) { maxLinesHit = true; truncated = true; break; }
 
       positions.push({
         Content: word,
@@ -167,7 +169,7 @@ export const LayoutWords = (
         lineStart = positions.length;
       }
       if (nextHasContent) {
-        if (style.MaxLines !== null && currentLine + 1 >= style.MaxLines) { maxLinesHit = true; }
+        if (style.MaxLines !== null && currentLine + 1 >= style.MaxLines) { maxLinesHit = true; truncated = true; }
         currentX = 0;
         currentY += lineHeight;
         currentLine++;
@@ -180,6 +182,14 @@ export const LayoutWords = (
   // closed it at a paragraph boundary).
   if (positions.length > lineStart) {
     lineRanges.push({ start: lineStart, end: positions.length - 1, width: currentX - spaceWidth });
+  }
+
+  // Text cut by MaxLines, or a last line wider than the box, ends in an ellipsis on its last line.
+  if (style.TextOverflow === 'Ellipsis' && lineRanges.length > 0) {
+    const last = lineRanges[lineRanges.length - 1];
+    if (truncated || (maxWidth !== null && last.width > maxWidth + 0.5)) {
+      _endWithEllipsis(positions, last, c, maxWidth);
+    }
   }
 
   // Pass 2: apply TextAlign per-line.
@@ -223,7 +233,30 @@ export const LayoutWords = (
   return positions;
 };
 
-const _alignOffset = (align: TextAlign, lineWidth: number, maxWidth: number): number => {
+export const ELLIPSIS = '…';
+
+/** Fit an ellipsis after the last line's words: drop whole words that leave no room, and cut a lone word by characters. */
+const _endWithEllipsis = (
+  positions: WordPosition[],
+  line: { start: number; end: number; width: number },
+  ctx: Ctx2D,
+  maxWidth: number | null,
+): void => {
+  const fits = (p: WordPosition, text: string): boolean => maxWidth === null || p.X + ctx.measureText(text).width <= maxWidth;
+  while (line.end > line.start && !fits(positions[line.end], positions[line.end].Content + ELLIPSIS)) {
+    positions.pop();
+    line.end--;
+  }
+  const word = positions[line.end];
+  let kept = word.Content;
+  while (kept.length > 0 && !fits(word, kept + ELLIPSIS)) kept = kept.slice(0, -1);
+  word.Content = kept + ELLIPSIS;
+  word.CharEnd = word.CharStart + kept.length;
+  word.Width = ctx.measureText(word.Content).width;
+  line.width = word.X + word.Width;
+};
+
+const _alignOffset =(align: TextAlign, lineWidth: number, maxWidth: number): number => {
   if (align === 'Center') return (maxWidth - lineWidth) / 2;
   if (align === 'Right') return maxWidth - lineWidth;
   return 0;

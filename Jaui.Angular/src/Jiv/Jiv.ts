@@ -292,9 +292,10 @@ export class Jiv implements OnInit, OnDestroy {
     // GroupHoverTextStyle rule are passed to the worker, so the hover
     // dispatcher only fans `_groupHover` out for those (a shared base
     // class with no GroupHover rule doesn't pull peers in).
+    const classes = name ? name.split(/\s+/).filter(Boolean) : [];
     const triggerClasses: string[] = [];
-    if (name && this._registry) {
-      for (const c of name.split(/\s+/).filter(Boolean)) {
+    if (this._registry) {
+      for (const c of classes) {
         if (this._registry.IsGroupTrigger(c)) triggerClasses.push(c);
       }
     }
@@ -346,6 +347,7 @@ export class Jiv implements OnInit, OnDestroy {
       Layout:        { ...fromClass?.Layout,        ...this.layout() } as Record<string, unknown>,
       ChildLayout:   childLayoutBag,
       TextStyle:     { ...fromClass?.TextStyle,     ...this.textStyle() } as Record<string, unknown>,
+      Classes:       classes,
       GroupTriggerClasses: triggerClasses.length > 0 ? triggerClasses : undefined,
       // Pseudo-selector rules — both `:Foo` and `:(expr)` — resolved at
       // JSS-parse time on main, shipped to the worker as plain-data

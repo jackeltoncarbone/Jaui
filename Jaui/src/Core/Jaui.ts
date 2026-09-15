@@ -539,6 +539,10 @@ export class Canvas implements DirtyTracker {
    *  composite loop alive until the engine's animations settle. */
   get IsAnimating(): boolean { return this._animationManager.IsRunning; }
 
+  /** The words a text node paints, after MaxLines and ellipsis; empty before its first text pass. */
+  RenderedWords = (node: JauiElement): string[] =>
+    (this._textAnimators.get(node)?.Words ?? []).filter((w) => !w.Dying).map((w) => w.Content);
+
   // ─── Event ingestion (worker mode) ──────────────────────────────────────
   // The engine no longer binds DOM listeners on its canvas — `this.Element`
   // is an OffscreenCanvas and isn't an EventTarget for pointer/wheel/key

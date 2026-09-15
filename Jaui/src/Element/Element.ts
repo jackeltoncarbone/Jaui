@@ -364,7 +364,22 @@ export class Element {
     // descendants under `child` get the tracker via `_propagateTracker`.
     if (child.Tracker !== this.Tracker) child._propagateTracker(this.Tracker);
     if (teleporting) child.TeleportSeq = ++Element._teleportSeqCounter;
+    child._notifyAncestry();
     this.MarkLayoutDirty();
+  };
+
+  /** The node's ancestry changed. A Jiv re-applies rules scoped to its ancestors, which could not match
+   *  while it was detached or before an ancestor took its class. */
+  OnAncestryChanged = (): void => {};
+
+  /** Tell every descendant its ancestry changed, as when this node's classes change. */
+  NotifyDescendantsOfAncestry = (): void => {
+    for (const c of this.Children) c._notifyAncestry();
+  };
+
+  private _notifyAncestry = (): void => {
+    this.OnAncestryChanged();
+    this.NotifyDescendantsOfAncestry();
   };
 
   /** Monotonic teleport recency counter — see `TeleportSeq`. */

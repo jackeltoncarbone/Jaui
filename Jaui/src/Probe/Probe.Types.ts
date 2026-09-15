@@ -16,6 +16,10 @@ export interface ProbeText {
   /** Re-measured at the node's content-box width: what the renderer wraps to. */
   WrappedHeight: number;
   WrappedLines: number;
+  /** Lines the text needs at that width with no MaxLines: more than WrappedLines means MaxLines cut it. */
+  NaturalLines: number;
+  /** The last word the renderer paints, so a check can see whether a cut ends in an ellipsis. */
+  LastRenderedWord: string | null;
   FontSize: number;
   LineHeight: number;
   TextOverflow: 'Clip' | 'Ellipsis';

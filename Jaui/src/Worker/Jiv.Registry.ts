@@ -52,6 +52,7 @@ export class JivRegistry {
    *  end up here; the Angular side filters via `JssRegistry.IsGroupTrigger`
    *  before passing `GroupTriggerClasses` through `JivApplyOpts`. */
   private _byClass = new Map<string, Set<JivCore>>();
+  private _triggerClassesOf = new Map<JivCore, readonly string[]>();
   /** Keyed by JivId — only Janvas nodes carry an entry. The registry
    *  routes incoming `M2W_JanvasInput` through this map and disposes
    *  on destroy. */
@@ -214,6 +215,7 @@ export class JivRegistry {
     this._applyElementProps(core, opts);
     this._applyMaterialBits(core, opts);
     this._applyStateBits(core, opts);
+    if (opts.Classes !== undefined) core.Classes = opts.Classes;
     this._nodes.set(id, core);
   };
 
@@ -266,10 +268,14 @@ export class JivRegistry {
     // predicate forms — rides PredicateStyles. _applyStateBits routes
     // them onto the JivCore.
     this._applyStateBits(core, opts);
+    // Every authored class, so descendant rules (`Card Title { … }`) can match this node as their ancestor.
+    const classesChanged = opts.Classes !== undefined && !_sameClasses(core.Classes, opts.Classes);
+    if (classesChanged) core.Classes = opts.Classes!;
     // Responsive @If: overlay matching Layout/ChildLayout patches onto the
     // base just captured (no-op unless this Jiv has layout-bearing predicates).
     core.RecomputeResponsiveLayout();
     if (opts.GroupTriggerClasses !== undefined) this._updateGroupClasses(core, opts.GroupTriggerClasses);
+    if (classesChanged) core.NotifyDescendantsOfAncestry();
     if ('Text' in opts || opts.TextStyle) {
       const nextText = 'Text' in opts ? (opts.Text ?? null) : core.Text;
       core.SetText(nextText, opts.TextStyle as Partial<TextStyle> | undefined);
@@ -345,10 +351,10 @@ export class JivRegistry {
   };
 
   /** Reapply this Jiv's group-trigger class membership. Removes from any
-   *  previous buckets, adds to the new set, updates `core.Classes`. */
+   *  previous buckets, adds to the new set. */
   private _updateGroupClasses = (core: JivCore, next: readonly string[]): void => {
     this._unregisterFromGroups(core);
-    core.Classes = next;
+    this._triggerClassesOf.set(core, next);
     for (const cls of next) {
       let set = this._byClass.get(cls);
       if (!set) { set = new Set(); this._byClass.set(cls, set); }
@@ -357,7 +363,9 @@ export class JivRegistry {
   };
 
   private _unregisterFromGroups = (core: JivCore): void => {
-    for (const cls of core.Classes) {
+    const previous = this._triggerClassesOf.get(core) ?? [];
+    this._triggerClassesOf.delete(core);
+    for (const cls of previous) {
       const set = this._byClass.get(cls);
       if (!set) continue;
       set.delete(core);
@@ -369,7 +377,7 @@ export class JivRegistry {
    *  hover dispatcher to fan `_groupHover` out across the group. */
   GroupPeersOf = (jiv: JivCore): Set<JivCore> => {
     const peers = new Set<JivCore>();
-    for (const cls of jiv.Classes) {
+    for (const cls of this._triggerClassesOf.get(jiv) ?? []) {
       const set = this._byClass.get(cls);
       if (!set) continue;
       set.forEach(p => peers.add(p));
@@ -563,3 +571,6 @@ const _payloadFromMouseEvent = (e: {
   Shift: false, Ctrl: false, Alt: false, Meta: false,
   TimeStamp: 0,
 });
+
+const _sameClasses = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((c, i) => c === b[i]);

@@ -35,17 +35,22 @@ const _tuple = (raw: string, node: Element): [number, number, number, number] =>
   } catch { return [0, 0, 0, 0]; }
 };
 
-const _text = (node: Element, padding: [number, number, number, number]): ProbeText | null => {
+const _text = (canvas: Canvas, node: Element, padding: [number, number, number, number]): ProbeText | null => {
   if (node.Text === null || node.TextMeasurement === null || !node.ResolveCtx) return null;
   const style = ResolveTextStyle(node.EffectiveTextStyle(), node.ResolveCtx);
   const contentWidth = Math.max(0, node.LayoutWidth - padding[1] - padding[3]);
-  const wrapped = MeasureText(node.Text, style, contentWidth > 0 ? contentWidth : null);
+  const wrapWidth = contentWidth > 0 ? contentWidth : null;
+  const wrapped = MeasureText(node.Text, style, wrapWidth);
+  const natural = style.MaxLines === null ? wrapped : MeasureText(node.Text, { ...style, MaxLines: null }, wrapWidth);
+  const words = canvas.RenderedWords(node);
   return {
     Content: node.Text.slice(0, TEXT_PREVIEW),
     MaxContentWidth: _round(node.TextMeasurement.Width),
     MinContentWidth: _round(node.TextMeasurement.MinWidth),
     WrappedHeight: _round(wrapped.Height),
     WrappedLines: wrapped.Lines.length,
+    NaturalLines: natural.Lines.length,
+    LastRenderedWord: words.length ? words[words.length - 1] : null,
     FontSize: _round(style.FontSize),
     LineHeight: _round(style.LineHeight),
     TextOverflow: style.TextOverflow,
@@ -133,7 +138,7 @@ export const ProbeLayout = (canvas: Canvas, ids: ReadonlyMap<Element, number>): 
       Cursor: node.Cursor,
       PointerEvents: node.PointerEvents,
       Leaving: node.LeaveRequested,
-      Text: _text(node, padding),
+      Text: _text(canvas, node, padding),
       Children: children,
     };
   };

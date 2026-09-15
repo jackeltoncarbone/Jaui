@@ -1,7 +1,7 @@
 import { Spring } from '../Animation/Spring';
 import type { Animatable } from '../Animation/Animation.Manager';
 import type { ResolvedTextStyle } from './Text.Types';
-import { LayoutWords, Tokenize, type WordPosition } from './Text.WordLayout';
+import { LayoutWords, type WordPosition } from './Text.WordLayout';
 
 /**
  * Per-word animator. Each word has its own X/Y/Opacity springs so wrap changes,
@@ -310,6 +310,7 @@ export class TextAnimator implements Animatable {
     const ratio = this._style.FontSize > 0 ? this._style.FontSize / newStyle.FontSize : 1;
     const positions = LayoutWords(newContent, newStyle, maxWidth);
     const living = this.Words.filter((w) => !w.Dying);
+    if (!_sameWords(living, positions)) return this._reconcileContent(newContent, newStyle, maxWidth);
 
     let needsKick = false;
     for (let i = 0; i < living.length && i < positions.length; i++) {
@@ -340,6 +341,8 @@ export class TextAnimator implements Animatable {
   private _reflow = (maxWidth: number | null): boolean => {
     const living = this.Words.filter((w) => !w.Dying);
     const positions = LayoutWords(this._content, this._style, maxWidth);
+    // A new width can change which words MaxLines keeps or which one carries the ellipsis.
+    if (!_sameWords(living, positions)) return this._reconcileContent(this._content, this._style, maxWidth);
 
     let needsKick = false;
     for (let i = 0; i < living.length && i < positions.length; i++) {
@@ -366,11 +369,10 @@ export class TextAnimator implements Animatable {
     newStyle: ResolvedTextStyle,
     maxWidth: number | null,
   ): boolean => {
-    const newTokens = Tokenize(newContent);
     const newPositions = LayoutWords(newContent, newStyle, maxWidth);
-    // LayoutWords may clip trailing tokens (e.g. MaxLines reached), so the
-    // visible token set is whatever has a position — anything past that is
-    // dropped from the animated word list.
+    // LayoutWords may clip trailing tokens (MaxLines reached) and end the last one in an ellipsis, so the
+    // visible words are its positions, not the source tokens.
+    const newTokens = newPositions.map((p) => p.Content);
     const visibleCount = newPositions.length;
 
     // Match new tokens against living words by content — first-occurrence greedy match.
@@ -472,6 +474,9 @@ export class TextAnimator implements Animatable {
 }
 
 // ─── Helpers ───
+
+const _sameWords = (words: readonly AnimatedWord[], positions: readonly WordPosition[]): boolean =>
+  words.length === positions.length && words.every((w, i) => w.Content === positions[i].Content);
 
 /** When a word's color is changing, snap each Tint{R,G,B,A} spring to the
  *  oldChannel/newChannel ratio (so the tinted new-color raster looks like

@@ -412,6 +412,12 @@ export class Jiv extends Element {
     if (this._hasTextPredicates) this._invalidateText();
   };
 
+  override OnAncestryChanged = (): void => {
+    if (!this._hasScopedPredicates) return;
+    this.RecomputeResponsiveLayout();
+    this.RecomputeResponsiveText();
+  };
+
   RecomputeResponsiveLayout = (): boolean => {
     if (!this._hasLayoutPredicates || !this.PredicateStyles) return false;
     const ctx = this._predicateCtx();

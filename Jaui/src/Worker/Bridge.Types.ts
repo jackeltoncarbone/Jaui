@@ -217,9 +217,9 @@ export interface JivApplyOpts {
    *  boolean. Read by `Var` predicates (`@If (@Open) { … }`, `@If (@Mode == 'x') { … }`). Distinct from
    *  States: these are author-driven conditional values, not interaction pseudo-states. */
   Vars?: Record<string, string | number | boolean>;
-  /** Class names this Jiv carries (parsed from `class="A B C"`). Worker
-   *  registers it under each entry that's a group-hover trigger so the
-   *  hover dispatcher can fan `_groupHover` out to peers. */
+  /** Every class name this Jiv carries (parsed from `class="A B C"`): what ancestor-scoped rules match. */
+  Classes?: readonly string[];
+  /** The subset of Classes that are group-hover triggers, so the hover dispatcher fans `_groupHover` out to peers. */
   GroupTriggerClasses?: readonly string[];
   Springs?: Record<string, Record<string, unknown>>;
   /** `@Animation` applications declared on this Jiv's class. Each entry

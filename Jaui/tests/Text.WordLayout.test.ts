@@ -117,4 +117,29 @@ describe('LayoutWords', () => {
       expect(p[1].Content).toBe('b');
     });
   });
+
+  describe('ellipsis', () => {
+    // 8px per char, so 'aa bb cc dd' at 40px wide: 'aa bb' (40) then 'cc dd'.
+    it('ends the last kept line in an ellipsis when MaxLines cuts words', () => {
+      const p = LayoutWords('aa bb cc dd', style({ MaxLines: 1, TextOverflow: 'Ellipsis' }), 40, mockCtx());
+      expect(p.map((w) => w.Content)).toEqual(['aa…']);
+    });
+
+    it('drops a whole word when its ellipsis does not fit, and keeps whole words when it does', () => {
+      const p = LayoutWords('aa bb cc dd', style({ MaxLines: 1, TextOverflow: 'Ellipsis' }), 48, mockCtx());
+      expect(p.map((w) => w.Content)).toEqual(['aa', 'bb…']);
+    });
+
+    it('cuts a lone word wider than the box by characters', () => {
+      const p = LayoutWords('abcdefghij', style({ MaxLines: 1, TextOverflow: 'Ellipsis' }), 40, mockCtx());
+      expect(p).toHaveLength(1);
+      expect(p[0].Content).toBe('abcd…');
+      expect(p[0].CharEnd).toBe(4);
+    });
+
+    it('leaves Clip text and text that fits alone', () => {
+      expect(LayoutWords('aa bb cc dd', style({ MaxLines: 1 }), 40, mockCtx()).map((w) => w.Content)).toEqual(['aa', 'bb']);
+      expect(LayoutWords('aa bb', style({ MaxLines: 1, TextOverflow: 'Ellipsis' }), 40, mockCtx()).map((w) => w.Content)).toEqual(['aa', 'bb']);
+    });
+  });
 });
