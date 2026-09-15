@@ -13,6 +13,7 @@ import { Framebuffer } from './Framebuffer';
 import { BlurPass } from './BlurPass';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
+import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
@@ -99,7 +100,8 @@ interface _PanelLocs {
   bgImageAlpha:     WebGLUniformLocation | null;
   bgGradParams:     WebGLUniformLocation | null;
   bgGradStopCount:  WebGLUniformLocation | null;
-  bgGradColor:      WebGLUniformLocation | null;
+  bgGradValue:      WebGLUniformLocation | null;
+  bgGradTangent:    WebGLUniformLocation | null;
   bgGradPos:        WebGLUniformLocation | null;
 }
 
@@ -123,13 +125,11 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   // Uniform arrays: GLSL exposes one location for the whole array via the
   // base name; `uniform1fv`/`uniform4fv` updates all elements from a
   // contiguous Float32Array.
-  bgGradColor:      gl.getUniformLocation(p, 'u_BgGradColor[0]'),
+  bgGradValue:      gl.getUniformLocation(p, 'u_BgGradValue[0]'),
+  bgGradTangent:    gl.getUniformLocation(p, 'u_BgGradTangent[0]'),
   bgGradPos:        gl.getUniformLocation(p, 'u_BgGradPos[0]'),
 });
 
-const _MAX_BG_GRAD_STOPS = 8;
-const _BG_GRAD_COLOR_SCRATCH = new Float32Array(_MAX_BG_GRAD_STOPS * 4);
-const _BG_GRAD_POS_SCRATCH   = new Float32Array(_MAX_BG_GRAD_STOPS);
 const _BG_UV_IDENTITY = [1, 1, 0, 0];
 
 // ─── Opaque handle wrapping ─────────────────────────────────────────────────
@@ -776,20 +776,12 @@ export class WebGL2Renderer implements Renderer {
       gl.uniform1i(locs.bgGradStopCount, 0);
       return;
     }
-    // Gradient path — pack stops into the scratch arrays then upload.
-    const stops = bgPaint.Stops;
-    const n = Math.min(stops.length, _MAX_BG_GRAD_STOPS);
-    for (let i = 0; i < n; i++) {
-      const s = stops[i];
-      _BG_GRAD_COLOR_SCRATCH[i * 4 + 0] = s.R;
-      _BG_GRAD_COLOR_SCRATCH[i * 4 + 1] = s.G;
-      _BG_GRAD_COLOR_SCRATCH[i * 4 + 2] = s.B;
-      _BG_GRAD_COLOR_SCRATCH[i * 4 + 3] = s.A;
-      _BG_GRAD_POS_SCRATCH[i] = s.Position;
-    }
-    gl.uniform1i(locs.bgGradStopCount, n);
-    gl.uniform4fv(locs.bgGradColor, _BG_GRAD_COLOR_SCRATCH);
-    gl.uniform1fv(locs.bgGradPos, _BG_GRAD_POS_SCRATCH);
+    // Gradient path — the curve arrives packed at the shader's array size.
+    const curve = bgPaint.Curve;
+    gl.uniform1i(locs.bgGradStopCount, curve.Count);
+    gl.uniform4fv(locs.bgGradValue, curve.Value);
+    gl.uniform4fv(locs.bgGradTangent, curve.Tangent);
+    gl.uniform1fv(locs.bgGradPos, curve.Position);
     if (bgPaint.Mode === 'LinearGradient') {
       gl.uniform1i(locs.bgMode, 2);
       gl.uniform4f(locs.bgGradParams, bgPaint.DirX, bgPaint.DirY, 0, 0);
@@ -1165,7 +1157,7 @@ export class WebGL2Renderer implements Renderer {
       for (let i = 0; i < n; i++) {
         pos[i] = stops[i].Position;
         val[i] = stops[i].Value;
-        ease[i] = Math.max(0.001, stops[i].Easing);
+        ease[i] = stops[i].Easing <= BLUR_EASE_SMOOTH ? BLUR_EASE_SMOOTH : Math.max(0.001, stops[i].Easing);
       }
       gl.uniform1i(this._progBlurLocs.hasStops, 1);
       gl.uniform1i(this._progBlurLocs.stopCount, n);

@@ -1,5 +1,4 @@
 import type { BackgroundValue, GradientStop } from '../Jiv/Jiv.Types';
-import { MAX_GRADIENT_STOPS } from '../Jiv/Jiv.Types';
 import type { FitMode } from '../Element/Element';
 import { ParseColor } from './Color.Parse';
 
@@ -20,6 +19,8 @@ const _cache = new Map<string, BackgroundValue>();
  *                                          → linear gradient with two stops
  *   Background: LinearGradient(180deg, #ff00ff, #00ffff)
  *                                          → stops with implicit even spacing
+ *   Background: LinearGradient(180deg, #000 0%, rgba(0,0,0,0) 60% ease 1.6, #000 100%)
+ *                                          → `ease e` bends the segment to the next stop along u^e
  *   Background: RadialGradient(rgba(255,255,255,0.4), rgba(0,0,0,0))
  *                                          → radial gradient centered (0.5,0.5)
  *   Background: RadialGradient(at 25% 75% radius 80%, <stops>)
@@ -40,7 +41,7 @@ const _cloneColor = (c: { R: number; G: number; B: number; A: number }) =>
   ({ R: c.R, G: c.G, B: c.B, A: c.A });
 
 const _cloneStops = (stops: GradientStop[]): GradientStop[] =>
-  stops.map((s) => ({ Position: s.Position, Color: _cloneColor(s.Color) }));
+  stops.map((s) => ({ Position: s.Position, Color: _cloneColor(s.Color), Easing: s.Easing }));
 
 const _clone = (b: BackgroundValue): BackgroundValue => {
   const colorCopy = _cloneColor(b.Color);
@@ -229,12 +230,20 @@ const _parsePercent = (raw: string, fallback: number): number => {
   return Number.isNaN(v) ? fallback : v;
 };
 
-/** Parse a single gradient stop: `"rgba(0,0,0,0.5) 50%"` or `"#fff"` (position
- *  inferred). Returns the stop with `Position: NaN` when no explicit position
- *  is set — `_normalizeStops` resolves NaN positions by evenly spreading them
- *  between bracketing explicit stops. */
+/** Parse a single gradient stop: `"rgba(0,0,0,0.5) 50%"`, `"#fff"` (position
+ *  inferred) or `"rgba(0,0,0,0.5) 50% ease 1.6"`. Returns the stop with
+ *  `Position: NaN` when no explicit position is set — `_normalizeStops`
+ *  resolves NaN positions by evenly spreading them between bracketing
+ *  explicit stops. */
 const _parseStop = (raw: string): GradientStop => {
-  const t = raw.trim();
+  let t = raw.trim();
+  let easing = 1;
+  const ease = /\s+ease\s+(\d*\.?\d+)\s*$/i.exec(t);
+  if (ease) {
+    const e = parseFloat(ease[1]);
+    if (e > 0) easing = e;
+    t = t.slice(0, ease.index).trim();
+  }
   // A stop is a color followed by an optional position. The color portion may
   // itself contain spaces (`rgb(255 255 255)`), so we look for a trailing
   // "<num>%" token after the last `)` (or whole string if no parens).
@@ -258,18 +267,17 @@ const _parseStop = (raw: string): GradientStop => {
       }
     }
   }
-  return { Position: position, Color: ParseColor(colorRaw) };
+  return { Position: position, Color: ParseColor(colorRaw), Easing: easing };
 };
 
 /** Fill in NaN positions by evenly spreading between explicit bracketing
  *  positions (CSS-style stop normalization), clamp to [0, 1], and sort
- *  ascending. If the result has more than MAX_GRADIENT_STOPS, evenly
- *  resample down to the cap. */
+ *  ascending. The stop cap is Gradient.Curve's, applied when the curve is fit. */
 const _normalizeStops = (stops: GradientStop[]): GradientStop[] => {
   if (stops.length === 0) return [];
   if (stops.length === 1) {
-    return [{ Position: 0, Color: _cloneColor(stops[0].Color) },
-            { Position: 1, Color: _cloneColor(stops[0].Color) }];
+    return [{ Position: 0, Color: _cloneColor(stops[0].Color), Easing: 1 },
+            { Position: 1, Color: _cloneColor(stops[0].Color), Easing: 1 }];
   }
   // Initial seed: first NaN → 0, last NaN → 1.
   if (Number.isNaN(stops[0].Position)) stops[0].Position = 0;
@@ -294,41 +302,7 @@ const _normalizeStops = (stops: GradientStop[]): GradientStop[] => {
     else if (s.Position > 1) s.Position = 1;
   }
   stops.sort((a, b) => a.Position - b.Position);
-  // Cap.
-  if (stops.length > MAX_GRADIENT_STOPS) {
-    const resampled: GradientStop[] = [];
-    for (let k = 0; k < MAX_GRADIENT_STOPS; k++) {
-      const t = k / (MAX_GRADIENT_STOPS - 1);
-      resampled.push(_sampleStops(stops, t));
-    }
-    return resampled;
-  }
   return stops;
-};
-
-const _sampleStops = (stops: GradientStop[], t: number): GradientStop => {
-  if (t <= stops[0].Position) return { Position: t, Color: _cloneColor(stops[0].Color) };
-  if (t >= stops[stops.length - 1].Position) {
-    return { Position: t, Color: _cloneColor(stops[stops.length - 1].Color) };
-  }
-  for (let i = 0; i < stops.length - 1; i++) {
-    const a = stops[i];
-    const b = stops[i + 1];
-    if (t >= a.Position && t <= b.Position) {
-      const span = b.Position - a.Position;
-      const u = span > 0 ? (t - a.Position) / span : 0;
-      return {
-        Position: t,
-        Color: {
-          R: a.Color.R + (b.Color.R - a.Color.R) * u,
-          G: a.Color.G + (b.Color.G - a.Color.G) * u,
-          B: a.Color.B + (b.Color.B - a.Color.B) * u,
-          A: a.Color.A + (b.Color.A - a.Color.A) * u,
-        },
-      };
-    }
-  }
-  return { Position: t, Color: _cloneColor(stops[stops.length - 1].Color) };
 };
 
 /** Split top-level comma-separated arguments. Respects nested parens (so

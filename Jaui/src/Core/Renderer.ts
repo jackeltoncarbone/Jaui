@@ -13,6 +13,8 @@
  * and force the other to emulate it.
  */
 
+import type { GradientCurve } from './Gradient.Curve';
+
 // ─── Opaque Handles ────────────────────────────────────────────────────────
 // Callers never inspect these. The WebGPU implementation stores GPUTexture
 // inside; a WebGL2 implementation would store WebGLTexture. Neither leaks.
@@ -46,8 +48,8 @@ export interface ShadowBackdrop {
 export type BgPaint =
   | { Mode: 'Color' }
   | { Mode: 'Image',          Texture: GpuTextureHandle, UvScaleX: number, UvScaleY: number, UvOffsetX: number, UvOffsetY: number, FadeAlpha: number }
-  | { Mode: 'LinearGradient', DirX: number, DirY: number, Stops: ReadonlyArray<{ Position: number; R: number; G: number; B: number; A: number }> }
-  | { Mode: 'RadialGradient', CenterX: number, CenterY: number, Radius: number, Stops: ReadonlyArray<{ Position: number; R: number; G: number; B: number; A: number }> };
+  | { Mode: 'LinearGradient', DirX: number, DirY: number, Curve: GradientCurve }
+  | { Mode: 'RadialGradient', CenterX: number, CenterY: number, Radius: number, Curve: GradientCurve };
 
 /**
  * Shared per-draw style for a Jline (stroke) batch. The geometry (per-segment

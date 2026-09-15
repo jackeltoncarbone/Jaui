@@ -59,6 +59,7 @@ import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
+import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
 import { FocusManager } from './Focus/FocusManager';
 import { InputRouter } from './Input/InputRouter';
@@ -2280,6 +2281,7 @@ export class Canvas implements DirtyTracker {
    *  panel paints `mix(placeholderColor, sampledImage, alpha)` where alpha
    *  ramps linearly from 0 to 1 over this many milliseconds. */
   private static readonly _BG_IMAGE_FADE_MS = 260;
+  private readonly _gradientCurves = new WeakMap<object, GradientCurve>();
 
   private _computeBgPaint = (node: Jiv): BgPaint | undefined => {
     const bg = node.RenderStyle.Background;
@@ -2337,16 +2339,17 @@ export class Canvas implements DirtyTracker {
         FadeAlpha: alpha,
       };
     }
-    // Gradient — flatten the resolved stops into the renderer's plain shape.
-    const stops = bg.Stops.map((s) => ({
-      Position: s.Position,
-      R: s.Color.R, G: s.Color.G, B: s.Color.B, A: s.Color.A,
-    }));
+    // Gradient — fit the smooth curve once per resolved stop list.
+    let curve = this._gradientCurves.get(bg.Stops);
+    if (!curve) {
+      curve = GradientCurveOf(bg.Stops);
+      this._gradientCurves.set(bg.Stops, curve);
+    }
     if (bg.Kind === 'LinearGradient') {
       // CSS angles: 0deg runs to the top, 90deg to the right, 180deg to the bottom (panel y runs down).
-      return { Mode: 'LinearGradient', DirX: Math.sin(bg.AngleRad), DirY: -Math.cos(bg.AngleRad), Stops: stops };
+      return { Mode: 'LinearGradient', DirX: Math.sin(bg.AngleRad), DirY: -Math.cos(bg.AngleRad), Curve: curve };
     }
-    return { Mode: 'RadialGradient', CenterX: bg.CenterX, CenterY: bg.CenterY, Radius: bg.Radius, Stops: stops };
+    return { Mode: 'RadialGradient', CenterX: bg.CenterX, CenterY: bg.CenterY, Radius: bg.Radius, Curve: curve };
   };
 
   /** Compute the offset descendants see when descending past a scroll container. */

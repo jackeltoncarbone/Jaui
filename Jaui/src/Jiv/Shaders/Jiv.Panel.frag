@@ -58,9 +58,10 @@ uniform vec2 u_SpecularTilt;
 //   2 = LinearGradient — angle in u_BgGradParams.x; t = dot(panelLocal, dir)
 //   3 = RadialGradient — center in u_BgGradParams.xy, radius in .z; t = dist
 //
-// Stops live in u_BgGradColor[i] (rgba) + u_BgGradPos[i] (position 0..1).
-// MAX_BG_GRAD_STOPS matches Jiv.Types.MAX_GRADIENT_STOPS on the CPU side.
-#define MAX_BG_GRAD_STOPS 8
+// A gradient is Gradient.Curve's cubic Hermite spline: knots in u_BgGradPos[i]
+// (0..1), premultiplied OKLab + alpha in u_BgGradValue[i], slopes in
+// u_BgGradTangent[i]. MAX_BG_GRAD_STOPS matches Jiv.Types.MAX_GRADIENT_STOPS.
+#define MAX_BG_GRAD_STOPS 16
 uniform int       u_BgMode;
 uniform sampler2D u_BgTexture;
 uniform vec4      u_BgUv;            // scale.xy, offset.zw
@@ -69,7 +70,8 @@ uniform float     u_BgImageAlpha;    // [0..1] cross-fade between v_Tint
 uniform vec4      u_BgGradParams;    // LinearGradient: cos(angle), sin(angle), _, _
                                      // RadialGradient: centerX, centerY, radius, _
 uniform int       u_BgGradStopCount;
-uniform vec4      u_BgGradColor[MAX_BG_GRAD_STOPS];
+uniform vec4      u_BgGradValue[MAX_BG_GRAD_STOPS];
+uniform vec4      u_BgGradTangent[MAX_BG_GRAD_STOPS];
 uniform float     u_BgGradPos[MAX_BG_GRAD_STOPS];
 
 out vec4 fragColor;
@@ -83,25 +85,59 @@ float triDither(vec2 p) {
     return (a + b - 1.0) / 255.0;
 }
 
+// Interleaved gradient noise at a screen pixel, in [0, 1): a fixed blue-ish pattern tied to the
+// framebuffer pixel, so a gradient's dither never crawls while the page scrolls or springs.
+float gradientNoise(vec2 pixel) {
+    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+}
+
+float linearToSrgb(float c) {
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+vec3 oklabToSrgb(vec3 lab) {
+    vec3 lms = vec3(
+        lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z,
+        lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z,
+        lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z);
+    lms = lms * lms * lms;
+    vec3 lin = clamp(vec3(
+         4.0767416621 * lms.x - 3.3077115913 * lms.y + 0.2309699292 * lms.z,
+        -1.2684380046 * lms.x + 2.6097574011 * lms.y - 0.3413193965 * lms.z,
+        -0.0041960863 * lms.x - 0.7034186147 * lms.y + 1.7076147010 * lms.z), 0.0, 1.0);
+    return vec3(linearToSrgb(lin.r), linearToSrgb(lin.g), linearToSrgb(lin.b));
+}
+
 vec4 sampleBgGradient(float t) {
-    // Sample the gradient at parameter t (clamped to [0, 1] by caller).
-    // Stops are sorted ascending by position. With at least 2 stops, we
-    // find the bracketing pair and lerp; edges return endpoint colors.
+    // Cubic Hermite through the knots in premultiplied OKLab (slope continuous at every knot),
+    // then back to straight sRGB. Edges hold the endpoint knots.
     if (u_BgGradStopCount <= 0) return vec4(0.0);
-    if (u_BgGradStopCount == 1) return u_BgGradColor[0];
-    if (t <= u_BgGradPos[0]) return u_BgGradColor[0];
     int last = u_BgGradStopCount - 1;
-    for (int i = 1; i < MAX_BG_GRAD_STOPS; i++) {
-        if (i > last) break;
-        float pNext = u_BgGradPos[i];
-        if (t <= pNext) {
-            float pPrev = u_BgGradPos[i - 1];
-            float span = max(pNext - pPrev, 0.0001);
-            float u = clamp((t - pPrev) / span, 0.0, 1.0);
-            return mix(u_BgGradColor[i - 1], u_BgGradColor[i], u);
+    vec4 v = u_BgGradValue[last];
+    if (u_BgGradStopCount == 1 || t <= u_BgGradPos[0]) {
+        v = u_BgGradValue[0];
+    } else {
+        for (int i = 1; i < MAX_BG_GRAD_STOPS; i++) {
+            if (i > last) break;
+            float p1 = u_BgGradPos[i];
+            if (t <= p1) {
+                float p0 = u_BgGradPos[i - 1];
+                float h = p1 - p0;
+                if (h <= 0.0) { v = u_BgGradValue[i]; break; }
+                float u = clamp((t - p0) / h, 0.0, 1.0);
+                float u2 = u * u;
+                float u3 = u2 * u;
+                v = (2.0 * u3 - 3.0 * u2 + 1.0) * u_BgGradValue[i - 1]
+                  + (u3 - 2.0 * u2 + u) * h * u_BgGradTangent[i - 1]
+                  + (-2.0 * u3 + 3.0 * u2) * u_BgGradValue[i]
+                  + (u3 - u2) * h * u_BgGradTangent[i];
+                break;
+            }
         }
     }
-    return u_BgGradColor[last];
+    float a = clamp(v.a, 0.0, 1.0);
+    if (a < 1e-4) return vec4(0.0);
+    return vec4(oklabToSrgb(v.rgb / a), a);
 }
 
 // Resolve the fill source color for a fragment based on u_BgMode. Returns
@@ -1316,6 +1352,11 @@ void main() {
     // so sharp solid/text panels stay bit-exact.
     if (materialType == 1.0 || hasBackdropFilter) {
         result.rgb += triDither(v_PixelPos);
+    } else if (u_BgMode >= 2) {
+        // Gradient fills: ±half an 8-bit step on screen. Blending scales rgb by alpha, so divide it back
+        // out (down to a floor) and a thin wash dithers as much as an opaque one.
+        float gradDither = (gradientNoise(floor(gl_FragCoord.xy)) - 0.5) / 255.0;
+        result.rgb += gradDither / max(result.a, 0.25);
     }
 
     fragColor = result;

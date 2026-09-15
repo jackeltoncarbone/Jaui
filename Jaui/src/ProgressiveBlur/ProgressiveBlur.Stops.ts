@@ -1,5 +1,5 @@
 import type { BlurStop, ProgressiveBlurDirection } from '../Jiv/Jiv.Types';
-import { MAX_BLUR_STOPS } from '../Jiv/Jiv.Types';
+import { BLUR_EASE_SMOOTH, MAX_BLUR_STOPS } from '../Jiv/Jiv.Types';
 
 export interface ParsedProgressiveBlur {
   /** Axis the spectrum runs along, derived from the gradient angle. */
@@ -16,7 +16,8 @@ export interface ParsedProgressiveBlur {
  *
  * Each stop is `<amount> <position> [ease <e>]` where `amount` ∈ [0,1]
  * (0 = clear/sharp, 1 = max blur), `position` accepts `0..1` or `%`, and the
- * optional `ease <e>` is the exponent on the segment FROM this stop to the next.
+ * optional `ease <e>` is the exponent on the segment FROM this stop to the next, or `ease smooth` for a
+ * smootherstep segment that leaves and arrives flat (one S-curve with no knee at either end).
  * The angle selects the axis (≈90°/270° → horizontal, else vertical). Returns
  * `null` for an unusable spec (caller falls back to the linear feather).
  */
@@ -51,7 +52,8 @@ export const ParseProgressiveBlur = (raw: string): ParsedProgressiveBlur | null 
     const ei = tokens.findIndex(t => t.toLowerCase() === 'ease');
     if (ei >= 0 && ei + 1 < tokens.length) {
       const e = parseFloat(tokens[ei + 1]);
-      if (!Number.isNaN(e) && e > 0) easing = e;
+      if (tokens[ei + 1].toLowerCase() === 'smooth') easing = BLUR_EASE_SMOOTH;
+      else if (!Number.isNaN(e) && e > 0) easing = e;
     }
     stops.push({ Position: _clamp01(position), Value: _clamp01(value), Easing: easing });
   }

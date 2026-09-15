@@ -82,7 +82,7 @@ uniform int u_HasStops;
 uniform int u_StopCount;                    // active stops (2..12)
 uniform float u_StopPos[12];                // ascending positions along the axis (0 = top/left)
 uniform float u_StopVal[12];                // frostedness at each stop (0 clear → 1 max blur)
-uniform float u_StopEase[12];               // easing exponent for the segment FROM stop i to i+1
+uniform float u_StopEase[12];               // easing exponent for the segment FROM stop i to i+1; 0 = smootherstep
 
 out vec4 fragColor;
 
@@ -283,7 +283,11 @@ void main() {
                 float p1 = u_StopPos[i + 1];
                 if (ax >= p0 && ax <= p1) {
                     float seg = (p1 > p0) ? (ax - p0) / (p1 - p0) : 0.0;
-                    seg = pow(clamp(seg, 0.0, 1.0), max(u_StopEase[i], 0.001));
+                    seg = clamp(seg, 0.0, 1.0);
+                    // Ease 0 is 'smooth': smootherstep, flat where the segment leaves and arrives.
+                    seg = u_StopEase[i] <= 0.0
+                        ? seg * seg * seg * (seg * (seg * 6.0 - 15.0) + 10.0)
+                        : pow(seg, u_StopEase[i]);
                     ramp = mix(u_StopVal[i], u_StopVal[i + 1], seg);
                     break;
                 }

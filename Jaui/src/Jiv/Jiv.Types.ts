@@ -18,13 +18,13 @@ export type CornerShape = 'Round' | 'Squircle' | 'Bevel' | 'Scoop' | 'Notch' | n
  * because a Color↔Image swap can't be a per-channel lerp.
  *
  * Gradient stops are normalized positions in [0, 1] with a parsed
- * Color. The CPU passes up to `MAX_GRADIENT_STOPS` per draw to the
- * shader as uniform arrays — beyond that, stops are evenly resampled
- * down to the cap.
+ * Color and an optional `Easing` exponent on the segment to the next
+ * stop. Gradient.Curve fits them to the shader's smooth curve.
  */
 export interface GradientStop {
   Position: number;
   Color: Color;
+  Easing?: number;
 }
 
 export type BackgroundValue =
@@ -36,9 +36,8 @@ export type BackgroundValue =
   | { Kind: 'LinearGradient', Color: Color, AngleRad: number, Stops: GradientStop[] }
   | { Kind: 'RadialGradient', Color: Color, CenterX: number, CenterY: number, Radius: number, Stops: GradientStop[] };
 
-/** Maximum gradient stops shipped to the shader per draw. Stops beyond
- *  this are evenly resampled in the parser before being uploaded. */
-export const MAX_GRADIENT_STOPS = 8;
+/** Knots shipped to the shader per gradient draw; Gradient.Curve resamples a longer curve down to it. */
+export const MAX_GRADIENT_STOPS = 16;
 
 /** A progressive-blur spectrum stop. At `Position` (0..1 along the element's
  *  ramp axis — 0 = top for vertical, left for horizontal) the blur + tint reach
@@ -51,6 +50,9 @@ export interface BlurStop {
   Value: number;
   Easing: number;
 }
+
+/** A blur stop's `Easing` for `ease smooth`: the segment follows smootherstep, flat at both of its stops. */
+export const BLUR_EASE_SMOOTH = 0;
 
 /** Max progressive-blur spectrum stops shipped to the shader per draw. */
 export const MAX_BLUR_STOPS = 12;
