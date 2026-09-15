@@ -717,7 +717,10 @@ const _simulateWrapHeight = (
     const ratio = rawAspect === null ? null : (Number.isFinite(Number(rawAspect)) && Number(rawAspect) > 0 ? Number(rawAspect) : null);
     const heightAuto = rawH === 'Auto' || rawH === 'MinContent' || rawH === 'MaxContent';
     const aspect = ratio !== null && heightAuto ? ratio : null;
-    const h = (explicitH ?? c.IntrinsicHeight ?? 0) + cmt + cmb;
+    const minH = _r(c.ChildLayout.MinHeight, childCtx, 'H');
+    const maxH = ResolveBound(c.ChildLayout.MaxHeight, childCtx, 'H');
+    // The flex pass clamps every item's cross size, so a 48pt MinHeight pill over a 20pt label is 48 tall on its line.
+    const h = clamp(explicitH ?? c.IntrinsicHeight ?? 0, minH, maxH) + cmt + cmb;
 
     const packed: Packed = {
       mainOuter: w,
@@ -727,8 +730,8 @@ const _simulateWrapHeight = (
       aspect,
       growW: Number(c.ChildLayout.FlexGrow),
       cmTop: cmt, cmBot: cmb,
-      minH: _r(c.ChildLayout.MinHeight, childCtx, 'H'),
-      maxH: ResolveBound(c.ChildLayout.MaxHeight, childCtx, 'H'),
+      minH,
+      maxH,
     };
 
     const addWithGap = lineMain === 0 ? w : lineMain + mainGap + w;

@@ -264,7 +264,15 @@ const _compute = (node: Element): void => {
     // actually produce — and Section's intrinsic-driven allocation comes
     // up short, so wrapped cards overflow into the next Section.
     const ancestorPad = _ancestorMainPadding(node, horiz, ctx);
-    const mainBudget = Math.max(0, ctx.ViewportWidth - mainPadding - ancestorPad);
+    let mainBudget = Math.max(0, ctx.ViewportWidth - mainPadding - ancestorPad);
+    // A row's lines break at its real width: the solved parent's content box, less the row's own margins, capped
+    // by its MaxWidth. The viewport alone ignores every MaxWidth column above, predicts too few lines on a wide
+    // screen, and the short intrinsic lets flex-shrink crush the row's siblings.
+    if (horiz) {
+      const [, mr, , ml] = ResolveLengthTuple4(node.ChildLayout.Margin, ctx, ['H', 'W', 'H', 'W']);
+      const own = Math.min(_textWrapBudget(node, true, ctx) - ml - mr - _rowSiblingsMain(node, ctx), _boundOf(node.ChildLayout.MaxWidth, ctx, 'W', true));
+      mainBudget = Math.min(mainBudget, Math.max(0, own - mainPadding));
+    }
     const wrapCross = _simulateWrapCrossSize(node, horiz, gap, crossGap, mainBudget);
     if (horiz) crossMax = wrapCross + crossPadding;
     else crossMax = wrapCross + crossPadding;
@@ -447,6 +455,8 @@ const _textWrapBudget = (
   // applied as a multiplier; falls back to viewport otherwise.
   let totalPad = 0;
   let multiplier = 1;
+  // The tightest MaxWidth column met on the way up, so a first frame does not wrap against the whole viewport.
+  let capped = Infinity;
   let cur: Element | null = parent;
   while (cur) {
     const childCtx = cur.ResolveCtx ?? ctx;
@@ -455,8 +465,10 @@ const _textWrapBudget = (
     const ownMain = horiz ? cur.ChildLayout.Width : cur.ChildLayout.Height;
     const explicit = _intrinsicOf(ownMain, childCtx, horiz ? 'W' : 'H');
     if (explicit !== null) {
-      return Math.max(0, explicit * multiplier - totalPad);
+      return Math.max(0, Math.min(explicit * multiplier - totalPad, capped));
     }
+    const maxMain = _boundOf(horiz ? cur.ChildLayout.MaxWidth : cur.ChildLayout.MaxHeight, childCtx, horiz ? 'W' : 'H', true);
+    if (Number.isFinite(maxMain)) capped = Math.min(capped, maxMain * multiplier - totalPad);
     if (typeof ownMain === 'string' && ownMain.includes('%')) {
       const pctMatch = /^\s*([\d.]+)\s*%\s*$/.exec(ownMain);
       if (pctMatch) multiplier *= Number(pctMatch[1]) / 100;
@@ -464,7 +476,27 @@ const _textWrapBudget = (
     cur = cur.Parent ?? null;
   }
   const vp = horiz ? ctx.ViewportWidth : ctx.ViewportHeight;
-  return Math.max(0, vp * multiplier - totalPad);
+  return Math.max(0, Math.min(vp * multiplier - totalPad, capped));
+};
+
+/** In a Row parent, what the node's siblings and the gaps between them take from the line: a list item's
+ *  words wrap in the width beside its marker, not the whole item. Zero in a Column parent. */
+const _rowSiblingsMain = (node: Element, ctx: ResolveContext): number => {
+  const parent = node.Parent ?? null;
+  if (!parent || (parent.Layout.Direction !== 'Row' && parent.Layout.Direction !== 'RowReverse')) return 0;
+  const parentCtx = parent.ResolveCtx ?? ctx;
+  let taken = 0;
+  let count = 0;
+  for (const sibling of parent.Children) {
+    if (sibling === node || sibling.LeaveRequested) continue;
+    if (sibling.ChildLayout.Position === 'Placed' || sibling.ChildLayout.Position === 'Fixed') continue;
+    const siblingCtx = sibling.ResolveCtx ?? ctx;
+    const [, smr, , sml] = ResolveLengthTuple4(sibling.ChildLayout.Margin, siblingCtx, ['H', 'W', 'H', 'W']);
+    taken += (_intrinsicOf(sibling.ChildLayout.Width, siblingCtx, 'W') ?? sibling.IntrinsicWidth ?? 0) + sml + smr;
+    count++;
+  }
+  const gap = Resolve(parent.Layout.ColumnGap, parentCtx, 'W') || Resolve(parent.Layout.Gap, parentCtx, 'W');
+  return taken + count * gap;
 };
 
 /** Return a pixel value if the dimension is "known" without parent dims.
