@@ -53,8 +53,13 @@ export interface ProbeNode {
   Scroll: { X: number; Y: number; ContentWidth: number; ContentHeight: number } | null;
   Layer: number;
   ZIndex: number | 'Auto';
+  /** The drawn corner radius, which carries the superellipse compensation. */
   Radius: number;
+  /** The smallest corner as authored: what decides whether the shape saturates to a circle or pill. */
+  RadiusAuthored: number;
   HasPaint: boolean;
+  /** What the background paints: Color, Image, LinearGradient or RadialGradient; null for a non-jiv. */
+  Background: string | null;
   Opacity: number;
   Presence: number;
   Visible: boolean;

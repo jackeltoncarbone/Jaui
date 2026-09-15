@@ -2458,13 +2458,11 @@ export class Canvas implements DirtyTracker {
     const rtr = corner(1);
     const rbr = corner(2);
     const rbl = corner(3);
-    // If every corner is fully rounded (radii saturate at half-dim), the
-    // shape is a circle/pill. Force smoothness=0 so the clip's superellipse
-    // collapses to n=2 — otherwise the default 0.3 paints a squircle that
-    // bulges into the diagonals, clipping a rounded square instead of a
-    // circle. Mirrors ShapeMode's circle-mode classification in the panel
-    // shader, which the clip path doesn't run.
-    const fullyRounded = rtl >= maxR && rtr >= maxR && rbr >= maxR && rbl >= maxR;
+    // A circle or pill clips at smoothness 0 (n = 2), else the default squircle bulges into the diagonals.
+    // Keyed to the AUTHORED radius as the panel shader's saturation is: the compensated one passes half a
+    // small box long before the author asked for a circle, and turned a 48pt rounded tile's art into a disc.
+    const raw = node.RenderStyle.BorderRadiusRaw;
+    const fullyRounded = Math.min(raw[0], raw[1], raw[2], raw[3]) * avgScale >= maxR;
     // The clip rect is the node's box in canvas space; under rotation its
     // top-left would be ambiguous, so store the CENTER (always well-defined)
     // and let the clip SDF rebuild corners from center ± half-extents in the
