@@ -106,7 +106,7 @@ const _parseHsl = (s: string): Color => {
   if (open < 0 || close < 0) {
     throw new Error(`[Jaui] Malformed hsl/hsla: "${s}"`);
   }
-  const parts = s.slice(open + 1, close).split(/[\s,]+/).filter((p) => p.length > 0);
+  const parts = s.slice(open + 1, close).split(/[\s,/]+/).filter((p) => p.length > 0);
   if (parts.length !== 3 && parts.length !== 4) {
     throw new Error(`[Jaui] hsl/hsla needs 3 or 4 components: "${s}"`);
   }
@@ -150,29 +150,22 @@ const _parseRgb = (s: string): Color => {
     throw new Error(`[Jaui] Malformed rgb/rgba: "${s}"`);
   }
   const inner = s.slice(open + 1, close);
-  // Accept comma or whitespace separators (CSS4)
-  const parts = inner.split(/[\s,]+/).filter((p) => p.length > 0);
+  // Comma, whitespace or CSS4 `r g b / a` separators.
+  const parts = inner.split(/[\s,/]+/).filter((p) => p.length > 0);
   if (parts.length !== 3 && parts.length !== 4) {
     throw new Error(`[Jaui] rgb/rgba needs 3 or 4 components: "${s}"`);
   }
-  // RGB channels: accept 0-255 int or 0-1 float. Heuristic: if any of r/g/b
-  // is > 1, treat as 0-255 and divide; otherwise assume already 0-1. This
-  // matches how designers authentically mix authoring styles.
-  const raw = parts.map((p) => {
-    // Trailing '%' — percentage form: "50%" → 0.5
-    if (p.endsWith('%')) return parseFloat(p.slice(0, -1)) / 100;
-    return parseFloat(p);
-  });
-  if (raw.some(Number.isNaN)) {
-    throw new Error(`[Jaui] Invalid numeric component in color: "${s}"`);
-  }
-  const [r, g, b, a] = raw;
-  const anyLarge = r > 1 || g > 1 || b > 1;
-  const scale = anyLarge ? 255 : 1;
+  // Channels are 0 to 255 or a percentage, as in CSS; never guessed from their size, or a
+  // near-black rgb(1, 0, 0) reads as pure red.
+  const component = (p: string, full: number): number => {
+    const v = p.endsWith('%') ? parseFloat(p.slice(0, -1)) / 100 : parseFloat(p) / full;
+    if (Number.isNaN(v)) throw new Error(`[Jaui] Invalid numeric component in color: "${s}"`);
+    return Math.min(1, Math.max(0, v));
+  };
   return {
-    R: r / scale,
-    G: g / scale,
-    B: b / scale,
-    A: raw.length === 4 ? a : 1,
+    R: component(parts[0], 255),
+    G: component(parts[1], 255),
+    B: component(parts[2], 255),
+    A: parts.length === 4 ? component(parts[3], 1) : 1,
   };
 };
