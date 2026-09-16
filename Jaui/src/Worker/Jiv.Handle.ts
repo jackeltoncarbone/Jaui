@@ -30,6 +30,7 @@ import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { ChildLayout, LayoutConfig } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
 import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
+import type { EmbedBox } from '../Embed/Embed.Geometry';
 
 export class JivHandle {
   readonly Id: number;
@@ -50,6 +51,11 @@ export class JivHandle {
   ScrollTargetY = 0;
   ContentWidth = 0;
   ContentHeight = 0;
+  /** The last full placement box: the rect above, plus its clipped-visible
+   *  part, the accumulated opacity and the node's corner radii. `null` until a
+   *  `WatchRect(true)` subscription delivers one. `<jembed>` places its DOM
+   *  element from this; ordinary consumers keep reading X/Y/Width/Height. */
+  Box: EmbedBox | null = null;
 
   // ─── Interaction state (mirrored from worker hover/active/focus events) ─
   /** True while the pointer is over this Jiv (or descendant). Worker pushes
@@ -131,8 +137,9 @@ export class JivHandle {
     // subscribed. JivHitHandlers.OnRectSnapshot is mutual: the bridge
     // calls it and we update the cache.
     bridge.SetHitHandlers(id, {
-      OnRectSnapshot: ({ X, Y, Width, Height }) => {
-        this.X = X; this.Y = Y; this.Width = Width; this.Height = Height;
+      OnRectSnapshot: (box) => {
+        this.X = box.X; this.Y = box.Y; this.Width = box.Width; this.Height = box.Height;
+        this.Box = box;
       },
     });
   }
@@ -449,9 +456,10 @@ export class JivHandle {
     // user-level handlers come and go.
     const merged: JivHitHandlers = {
       ...this._hit,
-      OnRectSnapshot: ({ X, Y, Width, Height }) => {
-        this.X = X; this.Y = Y; this.Width = Width; this.Height = Height;
-        this._hit.OnRectSnapshot?.({ X, Y, Width, Height });
+      OnRectSnapshot: (box) => {
+        this.X = box.X; this.Y = box.Y; this.Width = box.Width; this.Height = box.Height;
+        this.Box = box;
+        this._hit.OnRectSnapshot?.(box);
       },
     };
     this._bridge.SetHitHandlers(this.Id, merged);

@@ -141,6 +141,11 @@ export class Jaui implements OnInit, OnDestroy {
     this._canvasEl.style.position = 'relative';
     this._canvasEl.style.zIndex = '1';
     this._mirror.Attach(this._host.nativeElement, this._canvasEl);
+    // The DOM embed layer is a SIBLING of the canvas at z-index 2, so a
+    // `<jembed>` (an iframe, a <video>, a map) paints above it. Naming the host
+    // here rather than letting the layer find one keeps the layer out of the
+    // "which element am I in" business; it stays unbuilt until an embed mounts.
+    this.Bridge.Embeds.Attach(this._host.nativeElement);
     this.Canvas = new CanvasProxy(this.Bridge);
     (window as { __jaui?: { canvas: CanvasProxy } }).__jaui = { canvas: this.Canvas };
     (window as { __jauiSemantics?: () => string }).__jauiSemantics = () => this._mirror.Serialize();
@@ -289,6 +294,7 @@ export class Jaui implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this._teardownKeyboardInset?.();
     this._teardownSafeArea?.();
+    this.Bridge.Embeds.Dispose();
     this.Canvas.Stop();
     this.Bridge.Worker.terminate();
     this._canvasEl.remove();

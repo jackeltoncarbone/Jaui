@@ -30,6 +30,8 @@ import type {
 } from './Bridge.Types';
 import { ContextWatchdog } from './Context.Watchdog';
 import type { ProbeSnapshot } from '../Probe/Probe.Types';
+import { EmbedLayer, IsInsideEmbed } from '../Embed/Embed.Layer';
+import type { EmbedBox } from '../Embed/Embed.Geometry';
 
 const ROOT_ID = 0;
 
@@ -41,7 +43,13 @@ const _DEBUG: boolean =
 /** True when the currently focused element is a real text input, so the
  *  native browser clipboard handlers should take precedence over Jaui's
  *  display-text mirror (e.g. Jinput's hidden `<textarea>`, plain `<input>` /
- *  `<textarea>` outside the canvas, contenteditable surfaces). */
+ *  `<textarea>` outside the canvas, contenteditable surfaces).
+ *
+ *  A DOM EMBED counts. An embed is real DOM the person is interacting with
+ *  directly, and a cross-origin one (Stripe's card fields) reports its own
+ *  `<iframe>` element as `activeElement` — a tag this test would otherwise
+ *  miss, so Jaui would have kept hijacking Ctrl+C and firing its own
+ *  selection shortcuts while someone typed a card number. */
 const _isNativeTextInputFocused = (): boolean => {
   if (typeof document === 'undefined') return false;
   const ae = document.activeElement as HTMLElement | null;
@@ -49,7 +57,7 @@ const _isNativeTextInputFocused = (): boolean => {
   const tag = ae.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
   if (ae.isContentEditable) return true;
-  return false;
+  return IsInsideEmbed(ae);
 };
 
 export interface BridgeOptions {
@@ -79,8 +87,10 @@ export interface JivHitHandlers {
    *  delta fields (WheelPayload) so main can rebuild a faithful WheelEvent. */
   OnWheel?: (src: WheelPayload) => void;
   /** Called when the worker posts a fresh rect snapshot for this node.
-   *  Set on Handles that have subscribed via `WatchRect(true)`. */
-  OnRectSnapshot?: (rect: { X: number; Y: number; Width: number; Height: number }) => void;
+   *  Set on Handles that have subscribed via `WatchRect(true)`. The box
+   *  carries the clipped-visible rect, accumulated opacity and corner radii
+   *  as well, which is what `<jembed>` places its DOM element from. */
+  OnRectSnapshot?: (rect: EmbedBox) => void;
 }
 
 export class MainBridge {
@@ -112,6 +122,12 @@ export class MainBridge {
 
   /** Main-thread eviction self-heal — see Context.Watchdog. */
   private readonly _watchdog: ContextWatchdog;
+
+  /** The DOM overlay above the canvas — the one place real DOM (an iframe, a
+   *  `<video>`, a map) can live on a canvas app. Created lazily, so an app
+   *  with no `<jembed>` never adds an element to the page. `<jaui>` calls
+   *  `Embeds.Attach(host)` so the layer lands beside the canvas. */
+  readonly Embeds = new EmbedLayer();
 
   constructor(opts: BridgeOptions) {
     this.Canvas = opts.Canvas;
@@ -436,7 +452,7 @@ export class MainBridge {
   private _onRect = (m: W2M_RectSnapshot): void => {
     const h = this._hitHandlers.get(m.JivId);
     if (!h?.OnRectSnapshot) return;
-    h.OnRectSnapshot({ X: m.X, Y: m.Y, Width: m.Width, Height: m.Height });
+    h.OnRectSnapshot(m.Box);
   };
 
   // ─── DOM event capture ─────────────────────────────────────────────────
@@ -825,12 +841,15 @@ export class MainBridge {
       }
     }
 
-    // Focus state — engine's selection-key suppression looks at this.
+    // Focus state — engine's selection-key suppression looks at this. A
+    // focused DOM embed counts: while someone is typing into one, the keys
+    // belong to it and Jaui's own selection shortcuts must stand down.
     const focusHandler = (): void => {
       const ae = document.activeElement;
       const focused = !!ae && (
         ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT'
         || (ae as HTMLElement).isContentEditable
+        || IsInsideEmbed(ae)
       );
       this.PostMessage({ T: 'focus', IsTextInputFocused: focused });
     };

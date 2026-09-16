@@ -4217,3 +4217,13 @@ export {
 export type { JanvasFactoryContext } from '../Janvas/Janvas.Renderer';
 export type { JivApplyOpts, JivOp, M2W, W2M, PointerPayload, WheelPayload } from '../Worker/Bridge.Types';
 export type { ProbeNode, ProbeRect, ProbeSnapshot, ProbeText } from '../Probe/Probe.Types';
+
+// DOM embeds — the only way real DOM (an iframe, a <video>, a map) lives on a
+// canvas app. `<jembed>` in Jaui.Angular is the consumer-facing form.
+export {
+  EmbedLayer, EmbedSlot, IsInsideEmbed, EMBED_ATTRIBUTE,
+} from '../Embed/Embed.Layer';
+export {
+  MeasureEmbedBox, EmbedBoxesEqual, HIDDEN_EMBED_BOX,
+  type EmbedBox, type EmbedTreeNode,
+} from '../Embed/Embed.Geometry';

@@ -41,8 +41,28 @@ import type {
   WheelPayload,
 } from './Bridge.Types';
 import { LookupJanvasRenderer } from './Worker.RendererRegistry';
+import {
+  EmbedBoxesEqual, MeasureEmbedBox,
+  type EmbedBox, type EmbedTreeNode,
+} from '../Embed/Embed.Geometry';
 
 const ROOT_ID = 0;
+
+const ZERO_RADIUS: readonly [number, number, number, number] = [0, 0, 0, 0];
+
+// Module-level extractors so the per-frame measurement allocates nothing. The
+// tree shape `MeasureEmbedBox` walks is structural; opacity and radii live on
+// the animated RenderStyle, which only a Jiv has.
+const _opacityOf = (n: EmbedTreeNode): number => {
+  const style = (n as unknown as JivCore).RenderStyle;
+  // A bare Element has no RenderStyle — treat it as fully opaque rather than
+  // invisible, which would hide every embed underneath it.
+  return style ? style.Opacity : 1;
+};
+const _radiusOf = (n: EmbedTreeNode): readonly [number, number, number, number] => {
+  const style = (n as unknown as JivCore).RenderStyle;
+  return style ? style.BorderRadius : ZERO_RADIUS;
+};
 
 export class JivRegistry {
   private _nodes = new Map<number, JivCore>();
@@ -99,29 +119,27 @@ export class JivRegistry {
       // After Jaui's layout solver runs (`Layout.Solver._solveNode`),
       // `node.X` / `node.Y` are CANVAS-LOCAL absolute coordinates — the
       // solver does `absX = offsetX + cl.Left` recursively, and the
-      // animator commits the absolute target. So emitting raw X/Y is
-      // already canvas-local; no ancestor walk needed.
-      let x = n.X;
-      let y = n.Y;
-      // Subtract ancestor ScrollX/Y so consumers see the visible
-      // canvas-local rect (a node nested inside a scrolled container
-      // moves with the scroll). Own ScrollX/Y doesn't shift self,
-      // only its children.
-      for (let p: JivCore | null = n.Parent as JivCore | null; p; p = p.Parent as JivCore | null) {
-        x -= p.ScrollX;
-        y -= p.ScrollY;
-      }
-      const w = n.Width;
-      const h = n.Height;
+      // animator commits the absolute target. `MeasureEmbedBox` subtracts
+      // ancestor scroll from that (a node inside a scrolled container moves
+      // with the scroll; its own ScrollX/Y shifts only its children) and
+      // narrows the result by every clipping ancestor, which is what lets a
+      // DOM embed be clipped exactly like the jiv it covers.
+      const box = MeasureEmbedBox(
+        n as unknown as EmbedTreeNode, _opacityOf, _radiusOf,
+      );
       const last = this._lastSnapshot.get(id);
-      if (last && last.X === x && last.Y === y && last.W === w && last.H === h) continue;
-      this._lastSnapshot.set(id, { X: x, Y: y, W: w, H: h });
-      this._post({ T: 'rect', JivId: id, X: x, Y: y, Width: w, Height: h });
+      if (EmbedBoxesEqual(last, box)) continue;
+      this._lastSnapshot.set(id, box);
+      this._post({
+        T: 'rect', JivId: id,
+        X: box.X, Y: box.Y, Width: box.Width, Height: box.Height,
+        Box: box,
+      });
     }
   };
 
-  /** Last-emitted snapshot per id — debounce for unchanged rects. */
-  private _lastSnapshot = new Map<number, { X: number; Y: number; W: number; H: number }>();
+  /** Last-emitted snapshot per id — debounce for unchanged boxes. */
+  private _lastSnapshot = new Map<number, EmbedBox>();
 
   // ─── Op dispatch ────────────────────────────────────────────────────────
 
@@ -348,6 +366,9 @@ export class JivRegistry {
     this._unregisterFromGroups(core);
     this._nodes.delete(id);
     this._watchedRects.delete(id);
+    // Ids are never re-used, so a left-behind snapshot could never be read
+    // again — it would just sit in the map for the life of the page.
+    this._lastSnapshot.delete(id);
   };
 
   /** Reapply this Jiv's group-trigger class membership. Removes from any

@@ -11,6 +11,7 @@ export * from './Janvas/Janvas';
 export * from './Jiv/Jiv';
 export * from './Jimage/Jimage';
 export * from './Jext/Jext';
+export * from './Jembed/Jembed';
 export * from './Jyle/Jyle';
 export * from './SvgJiv/SvgJiv';
 export * from './Jinput/Jinput';
@@ -32,6 +33,10 @@ export type {
   Stylesheet, Ruleset,
 } from 'jaui';
 export { LiquidGlass, ClearGlass, ParseJss, Canvas } from 'jaui';
+// DOM embeds — `<jembed>` above is the component; these are the engine pieces a
+// consumer needs to place or inspect one imperatively.
+export { IsInsideEmbed, EMBED_ATTRIBUTE } from 'jaui';
+export type { EmbedBox } from 'jaui';
 
 // Worker bootstrap helpers — apps call `CheckBrowserSupport()` at boot
 // to feature-detect OffscreenCanvas + Worker before kicking Angular.

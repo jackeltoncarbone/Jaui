@@ -14,6 +14,7 @@
 
 import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import type { ProbeSnapshot } from '../Probe/Probe.Types';
+import type { EmbedBox } from '../Embed/Embed.Geometry';
 
 // ─── Main → Worker ────────────────────────────────────────────────────────
 
@@ -451,6 +452,13 @@ export interface W2M_RectSnapshot {
   Y: number;
   Width: number;
   Height: number;
+  /** The VISIBLE part of the rect after every clipping ancestor, plus the
+   *  accumulated opacity and the node's own corner radii. Carried on the same
+   *  message because the worker is already standing at the node: it is what
+   *  lets a DOM embed (`<jembed>`) be clipped and faded exactly like the jiv it
+   *  covers, rather than floating over unrelated content once its container
+   *  scrolls. See `Embed/Embed.Geometry`. */
+  Box: EmbedBox;
 }
 
 /** HUD stats stream (debug-only). Worker emits when ?debug enabled. */
