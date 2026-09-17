@@ -69,8 +69,14 @@ export interface BridgeOptions {
   /** Pre-spawned Worker (call `SpawnJauiWorker()`). The bridge does NOT
    *  spawn the worker itself because the static-URL `new Worker(...)` call
    *  has to live inside the Jaui package for the bundler to detect it.
-   *  Consumers receive that helper from Jaui core. */
-  Worker: Worker;
+   *  Consumers receive that helper from Jaui core.
+   *
+   *  NULL under server rendering. There is no GPU to draw with and no
+   *  OffscreenCanvas to transfer, so the bridge runs as a pure op SINK: it
+   *  hands out ids and accepts everything `<jiv>` enqueues, and posts none of
+   *  it. That is what lets the component tree — and therefore the semantic
+   *  mirror the crawler reads — build exactly as it does in the browser. */
+  Worker: Worker | null;
   /** Self-heal callback for the eviction watchdog — invoked when the worker is
    *  unrecoverable (iOS killed the whole background tab's worker, so it can't recover
    *  in place and will never post `context-restored`). Defaults to `location.reload()`. */
@@ -96,7 +102,7 @@ export interface JivHitHandlers {
 
 export class MainBridge {
   readonly Canvas: HTMLCanvasElement;
-  readonly Worker: Worker;
+  readonly Worker: Worker | null;
 
   /** Resolved when the worker posts {T:'ready'}. Components await this
    *  before relying on roundtrip results (rect snapshots, hit events). */
@@ -156,6 +162,11 @@ export class MainBridge {
 
     this.Ready = new Promise<void>(r => { this._readyResolve = r; });
 
+    // Workerless (server) bridge: nothing to listen to, no canvas to transfer, and no window
+    // to wire pointer events from. Construction ends here, with the id allocator and the op
+    // queue live — which is the entire surface `<jiv>` touches at construction time.
+    if (!this.Worker) return;
+
     this.Worker.addEventListener('message', (e: MessageEvent) => this._onMessage(e.data));
     this.Worker.addEventListener('error', (e: ErrorEvent) => {
       console.error('[Jaui.MainBridge] worker error:', e.message, e.error, 'filename:', e.filename, 'line:', e.lineno);
@@ -212,15 +223,20 @@ export class MainBridge {
   });
 
   PostMessage = (msg: M2W, transfer?: Transferable[]): void => {
+    // Workerless (server) bridge: DROP, don't backlog. The backlog exists to replay into a
+    // worker that is still booting; with no worker ever arriving it would instead accumulate
+    // every op every Jiv enqueues for the whole render and free none of it.
+    const worker = this.Worker;
+    if (!worker) return;
     if (!this._ready) {
       this._eventBacklog.push(msg);
       return;
     }
     try {
       if (transfer && transfer.length > 0) {
-        this.Worker.postMessage(msg, transfer);
+        worker.postMessage(msg, transfer);
       } else {
-        this.Worker.postMessage(msg);
+        worker.postMessage(msg);
       }
     } catch (err) {
       const t = (msg as { T: string }).T;
@@ -251,13 +267,16 @@ export class MainBridge {
   };
 
   private _sendInit = (): void => {
+    // Only reached with a worker — the constructor returns before wiring when there is none.
+    const worker = this.Worker;
+    if (!worker) return;
     // Page-rect for initial size — saves the first ResizeObserver round-trip.
     const rect = this.Canvas.getBoundingClientRect();
     const offscreen = this.Canvas.transferControlToOffscreen();
     const dpr = window.devicePixelRatio || 1;
     const isCoarse = !!window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
 
-    this.Worker.postMessage(
+    worker.postMessage(
       {
         T: 'init',
         Canvas: offscreen,
@@ -379,7 +398,8 @@ export class MainBridge {
         drain.map(m => (m as { T: string }).T));
       for (const m of drain) {
         try {
-          this.Worker.postMessage(m);
+          // A worker exists: `_ready` only flips when one posts back.
+          this.Worker!.postMessage(m);
         } catch (err) {
           const t = (m as { T: string }).T;
           const shape = _describeShape(m);
@@ -411,12 +431,12 @@ export class MainBridge {
         const rect = this.Canvas.getBoundingClientRect();
         const w = Math.round(rect.width), h = Math.round(rect.height);
         if (w > 0 && h > 0 && w === lastW && h === lastH) {
-          this.Worker.postMessage({ T: 'resize', Width: rect.width, Height: rect.height });
+          this.Worker!.postMessage({ T: 'resize', Width: rect.width, Height: rect.height });
           return;
         }
         lastW = w; lastH = h;
         if (tries++ < 20) requestAnimationFrame(settleSize);
-        else if (w > 0 && h > 0) this.Worker.postMessage({ T: 'resize', Width: rect.width, Height: rect.height });
+        else if (w > 0 && h > 0) this.Worker!.postMessage({ T: 'resize', Width: rect.width, Height: rect.height });
       };
       requestAnimationFrame(settleSize);
   };

@@ -4,11 +4,13 @@ import {
   InjectionToken,
   OnDestroy,
   OnInit,
+  PLATFORM_ID,
   effect,
   inject,
   input,
   output,
 } from '@angular/core';
+import { DOCUMENT, isPlatformBrowser } from '@angular/common';
 import {
   MainBridge,
   CanvasProxy,
@@ -109,6 +111,13 @@ export class Jaui implements OnInit, OnDestroy {
   private _host = inject(ElementRef<HTMLElement>);
   private _registry = inject(JssRegistry);
   private _mirror = inject(SemanticMirror);
+  /** The document is INJECTED, never read off the global. Server rendering installs no global
+   *  `document`, so `document.createElement('canvas')` below was the FIRST line of the app to
+   *  throw under SSR — before a single mirror node existed. */
+  private _doc = inject(DOCUMENT);
+  /** The canvas half of this component is browser-only; the mirror half is not. Everything that
+   *  needs a GPU, a Worker or a `window` hangs off this one flag. */
+  private readonly _isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
   private _canvasEl: HTMLCanvasElement;
 
   constructor() {
@@ -126,31 +135,45 @@ export class Jaui implements OnInit, OnDestroy {
       this._canvasEl = prebuilt.Canvas;
       slot.__JAUI_PREBUILT_BRIDGE__ = undefined;
     } else {
-      this._canvasEl = document.createElement('canvas');
+      this._canvasEl = this._doc.createElement('canvas') as HTMLCanvasElement;
       this._canvasEl.style.display = 'block';
       this._canvasEl.style.width = '100%';
       this._canvasEl.style.height = '100%';
-      const worker = inject(JAUI_WORKER);
+      // No worker on the server: there is no OffscreenCanvas to transfer and no GPU to draw
+      // with, and INJECTING the token would run the host's factory and spawn a real Worker.
+      // The bridge still builds — it accumulates the ops Jivs enqueue and posts none of them —
+      // so `<jiv>` constructs exactly as it does in the browser and the mirror fills normally.
+      const worker = this._isBrowser ? inject(JAUI_WORKER) : null;
       this.Bridge = new MainBridge({ Canvas: this._canvasEl, Worker: worker });
     }
-    this._host.nativeElement.appendChild(this._canvasEl);
-    // The semantic mirror sits under the canvas as the crawl + accessibility
-    // tree only; it is visually hidden (see SemanticMirror.Attach), so the
-    // canvas is the sole thing a sighted user sees. relative/z-index keeps the
-    // canvas above the mirror in the stacking context.
-    this._canvasEl.style.position = 'relative';
-    this._canvasEl.style.zIndex = '1';
-    this._mirror.Attach(this._host.nativeElement, this._canvasEl);
+    // THE CANVAS IS NOT SERIALIZED. On the server it would be an inert element that draws nothing
+    // and says nothing to a crawler — and worse, the client's own constructor appends a REAL one on
+    // hydration, so shipping it would leave every page carrying two canvases, one of them dead.
+    // The mirror is the whole of what the server render has to say.
+    if (this._isBrowser) {
+      this._host.nativeElement.appendChild(this._canvasEl);
+      // The semantic mirror sits under the canvas as the crawl + accessibility
+      // tree only; it is visually hidden (see SemanticMirror.Attach), so the
+      // canvas is the sole thing a sighted user sees. relative/z-index keeps the
+      // canvas above the mirror in the stacking context.
+      this._canvasEl.style.position = 'relative';
+      this._canvasEl.style.zIndex = '1';
+    }
+    // With no canvas on the server the mirror simply lands as the host's first child; on the
+    // client it goes before the canvas, which is what keeps the canvas painting over it.
+    this._mirror.Attach(this._host.nativeElement, this._isBrowser ? this._canvasEl : null);
     // The DOM embed layer is a SIBLING of the canvas at z-index 2, so a
     // `<jembed>` (an iframe, a <video>, a map) paints above it. Naming the host
     // here rather than letting the layer find one keeps the layer out of the
     // "which element am I in" business; it stays unbuilt until an embed mounts.
     this.Bridge.Embeds.Attach(this._host.nativeElement);
     this.Canvas = new CanvasProxy(this.Bridge);
-    (window as { __jaui?: { canvas: CanvasProxy } }).__jaui = { canvas: this.Canvas };
-    (window as { __jauiSemantics?: () => string }).__jauiSemantics = () => this._mirror.Serialize();
-    if (typeof ngDevMode === 'undefined' || ngDevMode) {
-      (window as { JauiProbe?: () => Promise<ProbeSnapshot | null> }).JauiProbe = this._probe;
+    if (this._isBrowser) {
+      (window as { __jaui?: { canvas: CanvasProxy } }).__jaui = { canvas: this.Canvas };
+      (window as { __jauiSemantics?: () => string }).__jauiSemantics = () => this._mirror.Serialize();
+      if (typeof ngDevMode === 'undefined' || ngDevMode) {
+        (window as { JauiProbe?: () => Promise<ProbeSnapshot | null> }).JauiProbe = this._probe;
+      }
     }
 
     // Push JSS var table to the worker on every registry version bump.
@@ -287,6 +310,11 @@ export class Jaui implements OnInit, OnDestroy {
   ngOnInit(): void {
     const sheet = this.stylesheet();
     if (sheet) this._registry.Merge(sheet);
+    // Starting the canvas transfers an OffscreenCanvas and opens the render loop, and `ready`
+    // is what host code uses as its cue to drive the canvas. Neither means anything without a
+    // GPU, so on the server the component ends its boot here — with the mirror attached and
+    // every Jiv free to project into it.
+    if (!this._isBrowser) return;
     this.Canvas.Start();
     this.ready.emit(this.Canvas);
   }
@@ -296,7 +324,7 @@ export class Jaui implements OnInit, OnDestroy {
     this._teardownSafeArea?.();
     this.Bridge.Embeds.Dispose();
     this.Canvas.Stop();
-    this.Bridge.Worker.terminate();
+    this.Bridge.Worker?.terminate();
     this._canvasEl.remove();
   }
 }

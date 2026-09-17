@@ -1,4 +1,5 @@
-import { Injectable } from '@angular/core';
+import { DOCUMENT } from '@angular/common';
+import { Injectable, inject } from '@angular/core';
 import type { ResolvedSemantics } from './Seo.Types';
 
 /** Tags whose mirror element CONTAINS descendants' mirror nodes. A card cell's
@@ -6,6 +7,18 @@ import type { ResolvedSemantics } from './Seo.Types';
  *  containment can't come from DOM nesting of mirror nodes in place; the
  *  mirror tree is built here instead. */
 const ContainerTags = new Set(['a', 'button', 'nav', 'main', 'section', 'ul', 'li']);
+
+/** `Node.DOCUMENT_POSITION_PRECEDING`, named rather than read off the global: the mirror
+ *  builds under server rendering too, where which DOM globals exist is the platform's business. */
+const POSITION_PRECEDING = 2;
+
+/** The accessible-clip pattern — visually hidden but still crawled and still read aloud.
+ *  Deliberately NOT `display:none` / `aria-hidden`, either of which would take the mirror
+ *  out of the very two trees it exists to be in. */
+const MIRROR_ROOT_STYLE =
+  'position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;' +
+  'overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;' +
+  'z-index:0;pointer-events:none;user-select:none;-webkit-user-select:none';
 
 export interface MirrorEntry {
   Host: HTMLElement;
@@ -30,6 +43,10 @@ export interface MirrorEntry {
  */
 @Injectable()
 export class SemanticMirror {
+  /** The document is INJECTED, never the global. Under server rendering there is no global
+   *  `document` — reading it is what made the whole canvas host throw before the mirror could
+   *  paint a single node — while `inject(DOCUMENT)` resolves on both platforms. */
+  private readonly _doc = inject(DOCUMENT);
   private _root: HTMLElement | null = null;
   private readonly _entries = new Set<MirrorEntry>();
   private _flushQueued = false;
@@ -42,12 +59,21 @@ export class SemanticMirror {
    *  pre-first-frame flash of unpositioned mirror text. */
   Attach = (host: HTMLElement, beforeEl: Element | null): void => {
     if (this._root) return;
-    const root = document.createElement('div');
+    // HYDRATION: the server already painted a mirror into this very host, and the client is
+    // reusing those nodes. Creating a second root here would leave the page carrying the
+    // server's tree AND a live one — two copies of every heading and link in the accessibility
+    // tree, and a crawler reading each twice. Adopt the one that is already there instead.
+    // Its children are dropped because every entry re-registers and re-applies during this
+    // boot; keeping them would strand the server's nodes under a root that no entry owns.
+    const adopted = host.querySelector<HTMLElement>(':scope > div.JauiSemantics');
+    if (adopted) {
+      adopted.replaceChildren();
+      this._root = adopted;
+      return;
+    }
+    const root = this._doc.createElement('div');
     root.className = 'JauiSemantics';
-    root.setAttribute('style',
-      'position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;' +
-      'overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;' +
-      'z-index:0;pointer-events:none;user-select:none;-webkit-user-select:none');
+    root.setAttribute('style', MIRROR_ROOT_STYLE);
     host.insertBefore(root, beforeEl);
     this._root = root;
   };
@@ -67,7 +93,7 @@ export class SemanticMirror {
     }
     entry.Navigate = navigate;
     if (entry.Tag !== resolved.Tag) {
-      const el = document.createElement(resolved.Tag);
+      const el = this._doc.createElement(resolved.Tag);
       // Out of flow: late-arriving mirror nodes must not shift earlier ones
       // (CLS is measured on the painted underlay). Text still paints for
       // FCP. The positional-sync milestone replaces 0,0 with the node's
@@ -103,7 +129,7 @@ export class SemanticMirror {
     // elements after it, and textContent assignment would wipe them.
     if (resolved.Text !== null) {
       if (!entry.TextNode || entry.TextNode.parentNode !== el) {
-        entry.TextNode = document.createTextNode('');
+        entry.TextNode = this._doc.createTextNode('');
         el.insertBefore(entry.TextNode, el.firstChild);
       }
       if (entry.TextNode.data !== resolved.Text) entry.TextNode.data = resolved.Text;
@@ -171,7 +197,7 @@ export class SemanticMirror {
     for (const [container, list] of groups) {
       list.sort((a, b) => {
         if (a.Host === b.Host) return 0;
-        return (a.Host.compareDocumentPosition(b.Host) & Node.DOCUMENT_POSITION_PRECEDING) ? 1 : -1;
+        return (a.Host.compareDocumentPosition(b.Host) & POSITION_PRECEDING) ? 1 : -1;
       });
       for (const entry of list) container.appendChild(entry.El!);
     }

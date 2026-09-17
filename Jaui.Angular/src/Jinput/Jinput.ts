@@ -2,6 +2,8 @@ import {
   ChangeDetectionStrategy, Component, ElementRef, OnDestroy,
   computed, effect, inject, input, model, output, signal, viewChild,
 } from '@angular/core';
+import { isPlatformBrowser } from '@angular/common';
+import { PLATFORM_ID } from '@angular/core';
 import { Jaui } from '../Jaui/Jaui';
 import { Jiv } from '../Jiv/Jiv';
 import { Jext } from '../Jext/Jext';
@@ -397,6 +399,10 @@ export class Jinput implements OnDestroy {
 
   // ── Refs ────────────────────────────────────────────────────────
   private readonly _jaui = inject(Jaui, { optional: true });
+  /** Everything this component does with a caret, a keyboard or a measured font needs a browser.
+   *  It still CONSTRUCTS under server rendering, because it is part of the page a crawler is
+   *  served; it simply does none of that there. */
+  private readonly _isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
   private readonly _hiddenInput = viewChild<ElementRef<HTMLTextAreaElement>>('hiddenInput');
   private readonly _wrap = viewChild<Jiv>('wrap');
 
@@ -506,6 +512,10 @@ export class Jinput implements OnDestroy {
   private _measureCtx: CanvasRenderingContext2D | null = null;
   private readonly _measureWidth = (text: string): number => {
     if (!text) return 0;
+    // No 2D context on the server, so no measurement is possible. Zero is the honest answer and
+    // matches the empty-text case the line above already returns; the browser re-measures for real
+    // on hydration, before anyone sees a caret.
+    if (!this._isBrowser) return 0;
     if (!this._measureCtx) {
       const c = document.createElement('canvas').getContext('2d');
       if (!c) throw new Error('[Jinput] failed to acquire 2D context');
@@ -680,7 +690,13 @@ export class Jinput implements OnDestroy {
     // measurable real width; the rAF poll (_startLayoutWidthPoll) still refines
     // to the exact wrap width. Safe fallback: if the canvas isn't sized yet we
     // keep the 600 default — never worse than before.
-    const initialCanvasWidth = this._jaui?.Canvas?.Element?.getBoundingClientRect().width;
+    // A server render has a canvas ELEMENT but no layout engine behind it, so the element carries
+    // no `getBoundingClientRect` at all. That is the same case the fallback below already handles —
+    // "not measurable yet, keep the default" — so it is tested for rather than assumed present.
+    const canvasEl = this._jaui?.Canvas?.Element;
+    const initialCanvasWidth = typeof canvasEl?.getBoundingClientRect === 'function'
+      ? canvasEl.getBoundingClientRect().width
+      : undefined;
     if (initialCanvasWidth && initialCanvasWidth > 0) this._wrapWidth.set(initialCanvasWidth);
 
     // External Text changes (programmatic) flow into the hidden input value
@@ -689,7 +705,7 @@ export class Jinput implements OnDestroy {
       const input = this._hiddenInput()?.nativeElement;
       if (!input) return;
       const next = this.Text();
-      if (document.activeElement !== input && input.value !== next) {
+      if (this._isBrowser && document.activeElement !== input && input.value !== next) {
         input.value = next;
         this._selStart.set(input.selectionStart ?? next.length);
         this._selEnd.set(input.selectionEnd ?? next.length);
@@ -750,6 +766,9 @@ export class Jinput implements OnDestroy {
     // bounce the textarea between the caret and the wrap top-left.
     if (!Jinput._isMobileTouch()) {
       effect(() => {
+        // Positions the hidden textarea under the caret. There is no caret to follow on the
+        // server, and the canvas element there carries no layout box to measure against.
+        if (!this._isBrowser) return;
         const inputEl = this._hiddenInput()?.nativeElement;
         if (!inputEl) return;
         const canvasEl = this._jaui?.Canvas?.Element;
@@ -777,6 +796,11 @@ export class Jinput implements OnDestroy {
       });
     }
 
+    // EVERY LISTENER BELOW IS ON A GLOBAL THAT A SERVER RENDER DOES NOT HAVE. An input still has
+    // to CONSTRUCT there — it is part of the page a crawler is served — but caret tracking, wrap
+    // re-flow and soft-keyboard summoning are all about a person typing, and there is nobody
+    // typing during a render. Gated as one block, and torn down under the same flag.
+    if (this._isBrowser) {
     document.addEventListener('selectionchange', this._onSelectionChange);
     // Wrap re-flows on viewport resize even when text hasn't changed; without
     // this listener long content stays wrapped to the old width after the
@@ -800,6 +824,7 @@ export class Jinput implements OnDestroy {
     window.addEventListener('pointermove', this._onPointerMoveSummon, true);
     window.addEventListener('pointerup', this._onPointerUpSummon, true);
     window.addEventListener('pointercancel', this._onPointerUpSummon, true);
+    }
 
     // Re-run layout once the @font-face font lands in the canvas2d font
     // registry — measureText falls back to a wider system font until
@@ -816,6 +841,7 @@ export class Jinput implements OnDestroy {
   }
 
   ngOnDestroy(): void {
+    if (this._isBrowser) {
     document.removeEventListener('selectionchange', this._onSelectionChange);
     document.removeEventListener('pointermove', this._onDocPointerMove);
     document.removeEventListener('pointerup', this._onDocPointerUp);
@@ -827,6 +853,7 @@ export class Jinput implements OnDestroy {
     window.removeEventListener('pointermove', this._onPointerMoveSummon, true);
     window.removeEventListener('pointerup', this._onPointerUpSummon, true);
     window.removeEventListener('pointercancel', this._onPointerUpSummon, true);
+    }
     if (this._blinkTimer) clearInterval(this._blinkTimer);
     this._clearLongPressTimer();
     if (this._wrapReadFrame !== null) cancelAnimationFrame(this._wrapReadFrame);
@@ -850,6 +877,9 @@ export class Jinput implements OnDestroy {
   private _wrapWatched = false;
   private _layoutPollFrame: number | null = null;
   private _startLayoutWidthPoll = (): void => {
+    // A per-frame poll that refines the wrap width against live layout rects. There are no frames
+    // and no layout under server rendering, so there is nothing to refine toward.
+    if (!this._isBrowser) return;
     if (this._layoutPollFrame !== null) return;
     const tick = (): void => {
       this._layoutPollFrame = requestAnimationFrame(tick);
@@ -884,6 +914,9 @@ export class Jinput implements OnDestroy {
   private _grandWatched = false;
 
   private _scheduleWrapRead = (attempt: number = 0): void => {
+    // Re-reads the wrap width on the next frame. No frames on the server, and nothing there is
+    // waiting on the answer.
+    if (!this._isBrowser) return;
     if (this._wrapReadFrame !== null) return;
     this._wrapReadFrame = requestAnimationFrame(() => {
       this._wrapReadFrame = null;
