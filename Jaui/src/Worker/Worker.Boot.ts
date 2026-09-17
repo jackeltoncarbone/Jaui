@@ -135,6 +135,7 @@ export const BootJauiWorker = (): void => {
       // animation would never tick until something else nudged it.
       registry.SetAnimationKick(() => canvas.Animations.Kick());
       canvas.RegisterGroupPeersResolver(jiv => registry.GroupPeersOf(jiv));
+      registry.SetScroller({ Measure: canvas.MeasureScrollContent, PageX: canvas.ScrollPageX });
       bridge.AttachRegistry(registry);
 
       canvas.RegisterPostFrame(() => registry.EmitRectSnapshots());

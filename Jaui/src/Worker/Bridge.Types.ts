@@ -277,7 +277,9 @@ export type JivOp =
    *  `Paint` is built on the main thread (DOM parse + tessellation) and the
    *  Float32Arrays are structured-cloned across to the worker. */
   | { K: 'svg-set'; Id: number; Paint: SvgVectorPaint }
-  | { K: 'svg-clear'; Id: number };
+  | { K: 'svg-clear'; Id: number }
+  /** Page a horizontal scroll row one screen of whole cards (Canvas.ScrollPageX). */
+  | { K: 'scroll-page'; Id: number; Direction: 1 | -1 };
 
 /** Batched Jiv tree ops, flushed once per Angular CD on main. Ordering is
  *  significant: a `create` must precede the `attach` that places it. */
@@ -459,6 +461,17 @@ export interface W2M_RectSnapshot {
    *  covers, rather than floating over unrelated content once its container
    *  scrolls. See `Embed/Embed.Geometry`. */
   Box: EmbedBox;
+  /** Present only for a scroll container: where it is and how far it can go,
+   *  so a paging control knows which of its arrows has anywhere to go. */
+  Scroll?: ScrollExtent;
+}
+
+/** A scroll container's offset and travel, in CSS px. */
+export interface ScrollExtent {
+  X: number;
+  Y: number;
+  MaxX: number;
+  MaxY: number;
 }
 
 /** HUD stats stream (debug-only). Worker emits when ?debug enabled. */

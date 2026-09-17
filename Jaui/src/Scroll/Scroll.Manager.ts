@@ -1,6 +1,7 @@
 import type { Jiv } from '../Jiv/Jiv';
 import type { Animatable } from '../Animation/Animation.Manager';
 import { type Mat2x3, MAT_IDENTITY, matMul, matInvApply } from '../Transform/Mat2x3';
+import { PageTarget, type PageSpan } from './Scroll.Page';
 
 /**
  * Scroll physics for Overflow:Scroll Jivs. Two behaviors share the same state:
@@ -149,6 +150,21 @@ export class ScrollManager implements Animatable {
     const dy = y === null ? 0 : y - s.targetY;
     if (behavior === 'smooth') this.ApplyDelta(jiv, dx, dy);
     else this.ApplyDeltaInstant(jiv, dx, dy);
+  };
+
+  /** Page a row one screen of whole cards along X (see `PageTarget`). The
+   *  padding is the container's resolved leading and trailing padding, which
+   *  is the line a paged card lands on. Content extents must be current. */
+  PageX = (jiv: Jiv, direction: 1 | -1, padStart: number, padEnd: number): void => {
+    const s = this._ensureState(jiv);
+    const spans: PageSpan[] = [];
+    for (const c of jiv.Children) {
+      if (c.ChildLayout.Position !== 'Flow' && c.ChildLayout.Position !== 'Offset') continue;
+      spans.push({ Start: c.X - jiv.X, End: c.X - jiv.X + c.Width });
+    }
+    spans.sort((a, b) => a.Start - b.Start);
+    const max = Math.max(0, jiv.ContentWidth - jiv.Width);
+    this.ScrollTo(jiv, PageTarget(spans, s.targetX, jiv.Width, padStart, padEnd, max, direction), null, 'smooth');
   };
 
   /** Scroll the nearest scrollable ancestor the minimum distance that brings

@@ -22,6 +22,7 @@ import type {
   W2M_PointerCapture,
   W2M_HitEvent,
   W2M_RectSnapshot,
+  ScrollExtent,
   W2M_Ready,
   JivOp,
   PointerPayload,
@@ -90,7 +91,7 @@ export interface JivHitHandlers {
    *  Set on Handles that have subscribed via `WatchRect(true)`. The box
    *  carries the clipped-visible rect, accumulated opacity and corner radii
    *  as well, which is what `<jembed>` places its DOM element from. */
-  OnRectSnapshot?: (rect: EmbedBox) => void;
+  OnRectSnapshot?: (rect: EmbedBox, scroll: ScrollExtent | null) => void;
 }
 
 export class MainBridge {
@@ -452,7 +453,7 @@ export class MainBridge {
   private _onRect = (m: W2M_RectSnapshot): void => {
     const h = this._hitHandlers.get(m.JivId);
     if (!h?.OnRectSnapshot) return;
-    h.OnRectSnapshot(m.Box);
+    h.OnRectSnapshot(m.Box, m.Scroll ?? null);
   };
 
   // ─── DOM event capture ─────────────────────────────────────────────────

@@ -36,6 +36,7 @@ import type {
   JivApplyOpts,
   JivOp,
   M2W_JivOps,
+  ScrollExtent,
   W2M,
   PointerPayload,
   WheelPayload,
@@ -47,6 +48,18 @@ import {
 } from '../Embed/Embed.Geometry';
 
 const ROOT_ID = 0;
+
+/** What the registry needs from the canvas to report and drive scrolling. */
+export interface RegistryScroller {
+  Measure: (node: JivCore) => void;
+  PageX: (node: JivCore, direction: 1 | -1) => void;
+}
+
+const _scrollExtentsEqual = (a: ScrollExtent | undefined, b: ScrollExtent | undefined): boolean => {
+  if (!a || !b) return a === b;
+  return Math.abs(a.X - b.X) < 0.5 && Math.abs(a.Y - b.Y) < 0.5
+    && Math.abs(a.MaxX - b.MaxX) < 0.5 && Math.abs(a.MaxY - b.MaxY) < 0.5;
+};
 
 const ZERO_RADIUS: readonly [number, number, number, number] = [0, 0, 0, 0];
 
@@ -127,19 +140,49 @@ export class JivRegistry {
       const box = MeasureEmbedBox(
         n as unknown as EmbedTreeNode, _opacityOf, _radiusOf,
       );
+      const scroll = this._scrollExtentOf(n);
       const last = this._lastSnapshot.get(id);
-      if (EmbedBoxesEqual(last, box)) continue;
+      const lastScroll = this._lastScroll.get(id);
+      if (EmbedBoxesEqual(last, box) && _scrollExtentsEqual(lastScroll, scroll)) continue;
       this._lastSnapshot.set(id, box);
+      if (scroll) this._lastScroll.set(id, scroll);
       this._post({
         T: 'rect', JivId: id,
         X: box.X, Y: box.Y, Width: box.Width, Height: box.Height,
         Box: box,
+        ...(scroll ? { Scroll: scroll } : {}),
       });
     }
   };
 
   /** Last-emitted snapshot per id — debounce for unchanged boxes. */
   private _lastSnapshot = new Map<number, EmbedBox>();
+  private _lastScroll = new Map<number, ScrollExtent>();
+
+  /** The canvas's scroll hooks. Content extents are measured lazily by input,
+   *  so a watched scroller is measured here before its travel is reported. */
+  private _scroller: RegistryScroller | null = null;
+  SetScroller = (scroller: RegistryScroller): void => {
+    this._scroller = scroller;
+  };
+
+  private _scrollExtentOf = (n: JivCore): ScrollExtent | undefined => {
+    if (n.Overflow !== 'Scroll' || !this._scroller) return undefined;
+    this._scroller.Measure(n);
+    return {
+      X: n.ScrollX,
+      Y: n.ScrollY,
+      MaxX: Math.max(0, n.ContentWidth - n.Width),
+      MaxY: Math.max(0, n.ContentHeight - n.Height),
+    };
+  };
+
+  private _scrollPage = (id: number, direction: 1 | -1): void => {
+    const core = this._nodes.get(id);
+    if (!core) { console.warn(`[JivRegistry] scroll-page: missing id=${id}`); return; }
+    if (!this._scroller) { console.warn('[JivRegistry] scroll-page: no scroller attached'); return; }
+    this._scroller.PageX(core, direction);
+  };
 
   // ─── Op dispatch ────────────────────────────────────────────────────────
 
@@ -155,6 +198,7 @@ export class JivRegistry {
       case 'janvas-attach': return this._janvasAttach(op.Id, op.Key, op.Config);
       case 'svg-set':       return this._svgSet(op.Id, op.Paint);
       case 'svg-clear':     return this._svgClear(op.Id);
+      case 'scroll-page':   return this._scrollPage(op.Id, op.Direction);
     }
   };
 
@@ -408,7 +452,7 @@ export class JivRegistry {
 
   private _watchRect = (id: number, watch: boolean): void => {
     if (watch) this._watchedRects.add(id);
-    else this._watchedRects.delete(id);
+    else { this._watchedRects.delete(id); this._lastScroll.delete(id); }
   };
 
   // ─── Helpers ────────────────────────────────────────────────────────────

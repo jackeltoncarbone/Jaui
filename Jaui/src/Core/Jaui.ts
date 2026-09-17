@@ -3641,25 +3641,44 @@ export class Canvas implements DirtyTracker {
   /** Walk the tree, compute ContentWidth/Height for each Overflow:Scroll Jiv from
    *  the bounding box of its children. Cheap; needed for clamping scroll target. */
   private _measureScrollContents = (node: Jiv): void => {
-    if (node.Overflow === 'Scroll') {
-      let maxRight = 0;
-      let maxBottom = 0;
-      for (const c of node.Children) {
-        // Only Flow children contribute to scroll content size.
-        // Placed/Fixed/Sticky are out-of-flow and don't extend the scroll bounds.
-        if (c.ChildLayout.Position !== 'Flow' && c.ChildLayout.Position !== 'Offset') continue;
-        const right = (c.X - node.X) + c.Width;
-        const bottom = (c.Y - node.Y) + c.Height;
-        if (right > maxRight) maxRight = right;
-        if (bottom > maxBottom) maxBottom = bottom;
-      }
-      // Add bottom padding so last item doesn't sit flush against the edge
-      const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
-      const [, padR, padB] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
-      node.ContentWidth = maxRight + padR;
-      node.ContentHeight = maxBottom + padB;
-    }
+    this.MeasureScrollContent(node);
     for (const c of node.Children as Jiv[]) this._measureScrollContents(c);
+  };
+
+  /** One scroll container's content extent, from its flow children as they
+   *  are drawn. A no-op on anything that does not scroll. Input measures the
+   *  whole tree lazily; a consumer that needs one row's extent now (a paging
+   *  control, a rect watcher) measures just that node. */
+  MeasureScrollContent = (node: Jiv): void => {
+    if (node.Overflow !== 'Scroll') return;
+    let maxRight = 0;
+    let maxBottom = 0;
+    for (const c of node.Children) {
+      // Only Flow children contribute to scroll content size.
+      // Placed/Fixed/Sticky are out-of-flow and don't extend the scroll bounds.
+      if (c.ChildLayout.Position !== 'Flow' && c.ChildLayout.Position !== 'Offset') continue;
+      const right = (c.X - node.X) + c.Width;
+      const bottom = (c.Y - node.Y) + c.Height;
+      if (right > maxRight) maxRight = right;
+      if (bottom > maxBottom) maxBottom = bottom;
+    }
+    // Add bottom padding so last item doesn't sit flush against the edge
+    const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
+    const [, padR, padB] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
+    node.ContentWidth = maxRight + padR;
+    node.ContentHeight = maxBottom + padB;
+  };
+
+  /** Page a horizontal scroll row one screen of whole cards, eased like a
+   *  wheel: the card cut off at the edge it moves toward lands on the row's
+   *  padding line. This is what a shelf's arrows press. */
+  ScrollPageX = (node: Jiv, direction: 1 | -1): void => {
+    if (node.Overflow !== 'Scroll') return;
+    this.MeasureScrollContent(node);
+    const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
+    const [, padR, , padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
+    this._scrollManager.PageX(node, direction, padL, padR);
+    this._animationManager.Kick();
   };
 
   /** Re-rasterize every text node against the current font set. Called

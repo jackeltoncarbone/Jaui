@@ -25,7 +25,7 @@
  */
 
 import type { MainBridge, JivHitHandlers } from './Bridge.Main';
-import type { JivApplyOpts, PointerPayload, WheelPayload } from './Bridge.Types';
+import type { JivApplyOpts, PointerPayload, ScrollExtent, WheelPayload } from './Bridge.Types';
 import type { JivStyle } from '../Jiv/Jiv.Types';
 import type { ChildLayout, LayoutConfig } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
@@ -137,10 +137,7 @@ export class JivHandle {
     // subscribed. JivHitHandlers.OnRectSnapshot is mutual: the bridge
     // calls it and we update the cache.
     bridge.SetHitHandlers(id, {
-      OnRectSnapshot: (box) => {
-        this.X = box.X; this.Y = box.Y; this.Width = box.Width; this.Height = box.Height;
-        this.Box = box;
-      },
+      OnRectSnapshot: (box, scroll) => this._takeRect(box, scroll),
     });
   }
 
@@ -290,6 +287,21 @@ export class JivHandle {
     if (this._watching === watch) return;
     this._watching = watch;
     this._bridge.Enqueue({ K: 'watch-rect', Id: this.Id, Watch: watch });
+  };
+
+  /** Page this scroll row one screen of whole cards; the worker eases it. */
+  ScrollPageX = (direction: 1 | -1): void => {
+    this._bridge.Enqueue({ K: 'scroll-page', Id: this.Id, Direction: direction });
+  };
+
+  private _takeRect = (box: EmbedBox, scroll: ScrollExtent | null): void => {
+    this.X = box.X; this.Y = box.Y; this.Width = box.Width; this.Height = box.Height;
+    this.Box = box;
+    if (!scroll) return;
+    this.ScrollX = scroll.X;
+    this.ScrollY = scroll.Y;
+    this.ContentWidth = box.Width + scroll.MaxX;
+    this.ContentHeight = box.Height + scroll.MaxY;
   };
 
   /** Promote this id to a Janvas with the registered factory at `key`.
@@ -456,10 +468,9 @@ export class JivHandle {
     // user-level handlers come and go.
     const merged: JivHitHandlers = {
       ...this._hit,
-      OnRectSnapshot: (box) => {
-        this.X = box.X; this.Y = box.Y; this.Width = box.Width; this.Height = box.Height;
-        this.Box = box;
-        this._hit.OnRectSnapshot?.(box);
+      OnRectSnapshot: (box, scroll) => {
+        this._takeRect(box, scroll);
+        this._hit.OnRectSnapshot?.(box, scroll);
       },
     };
     this._bridge.SetHitHandlers(this.Id, merged);
