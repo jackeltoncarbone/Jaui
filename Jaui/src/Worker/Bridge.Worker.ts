@@ -131,9 +131,10 @@ export class WorkerBridge {
     // The loop parks itself when every source of change has said it is still (see the park block
     // at the end of `Canvas._tickInner`), and parked there is no tick on its way to notice what a
     // message did. Most of the handlers below already wake it properly on their own -- `jiv-ops`
-    // Kicks, pointer/wheel run through IngestEvent, `resize` wakes inside `_resize` -- but a belt
+    // Kicks, pointer/wheel run through IngestEvent, `resize` wakes its slot -- but a belt
     // that covers ALL of them costs one boolean per message and means a message type added later
-    // cannot freeze the canvas by forgetting.
+    // cannot freeze the canvas by forgetting. (`resize` now relies on exactly this shape: it only
+    // writes a slot and wakes, and the frame that wake schedules is what applies it.)
     //
     // `Wake` and not `RequestFrame`: this schedules a TICK. If the message turns out to change
     // nothing the gate skips the render and the loop parks straight back, so speculating here buys

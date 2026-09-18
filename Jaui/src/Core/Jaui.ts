@@ -421,6 +421,11 @@ export class Canvas implements DirtyTracker {
     // Chrome's ForcedReflow analyzer). The ResizeObserver below also pushes
     // contentRect into _pendingResize, so most boots will pick up the
     // measured size from RO instead of falling through to clientWidth.
+    //
+    // This one keeps the painting `_resize`, not the bare apply: it is a rAF callback of its own,
+    // not a tick, so nothing is guaranteed to be about to paint for it. In practice the loop has
+    // usually drained the slot by the time it runs, and `_applySize` returns false without touching
+    // the framebuffer -- which is the point of that early-out.
     // Headless render-to-texture instances size themselves manually (SetSizePx) and are driven manually
     // (RenderHeadless) — skip the auto-resize / ResizeObserver / DPR watch entirely so they neither read DOM
     // geometry (the canvas is an offscreen shared with a foreign renderer) nor fight the caller's sizing.
@@ -679,16 +684,25 @@ export class Canvas implements DirtyTracker {
   IngestPointerCaptureReleased = (pointerId: number): void => { this._capturedPointers.delete(pointerId); };
 
   /** Bridge inbound: ResizeObserver delivered a new contentRect on main.
-   *  Re-uses the same `_pendingResize` slot the original (now-removed)
-   *  in-engine ResizeObserver filled, so the existing _resize() pipeline
-   *  picks it up on its next tick. */
+   *
+   *  Writes the size slot and wakes the loop. That is the whole job -- the frame loop drains the
+   *  slot at the top of `_tickInner` and the solve+render it was already going to run is the
+   *  resize's paint.
+   *
+   *  This used to apply the size synchronously AND schedule a second apply on the next frame, so a
+   *  drag -- which main delivers at one message per rendered frame -- bought TWO full-tree
+   *  solve+renders per message on a thread that can afford about one. The port queued, the drag
+   *  went quiet, and the backlog landed in bursts. The slot has always been a single last-write-wins
+   *  cell and the park predicate already refuses to park while it is full; the synchronous call was
+   *  bypassing the coalescing that was sitting right here.
+   *
+   *  A resize that arrives while the tab is HIDDEN still lands correctly, twice over: the slot holds
+   *  the newest size and keeps the loop off the park gate, so the first frame after the tab comes
+   *  back drains it before anything is drawn; and `Bridge.Main`'s `postLiveSize` re-posts the live
+   *  rect on `visibilitychange` anyway. Neither needs work on the hidden thread. */
   ResizeFromBridge = (cssWidth: number, cssHeight: number): void => {
     this._pendingResize = { width: cssWidth, height: cssHeight };
-    // Apply NOW, not just on the next animation frame: worker rAF is parked
-    // while the tab is hidden, so an rAF-only resize left a backgrounded tab
-    // laid out at its old size until something else woke the loop.
-    this._resize();
-    requestAnimationFrame(() => this._resize());
+    this.Wake();
   };
 
   /** Walk the tree re-materializing everything an `@If` can gate against the
@@ -1015,8 +1029,20 @@ export class Canvas implements DirtyTracker {
   };
 
   private _tickInner = (time: number): boolean => {
+    // ── Drain the pushed-size slot ──────────────────────────────────────────
+    // `ResizeFromBridge` writes the slot and wakes; THIS is where a resize is applied while the
+    // loop runs. One apply per frame at the newest size, however many messages arrived since the
+    // last frame -- a drag that outruns the thread now drops the sizes nobody would ever have seen
+    // instead of queueing them. No paint here on purpose: the solve+render below IS this resize's
+    // paint, and the clear it bridges happens in the same turn as the frame that repairs it.
+    //
+    // Order matters. This has to run BEFORE the zero-size gate: at boot the slot is the only thing
+    // that gives the canvas a size, so draining after the gate would let the first frame that
+    // finally had a size in hand bail out on the size it was carrying.
+    if (this._pendingResize !== null) this._applySize();
+
     // Boot-time zero-size gate. Until the worker bridge has delivered a
-    // real resize (ResizeFromBridge → _pendingResize → _resize sets
+    // real resize (ResizeFromBridge → _pendingResize → the drain above sets
     // _width/_height), the OffscreenCanvas backing store is 0×0 and any
     // GL op that touches the default framebuffer fails with
     // GL_INVALID_FRAMEBUFFER_OPERATION (error 1286). That used to spam
@@ -3311,7 +3337,15 @@ export class Canvas implements DirtyTracker {
     for (const child of node.Children as Jiv[]) this._clearDirty(child);
   };
 
-  private _resize = (): void => {
+  /** Apply the newest pushed size + the live DPR to the canvas, the predicate viewport and the
+   *  tree, and mark the tree for a solve. Returns true when something actually changed.
+   *
+   *  Split out of `_resize` because the two halves of a resize have different correct rates:
+   *  APPLYING has to happen once per distinct size, PAINTING once per frame. The frame loop calls
+   *  this one directly and lets its own solve+render -- a few lines further down the same tick --
+   *  be the paint. Callers that are not already inside a frame call `_resize`, which adds the
+   *  inline paint that bridges the framebuffer clear the `Element.width` write below performs. */
+  private _applySize = (): boolean => {
     // Browser-zoom can push DPR above native (e.g. 125% on a 1.5x display = DPR 1.875).
     // Text cache naturally invalidates — its hash includes DPR — so higher DPR costs
     // memory/fill but keeps strokes crisp on desktop.
@@ -3339,14 +3373,25 @@ export class Canvas implements DirtyTracker {
     // (~56ms reflow per Chrome's Performance analyzer), and (b) OffscreenCanvas
     // has no clientWidth/Height — the engine has to be size-pushed regardless.
     if (this._pendingResize) {
-      this._width = this._pendingResize.width;
-      this._height = this._pendingResize.height;
+      const next = this._pendingResize;
       this._pendingResize = null;
+      // An identical size is not a resize. Main re-posts the live rect on window-resize and on
+      // visibility return, and `_settleSize` polls it at boot, so same-size messages are routine --
+      // and each one used to buy a framebuffer clear and a full-tree solve+render for no change.
+      if (next.width === this._width && next.height === this._height && this._dpr === prevDpr) return false;
+      this._width = next.width;
+      this._height = next.height;
     } else if (this._width === 0 || this._height === 0) {
-      // First call before ResizeObserver has delivered an entry. Skip;
-      // observer's own callback will rAF a follow-up _resize() once the
-      // first entry lands.
-      return;
+      // Called before any size has been pushed. Nothing to apply; the first delivery into the slot
+      // is what gives this canvas a size, and the tick drains that.
+      return false;
+    } else if (this._dpr === prevDpr) {
+      // No new size and no DPR change. Two callers land here and both mean "nothing to do": the
+      // matchMedia watcher re-arming on a DPR that didn't move, and a deferred `_resize()` (boot,
+      // or the main-thread observer) that lost the race to the tick which already drained the slot.
+      // Returning early is what keeps that loser from re-clearing the framebuffer and repainting a
+      // frame the tick just painted.
+      return false;
     }
     // Otherwise, keep the cached size and just re-apply DPR (this path is
     // taken by the matchMedia DPR change handler).
@@ -3366,22 +3411,28 @@ export class Canvas implements DirtyTracker {
 
     // Mark root dirty so layout re-solves with new dimensions. Written STRAIGHT onto Root rather
     // than through MarkLayoutDirty, so it never reaches `Notify` and cannot wake a parked loop on
-    // its own -- hence the explicit wake. (The inline solve+render below covers the visible frame;
-    // the wake is what gets the dirty flags cleared and the next real frame scheduled.)
+    // its own -- hence the explicit wake. The wake is what schedules the frame that solves and
+    // paints at the new size; `_resize` adds an inline one on top for callers with no frame to
+    // wait for.
     this.Root.Dirty |= DirtyFlag.Layout;
+    // A resize forces a FULL-tree solve, so any per-node dirty marks standing from before it are
+    // stale. Clearing them here (rather than after the solve, where this used to live) also makes
+    // the tick's `_chooseScopedRoot` see an empty set and therefore return Root -- a resize must
+    // never be solved scoped. Runs after `_recomputeResponsiveLayout`, which marks nodes of its own.
+    this._dirtyNodes.clear();
     this.Wake();
+    return true;
+  };
 
-    // Re-render inline so the canvas backing store doesn't sit blank
-    // between the synchronous Element.width/height write above (which
-    // clears the WebGL framebuffer) and the next rAF tick. On user-
-    // driven resize that gap is visible as a flicker; keeping the inline
-    // render bridges it. The cold-load forced-reflow cost lives upstream
-    // of this — the clientWidth reads — and should be addressed by
-    // deferring size reads on first call, not by skipping the render.
+  /** Apply a pushed size AND paint it in the same turn. For callers that are NOT inside a frame:
+   *  the `Element.width` write in `_applySize` clears the WebGL framebuffer, and with no tick of
+   *  their own to bridge to they would leave the canvas blank until something else woke the loop.
+   *  Anything running inside the frame loop calls `_applySize` and lets the tick paint. */
+  private _resize = (): void => {
+    if (!this._applySize()) return;
     if (this._running) {
-      // On a cold boot this inline path is very often what paints FIRST: the size settles after the
-      // loop has started, so the resize's own solve+render beats the next rAF to the punch. Name it,
-      // or the first frame appears to arrive from nowhere.
+      // This can still be what paints FIRST -- a DPR change on a parked loop resolves here before
+      // the frame it wakes. Name it, or that frame appears to arrive from nowhere.
       const ff = !this._ffPresented;
       const tResize = ff ? performance.now() : 0;
       if (ff) JTrace(`jaui:resize:render ${Math.round(this._width)}x${Math.round(this._height)}`);
@@ -3391,10 +3442,6 @@ export class Canvas implements DirtyTracker {
         ComputeIntrinsicSizes(this.Root, this._viewport(), this._jssVars);
         this._solveAndAnimate();
         this._clearDirty(this.Root);
-        // Resize forces a full-tree solve, so any pre-resize dirty marks
-        // are now stale. Clear so the next tick's `_chooseScopedRoot`
-        // doesn't see a phantom single-dirty node and scope incorrectly.
-        this._dirtyNodes.clear();
       }
       this._processTextTransitions(this.Root);
       this._render(0);
@@ -3407,9 +3454,10 @@ export class Canvas implements DirtyTracker {
     }
   };
 
-  /** Size pushed in by the most recent ResizeObserver callback. _resize()
-   *  consumes this when set, avoiding a clientWidth read that would force
-   *  the browser to flush pending layout. */
+  /** Size pushed in by the most recent ResizeObserver callback -- a single last-write-wins cell, so
+   *  a burst of them costs one apply at the newest size. `_applySize` consumes it, avoiding a
+   *  clientWidth read that would force the browser to flush pending layout. The park predicate
+   *  refuses to park while it is full, which is what guarantees a frame comes to drain it. */
   private _pendingResize: { width: number; height: number } | null = null;
 
   private _observeResize = (): void => {
@@ -3420,20 +3468,20 @@ export class Canvas implements DirtyTracker {
     // source. Skip the engine-side observer entirely when RO isn't
     // available (= we're in a worker).
     //
-    // Main-thread mode: defer _resize() to the next animation frame so
-    // the RO callback returns synchronously. Running layout changes
-    // in-line causes the browser to emit "ResizeObserver loop completed
-    // with undelivered notifications" (benign but noisy).
+    // Main-thread mode: write the slot and wake, exactly as the bridge does. The tick drains it.
+    // This is also what keeps the RO callback returning synchronously -- running layout inline from
+    // one makes the browser emit "ResizeObserver loop completed with undelivered notifications"
+    // (benign but noisy). It used to rAF a `_resize()` per callback, which is one full-tree
+    // solve+render per observed frame with no coalescing between them.
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
-      if (entry) {
-        this._pendingResize = {
-          width: entry.contentRect.width,
-          height: entry.contentRect.height,
-        };
-      }
-      requestAnimationFrame(() => this._resize());
+      if (!entry) return;
+      this._pendingResize = {
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      };
+      this.Wake();
     });
     observer.observe(this.Element as unknown as Element);
   };
@@ -4120,6 +4168,10 @@ export class Canvas implements DirtyTracker {
   private _watchDpr = (): void => {
     // matchMedia only fires when the specified dpr condition changes (e.g.
     // on browser zoom). One-shot — when it fires, re-arm at the new dpr.
+    // The painting `_resize`, deliberately: this fires outside any frame, and it is the one caller
+    // that changes the backing-store size with NO new CSS size behind it -- `_applySize` rewrites
+    // Element.width/height at the new DPR, clearing the framebuffer, and only the inline paint
+    // bridges to the frame the wake schedules. An rAF-only DPR change flashes the canvas blank.
     this._platform.ObserveDprChange(this._dpr, () => {
       this._resize();
       this._watchDpr();
