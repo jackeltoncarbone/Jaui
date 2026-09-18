@@ -259,6 +259,30 @@ export class Canvas implements DirtyTracker {
   // once claimed. Off restores full-res per-panel scissored blur (clear glass
   // reads the full-res scene; light blur stays crisp). Re-enable only once the
   // shared pyramid keeps a full-res level 0. `?wkr-shared-backdrop` forces on.
+  //
+  // Two things have changed since that was written, and both widen the gap:
+  //
+  // 1. The shared path pins u_BaseFrostLod to a CONSTANT 2, and the shader's
+  //    frost gate added by the same commit that turned this off reads
+  //    frostReq = clamp((frostLod - u_BaseFrostLod) * 4, 0, 1). The per-surface
+  //    path builds at the panel's own sigma, so frostLod == u_BaseFrostLod and
+  //    frostReq is identically 0 — no rim boost, no caustic-hiding refraction
+  //    LOD, on any surface. Under shared, a 4pt-frost panel at DPR 2 gets
+  //    frostReq 1 and a rim lodBoost around 1.7 on top. Same shader, a rim
+  //    roughly 3x blurrier. The shared path has NEVER run against a shader that
+  //    contains frostReq. hasBackdropFilter's `frostLod > u_BaseFrostLod` test
+  //    inverts the same way: a flat backdrop-filter panel under 2pt of frost at
+  //    DPR 2 would lose its backdrop sample entirely (latent today — nothing
+  //    authors under 4pt).
+  // 2. The fill win is mostly the quarter-res cheat, not the sharing. At the
+  //    harness size (2560x1600) a glass-grid card's pyramid writes ~0.39Mpx, so
+  //    20 cards cost ~7.7Mpx; a FULL-RES canvas-wide shared pyramid costs
+  //    ~5.5Mpx. Break-even is ~14 cards, and on a phone viewport (786x1704) it
+  //    is ~26 chips — i.e. at equal fidelity, sharing over the whole canvas
+  //    LOSES for realistic chrome. A per-(sigma, depth) UNION pyramid is the
+  //    shape that wins; see WorkerReports/build-sharedbackdrop.md for the
+  //    condition under which the union is still a texel-exact crop
+  //    (k_union must equal k_member — BlurPass._baseDownsampleFactor).
   private _sharedBackdrop: boolean = false;
   private _sharedPyramid: GpuTextureHandle | null = null;
   private _sharedPyramidValid: boolean = false;
