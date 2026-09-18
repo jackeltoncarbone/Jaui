@@ -137,6 +137,16 @@ export class SemanticMirror {
       entry.TextNode.remove();
       entry.TextNode = null;
     }
+    // PLACE IT NOW; the flush is about ORDER, not about existence. Until this line the only thing that
+    // ever attached an element was `_flush`, on a microtask — so the mirror's contents depended on that
+    // microtask winning a race against whoever reads the DOM next. On the server it loses outright: a
+    // render serializes the document at app stability, and an element created during the last change
+    // detection pass is still sitting unparented when the HTML string is taken. That shipped a mirror root
+    // with NOTHING inside it — the one element on the page whose entire job is to carry the page's words.
+    // Appending here cannot get the order wrong in a way the flush does not then correct (appendChild
+    // MOVES a node, so the sort re-homes it), and it means the worst case is content in the wrong order
+    // rather than no content at all.
+    if (this._root && !entry.El!.parentNode) this._containerOf(entry).appendChild(entry.El!);
     this._queueFlush();
   };
 
