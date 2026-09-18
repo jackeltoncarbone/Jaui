@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MeasureText } from '../src/Text/Text.Measure';
+import { FitWithEllipsis, MeasureText } from '../src/Text/Text.Measure';
 import { DefaultTextStyle, type TextStyle } from '../src/Text/Text.Types';
 
 // Mock 2D context: 8px per character.
@@ -89,7 +89,35 @@ describe('MeasureText', () => {
     });
   });
 
+  describe('FitWithEllipsis', () => {
+    // 8px per char in the mock, and the ellipsis is one char.
+    it('keeps the longest prefix whose advance INCLUDING the ellipsis fits', () => {
+      expect(FitWithEllipsis('aaa bbb', 48, mockCtx())).toBe('aaa b');
+    });
+
+    it('returns the whole string when the whole string plus the ellipsis fits', () => {
+      expect(FitWithEllipsis('abc', 1000, mockCtx())).toBe('abc');
+      expect(FitWithEllipsis('abc', Infinity, mockCtx())).toBe('abc');
+    });
+
+    it('hangs a trailing space rather than painting `the …`', () => {
+      // At 40px the cut lands after 'aaa ' -- CSS hangs that space, so it is trimmed.
+      expect(FitWithEllipsis('aaa bbb', 40, mockCtx())).toBe('aaa');
+    });
+
+    it('keeps nothing when not even the ellipsis fits', () => {
+      expect(FitWithEllipsis('abc', 0, mockCtx())).toBe('');
+    });
+  });
+
   describe('TextOverflow: Ellipsis', () => {
+    it('cuts the last kept line from its TAIL, not from the wrapped line', () => {
+      // 'aaa' fills the 48px line and 'bbb' wraps away; CSS still keeps its 'b', because the wrap
+      // decides how many LINES there are and not where the ellipsis falls.
+      const r = MeasureText('aaa bbb', style({ MaxLines: 1, TextOverflow: 'Ellipsis' }), 48, mockCtx());
+      expect(r.Lines).toEqual(['aaa b…']);
+    });
+
     it('appends ellipsis when text exceeds MaxLines', () => {
       const r = MeasureText('one two three four', style({ MaxLines: 2, TextOverflow: 'Ellipsis' }), 32, mockCtx());
       expect(r.Lines).toHaveLength(2);
