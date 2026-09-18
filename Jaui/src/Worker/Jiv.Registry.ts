@@ -32,12 +32,12 @@ import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import { DefaultLayoutConfig, DefaultChildLayout } from '../Layout/Layout.Types';
 import type { LayoutConfig, ChildLayout } from '../Layout/Layout.Types';
 import type { SpringConfig } from '../Animation/Animation.Types';
+import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import type {
   JivApplyOpts,
   JivOp,
   M2W_JivOps,
   ScrollExtent,
-  ScrollToOptions,
   W2M,
   PointerPayload,
   WheelPayload,
