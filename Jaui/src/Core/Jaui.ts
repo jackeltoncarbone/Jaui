@@ -266,7 +266,7 @@ export class Canvas implements DirtyTracker {
    *  surface (slower than the old scissored per-surface blur). */
   private _sceneDirtyRects: number[] = [];
   /** Frame counter for the one-shot per-surface dump (`?wkr-jaui-prof`). Logs
-   *  each glass/pblur surface's rect + scissor fill once on a settled frame so
+   *  each glass/pblur surface's rect + region fill once on a settled frame so
    *  we can see which surface dominates GPU fill. */
   private _surfFrame: number = 0;
   /** Deferred janvas clip-mask draws — populated during the janvas pre-pass,
@@ -1304,22 +1304,22 @@ export class Canvas implements DirtyTracker {
     let lastBaseFrostLod: number = 0;
     // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
     // contract means the scene is different every frame; caching snapshots
-    // across surfaces was already unsafe. Each glass/pblur now scissors
-    // its own blur pass to just its sample region, so recomputing per
+    // across surfaces was already unsafe. Each glass/pblur now builds its
+    // own pyramid AT the size of its sample region, so recomputing per
     // surface is cheap. If a future optimization needs to skip recompute
     // (e.g. fullscreen chrome pblurs with matching radius), add a local
-    // cache scoped to the scissor rect + radius rather than a global flag.
+    // cache scoped to the region rect + radius rather than a global flag.
     //
     // Within-frame pyramid sharing was attempted (track dirty rect, reuse
     // pyramid when next surface's read region doesn't overlap) but
     // regressed perf 2× on a software-rasterized device:
     //   - Most blur surfaces' read regions overlap the accumulating
     //     dirty rect (full-width pblurs + page text), so reuse rarely fires.
-    //   - Each ComputeBlur is scissored to its OWN read region — a cached
-    //     pyramid is only valid inside that scissor; reuse for a different
-    //     scissor reads stale pixels.
-    // To revisit this: build pyramids un-scissored (fills full canvas
-    // every time, costlier per build) or with the union scissor of all
+    //   - Each ComputeBlur is SIZED to its OWN read region — a cached
+    //     pyramid holds only that rect; reuse for a different region reads
+    //     the wrong part of the screen, not merely stale pixels.
+    // To revisit this: build pyramids over the full canvas (costlier per
+    // build, and the attachment cost this lane removed) or over the union region of all
     // consumers (requires upfront scan of pblur/glass surfaces). Both
     // change the calculus and need their own measurement pass.
 
@@ -1488,21 +1488,23 @@ export class Canvas implements DirtyTracker {
           const _ab = this._nodeAabb(node, eff, effH);
           const px = _ab.minX * d, py = _ab.minY * d;
           const pw = (_ab.maxX - _ab.minX) * d, ph = (_ab.maxY - _ab.minY) * d;
-          const scissor = {
+          const region = {
             x: Math.max(0, Math.floor(px - margin)),
             y: Math.max(0, Math.floor(py - margin)),
             w: Math.min(w, Math.ceil(pw + margin * 2)),
             h: Math.min(h, Math.ceil(ph + margin * 2)),
           };
-          // Same two economies as the glass FILL path: the raw-scene snapshot is only
-          // read where the panel authored no frost (sampleBackdrop's u_Scene fallback),
-          // and the mip chain is only built as deep as this rim can sample —
-          // `BorderFilter: Blur(n)` is the one thing that takes a border-only pass off
-          // LOD 0. Both bounds come from _backdropMaxLod / _instanceFrostLod above.
+          // Same three economies as the glass FILL path: the pyramid is built at the size of
+          // the region above (so its attachments are the card's, not the canvas's, and the
+          // handle carries the screen-UV map the shader needs), the raw-scene snapshot is only
+          // read where the panel authored no frost (sampleBackdrop's u_Scene fallback), and the
+          // mip chain is only built as deep as this rim can sample — `BorderFilter: Blur(n)` is
+          // the one thing that takes a border-only pass off LOD 0. The last two bounds come
+          // from _backdropMaxLod / _instanceFrostLod above.
           const _boFrostLod = _instanceFrostLod(node.RenderStyle.BackdropFrostBlur, d);
           const lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
-          const sceneSnap = _boFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(scissor) : null;
-          const lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
+          const sceneSnap = _boFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
+          const lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, region);
           r.GenerateBlurMipmap(_backdropMaxLod(
             _boFrostLod,
             lastBaseFrostLod,
@@ -1769,18 +1771,16 @@ export class Canvas implements DirtyTracker {
         const baseSigmaDevice = this._dpr;
         const targetSigmaDevice = maxFeatherSigma * this._dpr;
         const maxLod = Math.max(1, Math.log2(Math.max(1, targetSigmaDevice / baseSigmaDevice)));
-        // Scissor the blur passes to this pblur's rect + LOD-scaled margin.
-        // Each mipmap LOD doubles the canvas-space footprint of one texel,
-        // so a bilinear sample at max LOD reaches ±2^(maxLod+1) canvas px
-        // from the pblur's own rect. Fullscreen pblurs (TopBlur/ContentBlur
-        // covering 100vw×100vh) get clamped to the full canvas — no
-        // savings, no harm. Localized pblurs (card footers ~260×60) see
-        // big fill-rate reductions: e.g. 516×316 vs 1920×1080 = ~13× per
-        // blur pass, 4 passes per blur = ~50× cumulative fragment work
-        // saved per localized pblur per frame.
+        // Size the pyramid to this pblur's rect + LOD-scaled margin. Each mipmap LOD doubles
+        // the canvas-space footprint of one texel, so a bilinear sample at max LOD reaches
+        // ±2^(maxLod+1) canvas px from the pblur's own rect. Fullscreen pblurs
+        // (TopBlur/ContentBlur covering 100vw×100vh) resolve to the whole canvas — identity
+        // map, no savings, no harm. Localized pblurs (card footers ~260×60) see big
+        // reductions: e.g. 516×316 vs 1920×1080 = ~13× less fill per blur pass and, more
+        // valuably on a tile-based GPU, attachments 13× smaller to load and store.
         const lodMargin = Math.ceil(Math.pow(2, maxLod + 1));
-        // AABB of the (possibly rotated) node in canvas px — scissor is an
-        // axis-aligned GPU cull, so use the rotated rect's bounding box.
+        // AABB of the (possibly rotated) node in canvas px — the region is an
+        // axis-aligned rect, so use the rotated rect's bounding box.
         const _ab = this._nodeAabb(node, eff, effH);
         const px = _ab.minX * d;
         const py = _ab.minY * d;
@@ -1789,7 +1789,7 @@ export class Canvas implements DirtyTracker {
         // When a feather is set AND the background is fully opaque, the
         // solid post-feather region collapses to just u_Background — no
         // pyramid samples read past the feather zone (the shader early-outs
-        // there). Tighten the blur scissor to only the feather strip + LOD
+        // there). Tighten the blur region to only the feather strip + LOD
         // margin — for a tall content-area pblur with a 120pt feather,
         // that's ~15× less blur fill per frame.
         const bgOpaque = node.RenderStyle.Background.Color.A >= 0.999;
@@ -1807,7 +1807,7 @@ export class Canvas implements DirtyTracker {
         // AABB. Under rotation the AABB is larger than (and offset from) the
         // rotated panel, so a tightened strip clips the rotated blur's edge
         // ("edge miss on the outside"). When rotated, fall back to the full
-        // AABB scissor — the shader's ramp/feather still runs correctly in the
+        // AABB region — the shader's ramp/feather still runs correctly in the
         // rotated frame; only this CPU-side fill optimization is skipped.
         const _rotated = matSin(eff) !== 0;
         let fx = px, fy = py, fw = pw, fh = ph;
@@ -1817,7 +1817,7 @@ export class Canvas implements DirtyTracker {
           else if (dir === 'ToRight')  { fw = feather; }
           else if (dir === 'ToLeft')   { fx = px + pw - feather; fw = feather; }
         }
-        const scissor = {
+        const region = {
           x: Math.max(0, Math.floor(fx - lodMargin)),
           y: Math.max(0, Math.floor(fy - lodMargin)),
           w: Math.min(w, Math.ceil(fw + lodMargin * 2)),
@@ -1825,19 +1825,21 @@ export class Canvas implements DirtyTracker {
         };
         if (this._consoleProfilingEnabled && this._surfFrame === 90) {
           // eslint-disable-next-line no-console
-          console.log(`[Jaui.surf] PBLUR rect=${Math.round(pw)}x${Math.round(ph)} scissor=${scissor.w}x${scissor.h} (${(scissor.w * scissor.h / 1e6).toFixed(2)}Mpx) frost=${maxFeatherSigma}pt dir=${dir} maxLod=${maxLod.toFixed(1)} bgOpaque=${bgOpaque}`);
+          console.log(`[Jaui.surf] PBLUR rect=${Math.round(pw)}x${Math.round(ph)} region=${region.w}x${region.h} (${(region.w * region.h / 1e6).toFixed(2)}Mpx) frost=${maxFeatherSigma}pt dir=${dir} maxLod=${maxLod.toFixed(1)} bgOpaque=${bgOpaque}`);
         }
-        // Snapshot only this pblur's footprint + blur margin (same scissor the
-        // blur uses) instead of the whole canvas — the shader samples the pyramid
-        // only within the panel, so the rest of the snapshot is never read.
-        const sceneSnap = r.SnapshotScreen(scissor);
+        // Snapshot only this pblur's footprint + blur margin (same region the pyramid is built
+        // over) instead of the whole canvas — the shader samples the pyramid only within the
+        // panel, so the rest of the snapshot is never read. The pyramid is built FROM this
+        // snapshot, so the region it is given must not reach past what was copied: at radius 0
+        // the grid phase is 1 and BlurPass grows it by nothing, which is what makes that safe.
+        const sceneSnap = r.SnapshotScreen(region);
         // Sharp-root pyramid: radius 0 makes BlurPass seed mip 0 with the RAW
         // scene (a 1-tap copy, no dual-filter pre-blur), then GenerateBlurMipmap
         // builds the Gaussian stack from it. The shader samples ONE continuous
         // LOD from mip 0 (truly clear, σ=0) up to u_MaxLod (heavy) — true
         // progression with no sharp/blurred crossfade, and one fewer pass than
         // the dual filter.
-        lastBackdrop = r.ComputeBlur(sceneSnap, w, h, 0, undefined, scissor);
+        lastBackdrop = r.ComputeBlur(sceneSnap, w, h, 0, undefined, region);
         lastBaseFrostLod = 0;
         // Cap mip build at this pblur's max sampled LOD — the shader does
         // textureLod(u_Pyramid, uv, ramp²·maxLod), so it never reads past
@@ -1913,13 +1915,16 @@ export class Canvas implements DirtyTracker {
         // scene — so there's no feedback loop and we can feed ComputeBlur
         // the scene FBO's texture directly, zero blits.
         //
-        // Scissor the blur to just the panel's sample region (panel rect
-        // plus a generous margin for refraction + rim + bezel). Fragment
-        // fill on each blur pass drops from full-canvas to panel-sized —
-        // 20-50× less for localized glass like TabBar/ToolbarDropdown. For
-        // a ~500×80 TabBar on a 1920×1080 canvas, scissor saves ~98% of
-        // the blur's fragment writes with zero visual change (glass only
-        // samples inside this rect anyway).
+        // Build the pyramid OVER just the panel's sample region (panel rect plus a generous
+        // margin for refraction + rim + bezel), and AT that size: level 0 comes back
+        // region-sized and the handle carries the map from screen UV into it.
+        //
+        // Two costs come off together. Fragment fill drops from full-canvas to panel-sized
+        // (20-50× for localized glass like TabBar/ToolbarDropdown), which a scissor already
+        // bought. The attachment does NOT come off with a scissor: a tile-based GPU has no
+        // partial render area, so every pass on a canvas-sized level 0 pays a full 16.4MB load
+        // and store however tight the scissor is. Sizing the attachment to the region is what
+        // takes that away — and it is the larger half. Same texels, same device density.
         const d = this._dpr;
         // Build the backdrop blur at THIS panel's actual frost sigma so the
         // panel can sample LOD 0 (full resolution). Previously level 0 held
@@ -1927,7 +1932,7 @@ export class Canvas implements DirtyTracker {
         // a high mip LOD (8pt frost -> LOD 3 -> 1/8 res), which made frosted
         // backdrops read as a low-res texture upscaled. The dual filter still
         // downsamples internally for speed then upsamples back to full res,
-        // and we scissor to the panel rect below, so cost stays bounded.
+        // and the pyramid is only as large as the panel's region, so cost stays bounded.
         const frostCssPx = Math.max(1, node.RenderStyle.BackdropFrostBlur);
         // Margin must cover the FULL reach of the glass shader's backdrop
         // sampling (Jiv.Panel.frag), or a displaced sample lands past the
@@ -1939,8 +1944,9 @@ export class Canvas implements DirtyTracker {
         // plus the frost blur's own spatial spread. Compute the exact bound so
         // the blur is built everywhere the panel can sample — keeps the full
         // refraction look (no displacement clamp) while guaranteeing it reads
-        // blurred pixels. The scissor is still canvas-clamped below, so a heavy
-        // panel just falls back toward a full-canvas blur (correct, bounded).
+        // blurred pixels. The region is still canvas-clamped below, so a heavy
+        // panel just falls back toward a full-canvas pyramid (correct, bounded) — and a
+        // full-canvas region resolves to the identity map, i.e. exactly the old behaviour.
         const _gsx = matScaleX(eff), _gsy = matScaleY(eff);
         const _gAvgScale = (_gsx + _gsy) * 0.5;
         const _gMinHalf = Math.min(node.Width * _gsx, node.Height * _gsy) * d * 0.5;
@@ -1954,7 +1960,7 @@ export class Canvas implements DirtyTracker {
         const py = _ab.minY * d;
         const pw = (_ab.maxX - _ab.minX) * d;
         const ph = (_ab.maxY - _ab.minY) * d;
-        const scissor = {
+        const region = {
           x: Math.max(0, Math.floor(px - margin)),
           y: Math.max(0, Math.floor(py - margin)),
           w: Math.min(w, Math.ceil(pw + margin * 2)),
@@ -1962,7 +1968,7 @@ export class Canvas implements DirtyTracker {
         };
         if (this._consoleProfilingEnabled && this._surfFrame === 90) {
           // eslint-disable-next-line no-console
-          console.log(`[Jaui.surf] GLASS rect=${Math.round(pw)}x${Math.round(ph)} scissor=${scissor.w}x${scissor.h} (${(scissor.w * scissor.h / 1e6).toFixed(2)}Mpx) frost=${frostCssPx}pt margin=${Math.round(margin)}`);
+          console.log(`[Jaui.surf] GLASS rect=${Math.round(pw)}x${Math.round(ph)} region=${region.w}x${region.h} (${(region.w * region.h / 1e6).toFixed(2)}Mpx) frost=${frostCssPx}pt margin=${Math.round(margin)}`);
         }
         // Hoisted: the mip depth below has to know whether the adaptive shadow will read the
         // pyramid at its own detail LOD, and the measure pass runs after the pyramid is built.
@@ -1993,10 +1999,10 @@ export class Canvas implements DirtyTracker {
             // Reuse unless this surface's sample rect overlaps something drawn
             // into the scene since the pyramid was built (fresh content / glass
             // over glass). Per-rect test — a coarse union AABB over-triggered.
-            const sx1 = scissor.x + scissor.w, sy1 = scissor.y + scissor.h;
+            const sx1 = region.x + region.w, sy1 = region.y + region.h;
             const dr = this._sceneDirtyRects;
             for (let i = 0; i < dr.length; i += 4) {
-              if (scissor.x < dr[i + 2] && sx1 > dr[i] && scissor.y < dr[i + 3] && sy1 > dr[i + 1]) { needRebuild = true; break; }
+              if (region.x < dr[i + 2] && sx1 > dr[i] && region.y < dr[i + 3] && sy1 > dr[i + 1]) { needRebuild = true; break; }
             }
           }
           if (needRebuild) {
@@ -2020,15 +2026,15 @@ export class Canvas implements DirtyTracker {
           // `sampleBackdrop` falls back to u_Scene ONLY where `frostLod < 0.01 &&
           // extraLod < 0.01` — a panel that authored no frost at all. Any frosted
           // panel (every glass class in the app) never touches that sampler, so the
-          // blit was a scissor-sized copy of the scene made for nobody. The adaptive
+          // blit was a region-sized copy of the scene made for nobody. The adaptive
           // shadow DOES need a sharp read, but it runs with its own 1x1 target bound,
           // so it can sample the live scene texture directly — same pixels, no copy.
           const instFrostLod = _instanceFrostLod(node.RenderStyle.BackdropFrostBlur, d);
           const _tSnap = performance.now();
-          sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(scissor) : null;
+          sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
           const _tBlur = performance.now();
           this._opMs.Snap += _tBlur - _tSnap;
-          lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
+          lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, region);
           this._opMs.Blur += performance.now() - _tBlur;
           // Pyramid is built AT this panel's frost sigma, so set the base LOD to
           // the panel's frostLod: the shader's main sample (lod = frostLod -
@@ -2494,7 +2500,7 @@ export class Canvas implements DirtyTracker {
   };
 
   /** Canvas-space AABB of `node`'s (possibly rotated) rect under matrix `m` —
-   *  the min/max of its four mapped corners. Used for axis-aligned scissor/cull
+   *  the min/max of its four mapped corners. Used for axis-aligned region/cull
    *  rects. At rotation 0 this is exactly the node's mapped rect. */
   /** Max painted overhang (CSS px) beyond a node's box anywhere in a subtree:
    *  drop-shadow reach (blur + |offset|) and border width. Used to size the

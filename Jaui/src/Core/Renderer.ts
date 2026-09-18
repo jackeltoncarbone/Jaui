@@ -21,7 +21,54 @@ import type { GradientCurve } from './Gradient.Curve';
 
 export interface GpuTextureHandle {
   readonly _brand: 'GpuTextureHandle';
+  /** Set on a blur pyramid that holds only PART of the screen — see `BackdropRegion`.
+   *  Absent means the texture covers the whole canvas and screen UV addresses it directly. */
+  readonly Region?: BackdropRegion;
 }
+
+/** Where a backdrop pyramid's texels sit on screen.
+ *
+ *  A pyramid is sized to the SURFACE that needs it, not to the canvas: a glass card is a
+ *  562x430 patch of a 2560x1600 screen, and holding it in a canvas-sized attachment costs a
+ *  full 16.4MB load+store per render pass on a tile-based GPU (Metal has no partial render
+ *  area, so a scissored draw still resolves the whole attachment). The texels are the SAME
+ *  texels at the SAME device density — only their address changes.
+ *
+ *  So every consumer maps its screen UV into the pyramid's own UV before sampling:
+ *
+ *      regionUv = screenUv * (ScaleX, ScaleY) + (OffsetX, OffsetY)
+ *      screenUv = (regionUv - (OffsetX, OffsetY)) / (ScaleX, ScaleY)
+ *
+ *  with `screenUv` the bottom-origin canvas UV every backdrop consumer already computes
+ *  (`v_PixelPos / u_Resolution` with y flipped). For a region at device (x, yBottom) of size
+ *  (w, h) on a (W, H) canvas: Scale = (W/w, H/h), Offset = (-x/w, -yBottom/h).
+ *
+ *  Worked round trip on a REAL rect — the top-left card of the `glass-grid` / `idle` scenes,
+ *  canvas 2560x1600, region x=52 yBottom=1092 w=568 h=436, and the card's own top-left device
+ *  pixel (120, 140) counting y DOWN from the top:
+ *      screenUv = ((120+0.5)/2560, 1 - (140+0.5)/1600)   = (120.5/2560, 1459.5/1600)
+ *      Scale    = (2560/568, 1600/436)
+ *      Offset   = (-52/568, -1092/436)
+ *      regionUv = (120.5/568 - 52/568, 1459.5/436 - 1092/436) = (68.5/568, 367.5/436)
+ *  which is region texel 68 across — and 120 - 52 = 68. Vertically, 367.5 from the bottom of
+ *  436 is 68.5 from the top, the region's top edge sits at canvas y = 1600 - 1092 - 436 = 72,
+ *  and 72 + 68 = 140. Inverting returns (120.5/2560, 1459.5/1600). One texel per device pixel,
+ *  before and after: this moves WHERE the pixels live, never how many of them there are per
+ *  screen pixel. */
+export interface BackdropRegion {
+  readonly ScaleX: number;
+  readonly ScaleY: number;
+  readonly OffsetX: number;
+  readonly OffsetY: number;
+  /** Level-0 dimensions in texels. Consumers that reconstruct across the texel grid (the
+   *  progressive blur's cubic B-spline) need the pyramid's own resolution, not the canvas's. */
+  readonly TexelsX: number;
+  readonly TexelsY: number;
+}
+
+/** A full-canvas pyramid: screen UV addresses it unchanged. */
+export const BACKDROP_REGION_FULL: BackdropRegion =
+  { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: 0, TexelsY: 0 };
 
 export interface GpuBufferHandle {
   readonly _brand: 'GpuBufferHandle';
@@ -85,7 +132,8 @@ export interface StrokeStyle {
 export interface ProgressiveBlurParams {
   /** Screen rect in device pixels. */
   Rect: { X: number; Y: number; W: number; H: number };
-  /** Unblurred scene texture. */
+  /** Unblurred scene texture. Read only by the WebGPU pipeline's crossfade shader; the WebGL2
+   *  path's pyramid is sharp-root, so its level 0 IS the clear end and it samples nothing else. */
   Scene: GpuTextureHandle;
   /** Mipmapped blur pyramid texture. */
   Pyramid: GpuTextureHandle;
@@ -264,21 +312,20 @@ export interface Renderer {
 
   // ── Blur ──
 
-  /** Run the dual-filter blur pyramid. Returns handle to the blurred output.
+  /** Run the dual-filter blur pyramid. Returns a handle to the blurred output.
    *
-   *  `scissor` (optional) restricts destination fills to a rect in input-
-   *  texture coordinates. Callers that sample only a small region of the
-   *  final pyramid (e.g. a glass panel far smaller than the canvas) pass
-   *  their sample region here to save 10–50× fragment fill on each blur
-   *  pass. Pblurs should omit it — they sample the pyramid across the
-   *  whole canvas at high LOD. */
+   *  `region` (optional) is the rect of the input the caller will sample, in input-texture
+   *  device px with y=0 at the TOP. The pyramid is ALLOCATED to it: level 0 comes back
+   *  `region`-sized, at the same device density, and the returned handle carries the
+   *  `BackdropRegion` that maps screen UV into it. Callers pass their surface's footprint
+   *  plus its sample margin. Omit it for a pyramid that covers the whole input. */
   ComputeBlur(
     input: GpuTextureHandle,
     width: number,
     height: number,
     radius: number,
     minDepth?: number,
-    scissor?: { x: number; y: number; w: number; h: number },
+    region?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle;
 
   /** Generate mipmaps on the blur output so glass + progressive blur can

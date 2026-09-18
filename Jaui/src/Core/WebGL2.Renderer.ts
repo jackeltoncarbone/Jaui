@@ -7,7 +7,7 @@
  * backend — works on every browser, every GPU, every driver.
  */
 
-import { SHADOW_EASE_SECONDS, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop } from './Renderer';
+import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop } from './Renderer';
 import { ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { Framebuffer } from './Framebuffer';
 import { BlurPass } from './BlurPass';
@@ -86,6 +86,7 @@ interface _PanelLocs {
   resolution:   WebGLUniformLocation | null;
   viewOffset:   WebGLUniformLocation | null;
   backdrop:     WebGLUniformLocation | null;
+  backdropXf:   WebGLUniformLocation | null;
   scene:        WebGLUniformLocation | null;
   baseFrostLod: WebGLUniformLocation | null;
   specTilt:     WebGLUniformLocation | null;
@@ -109,6 +110,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   resolution:   gl.getUniformLocation(p, 'u_Resolution'),
   viewOffset:   gl.getUniformLocation(p, 'u_ViewOffset'),
   backdrop:     gl.getUniformLocation(p, 'u_Backdrop'),
+  backdropXf:   gl.getUniformLocation(p, 'u_BackdropXf'),
   scene:        gl.getUniformLocation(p, 'u_Scene'),
   baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
   specTilt:     gl.getUniformLocation(p, 'u_SpecularTilt'),
@@ -138,10 +140,18 @@ interface WrappedGlTexture extends GpuTextureHandle {
   readonly _glTex: WebGLTexture;
 }
 
-const _wrap = (tex: WebGLTexture): GpuTextureHandle =>
-  ({ _brand: 'GpuTextureHandle', _glTex: tex } as unknown as GpuTextureHandle);
+// The blur pyramid is sized to the SURFACE, so a backdrop texture no longer covers the screen —
+// and every consumer has to know which part of the screen it does cover. That travels ON THE
+// HANDLE rather than as renderer state: a handle cannot go stale, and the shared-backdrop path
+// (which reuses a pyramid built several surfaces ago) would read a stale field every time.
+const _wrap = (tex: WebGLTexture, region?: BackdropRegion): GpuTextureHandle =>
+  ({ _brand: 'GpuTextureHandle', _glTex: tex, Region: region } as unknown as GpuTextureHandle);
 const _unwrap = (handle: GpuTextureHandle): WebGLTexture =>
   (handle as unknown as WrappedGlTexture)._glTex;
+/** The screen-UV → pyramid-UV map a backdrop texture carries, or the identity for a texture
+ *  that covers the whole canvas (the raw scene, the shared backdrop, the ?no-blur passthrough). */
+const _regionOf = (handle: GpuTextureHandle | null | undefined): BackdropRegion =>
+  handle?.Region ?? BACKDROP_REGION_FULL;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -266,7 +276,18 @@ export class WebGL2Renderer implements Renderer {
 
   // Render targets
   private _sceneFbo!: Framebuffer;
+  /** Glass and backdrop-filter surfaces (`radius > 0` — a real frost sigma). */
   private _blur!: BlurPass;
+  /** The sharp-root pyramid (`radius <= 0`), which today means the progressive blur.
+   *
+   *  A separate instance because every level FBO is now sized from the surface REGION, and
+   *  these two consumers ask for very different ones: a progressive blur's region is usually a
+   *  whole edge of the canvas, a glass card's is the card. Sharing one set would re-allocate
+   *  the entire chain twice a frame on any page that has both — a toolbar over a grid, which is
+   *  most of this app. Lazily created on first use. */
+  private _rootBlur: BlurPass | null = null;
+  /** The pass the last ComputeBlur ran on; GenerateBlurMipmap and LastBlurDepth follow it. */
+  private _lastBlur: BlurPass | null = null;
   /** Dedicated blur pass for the shared backdrop pyramid (`?wkr-shared-backdrop`).
    *  Separate buffers from `_blur` so the per-surface pblur / glass-border blurs
    *  can't clobber the once-per-frame shared pyramid that many glass surfaces
@@ -355,6 +376,8 @@ export class WebGL2Renderer implements Renderer {
     rot: WebGLUniformLocation | null;
     scene: WebGLUniformLocation | null;
     pyramid: WebGLUniformLocation | null;
+    pyramidXf: WebGLUniformLocation | null;
+    pyramidSize: WebGLUniformLocation | null;
     maxLod: WebGLUniformLocation | null;
     direction: WebGLUniformLocation | null;
     feather: WebGLUniformLocation | null;
@@ -718,6 +741,12 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform2f(locs.resolution, canvasWidth, canvasHeight);
     gl.uniform2f(locs.viewOffset, this._captureViewOffsetX, this._captureViewOffsetY);
     gl.uniform1i(locs.backdrop, 0);
+    // The pyramid is sized to this surface, so `sampleBackdrop` maps screen UV through this
+    // before it reads. Identity for a full-canvas backdrop — and for a null one, where the
+    // shader never reaches the sampler at all.
+    const backdropRegion = _regionOf(backdrop);
+    gl.uniform4f(locs.backdropXf,
+      backdropRegion.ScaleX, backdropRegion.ScaleY, backdropRegion.OffsetX, backdropRegion.OffsetY);
     gl.uniform1i(locs.clipTex, 1);
     gl.uniform1i(locs.scene, 2);
     gl.uniform1f(locs.baseFrostLod, baseFrostLod);
@@ -970,27 +999,33 @@ export class WebGL2Renderer implements Renderer {
   ComputeBlur = (
     input: GpuTextureHandle, width: number, height: number,
     radius: number, minDepth?: number,
-    scissor?: { x: number; y: number; w: number; h: number },
+    region?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle => {
+    // The diagnostic hands back the canvas-sized scene, which screen UV addresses directly —
+    // so it comes back with no region, and every consumer's transform is the identity.
     if (this.DiagNoBlur) return input;
-    const result = this._blur.Blur(_unwrap(input), width, height, radius, minDepth, scissor);
+    const pass = radius > 0
+      ? this._blur
+      : (this._rootBlur ?? (this._rootBlur = new BlurPass(this._gl)));
+    this._lastBlur = pass;
+    const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
     // draw re-binds its program correctly.
     this._lastProgram = null;
-    return _wrap(result);
+    return _wrap(result, pass.LastRegion);
   };
 
   GenerateBlurMipmap = (maxLod?: number): void => {
     if (this.DiagNoBlur) return;
-    this._blur.GenerateOutputMipmap(maxLod);
+    (this._lastBlur ?? this._blur).GenerateOutputMipmap(maxLod);
     // The blit-to-mip path in BlurPass.GenerateOutputMipmap doesn't touch
     // shader programs, but keep the invalidation paired with ComputeBlur
     // for consistency. Cheap to do.
     this._lastProgram = null;
   };
 
-  get LastBlurDepth(): number { return this._blur.LastDepth; }
+  get LastBlurDepth(): number { return (this._lastBlur ?? this._blur).LastDepth; }
 
   /** Build the shared backdrop: a sharp-root (σ=0) blur of the current scene
    *  with a full Gaussian mip chain, into a DEDICATED pass so the per-surface
@@ -1009,11 +1044,13 @@ export class WebGL2Renderer implements Renderer {
     const qw = Math.max(1, width >> 2), qh = Math.max(1, height >> 2);
     const tex = pass.Blur(this._sceneFbo.Texture, qw, qh, 0, undefined, undefined);
     pass.GenerateOutputMipmap(Math.max(1, maxLod - 2));
+    // It covers the WHOLE canvas (at quarter resolution), so screen UV addresses it unchanged.
+    const region = pass.LastRegion;
     // BlurPass bound its own programs; invalidate the cache like ComputeBlur does.
     this._lastProgram = null;
     // Restore the scene FBO so the subsequent glass draws target it.
     this.RebindSceneTarget();
-    return _wrap(tex);
+    return _wrap(tex, region);
   };
 
   // ── Adaptive shadow ──
@@ -1025,6 +1062,7 @@ export class WebGL2Renderer implements Renderer {
     resolution: WebGLUniformLocation | null;
     rect: WebGLUniformLocation | null;
     detailLod: WebGLUniformLocation | null;
+    backdropXf: WebGLUniformLocation | null;
   } | null = null;
   private _shadowStateTex: WebGLTexture | null = null;
   private _shadowStateFbo: WebGLFramebuffer | null = null;
@@ -1074,6 +1112,10 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform2f(locs.resolution, this._width, this._height);
     gl.uniform4f(locs.rect, rect.x, rect.y, rect.w, rect.h);
     gl.uniform1f(locs.detailLod, Math.max(0, detailLod));
+    // `scene` is the canvas-sized sharp tap; `backdrop` is this surface's own pyramid, so only
+    // the second needs the region map.
+    const bxf = _regionOf(backdrop);
+    gl.uniform4f(locs.backdropXf, bxf.ScaleX, bxf.ScaleY, bxf.OffsetX, bxf.OffsetY);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(scene));
     gl.activeTexture(gl.TEXTURE1);
@@ -1104,6 +1146,7 @@ export class WebGL2Renderer implements Renderer {
       resolution: gl.getUniformLocation(program.Program, 'u_Resolution'),
       rect: gl.getUniformLocation(program.Program, 'u_Rect'),
       detailLod: gl.getUniformLocation(program.Program, 'u_DetailLod'),
+      backdropXf: gl.getUniformLocation(program.Program, 'u_BackdropXf'),
     };
     // 10-bit so a small per-frame ease still moves the stored value instead of rounding back to it.
     const tex = gl.createTexture()!;
@@ -1134,6 +1177,13 @@ export class WebGL2Renderer implements Renderer {
       params.Cos ?? 1, params.Sin ?? 0, params.PivotX ?? 0, params.PivotY ?? 0);
     gl.uniform1i(this._progBlurLocs.scene, 0);
     gl.uniform1i(this._progBlurLocs.pyramid, 1);
+    // The pyramid holds a REGION of the screen. The ramp, the feather and the clip all still
+    // run in screen UV — only the two fetches map through this, and the cubic reconstruction
+    // needs the pyramid's own texel grid rather than the canvas's.
+    const pxf = _regionOf(params.Pyramid);
+    gl.uniform4f(this._progBlurLocs.pyramidXf, pxf.ScaleX, pxf.ScaleY, pxf.OffsetX, pxf.OffsetY);
+    gl.uniform2f(this._progBlurLocs.pyramidSize,
+      pxf.TexelsX || this._width, pxf.TexelsY || this._height);
     gl.uniform1i(this._progBlurLocs.clipTex, 2);
     gl.uniform2i(this._progBlurLocs.clipMeta, params.ClipOffset, params.ClipCount);
     gl.uniform1f(this._progBlurLocs.maxLod, params.MaxLod);
@@ -1594,6 +1644,8 @@ export class WebGL2Renderer implements Renderer {
       rot: gl.getUniformLocation(p, 'u_Rot'),
       scene: gl.getUniformLocation(p, 'u_Scene'),
       pyramid: gl.getUniformLocation(p, 'u_Pyramid'),
+      pyramidXf: gl.getUniformLocation(p, 'u_PyramidXf'),
+      pyramidSize: gl.getUniformLocation(p, 'u_PyramidSize'),
       maxLod: gl.getUniformLocation(p, 'u_MaxLod'),
       direction: gl.getUniformLocation(p, 'u_Direction'),
       feather: gl.getUniformLocation(p, 'u_Feather'),

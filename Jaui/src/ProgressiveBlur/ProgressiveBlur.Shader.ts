@@ -65,6 +65,13 @@ in vec2 v_PixelPos;
 uniform vec2 u_Resolution;                  // canvas w/h, device px
 uniform vec4 u_Rect;                        // x, y, w, h of this pblur element (device px)
 uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = sharp scene, higher = more blur)
+// The pyramid is built at the size of the REGION this pblur samples, not the canvas: a
+// canvas-sized attachment costs a full load+store per render pass on a tile-based GPU however
+// small the scissor. Screen UV maps in as uv * u_PyramidXf.xy + u_PyramidXf.zw — identity
+// (1,1,0,0) when the region IS the canvas. Density is unchanged: one level-0 texel per device
+// pixel either way, which is why the LOD arithmetic below still measures in screen UV.
+uniform vec4 u_PyramidXf;
+uniform vec2 u_PyramidSize;                 // level-0 dimensions in TEXELS (the cubic needs its grid)
 uniform float u_MaxLod;                     // max mipmap LOD to sample (maps to ramp = 1.0)
 uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 ToRight
 uniform float u_Feather;                    // ramp length in device px (0 = span whole element)
@@ -130,6 +137,7 @@ vec4 cubicWeights(float v) {
 // i.e. u_Resolution / 2^lod. textureLod still does the trilinear mip blend;
 // the B-spline reconstructs smoothly across that level's texel grid.
 vec3 textureBicubicLod(sampler2D tex, vec2 uv, float lod, vec2 texSize) {
+    // uv and texSize are BOTH in the pyramid's own frame — the caller maps them.
     vec2 invTexSize = 1.0 / texSize;
     vec2 coord = uv * texSize - 0.5;
     vec2 fxy = fract(coord);
@@ -343,6 +351,9 @@ void main() {
     // structured Moiré on smooth regions).
     float lodJitter = (_wn(v_PixelPos + 31.0) + _wn(v_PixelPos + 97.0) - 1.0) * 0.5;
     lod = max(0.0, lod + lodJitter);
+    // One level-0 texel IS one device pixel, so a LOD-lod texel is exp2(lod) device px
+    // wide wherever the pyramid lives. This inset is measured against the CLIP AABB, which is in
+    // screen UV, so it stays screen-relative.
     vec2 texelUv = exp2(lod) / u_Resolution;
     // Inset by ~2 texels (not ½) so the bicubic kernel's footprint stays
     // inside the clip AABB — no beyond-clip scene content bleeds into the
@@ -350,6 +361,10 @@ void main() {
     vec2 uvMin = clipUv.xy + texelUv * 2.0;
     vec2 uvMax = clipUv.zw - texelUv * 2.0;
     vec2 safeUv = clamp(v_SampleUv, min(uvMin, uvMax), max(uvMin, uvMax));
+    // Clamped in screen UV (that is the frame the clip AABB is in), then mapped into the
+    // pyramid's own UV for the fetches below.
+    vec2 pyrUv = safeUv * u_PyramidXf.xy + u_PyramidXf.zw;
+    vec2 pyrSize = u_PyramidSize / exp2(lod);
 
     // True single-continuum sample. The pyramid's mip 0 IS the sharp scene
     // (seeded raw — see BlurPass sharp-root), so one continuous LOD ramps from
@@ -369,12 +384,12 @@ void main() {
     float cubicBlend = smoothstep(1.0, 3.0, lod);
     vec3 rgb;
     if (cubicBlend <= 0.0) {
-        rgb = textureLod(u_Pyramid, safeUv, lod).rgb;
+        rgb = textureLod(u_Pyramid, pyrUv, lod).rgb;
     } else if (cubicBlend >= 1.0) {
-        rgb = textureBicubicLod(u_Pyramid, safeUv, lod, u_Resolution / exp2(lod));
+        rgb = textureBicubicLod(u_Pyramid, pyrUv, lod, pyrSize);
     } else {
-        vec3 sharpRgb  = textureLod(u_Pyramid, safeUv, lod).rgb;
-        vec3 smoothRgb = textureBicubicLod(u_Pyramid, safeUv, lod, u_Resolution / exp2(lod));
+        vec3 sharpRgb  = textureLod(u_Pyramid, pyrUv, lod).rgb;
+        vec3 smoothRgb = textureBicubicLod(u_Pyramid, pyrUv, lod, pyrSize);
         rgb = mix(sharpRgb, smoothRgb, cubicBlend);
     }
 
