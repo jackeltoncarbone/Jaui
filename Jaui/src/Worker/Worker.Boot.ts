@@ -73,83 +73,10 @@ const _forwardWorkerConsole = (): void => {
   });
 };
 
-/** How long the boot hold below will keep re-arming if the engine never presents a frame. It is a
- *  backstop for a canvas that boots and is then never given a size, not a budget: the warm first
- *  frame lands at ~440ms and the first-EVER visit at ~1,460ms, both far inside it. */
-const VSYNC_HOLD_CAP_MS = 4000;
-
-/**
- * Hold this worker's BeginFrame subscription open across the whole boot gap, and time it.
- *
- * A dedicated worker's `requestAnimationFrame` is a BeginFrame SUBSCRIPTION on a viz frame sink,
- * not a timer (`ShowStudio.Documentation/Perf/README.md`). Two things follow that nothing on the
- * boot path was accounting for. The sink does not exist until the first call makes it, and making
- * it is a round trip out of the worker, through the browser process, into viz, where it is
- * registered under the creating document's frame sink before one frame can be delivered. And the
- * subscription LAPSES the instant no callback is outstanding.
- *
- * Both of those land squarely on the first frame. The engine's first-ever rAF is the one `Canvas`'s
- * constructor arms for its deferred `_resize`; at that point the canvas has no size, so the
- * callback fires, does nothing, and lets the subscription drop. `Canvas.Start()` then has to take
- * it again — and cannot be called until the page has handed `start` back over the bridge, which the
- * page cannot do until its own main thread comes free. Measured on a warm production load the first
- * tick arrived **84ms — five vsyncs — after the loop was armed**, with the canvas element in the
- * document, laid out and 1600x1000 the entire time.
- *
- * So take the subscription here, at the top of boot, ~145ms before the engine needs it, and never
- * let it lapse until the engine has presented. NOTHING IS DRAWN AND NOTHING IS STEPPED: the
- * callback re-arms and returns. It is released on the first present, so a still page parks exactly
- * as it did before — the hold is a boot cost, and every window the perf harness opens starts long
- * after it is gone (`run.mjs` reads its worker baseline after `Open`, `Warm` and the wheel probe).
- *
- * IT IS ALSO THE MEASUREMENT, and that is not a consolation prize. `jaui:vsync:held` is the first
- * BeginFrame this worker was ever given, timed from the subscription that asked for it — the number
- * nobody has ever had. `jaui:vsync:released` carries the cadence it then ran at. If those marks say
- * frames were arriving at the display rate right through the gap the engine spent waiting, then
- * BeginFrame delivery was never the term, this hold buys nothing, and the 84ms belongs to something
- * else — which the numbers will say, rather than this comment.
- */
-const _holdBeginFrames = (): (() => void) => {
-  if (typeof requestAnimationFrame !== 'function') return () => { /* no frame clock to hold */ };
-  const armed = performance.now();
-  let frames = 0;
-  let first = 0;
-  let last = 0;
-  let worstGap = 0;
-  let released = false;
-  const step = (): void => {
-    const now = performance.now();
-    frames++;
-    if (frames === 1) {
-      first = now;
-      JTrace(`jaui:vsync:held ${JMs(now - armed)}ms`);
-    } else {
-      const gap = now - last;
-      if (gap > worstGap) worstGap = gap;
-    }
-    last = now;
-    if (released || now - armed > VSYNC_HOLD_CAP_MS) return;
-    requestAnimationFrame(step);
-  };
-  requestAnimationFrame(step);
-  // Released by LETTING THE LAST CALLBACK DRAIN, never by cancelling it. The release runs inside the
-  // engine's own present, i.e. inside a rAF callback the engine has not yet re-armed from — so
-  // cancelling here would leave the worker with zero outstanding requests for the rest of that
-  // dispatch, which is the one thing this whole function exists to prevent.
-  return (): void => {
-    if (released) return;
-    released = true;
-    JTrace(`jaui:vsync:released n=${frames} span=${JMs(last - first)}ms gapmax=${JMs(worstGap)}ms`);
-  };
-};
-
 /** Boot the Jaui worker. Wires the bridge, waits for the `init` message,
  *  then constructs renderer/platform/canvas/registry and posts `ready`.
  *  Call once per worker scope. */
 export const BootJauiWorker = (): void => {
-  // FIRST LINE OF THE BOOT, because the subscription it opens is the thing with the latency — see
-  // `_holdBeginFrames`. Everything below this runs while viz is building the frame sink.
-  const releaseVsyncHold = _holdBeginFrames();
   _forwardWorkerConsole();
   // Build marker — proves WHICH worker bundle is live in the tab (a soft refresh
   // reuses the cached module worker; only a hard reload re-inits it). Gated behind
@@ -302,12 +229,6 @@ export const BootJauiWorker = (): void => {
 
       JTrace(`jaui:registry:end ${JMs(performance.now() - _t0)}ms`);
 
-      // Hand the BeginFrame subscription over to the engine's own loop the moment it has presented.
-      // Registered LAST of the post-frame subscribers and self-removing, so the splice it performs
-      // cannot skip one of the others on the frame it runs (`Canvas._postFrameSubs` iterates by
-      // index), and nothing is left on the per-frame path afterwards.
-      const offVsyncHold = canvas.RegisterPostFrame(() => { offVsyncHold(); releaseVsyncHold(); });
-
       canvas.ResizeFromBridge(m.Width, m.Height);
 
       if (_debug) console.log('[Jaui.Worker] ready');
@@ -319,8 +240,6 @@ export const BootJauiWorker = (): void => {
       JTrace(`jaui:ready:posted init=${JMs(performance.now() - _t0)}ms`);
       post({ T: 'ready' });
     } catch (err) {
-      // A boot that failed will never present, so nothing would ever hand the subscription over.
-      releaseVsyncHold();
       console.error('[Jaui.Worker] init failed:', err);
       throw err;
     }
