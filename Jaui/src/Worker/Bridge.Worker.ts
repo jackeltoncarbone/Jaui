@@ -12,11 +12,11 @@
  */
 
 import type { Canvas } from '../Core/Jaui';
-import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
+import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { WorkerPlatform, type WorkerPlatformInit } from './Worker.Platform';
 import type { JivRegistry } from './Jiv.Registry';
 import { PrimeFontInSharedCtx } from '../Text/Text.WordLayout';
-import { BumpFontGeneration, PrimeFontInMeasureCtx } from '../Text/Text.Measure';
+import { BumpFontGeneration, PrimeFontInMeasureCtx, FamilyResolvesInMeasureCtx } from '../Text/Text.Measure';
 import {
   isMessage,
   type M2W,
@@ -83,6 +83,10 @@ export interface SynthWheelEvent extends SynthPointerEvent {
   deltaY: number;
   deltaMode: number;
 }
+
+/** How long the font installs have to go quiet before the worker states the outcome once. Main
+ *  fans its fetches out, so the faces arrive in a burst; one line per face would be dozens. */
+const FONT_OUTCOME_DELAY_MS = 400;
 
 export class WorkerBridge {
   private _post: PostFn;
@@ -209,6 +213,10 @@ export class WorkerBridge {
       if (m.Descriptors.Display) (desc as { display?: string }).display = m.Descriptors.Display;
       if (m.Descriptors.UnicodeRange) desc.unicodeRange = m.Descriptors.UnicodeRange;
     }
+    // Hoisted above the load: the FAILURE path names them too, and a face that refused to install
+    // is exactly the one whose weight you need to read.
+    const weight = m.Descriptors?.Weight ?? '400';
+    const style = m.Descriptors?.Style ?? 'normal';
     const ff = new FontFace(m.Family, m.Buffer, desc);
     ff.load().then(async () => {
       const fontSet = (self as unknown as { fonts?: FontFaceSet }).fonts;
@@ -225,8 +233,6 @@ export class WorkerBridge {
       //      font to a canvas's font registry on first reference; doing
       //      it now means the engine's main canvas inherits the binding
       //      via the shared FontFaceSet.
-      const weight = m.Descriptors?.Weight ?? '400';
-      const style = m.Descriptors?.Style ?? 'normal';
       const spec = `${style} ${weight} 16px "${m.Family}"`;
       try { await fontSet?.load(spec); } catch { /* WebKit may reject some shorthands; the add() above is still effective on Chromium */ }
       // Prime the engine's *actual* shared measurement contexts so iOS
@@ -248,9 +254,43 @@ export class WorkerBridge {
       // rasterized wider into the same box → clipping on the right edge.
       this._platform?.IngestMessage({ T: 'fonts-done' });
       this._canvas?.Animations.Kick();
+      this._fontsRegistered++;
+      this._traceFontOutcome(m.Family, weight, style);
     }).catch((err) => {
+      this._fontsFailed++;
+      const why = (err as { message?: string })?.message ?? String(err);
       console.warn(`[Jaui.Worker] FontFace load FAILED: ${m.Family}`, err);
+      // A worker console.warn reaches nobody: the worker has no error overlay, and the boot
+      // report's error capture is on the PAGE's `window`. Naming the failure is what puts a font
+      // that refused to install in front of a person holding the device it refused on.
+      JTrace(`jaui:font:failed ${m.Family} ${weight} ${why}`);
+      this._traceFontOutcome(m.Family, weight, style);
     });
+  };
+
+  private _fontsRegistered = 0;
+  private _fontsFailed = 0;
+  private _fontOutcomeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Roll the font installs up into one trace line once they stop arriving, and say whether the
+   * family actually took.
+   *
+   * The counts alone cannot answer the question that matters. WebKit keeps the FontFaceSet and a
+   * canvas's font registry as separate caches, so a face can be constructed, loaded and added and
+   * still not be the face `measureText` resolves — which is exactly the failure that shows up as
+   * "the font isn't loading" on a phone and on nothing else. So the line carries the measured
+   * verdict for the family, not just the bookkeeping.
+   */
+  private _traceFontOutcome = (family: string, weight: string, style: string): void => {
+    if (!JauiTracing()) return;
+    if (this._fontOutcomeTimer !== null) clearTimeout(this._fontOutcomeTimer);
+    this._fontOutcomeTimer = setTimeout(() => {
+      this._fontOutcomeTimer = null;
+      const resolves = FamilyResolvesInMeasureCtx(family, weight, style);
+      JTrace(`jaui:fonts registered=${this._fontsRegistered} failed=${this._fontsFailed} ` +
+             `${family}=${resolves ? 'RESOLVES' : 'FALLBACK'}`);
+    }, FONT_OUTCOME_DELAY_MS);
   };
 
   /** The first batch is the whole page's tree, backlogged on main since before the worker was

@@ -33,6 +33,41 @@ export const PrimeFontInMeasureCtx = (
   ctx.font = prev;
 };
 
+/** A family name no font can be installed under, so the canvas is guaranteed to fall back. */
+const _NO_SUCH_FAMILY = '__jaui_no_such_family__';
+/** Wide enough that two different faces cannot measure the same by accident. */
+const _PROBE_TEXT = 'ABCDEFGHIJKLM abcdefghijklm 0123456789';
+
+/**
+ * Whether `family` actually RESOLVES in the context the engine measures with — the direct answer
+ * to "does this worker have the page's font", as opposed to "was it handed one".
+ *
+ * A canvas given a family it cannot find silently falls back to the default face, so a family that
+ * measures the same as a name no font could possibly have is not installed here. Diagnostic only:
+ * it is called from the font-install path behind `JauiTracing()`, never per frame. A face whose
+ * advance widths matched the platform default across the whole probe string would read as missing,
+ * which for any real webface against a system UI face does not happen.
+ */
+export const FamilyResolvesInMeasureCtx = (
+  family: string,
+  weight: string = '400',
+  style: string = 'normal',
+): boolean => {
+  const ctx = _getSharedContext();
+  const prev = ctx.font;
+  try {
+    ctx.font = `${style} ${weight} 72px "${_NO_SUCH_FAMILY}"`;
+    const fallback = ctx.measureText(_PROBE_TEXT).width;
+    ctx.font = `${style} ${weight} 72px "${family}"`;
+    const actual = ctx.measureText(_PROBE_TEXT).width;
+    return Math.abs(actual - fallback) > 0.01;
+  } catch {
+    return false;
+  } finally {
+    ctx.font = prev;
+  }
+};
+
 // Chromium caches the resolved face per exact font string for the whole worker, and an entry resolved
 // before a FontFace arrived keeps its fallback in every context. Each font install bumps this, and the
 // bump rides in the size string, a tenth of a thousandth of a pixel at a time, so no string is reused.
