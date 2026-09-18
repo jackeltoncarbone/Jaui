@@ -992,17 +992,26 @@ void main() {
         // of interior fragments (the dominant cost of a full-screen glass modal).
         // The full 3-tap CA still runs in the thin rim band where it's visible.
         float caSpreadPx = chromaticAberration * hump * 3.0; // = length(caStep)
-        if (caSpreadPx < 0.5) {
-            backdrop = sampleBackdrop(baseUv, lodBoost, frostLod);
-        } else {
-            vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
-            vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
-            vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
-            backdrop = vec3(sR.r, sG.g, sB.b);
+        // A border-only pass throws `backdrop` away: it only reaches `fillRgb`, and the
+        // borderOnly block below resets `result` to a transparent interior. So the one
+        // to three MIPMAPPED, REFRACTED, chromatically-split taps here were paid on every
+        // fragment of the rim quad for a fill nobody sees. Skipping them is byte-identical
+        // by construction — and it is what lets emitBorderOverlay stop padding its blur
+        // scissor by `Thickness x Refraction`: with these gone, the only backdrop tap a
+        // border-only fragment makes is the border zone's own, which is INWARD.
+        // `lodBoost` is still computed above, because the border zone reads it.
+        if (borderOnly == 0.0) {
+            if (caSpreadPx < 0.5) {
+                backdrop = sampleBackdrop(baseUv, lodBoost, frostLod);
+            } else {
+                vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
+                vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
+                vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
+                backdrop = vec3(sR.r, sG.g, sB.b);
+            }
+            backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);
         }
-
-        backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);
-    } else if (hasBackdropFilter) {
+    } else if (hasBackdropFilter && borderOnly == 0.0) {
         // Flat panel backdrop sampling — no refraction, no CA, no rim boost.
         vec3 s = sampleBackdrop(baseUv, 0.0, frostLod);
         backdrop = applyTint(applyGrading(s, brightness, saturation, contrast), bodyTint);
@@ -1068,7 +1077,15 @@ void main() {
     // whole block (incl. its extra rim backdrop tap) in the deep interior:
     // edgeLightAlpha stays 0 → the composite below is a no-op. Pixel-identical,
     // saves one mipmapped backdrop read across the entire panel/modal interior.
-    if (materialType == 1.0 && fillAlpha > 0.0 && dist > -max(bezelWidth * 0.75, 6.0)) {
+    //
+    // A border-only pass is excluded OUTRIGHT, and that is a BUG FIX, not an economy.
+    // The borderOnly block below zeroes `fillAlpha` so that every interior effect
+    // drops out — but `edgeLightAlpha` had ALREADY captured fillAlpha here, several
+    // hundred lines earlier, so the wide rim glow still composited into a pass whose
+    // own comment promises a transparent interior. `JwiftGlass` hides it with
+    // `FresnelStrength: 0`; `JwiftSolidGlass` does NOT (0.55, with `BorderLayer: 10`),
+    // so its overlay has been painting a full-strength interior glow all along.
+    if (materialType == 1.0 && borderOnly == 0.0 && fillAlpha > 0.0 && dist > -max(bezelWidth * 0.75, 6.0)) {
         // Wide rim band — at LEAST 6 px so the glow is actually visible,
         // scaled up with bezelWidth (the optical "thickness" of the glass).
         float rimBand = max(bezelWidth * 0.75, 6.0);
@@ -1167,9 +1184,11 @@ void main() {
 
     // Border-only overlay (BorderLayer glass rim drawn OVER children): start
     // from a fully transparent interior — no fill, no shadow — and zero the
-    // fill-coupled alpha so every interior glass effect (rim glow, edge light,
-    // bevel/rim specular) contributes nothing. Only the border zone below will
-    // paint, sampling the real backdrop with its BorderFilter grading.
+    // fill-coupled alpha so every interior glass effect (bevel/rim specular,
+    // hemispherical rim ambient) contributes nothing. Only the border zone below
+    // will paint, sampling the real backdrop with its BorderFilter grading.
+    // The wide rim glow is NOT covered by this line — it reads a copy of fillAlpha
+    // taken before it — so its block is gated on `borderOnly` at the source.
     if (borderOnly == 1.0) {
         result = vec4(0.0);
         fillAlpha = 0.0;

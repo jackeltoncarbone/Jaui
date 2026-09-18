@@ -100,6 +100,12 @@ const _hasBackdropFilter = (node: Jiv): boolean => {
     || s.BackdropFrostBlur > 0.001
     || Math.abs(s.Tint) > 0.001;
 };
+
+/** The knee of the panel shader's `solidness` term — `1 - smoothstep(0, 4, Refraction)`
+ *  in Jiv.Panel.frag. Below it a glass slab is treated as OPAQUE and its rim gathers the
+ *  card's OWN content through an inward-inset tap; at or above it the slab is see-through
+ *  and the rim gathers straight down. `_rimFuses` refuses the solid case. */
+const RIM_SOLID_REFRACTION_KNEE = 4;
 import { DirtyFlag } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
@@ -219,6 +225,7 @@ export class Canvas implements DirtyTracker {
   private _diagNoPanels: boolean = false;   // [diag ?no-panels] skip non-glass panel fill (SDF+shadow+border) → panel share
   private _diagNoShadow: boolean = false;   // [diag ?no-shadow] zero panel drop-shadow → shadow overdraw share
   private _diagNoGlassDraw: boolean = false; // [diag ?no-glass-draw] skip glass refraction draw (keep blur) → glass-draw share
+  private _diagNoRimFuse: boolean = false;  // [diag ?no-rim-fuse] always take the standalone BorderLayer overlay pass, never fuse the rim
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -827,6 +834,12 @@ export class Canvas implements DirtyTracker {
    *  at the top of every _render; real structural/material changes happen under
    *  !_uiStatic (which drops the whole cache), so it can't go stale mid-static. */
   private _subtreeDynamicMemo = new Map<Jiv, boolean>();
+  /** Per-render memo of the BorderLayer rim-fusion decision (`_rimFuses`). The fill
+   *  pass and `descendChildren` both ask for it, one node apart, and the answer costs
+   *  a descendant walk — so it is computed once per surface per frame. Cleared next to
+   *  `_subtreeDynamicMemo`; layout is final before the render walk starts, so nothing
+   *  inside a frame can invalidate it. */
+  private _rimFuseMemo = new Map<Jiv, boolean>();
   /** True when no UI animation/relayout is pending, so the static caches are
    *  safe to build + reuse. The everplaying field keeps the loop alive via
    *  _needsRender (NOT IsRunning), so this stays true in steady state. */
@@ -1175,6 +1188,7 @@ export class Canvas implements DirtyTracker {
     // Per-frame: reset the dynamic-subtree memo; gate the layer cache on a live
     // WebGL2 context (the capture binds FBOs + needs GetGL()).
     this._subtreeDynamicMemo.clear();
+    this._rimFuseMemo.clear();
     // [damage] Phase A proof: a small field-only dirty rect; everything outside is culled.
     this._damageRectCss = this._damageTest
       ? { x: this._width * 0.10, y: this._height * 0.40, w: this._width * 0.30, h: this._height * 0.25 }
@@ -1400,7 +1414,9 @@ export class Canvas implements DirtyTracker {
       }
     };
 
-    const descendChildren = (node: Jiv, eff: Mat2x3, stack: ClipStack, scope: TeleportScope, effH: Mat3x3 | null, persp: PerspCtx | null): void => {
+    // `ownPanelCulled` — the caller skipped this node's OWN paint (its box failed the
+    // clip or damage cull) and is only here to let overflowing children self-cull.
+    const descendChildren = (node: Jiv, eff: Mat2x3, stack: ClipStack, scope: TeleportScope, effH: Mat3x3 | null, persp: PerspCtx | null, ownPanelCulled: boolean = false): void => {
       const boxClip = this._boxClip(node, eff);
       const childM = this._descendOffset(node, eff);
       // Mirror the scroll translate onto the homography so descendants of a
@@ -1418,10 +1434,17 @@ export class Canvas implements DirtyTracker {
       // BEFORE the rest, so negative BorderLayer lands behind content and a
       // value past every child's Layer lands on top. Painted in the node's OWN
       // transform/clip (`eff`, `stack`) — the border belongs to the node, not
-      // the child offset frame. Zero work for the default (no suppressed border).
-      const borderSuppressed =
-        node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)
-        && node.Visible && node.Width > 0 && node.Height > 0;
+      // the child offset frame. Zero work for the default (no suppressed border),
+      // and none either when `_rimFuses` proved the annulus is clear and the fill
+      // pass already painted the rim.
+      let borderSuppressed = this._rimNeedsOverlay(node, eff);
+      // The node's own panel was culled (off-screen, or outside the damage rect) and
+      // never drew — so its rim is not a rim floating over children, it is a pass that
+      // paints nothing. A glass one still cost a full SnapshotScreen + ComputeBlur +
+      // mipmap + draw. Drop it once even the stroke's reach past the box is out.
+      if (borderSuppressed && ownPanelCulled && this._rimOutsidePaintedArea(node, eff, stack, effH)) {
+        borderSuppressed = false;
+      }
       const borderLayer = node.RenderStyle.BorderLayer;
       let borderEmitted = !borderSuppressed;
       const emitBorderOverlay = (): void => {
@@ -1450,16 +1473,18 @@ export class Canvas implements DirtyTracker {
           const frostCssPx = Math.max(1, node.RenderStyle.BackdropFrostBlur);
           const _gsx = matScaleX(eff), _gsy = matScaleY(eff);
           const _gAvgScale = (_gsx + _gsy) * 0.5;
-          const _gMinHalf = Math.min(node.Width * _gsx, node.Height * _gsy) * d * 0.5;
           const _gThicknessDev = node.RenderStyle.Thickness * _gAvgScale * d;
-          const _gBulgeMax = node.RenderStyle.Fillet * _gMinHalf * 0.25 * 0.7;
-          // MAGNITUDE: refraction displacement reach is |thickness·refraction| (a negative Refraction —
-          // e.g. the pressed selection indicator's -1 — only flips direction). The signed value shrank the
-          // blur/snapshot scissor below the AABB, clipping the rounded refraction to a rectangle. abs() sizes
-          // the scissor to cover the full displaced footprint so the pill refraction reads valid backdrop.
-          const _gRefractMax = (_gThicknessDev + _gBulgeMax) * Math.abs(node.RenderStyle.Refraction);
-          const _gCaMax = node.RenderStyle.ChromaticAberration * 3.0;
-          const margin = frostCssPx * d + _gRefractMax + _gCaMax + 8 * d;
+          // ── What a BORDER-ONLY pass can actually reach ──
+          // This margin used to be the glass FILL path's, copied whole: frost + the
+          // refraction footprint (|Thickness x Refraction|, plus the Fillet bulge) +
+          // chromatic aberration. None of those three exist here. A border-only fragment
+          // makes exactly ONE backdrop tap — the border zone's `bUv`, which offsets
+          // INWARD along the normal and is scaled by `solidness`, so it never leaves the
+          // panel — because Jiv.Panel.frag now skips the fill's refracted and CA taps on
+          // `borderOnly` (they only fed a fill this pass throws away). So the reach is the
+          // frost blur's own spatial spread plus a pixel pad. On a JwiftGlass card at dpr 2
+          // that is 24 px instead of 65, and the blur + snapshot shrink with it.
+          const margin = frostCssPx * d + 8 * d;
           const _ab = this._nodeAabb(node, eff, effH);
           const px = _ab.minX * d, py = _ab.minY * d;
           const pw = (_ab.maxX - _ab.minX) * d, ph = (_ab.maxY - _ab.minY) * d;
@@ -1633,7 +1658,7 @@ export class Canvas implements DirtyTracker {
         // subtree. A non-clipping box (e.g. Scroll with Clip:Visible) can have
         // children that overflow its box and remain on-screen, so recurse.
         if (node.ClipsChildren) return;
-        descendChildren(node, eff, stack, scope, effH, childPersp);
+        descendChildren(node, eff, stack, scope, effH, childPersp, true);
         return;
       }
 
@@ -1647,7 +1672,7 @@ export class Canvas implements DirtyTracker {
         const _dr = this._damageRectCss;
         if (_dab.maxX <= _dr.x || _dab.minX >= _dr.x + _dr.w || _dab.maxY <= _dr.y || _dab.minY >= _dr.y + _dr.h) {
           if (node.ClipsChildren) return;
-          descendChildren(node, eff, stack, scope, effH, childPersp);
+          descendChildren(node, eff, stack, scope, effH, childPersp, true);
           return;
         }
       }
@@ -1715,9 +1740,10 @@ export class Canvas implements DirtyTracker {
       // fused panel here and re-emit it as a standalone BorderOnly instance
       // interleaved among the children (see descendChildren). Default
       // (BorderLayer 0, or no visible border) keeps the border fused — today's
-      // paint order, zero cost.
+      // paint order, zero cost. So does a rim with nothing under it: `_rimFuses`
+      // proves no descendant paints in the annulus and the overlay is dropped.
       const ownBorderMode: 'Normal' | 'Suppress' =
-        (node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)) ? 'Suppress' : 'Normal';
+        this._rimNeedsOverlay(node, eff) ? 'Suppress' : 'Normal';
 
       if (material === 'ProgressiveBlur' && !this._diagNoPblur) {
         // Flush both pending batches: the pblur snapshots the scene and
@@ -2127,7 +2153,11 @@ export class Canvas implements DirtyTracker {
           if (flatBgPaint.Mode === 'Image') this._counts.Image++;
           this._panelBuffer.Begin();
         } else {
-          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+          // `ownBorderMode` travels with the BATCHED instance too. It was omitted here, so
+          // a Color-background node with a non-zero BorderLayer kept its border on the
+          // fused panel AND got the overlay — the rim composited twice. Border mode is
+          // per-instance data, so it costs the batch nothing.
+          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
         }
         }
       }
@@ -2531,6 +2561,149 @@ export class Canvas implements DirtyTracker {
   private _hasPaintedBorder = (node: Jiv): boolean => {
     const s = node.RenderStyle;
     return s.BorderWidth > 0 && s.BorderColor.A > 0.001;
+  };
+
+  /** True when this node's rim has to be re-emitted as a standalone overlay pass
+   *  AFTER its children instead of being painted by its own fill pass. The fill pass
+   *  (which suppresses the rim) and `descendChildren` (which emits the overlay) both
+   *  ask THIS, so the two can never disagree about one node. */
+  private _rimNeedsOverlay = (node: Jiv, eff: Mat2x3): boolean => {
+    const s = node.RenderStyle;
+    if (s.BorderLayer === 0 || !this._hasPaintedBorder(node)) return false;
+    if (!node.Visible || node.Width <= 0 || node.Height <= 0) return false;
+    if (this._diagNoRimFuse) return true;
+    const memo = this._rimFuseMemo.get(node);
+    if (memo !== undefined) return !memo;
+    const fuses = this._rimFuses(node, eff);
+    this._rimFuseMemo.set(node, fuses);
+    return !fuses;
+  };
+
+  /** ── BorderLayer rim fusion ──────────────────────────────────────────────
+   *  A non-zero `BorderLayer` exists so a surface's rim can float OVER its children.
+   *  It buys that with a whole second pass after the subtree — and for a GLASS rim
+   *  that pass is a full backdrop pipeline of its own (SnapshotScreen + ComputeBlur +
+   *  mipmap + draw), which fires even for a surface with no children at all. When
+   *  nothing a descendant paints lands in the rim annulus, the rim has nothing to
+   *  float over and the fill pass can simply paint it.
+   *
+   *  This is NOT a free identity, and the difference is in the rim's GATHER, not its
+   *  geometry. The overlay's border zone samples a pyramid built AFTER this surface's
+   *  own fill went into the scene, so it gathers this surface's graded face and runs
+   *  the body's grade + Tint over it a SECOND time. The fill pass's pyramid predates
+   *  the fill, so a fused rim gathers the raw backdrop once. For refractive glass that
+   *  is a calibration shift (a brighter rim, and the one the stylesheet describes).
+   *  For a SOLID slab it is not a shift but a wrong picture, so those never fuse. */
+  private _rimFuses = (node: Jiv, eff: Mat2x3): boolean => {
+    const s = node.RenderStyle;
+    // `solidness = 1 - smoothstep(0, 4, Refraction)` (Jiv.Panel.frag). Above the knee
+    // the slab is see-through and the rim gathers straight down; below it the slab is
+    // OPAQUE and the shader deliberately insets the rim's tap INTO the card's own
+    // content ("a black card over a green field gets a bright green rim"). The fill
+    // pass has no pyramid that contains that content — a fused rim there would gather
+    // the scene behind an opaque card. JwiftSolidGlass is exactly this case.
+    if (_isGlass(s.Material) && Math.abs(s.Refraction) < RIM_SOLID_REFRACTION_KNEE) return false;
+    // The annulus, in the node's own natural units. Jiv.Panel.frag inks the stroke over
+    // -(drawnBorderWidth + fadeIn) < dist < aa, where `widthScale` peaks at
+    // 1 + BorderVariance, `drawnBorderWidth` floors at ONE DEVICE px (the hairline
+    // floor) and `aa` is BorderBlur.
+    const dev = Math.max((matScaleX(eff) + matScaleY(eff)) * 0.5, 1e-4) * this._dpr;
+    const wide = 1 + Math.max(s.BorderVariance, 0);
+    const annulus = Math.max(s.BorderWidth * wide, 1 / dev)
+                  + Math.max(s.BorderFade * wide, s.BorderBlur);
+    // The annulus hugs the ROUNDED silhouette, so a box inset by the annulus alone is
+    // not clear of it at a corner: the largest axis-aligned box inside a rounded rect of
+    // radius R is inset by R(1 - 1/sqrt 2). Inset by both and anything that fits inside
+    // the result provably never touches the stroke.
+    const r = s.BorderRadius;
+    const rMax = Math.max(r[0], r[1], r[2], r[3]);
+    const safe = annulus + Math.max(rMax - annulus, 0) * (1 - Math.SQRT1_2);
+    const x0 = node.X + safe, y0 = node.Y + safe;
+    const x1 = node.X + node.Width - safe, y1 = node.Y + node.Height - safe;
+    if (x1 <= x0 || y1 <= y0) return false;  // the annulus reaches across the whole box
+    return !this._paintsOutside(node, 0, 0, x0, y0, x1, y1);
+  };
+
+  /** Walks `parent`'s descendants asking whether anything they PAINT reaches outside the
+   *  clear box (x0,y0)-(x1,y1), stated in the surface's natural coordinates; (ox, oy)
+   *  maps `parent`'s own natural coords into that frame. Returns true the moment it finds
+   *  ink outside the box — or meets a node whose painted position it cannot place cheaply
+   *  (a transform, a teleport, a perspective). Never fuse on a guess. */
+  private _paintsOutside = (
+    parent: Jiv, ox: number, oy: number, x0: number, y0: number, x1: number, y1: number,
+  ): boolean => {
+    // Children ride the parent's scroll; a Pinned child belongs to the scroller's FRAME
+    // and does not — mirroring `descendChildren`'s own `pin` branch.
+    const scrolls = parent.Overflow === 'Scroll';
+    const sx = scrolls ? ox - parent.ScrollX : ox;
+    const sy = scrolls ? oy - parent.ScrollY : oy;
+    const kids = parent.Children as Jiv[];
+    for (let i = 0; i < kids.length; i++) {
+      const c = kids[i];
+      if (!c.Visible || c.EffectiveOpacity <= 0.001) continue;
+      const rs = c.RenderStyle, t = rs.Transform;
+      if (c.TeleportSeq !== 0) return true;
+      if (t.Rotation !== 0 || t.RotateX !== 0 || t.RotateY !== 0 || t.TranslateZ !== 0) return true;
+      if (rs.Perspective > 0) return true;
+      if (rs.VisualScaleX !== 1 || rs.VisualScaleY !== 1
+          || rs.VisualTranslateX !== 0 || rs.VisualTranslateY !== 0) return true;
+      const pin = c.ChildLayout.Position === 'Pinned' && scrolls;
+      const cx = pin ? ox : sx, cy = pin ? oy : sy;
+      const bx0 = c.X + cx, by0 = c.Y + cy;
+      const bx1 = bx0 + c.Width, by1 = by0 + c.Height;
+      if (c.Width > 0 && c.Height > 0 && this._paintsInk(c)) {
+        // A shadow and a border's outer feather both reach PAST the box.
+        let m = rs.ShadowColor.A > 0.001
+          ? rs.ShadowBlur + Math.max(Math.abs(rs.ShadowOffsetX), Math.abs(rs.ShadowOffsetY))
+          : 0;
+        if (this._hasPaintedBorder(c)) m = Math.max(m, rs.BorderBlur);
+        if (bx0 - m < x0 || by0 - m < y0 || bx1 + m > x1 || by1 + m > y1) return true;
+      }
+      // A clipping box already inside the clear area bounds everything under it.
+      if (c.ClipsChildren && bx0 >= x0 && by0 >= y0 && bx1 <= x1 && by1 <= y1) continue;
+      if (this._paintsOutside(c, cx, cy, x0, y0, x1, y1)) return true;
+    }
+    return false;
+  };
+
+  /** True when `node` itself puts ink on the screen, as opposed to being a pure layout
+   *  box. Mirrors what the render walk actually emits for one node: a panel fill, border
+   *  or shadow, a glass / filtered material, text, vector SVG, or a 3D field. A padded
+   *  content stack that paints nothing is what lets a card's rim fuse at all. */
+  private _paintsInk = (node: Jiv): boolean => {
+    const s = node.RenderStyle;
+    const bg = s.Background;
+    if (bg.Kind !== 'Color' || bg.Color.A > 0.001) return true;
+    if (this._hasPaintedBorder(node)) return true;
+    if (s.ShadowColor.A > 0.001) return true;
+    if (_isGlass(s.Material) || s.Material === 'ProgressiveBlur' || _hasBackdropFilter(node)) return true;
+    if (node instanceof Janvas) return true;
+    const anim = this._textAnimators.get(node);
+    if (anim && anim.Words.length > 0) return true;
+    const svg = node.SvgVector;
+    return !!svg && (svg.Fills.length > 0 || svg.Strokes.length > 0);
+  };
+
+  /** True when this node's rim STROKE — its box plus the reach the stroke has past it —
+   *  lies wholly outside the clip stack, or outside the damage rect being repainted. The
+   *  AABB culls in `renderNode` test the BOX and then skip the node's own panel; the
+   *  stroke is wider than the box, so its overlay pass is only safe to drop once the
+   *  wider shape is out too. */
+  private _rimOutsidePaintedArea = (
+    node: Jiv, eff: Mat2x3, stack: ClipStack, effH: Mat3x3 | null,
+  ): boolean => {
+    const s = node.RenderStyle;
+    const scale = Math.max(matScaleX(eff), matScaleY(eff));
+    const m = (s.BorderWidth * (1 + Math.max(s.BorderVariance, 0)) + s.BorderBlur) * scale;
+    const ab = this._nodeAabb(node, eff, effH);
+    const nx = ab.minX - m, ny = ab.minY - m, nx2 = ab.maxX + m, ny2 = ab.maxY + m;
+    for (const c of stack) {
+      if (nx2 <= c.X || nx >= c.X + c.W) return true;
+      if (ny2 <= c.Y || ny >= c.Y + c.H) return true;
+    }
+    const dr = this._damageRectCss;
+    return dr !== null
+      && (nx2 <= dr.x || nx >= dr.x + dr.w || ny2 <= dr.y || ny >= dr.y + dr.h);
   };
 
   /** Build the rounded-rect ClipShape for `node` — its box plus its
@@ -3927,6 +4100,10 @@ export class Canvas implements DirtyTracker {
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
     if (params.has('no-glass-draw')) this._diagNoGlassDraw = true;
+    // Both sides of the rim fusion out of ONE build: `?no-rim-fuse` restores the
+    // standalone BorderLayer overlay pass, so a before/after shot is two URLs, not
+    // two commits. The rim's gather differs between them by design — see `_rimFuses`.
+    if (params.has('no-rim-fuse') || hash.includes('no-rim-fuse')) this._diagNoRimFuse = true;
     if (params.has('wkr-shared-backdrop') || hash.includes('wkr-shared-backdrop')) this._sharedBackdrop = true;
     if (params.has('no-shared-backdrop') || hash.includes('no-shared-backdrop')) this._sharedBackdrop = false;
     if (params.has('layer-cache') || hash.includes('layer-cache')) this._layerCacheEnabled = true;
