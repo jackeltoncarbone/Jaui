@@ -225,7 +225,8 @@ export class Canvas implements DirtyTracker {
   private _diagNoPanels: boolean = false;   // [diag ?no-panels] skip non-glass panel fill (SDF+shadow+border) → panel share
   private _diagNoShadow: boolean = false;   // [diag ?no-shadow] zero panel drop-shadow → shadow overdraw share
   private _diagNoGlassDraw: boolean = false; // [diag ?no-glass-draw] skip glass refraction draw (keep blur) → glass-draw share
-  private _diagNoRimFuse: boolean = false;  // [diag ?no-rim-fuse] always take the standalone BorderLayer overlay pass, never fuse the rim
+  private _diagNoRimFuse: boolean = false;
+  private _diagWideRimRegion: boolean = false;  // [diag ?wide-rim-region] overlay takes the fill path's blur margin, so one BlurPass instance sees ONE region size  // [diag ?no-rim-fuse] always take the standalone BorderLayer overlay pass, never fuse the rim
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -1484,7 +1485,20 @@ export class Canvas implements DirtyTracker {
           // `borderOnly` (they only fed a fill this pass throws away). So the reach is the
           // frost blur's own spatial spread plus a pixel pad. On a JwiftGlass card at dpr 2
           // that is 24 px instead of 65, and the blur + snapshot shrink with it.
-          const margin = frostCssPx * d + 8 * d;
+          // [diag ?wide-rim-region] Give the overlay the FILL path's margin instead of its own.
+          // Not a fidelity switch - a bigger blur region contains the smaller one and the rim samples
+          // the same texels either way. It exists because the tight margin and the region-sized
+          // pyramid interact: `Framebuffer.Resize` is a no-op at the same size and a full texImage2D
+          // of the level at any other, so one BlurPass instance serving two region sizes reallocates
+          // its whole chain once per pipeline. On win32 that alternation cost 2.45x (1447 -> 3550ms of
+          // GPU-process time on glass-grid); matched, the same commit reads 1524. This flag is how the
+          // region pyramid gets measured WITHOUT that confound, on either machine, out of one build.
+          const margin = this._diagWideRimRegion
+            ? frostCssPx * d + ((_gThicknessDev + node.RenderStyle.Fillet
+                * Math.min(node.Width * _gsx, node.Height * _gsy) * d * 0.5 * 0.25 * 0.7)
+                * Math.abs(node.RenderStyle.Refraction))
+              + node.RenderStyle.ChromaticAberration * 3.0 + 8 * d
+            : frostCssPx * d + 8 * d;
           const _ab = this._nodeAabb(node, eff, effH);
           const px = _ab.minX * d, py = _ab.minY * d;
           const pw = (_ab.maxX - _ab.minX) * d, ph = (_ab.maxY - _ab.minY) * d;
@@ -4110,6 +4124,7 @@ export class Canvas implements DirtyTracker {
     // standalone BorderLayer overlay pass, so a before/after shot is two URLs, not
     // two commits. The rim's gather differs between them by design — see `_rimFuses`.
     if (params.has('no-rim-fuse') || hash.includes('no-rim-fuse')) this._diagNoRimFuse = true;
+    if (params.has('wide-rim-region') || hash.includes('wide-rim-region')) this._diagWideRimRegion = true;
     if (params.has('wkr-shared-backdrop') || hash.includes('wkr-shared-backdrop')) this._sharedBackdrop = true;
     if (params.has('no-shared-backdrop') || hash.includes('no-shared-backdrop')) this._sharedBackdrop = false;
     if (params.has('layer-cache') || hash.includes('layer-cache')) this._layerCacheEnabled = true;
