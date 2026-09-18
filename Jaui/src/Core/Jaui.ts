@@ -680,12 +680,22 @@ export class Canvas implements DirtyTracker {
     requestAnimationFrame(() => this._resize());
   };
 
-  /** Walk the tree re-materializing each Jiv's `@If` layout overrides for the
-   *  current viewport. A cheap no-op for every node without layout-bearing
-   *  predicates; called from `_resize` before the solve. */
+  /** Walk the tree re-materializing everything an `@If` can gate against the
+   *  viewport that just changed: layout, text, and STYLE. Called from `_resize`
+   *  before the solve.
+   *
+   *  The style mark is unconditional because a Jiv can carry a paint-only
+   *  responsive rule and nothing else — `Itm_HeroBackdropFrost` in
+   *  `ShowStudio.App/src/Item/Item.jss` is `@If (Width < 1000) { Opacity: 0 }`,
+   *  with no layout-bearing or text-bearing predicate for the two calls above to
+   *  catch. `RenderStyle` is only rewritten by a marked `JivStyleAnimator.Tick`,
+   *  so before this line that hero backdrop crossed the 1000px threshold and kept
+   *  its old opacity until the animator's 60-frame backstop happened to re-resolve
+   *  it. */
   private _recomputeResponsiveLayout = (node: JauiElement): void => {
     (node as Jiv).RecomputeResponsiveLayout?.();
     (node as Jiv).RecomputeResponsiveText?.();
+    (node as Jiv).MarkStyleDirty?.();
     const kids = node.Children;
     for (let i = 0; i < kids.length; i++) this._recomputeResponsiveLayout(kids[i]);
   };
@@ -3195,6 +3205,14 @@ export class Canvas implements DirtyTracker {
         const needsKick = animator.SetTargets({
           X: result.X, Y: result.Y, Width: result.Width, Height: result.Height,
         });
+        // A scoped predicate (`:(Self.Width > 600)`, `Ancestor(Card)`) makes this
+        // Jiv's resolved style a function of the rect the solve just produced. The
+        // box moved, not a state, so none of the existing marks fire — and
+        // `RenderStyle` is only rewritten by a MARKED animator, so the style used
+        // to catch up to the box one backstop re-resolve at a time. Both gates are
+        // cheap flags: a node that never reads its own box, or whose box did not
+        // move, pays nothing.
+        if (needsKick && node instanceof Jiv && node.HasScopedPredicates) node.MarkStyleDirty();
         if (node.SnapLayout) {
           animator.SnapToTargets();
         } else if (needsKick) {

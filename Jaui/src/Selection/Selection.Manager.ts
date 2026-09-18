@@ -407,6 +407,12 @@ export class SelectionManager implements Animatable {
    *  RemoveChild once the spring settles near 0. */
   private _kill = (parent: Jiv, jiv: Jiv): void => {
     jiv.Style.Opacity = '0';
+    // Kick arms the frame loop; it does NOT tell the animator its target moved.
+    // The new Opacity only becomes a spring target when the animator re-resolves,
+    // so without this mark the fade-out began whenever the 60-frame backstop
+    // happened to fire — up to a second late, and never at all once the loop
+    // parks on a still page.
+    jiv.MarkStyleDirty();
     this._dying.push({ Parent: parent, Jiv: jiv });
     this._animationManager.Kick();
   };
@@ -593,6 +599,7 @@ export class SelectionManager implements Animatable {
         const born = jiv;
         requestAnimationFrame(() => {
           born.Style.Opacity = '1';
+          born.MarkStyleDirty();
           this._animationManager.Kick();
         });
       } else {
@@ -602,6 +609,10 @@ export class SelectionManager implements Animatable {
         jiv.ChildLayout.Height = h + 'px';
         jiv.Style.BorderRadius = radiusPx + 'px';
         jiv.MarkLayoutDirty();
+        // BorderRadius is resolved into RenderStyle, not read off Style by the
+        // solver — the layout mark alone re-solves the box and repaints the old
+        // corners.
+        jiv.MarkStyleDirty();
       }
       out.push(jiv);
     }
