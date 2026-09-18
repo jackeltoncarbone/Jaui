@@ -1,9 +1,10 @@
 /**
  * Worker.Boot — exported boot function for the Jaui rendering worker.
  *
- * This file replaces the side-effecting body that used to live in
- * `Jaui.Worker.ts`. Show-studio (or any consumer) builds a custom worker
- * entry that:
+ * EVERY consumer builds its own worker entry — there is no default one, because a worker with no
+ * janvas renderers registered cannot draw a field, a mannequin or a gait, and the entry is also
+ * where the bundler's static `new Worker(new URL(...))` has to resolve to. Show Studio's is
+ * `ShowStudio.App/src/Jaui.Worker.ts`. An entry:
  *   1. Registers JanvasRenderer factories via `RegisterJanvasRenderer`
  *   2. Calls `BootJauiWorker()` once
  *
@@ -97,6 +98,16 @@ export const BootJauiWorker = (): void => {
 
   const bridge = new WorkerBridge(post);
 
+  // NOTHING HAPPENS BEFORE `init`, AND THAT IS A DECISION. A host may start this worker from the
+  // document head (show-studio does), so the module is parsed and sitting here well before the page
+  // has a canvas to transfer — tempting to fill that window by taking a THROWAWAY GL context and
+  // issuing the shader batch into it, since Chrome's compiled-program cache is keyed on shader source
+  // and shared across contexts. It would make the first-ever visit WORSE. The cache entry is written
+  // when a compile COMPLETES, ~700ms in; the real `init` now arrives long before that, misses the
+  // still-in-flight entry, and compiles the same thirteen programs a second time — two full compiles
+  // for one first frame, plus a second live context during boot. The speculative warm-up only pays
+  // when init arrives after the warm-up finished, which is the opposite of what an early spawn does.
+  // Start the worker sooner; do not start the GPU twice.
   bridge.OnInit = async (m: M2W_Init): Promise<void> => {
     // `jaui:booted` below only says the message handler is installed. THIS is where the worker
     // starts doing work, and the distance from `booted` to here is the page's half of the

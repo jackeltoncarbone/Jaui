@@ -461,6 +461,37 @@ export class WebGL2Renderer implements Renderer {
     this._shadowSlots.clear();
     this._shadowFreeSlots.length = 0;
 
+    // ── One compile batch for every program the engine can draw with ──
+    // Thirteen programs stand between a cold tab and its first pixel. Compiled one at a time —
+    // compile, ask, link, ask — they run the driver's compiler pool one deep and the waits add up
+    // in a line; issued together they overlap, and the whole set costs about what its slowest
+    // member costs. See `ShaderBatch` for the named source (KHR_parallel_shader_compile). Nothing
+    // about WHAT is compiled changes: same sources, same defines, same programs.
+    //
+    // ISSUED HERE, COLLECTED AT THE FIRST FRAME. Init does not wait: see `_ensureShaders`. The
+    // caller posts `ready` the moment Init returns, so everything downstream of ready that does not
+    // touch GL — the whole backlogged jiv tree, its text measure, its layout solve — runs beside the
+    // compile instead of behind it.
+    //
+    // FIRST THING AFTER THE CONTEXT, AND AHEAD OF EVERY ALLOCATION. On a first-EVER visit the driver
+    // spends ~700ms optimising these; the quad, the scene FBO and the placeholder/clip textures below
+    // need nothing from them and cost real milliseconds, so every one of those spent before the batch
+    // is issued is a millisecond the compiler pool sat idle at the front of the longest job in the
+    // boot. Only the context and the state reset above have to come first.
+    const batch = new ShaderBatch(gl);
+    this._blur = new BlurPass(gl, batch);
+    this._compilePanelShader(batch);
+    this._compileTextShader(batch);
+    this._compileStrokeShader(batch);
+    this._compileSvgFillShader(batch);
+    this._compileSvgStrokeShader(batch);
+    this._compileBlitShader(batch);
+    this._compileClipMaskShader(batch);
+    this._compileProgBlurShader(batch);
+    this._compileShadowBackdropShader(batch);
+    this._pendingShaders = batch;
+    JTrace(`jaui:shaders:issued n=${batch.Count} ${JMs(batch.IssueMs)}ms`);
+
     this._quad = new QuadGeometry(gl);
     // depth: true so foreign 3D renderers (THREE) can z-test against it
     // when they draw into Jaui's scene FBO via <janvas>.
@@ -480,31 +511,6 @@ export class WebGL2Renderer implements Renderer {
     if (timerExt) {
       this._timerExt = timerExt;
     }
-
-    // ── One compile batch for every program the engine can draw with ──
-    // Thirteen programs stand between a cold tab and its first pixel. Compiled one at a time —
-    // compile, ask, link, ask — they run the driver's compiler pool one deep and the waits add up
-    // in a line; issued together they overlap, and the whole set costs about what its slowest
-    // member costs. See `ShaderBatch` for the named source (KHR_parallel_shader_compile). Nothing
-    // about WHAT is compiled changes: same sources, same defines, same programs.
-    //
-    // ISSUED HERE, COLLECTED AT THE FIRST FRAME. Init does not wait: see `_ensureShaders`. The
-    // caller posts `ready` the moment Init returns, so everything downstream of ready that does not
-    // touch GL — the whole backlogged jiv tree, its text measure, its layout solve — runs beside the
-    // compile instead of behind it.
-    const batch = new ShaderBatch(gl);
-    this._blur = new BlurPass(gl, batch);
-    this._compilePanelShader(batch);
-    this._compileTextShader(batch);
-    this._compileStrokeShader(batch);
-    this._compileSvgFillShader(batch);
-    this._compileSvgStrokeShader(batch);
-    this._compileBlitShader(batch);
-    this._compileClipMaskShader(batch);
-    this._compileProgBlurShader(batch);
-    this._compileShadowBackdropShader(batch);
-    this._pendingShaders = batch;
-    JTrace(`jaui:shaders:issued n=${batch.Count} ${JMs(batch.IssueMs)}ms`);
 
     // 1x1 black placeholder texture
     const dummy = gl.createTexture();
