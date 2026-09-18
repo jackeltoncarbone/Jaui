@@ -367,6 +367,9 @@ export class Canvas implements DirtyTracker {
     });
 
     this._animationManager.OnFrame(() => this.RequestFrame());
+    // The animation half of the park's wake contract: anything that Kicks the manager -- a spring
+    // retargeted, a class swap, a scroll easing, a presence mount -- restarts this loop first.
+    this._animationManager.OnWake(this.Wake);
     this._scrollManager = new ScrollManager(this.Root);
     this._animationManager.Register(this._scrollManager);
     // TEMPORARY: `?autoscroll[=NN]` turns on demo auto-scroll — every scroll
@@ -540,6 +543,7 @@ export class Canvas implements DirtyTracker {
   Start = (): void => {
     if (this._running) return;
     this._running = true;
+    this._parked = false;
     this._lastTime = 0;
     // Start rendering immediately — don't block on web fonts. The browser
     // does the same thing with `font-display: swap`: render with fallback
@@ -789,10 +793,37 @@ export class Canvas implements DirtyTracker {
   private _adaptiveShadowsDrawn = false;
   private _shadowSettleUntil = 0;
 
+  /** True while the rAF loop is stopped because every source of change has said it is still.
+   *  See the park block at the end of `_tickInner` for the whole argument. */
+  private _parked = false;
+
+  /**
+   * Restart the frame loop. Schedules a TICK, not a render.
+   *
+   * That distinction is the point: the tick re-evaluates the render-on-demand gate and parks again
+   * immediately if nothing actually changed, so waking speculatively -- which the worker bridge
+   * does on every inbound message -- costs one gate evaluation and never a frame. A speculative
+   * `RequestFrame` would have cost a full render walk instead.
+   *
+   * Idempotent and free when the loop is already running, which is the overwhelmingly common
+   * case -- `Notify` calls this once per dirty node, so the first line has to be the cheap one.
+   *
+   * WHY THIS EXISTS AT ALL, in one sentence: parking means there is no longer a tick already on
+   * its way to notice what just changed, so whatever changed has to say so. The four funnels that
+   * do the saying are named in the park block at the end of `_tickInner`.
+   */
+  Wake = (): void => {
+    if (!this._parked) return;
+    this._parked = false;
+    if (!this._running || this._contextLost) return;
+    if (this._frameId === 0) this._frameId = requestAnimationFrame(this._tick);
+  };
+
   /** Request a re-render on the next loop tick (render-on-demand wake). Cheap + idempotent;
    *  called by async producers (image decode, janvas/foreign-renderer change, scroll). */
   RequestFrame = (): void => {
     this._needsRender = true;
+    this.Wake();
   };
 
   private _pendingCapture: ((b: Blob | null) => void) | null = null;
@@ -800,7 +831,7 @@ export class Canvas implements DirtyTracker {
   CaptureFrame = (): Promise<Blob | null> => {
     return new Promise(resolve => {
       this._pendingCapture = resolve;
-      this._needsRender = true;
+      this.RequestFrame();
     });
   };
 
@@ -919,6 +950,7 @@ export class Canvas implements DirtyTracker {
       this.ContextRestoredRelay?.();
       if (!this._running) {
         this._running = true;
+        this._parked = false;
         this._frameId = requestAnimationFrame(this._tick);
       }
     }).catch((err: unknown) => {
@@ -936,10 +968,14 @@ export class Canvas implements DirtyTracker {
 
   private _tickErrorCount = 0;
   private _tick = (time: number): void => {
+    this._frameId = 0;
     if (!this._running || this._contextLost) return;
-    this._frameId = requestAnimationFrame(this._tick);
+    // `park` can only become true by _tickInner RETURNING it. A throw leaves it false and the loop
+    // re-arms below, which is the same robustness the old unconditional re-arm bought: one bad
+    // frame must not take the engine down, and it must not be able to park it either.
+    let park = false;
     try {
-      this._tickInner(time);
+      park = this._tickInner(time);
     } catch (err) {
       // One bad frame shouldn't take down the engine. Log the first few
       // occurrences (so we see the bug) and then go quiet to keep the
@@ -951,10 +987,13 @@ export class Canvas implements DirtyTracker {
         console.error('[Jaui] tick still throwing — suppressing further duplicates');
       }
       this._tickErrorCount++;
+      park = false;
     }
+    if (park) { this._parked = true; return; }
+    this._frameId = requestAnimationFrame(this._tick);
   };
 
-  private _tickInner = (time: number): void => {
+  private _tickInner = (time: number): boolean => {
     // Boot-time zero-size gate. Until the worker bridge has delivered a
     // real resize (ResizeFromBridge → _pendingResize → _resize sets
     // _width/_height), the OffscreenCanvas backing store is 0×0 and any
@@ -964,7 +1003,7 @@ export class Canvas implements DirtyTracker {
     // texSubImage2D (whose upload path implicitly checks the current
     // framebuffer's completeness). Skip the entire frame at zero size —
     // the next rAF after the first resize delivery picks up cleanly.
-    if (this._width === 0 || this._height === 0) return;
+    if (this._width === 0 || this._height === 0) return false;
 
     // Feed the HUD BEFORE we overwrite _lastTime — the HUD uses it to derive
     // the rAF-to-rAF delta (which, on iOS, includes time the main thread spent
@@ -1160,6 +1199,50 @@ export class Canvas implements DirtyTracker {
         }
       }
     }
+
+    // ── The park ───────────────────────────────────────────────────────────────
+    // Return true and the rAF loop STOPS. `Wake` is what starts it again.
+    //
+    // This is not "assume nothing moved". Every signal below is one the render-on-demand gate
+    // thirty lines up ALREADY decides on; they are read again here, after the render rather than
+    // before it, so the loop parks exactly on the frames that gate was already skipping. A park
+    // can therefore only be wrong somewhere that gate was already wrong, and that gate has
+    // shipped and been measured. Nothing new is assumed about the scene: a surface that changes
+    // without our tree changing -- a Janvas whose foreign renderer drew, an image that finished
+    // decoding, a spring nobody kicked -- does not become invisible here, because every one of
+    // those already had to say so to get PAST the gate and be drawn at all.
+    //
+    // What parking does change is who pays for the saying. Until now each of those signals was
+    // consumed by a tick that was going to happen regardless, so a signal that forgot to schedule
+    // a frame still got one; the loop was covering for it. Parked, there is no next tick, so the
+    // signal has to ask. That is four funnels, and every writer of the four goes through one:
+    //
+    //   layout / text dirty   Element.MarkLayoutDirty -> DirtyTracker.Notify -> `Wake`.
+    //                         `_resize` writes Root.Dirty directly and wakes itself.
+    //   animation active      AnimationManager.Kick -> OnWake -> `Wake`, fired BEFORE Kick's own
+    //                         early-out. Plus JivStyleAnimator.Wake, which makes an already
+    //                         REGISTERED animatable live without any Kick at all -- which is what
+    //                         a visual-only `:Hover` does, and it marks nothing dirty.
+    //   explicit request      RequestFrame -> `Wake`. Janvas.MarkDirty, the image cache's decode
+    //                         completion and the background-image cross-fade all land here.
+    //   anything from main    WorkerBridge.HandleMessage wakes on EVERY inbound message, before it
+    //                         is even dispatched. A message from main is by definition a potential
+    //                         change and the belt costs one boolean.
+    //
+    // The render tail, the GPU-side shadow ease and an unconsumed resize or capture are read
+    // directly rather than through a funnel, because this loop is the only thing that writes them.
+    //
+    // `_needsRender` is read HERE and not reused from the top of the tick on purpose: `_render`
+    // re-requests a frame for its own reasons (a background image still fading in, at :2456), and
+    // parking on the value it held before the render would drop those frames on the floor.
+    return (this.Root.Dirty & (DirtyFlag.Layout | DirtyFlag.Text)) === 0
+      && this._dirtyNodes.size === 0
+      && !this._animationManager.IsRunning
+      && !this._needsRender
+      && this._renderHold === 0
+      && time >= this._shadowSettleUntil
+      && this._pendingResize === null
+      && this._pendingCapture === null;
   };
 
   private _render = (dt: number): void => {
@@ -2946,6 +3029,11 @@ export class Canvas implements DirtyTracker {
    *  keep the dirty path branchless. Cleared after every solve. */
   Notify = (node: JauiElement): void => {
     this._dirtyNodes.add(node);
+    // The whole tree's dirty marks funnel through here -- `MarkLayoutDirty` is the only writer of
+    // the Layout flag and it ends in this call -- which makes this the one place a parked loop can
+    // learn that layout or text changed. Guarded on `_parked` inside `Wake`, so the ordinary case
+    // is a single boolean test on a path that runs per dirty node.
+    this.Wake();
   };
 
   /** Pick the smallest subtree we can re-solve in isolation this frame, or
@@ -3073,6 +3161,11 @@ export class Canvas implements DirtyTracker {
         if (node instanceof Jiv) {
           const styleAnim = new JivStyleAnimator(node);
           styleAnim.SnapToTargets();
+          // A visual-only state flip (`:Hover` changing a Background, nothing metric) marks
+          // nothing dirty and Kicks nothing -- Jiv._syncState only wakes the animator. Registered
+          // animatables are stepped by StepFrame every tick, so before the park that was enough.
+          // Parked there is no tick to be stepped by, so the wake has to travel with the flag.
+          styleAnim.OnWake = this.Wake;
           this._styleAnimators.set(node, styleAnim);
           this._animationManager.Register(styleAnim);
           // Kick the rAF loop if the Jiv carries @Animation declarations
@@ -3201,8 +3294,12 @@ export class Canvas implements DirtyTracker {
     // the old DPR even after the browser hands us more device pixels.
     if (this._dpr > prevDpr) this._imageCache.RerasterizeSvgs(this._dpr);
 
-    // Mark root dirty so layout re-solves with new dimensions
+    // Mark root dirty so layout re-solves with new dimensions. Written STRAIGHT onto Root rather
+    // than through MarkLayoutDirty, so it never reaches `Notify` and cannot wake a parked loop on
+    // its own -- hence the explicit wake. (The inline solve+render below covers the visible frame;
+    // the wake is what gets the dirty flags cleared and the next real frame scheduled.)
     this.Root.Dirty |= DirtyFlag.Layout;
+    this.Wake();
 
     // Re-render inline so the canvas backing store doesn't sit blank
     // between the synchronous Element.width/height write above (which
@@ -3924,7 +4021,7 @@ export class Canvas implements DirtyTracker {
     // new font at the OLD advance widths.
     BumpFontGeneration();
     this._textCache.Clear();
-    this._needsRender = true;
+    this.RequestFrame();
   };
 
   /** Listen for fonts that arrive AFTER the first tick — e.g. a lazy

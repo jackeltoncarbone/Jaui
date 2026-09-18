@@ -13,10 +13,20 @@ export class AnimationManager {
   private _running: boolean = false;
   private _lastTime: number = 0;
   private _onFrame: (() => void) | null = null;
+  private _onWake: (() => void) | null = null;
 
   /** Register a callback to fire after all animations step (triggers re-render). */
   OnFrame = (cb: () => void): void => {
     this._onFrame = cb;
+  };
+
+  /** Register the host's frame-loop wake. Fired by `Kick` BEFORE its own early-out, because the
+   *  host may have parked its loop while `_running` was already true in a tick that has since
+   *  settled -- and a Kick that returned early without waking would leave the animation registered,
+   *  live and never stepped. This is one of the three funnels the host's park depends on; see
+   *  `Canvas._tickInner`'s park block. */
+  OnWake = (cb: () => void): void => {
+    this._onWake = cb;
   };
 
   Register = (animatable: Animatable): void => {
@@ -27,8 +37,9 @@ export class AnimationManager {
     this._animatables.delete(animatable);
   };
 
-  /** Kick the loop if it's not already running. */
+  /** Kick the loop if it's not already running. Always wakes the host first. */
   Kick = (): void => {
+    this._onWake?.();
     if (this._running) return;
     this._running = true;
     this._lastTime = 0;

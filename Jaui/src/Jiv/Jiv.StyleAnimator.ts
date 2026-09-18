@@ -208,12 +208,21 @@ export class JivStyleAnimator implements Animatable {
   /** Consecutive at-rest frames skipped; bounds the backstop re-resolve. */
   private _idleFrames = 0;
 
+  /** The host's frame-loop wake, set by Canvas when the animator is registered.
+   *
+   *  A VISUAL-ONLY state flip (`:Hover` changing a Background and nothing else) marks nothing
+   *  dirty -- Jiv._syncState says so in as many words -- so before render-on-demand could park its
+   *  loop, the only thing that made such a flip paint was the loop happening to tick anyway. With
+   *  the loop parked there is no next tick to be resolved on, so `Wake` has to ask for one. */
+  OnWake: (() => void) | null = null;
+
   /** Wake this animator — re-resolve its target on the next Tick. Call from any
    *  mutation that changes what ResolveStyle would produce (state flip, class
    *  swap, var/theme change, layout-affecting change). Cheap + idempotent. */
   Wake = (): void => {
     this._dirty = true;
     this._idleFrames = 0;
+    this.OnWake?.();
   };
 
   constructor(private _jiv: Jiv) {

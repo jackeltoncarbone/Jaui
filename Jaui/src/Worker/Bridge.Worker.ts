@@ -124,6 +124,21 @@ export class WorkerBridge {
   HandleMessage = (msg: unknown): void => {
     if (typeof msg !== 'object' || msg === null) return;
     const m = msg as M2W;
+    // EVERY inbound message wakes the engine's frame loop, before it is dispatched and whatever it
+    // turns out to be.
+    //
+    // The loop parks itself when every source of change has said it is still (see the park block
+    // at the end of `Canvas._tickInner`), and parked there is no tick on its way to notice what a
+    // message did. Most of the handlers below already wake it properly on their own -- `jiv-ops`
+    // Kicks, pointer/wheel run through IngestEvent, `resize` wakes inside `_resize` -- but a belt
+    // that covers ALL of them costs one boolean per message and means a message type added later
+    // cannot freeze the canvas by forgetting.
+    //
+    // `Wake` and not `RequestFrame`: this schedules a TICK. If the message turns out to change
+    // nothing the gate skips the render and the loop parks straight back, so speculating here buys
+    // the belt for one gate evaluation rather than for a full render walk. On an unparked loop --
+    // which is every message that arrives during an interaction -- it is a single boolean test.
+    this._canvas?.Wake();
     // Platform messages first — they're cheap and many of the bridge's
     // payloads (DPR, focus, fonts, key, coarse) are pure Platform deltas.
     if (this._platform && this._platform.IngestMessage(m)) return;

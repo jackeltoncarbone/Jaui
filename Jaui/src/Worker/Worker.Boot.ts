@@ -150,6 +150,14 @@ export const BootJauiWorker = (): void => {
       // perceived smoothness. Sample over a 1-second sliding window;
       // emit a `fps` message every ~250ms — short enough to react to
       // recent stalls, sparse enough not to flood the bridge.
+      //
+      // ONLY WHEN SOMEBODY IS READING IT. This used to be registered unconditionally, which meant
+      // every page in the app paid a post-frame callback per tick -- a performance.now(), a push,
+      // a shift over a ~60-entry array -- plus four postMessages a second, forever, to feed an
+      // overlay nobody had asked for. Every consumer is behind a flag already: the standalone
+      // overlay is `?fps`, the app's own TraceFps is `?trace` (Diagnostics/Trace.ts), and the
+      // phase dump below is `?debug`. So the sampler is behind the union of them.
+      const _fpsWanted = /[?&](fps|trace|debug|jdebug)\b/.test(m.UrlSearch ?? '');
       const fpsStamps: number[] = [];
       let fpsFrame = 0;
       let fpsLastEmit = 0;
@@ -166,7 +174,7 @@ export const BootJauiWorker = (): void => {
       // (full rAF period including any worker idleness — a long gap with
       // no work means the worker rAF isn't being scheduled fast enough,
       // not that the work itself is slow).
-      canvas.RegisterPostFrame(() => {
+      if (_fpsWanted) canvas.RegisterPostFrame(() => {
         const now = performance.now();
         if (lastFrameStart > 0) _trackPhase('frame', now - lastFrameStart);
         lastFrameStart = now;
