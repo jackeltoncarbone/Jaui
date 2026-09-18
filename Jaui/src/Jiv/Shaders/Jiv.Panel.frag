@@ -1305,7 +1305,39 @@ void main() {
             float lightFacing = max(alignment, 0.0);
             float alphaFloor = 1.0 - v_Outline.x;
             float strokeBrightness = mix(alphaFloor, 1.0, pow(lightFacing, 2.0));
-            vec3 strokeTint = mix(v_BorderColor.rgb, vec3(1.0), pow(lightFacing, 3.0) * v_Outline.y);
+            // ── What the Fresnel converges on ──
+            // The lit side of a real bevel INTENSIFIES what is behind it; it does not turn white.
+            // White is only the right answer where the backdrop has no colour, because the most
+            // intense form of a neutral IS white. So the target is the rim's own gather driven to
+            // full value: hue and saturation kept, value pinned to 1, then pushed past the hue —
+            // and blended back to white by how little chroma the gather actually has.
+            //
+            // This is the same operation the wide rim glow already performs a hundred lines up
+            // (`rimVibrant`: saturate 1.6, brighten 1.25), which is why RIM_CHROMA_GAIN restates
+            // its 1.6 rather than inventing a number.
+            //
+            // It saturates about WHITE, not about luma, and that is the whole difference from the
+            // attempt that was backed out. applyGrading's saturation is a lerp about luma, so any
+            // saturation above 1 drives the channels BELOW luma down — over the border's alpha fade
+            // that reads as a darker ring inside the stroke. Here every target has max channel 1.0,
+            // so the stroke can never land dimmer in value than the white it replaces; only the
+            // off-hue channels come down, which IS the colour being carried.
+            //
+            // Over a neutral gather (grey, black, white) chroma is 0, carry is 0 and the target is
+            // exactly vec3(1.0) — byte-identical to the old line, so every sheet calibrated over
+            // black keeps its measured numbers.
+            const float RIM_CHROMA_GAIN = 1.6;
+            vec3 gather = clamp(borderBackdrop, 0.0, 1.0);
+            float gatherHi = max(max(gather.r, gather.g), gather.b);
+            float gatherLo = min(min(gather.r, gather.g), gather.b);
+            vec3 huedTarget = gather / max(gatherHi, 0.001);
+            huedTarget = clamp(mix(vec3(1.0), huedTarget, RIM_CHROMA_GAIN), 0.0, 1.0);
+            // Carry colour only where there IS colour, and only where the gather is bright enough
+            // for its hue to be trustworthy — normalising a near-black pixel amplifies noise.
+            float rimCarry = smoothstep(0.0, 0.18, gatherHi - gatherLo)
+                           * smoothstep(0.015, 0.09, gatherHi);
+            vec3 fresnelTarget = mix(vec3(1.0), huedTarget, rimCarry);
+            vec3 strokeTint = mix(v_BorderColor.rgb, fresnelTarget, pow(lightFacing, 3.0) * v_Outline.y);
             vec3 borderRgb = mix(borderBackdrop, strokeTint, v_BorderColor.a * strokeBrightness);
 
             // Replace the panel result in the border zone (alpha-blended by mask).
