@@ -1481,20 +1481,7 @@ export class Canvas implements DirtyTracker {
           // `borderOnly` (they only fed a fill this pass throws away). So the reach is the
           // frost blur's own spatial spread plus a pixel pad. On a JwiftGlass card at dpr 2
           // that is 24 px instead of 65, and the blur + snapshot shrink with it.
-          // [diag ?wide-rim-region] Give the overlay the FILL path's margin instead of its own.
-          // Not a fidelity switch - a bigger blur region contains the smaller one and the rim samples
-          // the same texels either way. It exists because the tight margin and the region-sized
-          // pyramid interact: `Framebuffer.Resize` is a no-op at the same size and a full texImage2D
-          // of the level at any other, so one BlurPass instance serving two region sizes reallocates
-          // its whole chain once per pipeline. On win32 that alternation cost 2.45x (1447 -> 3550ms of
-          // GPU-process time on glass-grid); matched, the same commit reads 1524. This flag is how the
-          // region pyramid gets measured WITHOUT that confound, on either machine, out of one build.
-          const margin = this._diagWideRimRegion
-            ? frostCssPx * d + ((_gThicknessDev + node.RenderStyle.Fillet
-                * Math.min(node.Width * _gsx, node.Height * _gsy) * d * 0.5 * 0.25 * 0.7)
-                * Math.abs(node.RenderStyle.Refraction))
-              + node.RenderStyle.ChromaticAberration * 3.0 + 8 * d
-            : frostCssPx * d + 8 * d;
+          const margin = frostCssPx * d + 8 * d;
           const _ab = this._nodeAabb(node, eff, effH);
           const px = _ab.minX * d, py = _ab.minY * d;
           const pw = (_ab.maxX - _ab.minX) * d, ph = (_ab.maxY - _ab.minY) * d;
