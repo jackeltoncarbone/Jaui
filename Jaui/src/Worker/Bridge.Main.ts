@@ -67,10 +67,13 @@ export interface BridgeOptions {
    *  to the worker (one-way) and keeps the element only as an event
    *  capture target. */
   Canvas: HTMLCanvasElement;
-  /** Pre-spawned Worker (call `SpawnJauiWorker()`). The bridge does NOT
-   *  spawn the worker itself because the static-URL `new Worker(...)` call
-   *  has to live inside the Jaui package for the bundler to detect it.
-   *  Consumers receive that helper from Jaui core.
+  /** Pre-spawned Worker. The bridge does NOT spawn the worker itself: the static-URL
+   *  `new Worker(new URL(...), { type: 'module' })` call has to sit in the consumer's own source for
+   *  its bundler to detect the entry and emit the chunk, and only the consumer knows which worker
+   *  entry — which set of janvas renderers — it wants. Show Studio's is in `src/App.ts`.
+   *
+   *  It may have been spawned long before this bridge existed — from the document head, before the
+   *  app bundle ran. See `_adoptEarlySpawn` for what that costs and how it is settled.
    *
    *  NULL under server rendering. There is no GPU to draw with and no
    *  OffscreenCanvas to transfer, so the bridge runs as a pure op SINK: it
@@ -176,9 +179,44 @@ export class MainBridge {
       console.error('[Jaui.MainBridge] worker messageerror:', e);
     });
 
+    // Immediately after the listener above and before anything can yield — see `_adoptEarlySpawn`.
+    this._adoptEarlySpawn();
+
     this._wireDomEvents();
     this._sendInit();
   }
+
+  /**
+   * Take over from whoever was listening to the worker before this bridge existed.
+   *
+   * A host may start the render worker from the document head rather than from its component tree —
+   * Show Studio does, in `public/early-boot.js`, so the worker's module parse, GL context and shader
+   * batch all overlap Angular's bootstrap instead of queueing behind it. That leaves a window of
+   * ~200ms in which the worker is live and this class is not, and a worker's `postMessage` does NOT
+   * queue on the main side for a listener that has not been added yet: it is dispatched to whoever is
+   * listening and otherwise gone. The render worker says nothing before `init`, but "nothing" includes
+   * its console relay and its `error` event — which is precisely how a worker whose module failed to
+   * parse would have failed invisibly, with no bridge, no `ready` and nothing in the console.
+   *
+   * So the early spawner holds its own listeners and hands over what it heard. This replays the
+   * messages through the ordinary path, reports the errors, and takes those listeners off so they do
+   * not sit on the hot message path for the life of the page.
+   *
+   * There is no task boundary between the `addEventListener` in the constructor and this call, so no
+   * message can land in the seam and be delivered twice.
+   */
+  private _adoptEarlySpawn = (): void => {
+    const worker = this.Worker as (Worker & { __JauiEarlyDrain?: (() => { Messages: unknown[]; Errors: string[] }) | undefined });
+    const drain = worker.__JauiEarlyDrain;
+    if (!drain) return;
+    worker.__JauiEarlyDrain = undefined;
+    const heard = drain();
+    for (const error of heard.Errors) {
+      console.error('[Jaui.MainBridge] worker error before the bridge existed:', error);
+    }
+    if (heard.Messages.length > 0) JTrace(`worker:early-messages n=${heard.Messages.length}`);
+    for (const message of heard.Messages) this._onMessage(message);
+  };
 
   /** Allocate a fresh worker-side id. The Angular Jiv component calls this
    *  once at construction and stashes the id on its handle. */

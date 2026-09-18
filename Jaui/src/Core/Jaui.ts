@@ -4621,7 +4621,14 @@ export { CheckBrowserSupport, type BrowserSupportResult } from '../Worker/Browse
 export { MainBridge, RootId, type BridgeOptions, type JivHitHandlers } from '../Worker/Bridge.Main';
 export { JivHandle, type ScrollTarget } from '../Worker/Jiv.Handle';
 export { CanvasProxy } from '../Worker/Canvas.Proxy';
-export { SpawnJauiWorker } from '../Worker/Worker.Spawn';
+// NO SPAWN HELPER, deliberately. `SpawnJauiWorker()` used to live here over a `new Worker(new
+// URL('./Jaui.Worker.ts', import.meta.url))` pointing at a default entry that registered no janvas
+// renderers, and nothing had called it since show-studio started shipping its own worker entry. It
+// was not merely dead: a bundler resolves that static URL whether or not the function is reachable,
+// so every build emitted a whole third `worker-<hash>.js` nobody could ever run — and made the
+// remaining two impossible to tell apart by name, which is what the early-boot hint has to do. A
+// consumer writes the `new Worker` in its own source, because only its own source knows which
+// renderers the worker must register before `BootJauiWorker`.
 export { BootJauiWorker } from '../Worker/Worker.Boot';
 export {
   RegisterJanvasRenderer,
