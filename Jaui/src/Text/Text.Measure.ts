@@ -64,6 +64,52 @@ export const ApplyTextStyle = (ctx: Ctx2D, style: ResolvedTextStyle, dpr: number
   (ctx as any).letterSpacing = `${style.LetterSpacing * dpr}px`;
 };
 
+// ─── The ellipsis law ─────────────────────────────────────────────
+
+/** The character a truncated tail ends in. ONE definition: `Text.WordLayout` paints with it and
+ *  this file sizes the box for it, and a box sized for one ellipsis and painted with another
+ *  disagrees by exactly the glyph everybody is looking at. */
+export const ELLIPSIS = '…';
+
+/**
+ * How much of `text` survives an ellipsis inside `maxWidth`. THE rule — the measurer below and
+ * `LayoutWords`, which is what actually places the glyphs, both call this one function.
+ *
+ * CSS `text-overflow: ellipsis` (CSS Overflow Module Level 3, §5.2 "the ellipsis is placed so that
+ * it fits within the line box, replacing content at the end of the line") keeps the longest prefix
+ * whose advance INCLUDING the ellipsis fits, and it cuts at a character. UIKit's
+ * `NSLineBreakMode.byTruncatingTail` does the same thing to the last line TextKit lays out.
+ *
+ * Jaui used to ellipsize the WORD-WRAPPED line instead, which silently threw away the whole of the
+ * word the wrap had pushed onto the next line: `Rehearsal moved to the…` where Chrome and a UILabel
+ * both write `Rehearsal moved to the t…`. The wrap decides how many LINES there are. It does not
+ * get to decide where the ellipsis falls — so `text` here is the line's own words PLUS everything
+ * the clamp dropped from that paragraph, and the cut is free to land inside a dropped word.
+ *
+ * Binary search, not a shrink loop: the advance is monotone in the prefix length, so a 300-character
+ * remainder costs nine measures instead of two hundred and eighty — and the remainder is long now
+ * precisely BECAUSE the rule reaches past the wrap.
+ *
+ * The answer is snapped off a lone surrogate (a cut between a pair paints a replacement box) and
+ * stripped of trailing whitespace (a kept trailing space paints `the …`, where CSS hangs the space
+ * and paints `the…`). Callers rely on that trim: it is what stops the cut ever landing on a space.
+ */
+export const FitWithEllipsis = (text: string, maxWidth: number, ctx: Ctx2D): string => {
+  if (!(maxWidth < Infinity)) return text;
+  const Fits = (n: number): boolean => ctx.measureText(text.slice(0, n) + ELLIPSIS).width <= maxWidth;
+  if (Fits(text.length)) return text;
+
+  let lo = 0;
+  let hi = text.length;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (Fits(mid)) lo = mid; else hi = mid;
+  }
+  const trailing = lo > 0 ? text.charCodeAt(lo - 1) : 0;
+  if (trailing >= 0xd800 && trailing <= 0xdbff) lo--;
+  return text.slice(0, lo).replace(/\s+$/, '');
+};
+
 // ─── Shared measurement cache ────────────────────────────────────────────────
 //
 // `MeasureText` is a pure function of (content, the style's METRIC fields,
@@ -188,9 +234,10 @@ const _measure = (
   const rawSpace = c.measureText(' ').width;
   const spaceWidth = rawSpace > 0 && Number.isFinite(rawSpace) ? rawSpace : style.FontSize * 0.25;
 
-  // No wrap — one line per paragraph (preserves explicit \n split)
+  // No wrap — one line per paragraph (preserves explicit \n split). Each paragraph is its own
+  // tail: with no budget there is nothing for the ellipsis rule to cut back to.
   if (maxWidth === null || maxWidth === Infinity) {
-    const lines = _applyMaxLines(rawLines, style, c);
+    const lines = _applyMaxLines(rawLines.map(_wholeLine), style, c, Infinity);
     return {
       Width: _widestLine(lines, widths, spaceWidth, c),
       MinWidth: minWidth,
@@ -205,7 +252,7 @@ const _measure = (
   // PLACES the glyphs, so measuring by any other rule lets the box disagree with
   // the words inside it — the disagreement `_lineWidth`'s max(whole, sum) below
   // exists to absorb.
-  const lines: string[] = [];
+  const lines: WrappedLine[] = [];
   for (const paragraph of rawLines) {
     _wrapParagraph(paragraph, maxWidth, widths, spaceWidth, c, lines);
   }
@@ -255,6 +302,27 @@ const _wordWidth = (word: string, widths: Map<string, number>, ctx: Ctx2D): numb
   return w;
 };
 
+/**
+ * A wrapped line, and the paragraph TAIL it was cut from: this line's own words plus every word the
+ * wrap pushed onto a later line. `Text` is the line as it wraps; the tail is what the ellipsis rule
+ * measures against, because a character-granular cut is allowed to reach into the word the wrap
+ * dropped. See `FitWithEllipsis`.
+ *
+ * `Words` is the paragraph's word list, SHARED by every line of that paragraph rather than sliced —
+ * only the one line that ends up carrying an ellipsis ever materialises its tail.
+ */
+interface WrappedLine {
+  Text: string;
+  Words: readonly string[] | null;
+  From: number;
+}
+
+/** A line with no wrap behind it, and therefore its own tail. */
+const _wholeLine = (text: string): WrappedLine => ({ Text: text, Words: null, From: 0 });
+
+const _tail = (line: WrappedLine): string =>
+  line.Words === null ? line.Text : line.Words.slice(line.From).join(' ');
+
 /** Wrap a single paragraph into lines, pushing into `out`. */
 const _wrapParagraph = (
   paragraph: string,
@@ -262,15 +330,15 @@ const _wrapParagraph = (
   widths: Map<string, number>,
   spaceWidth: number,
   ctx: Ctx2D,
-  out: string[],
+  out: WrappedLine[],
 ): void => {
   if (paragraph === '') {
-    out.push('');
+    out.push(_wholeLine(''));
     return;
   }
   const words = paragraph.split(/\s+/).filter(w => w.length > 0);
   if (words.length === 0) {
-    out.push('');
+    out.push(_wholeLine(''));
     return;
   }
 
@@ -279,44 +347,36 @@ const _wrapParagraph = (
   for (let i = 0; i < words.length; i++) {
     const w = _wordWidth(words[i], widths, ctx);
     if (pen > 0 && pen + w > maxWidth) {
-      out.push(words.slice(lineStart, i).join(' '));
+      out.push({ Text: words.slice(lineStart, i).join(' '), Words: words, From: lineStart });
       lineStart = i;
       pen = 0;
     }
     pen += w + spaceWidth;
   }
-  out.push(words.slice(lineStart).join(' '));
+  out.push({ Text: words.slice(lineStart).join(' '), Words: words, From: lineStart });
 };
 
-/** Apply MaxLines + TextOverflow (Ellipsis) to the line list. */
+/**
+ * Apply MaxLines + TextOverflow (Ellipsis) to the line list.
+ *
+ * The last surviving line is re-cut from its TAIL, not from itself: `FitWithEllipsis` owns where the
+ * ellipsis falls and it may keep part of a word the wrap had already pushed away. Sizing the box
+ * from the wrapped line while `LayoutWords` paints by the tail rule would put the ellipsis in two
+ * different places on the same card.
+ */
 const _applyMaxLines = (
-  lines: string[],
+  lines: readonly WrappedLine[],
   style: ResolvedTextStyle,
   ctx: Ctx2D,
-  maxWidth: number | null = null,
+  maxWidth: number,
 ): string[] => {
-  if (style.MaxLines === null || lines.length <= style.MaxLines) return lines;
+  const text = lines.map((l) => l.Text);
+  if (style.MaxLines === null || lines.length <= style.MaxLines) return text;
 
-  const clipped = lines.slice(0, style.MaxLines);
+  const clipped = text.slice(0, style.MaxLines);
   if (style.TextOverflow === 'Ellipsis' && clipped.length > 0) {
-    const lastIdx = clipped.length - 1;
-    clipped[lastIdx] = _truncateWithEllipsis(clipped[lastIdx], ctx, maxWidth);
+    const last = lines[clipped.length - 1];
+    clipped[clipped.length - 1] = FitWithEllipsis(_tail(last), maxWidth, ctx) + ELLIPSIS;
   }
   return clipped;
-};
-
-/** Truncate a line and append ellipsis so it fits in maxWidth. */
-const _truncateWithEllipsis = (
-  line: string,
-  ctx: Ctx2D,
-  maxWidth: number | null,
-): string => {
-  const ellipsis = '…';
-  if (maxWidth === null) return line + ellipsis;
-
-  let truncated = line;
-  while (truncated.length > 0 && ctx.measureText(truncated + ellipsis).width > maxWidth) {
-    truncated = truncated.slice(0, -1);
-  }
-  return truncated + ellipsis;
 };

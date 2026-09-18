@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { LayoutWords, Tokenize } from '../src/Text/Text.WordLayout';
+import { MeasureText } from '../src/Text/Text.Measure';
 import { DefaultTextStyle, type TextStyle } from '../src/Text/Text.Types';
 
 // Mock ctx — 8px per char
@@ -120,14 +121,39 @@ describe('LayoutWords', () => {
 
   describe('ellipsis', () => {
     // 8px per char, so 'aa bb cc dd' at 40px wide: 'aa bb' (40) then 'cc dd'.
-    it('ends the last kept line in an ellipsis when MaxLines cuts words', () => {
+    //
+    // The rule is CSS's and TextKit's: the longest prefix of what is left of the paragraph whose
+    // advance INCLUDING the ellipsis fits, cut at a CHARACTER. Where the wrap broke the line does
+    // not decide where the ellipsis falls -- see FitWithEllipsis in Text.Measure.
+    it('cuts the last line at a character, not at the word the wrap kept', () => {
       const p = LayoutWords('aa bb cc dd', style({ MaxLines: 1, TextOverflow: 'Ellipsis' }), 40, mockCtx());
-      expect(p.map((w) => w.Content)).toEqual(['aa…']);
+      // 'aa b' + ellipsis is 40px exactly. The old word-granular rule dropped 'bb' whole and wrote
+      // 'aa…', a glyph short of what Chrome puts in the same box.
+      expect(p.map((w) => w.Content)).toEqual(['aa', 'b…']);
     });
 
-    it('drops a whole word when its ellipsis does not fit, and keeps whole words when it does', () => {
+    it('keeps a whole word when the whole word fits', () => {
       const p = LayoutWords('aa bb cc dd', style({ MaxLines: 1, TextOverflow: 'Ellipsis' }), 48, mockCtx());
       expect(p.map((w) => w.Content)).toEqual(['aa', 'bb…']);
+    });
+
+    it('reaches INTO the word the wrap pushed off the line', () => {
+      // 'aaa' fills the line and 'bbb' wraps away, so under a word-granular rule 'bbb' could never
+      // contribute a glyph. 'aaa b' + ellipsis is 48px exactly, so CSS keeps that 'b' -- and the
+      // token carrying it was never placed by the wrap, so this is the branch that APPENDS one.
+      const p = LayoutWords('aaa bbb', style({ MaxLines: 1, TextOverflow: 'Ellipsis' }), 48, mockCtx());
+      expect(p.map((w) => w.Content)).toEqual(['aaa', 'b…']);
+      expect(p[1].CharStart).toBe(4);
+      expect(p[1].CharEnd).toBe(5);
+    });
+
+    it('paints exactly the line MeasureText sized the box for', () => {
+      // The seam this pairing exists to close: under the word-granular rule the measurer shrank the
+      // joined line by characters while LayoutWords popped whole words, so on 5 of the harness's 20
+      // glass cards the box was sized for one string and the glyphs were another.
+      const s = style({ MaxLines: 1, TextOverflow: 'Ellipsis' });
+      const painted = LayoutWords('aaa bbb', s, 48, mockCtx()).map((w) => w.Content).join(' ');
+      expect(painted).toBe(MeasureText('aaa bbb', s, 48, mockCtx()).Lines[0]);
     });
 
     it('cuts a lone word wider than the box by characters', () => {

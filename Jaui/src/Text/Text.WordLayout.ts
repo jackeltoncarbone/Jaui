@@ -1,6 +1,6 @@
 import type { ResolvedTextStyle, TextAlign } from './Text.Types';
 import { ResolveLastLineAlign } from './Text.Types';
-import { ApplyTextStyle } from './Text.Measure';
+import { ApplyTextStyle, ELLIPSIS, FitWithEllipsis } from './Text.Measure';
 
 export interface WordPosition {
   /** Word text (no trailing space). */
@@ -123,6 +123,11 @@ export const LayoutWords = (
   let maxLinesHit = false;
   // Words were left out because MaxLines was reached.
   let truncated = false;
+  // Where the paragraph that owns the LAST placed word ends, as a char offset into `content`. The
+  // ellipsis rule measures from the last line's first word to here, which is how a character-
+  // granular cut reaches the word the wrap pushed away -- see `FitWithEllipsis`. Recorded at the
+  // push rather than per paragraph: a trailing empty paragraph owns no line.
+  let tailEnd = 0;
   for (let p = 0; p < paragraphs.length; p++) {
     if (maxLinesHit) break;
     const paragraph = paragraphs[p];
@@ -153,6 +158,7 @@ export const LayoutWords = (
         CharStart: charBase + tok.CharStart,
         CharEnd: charBase + tok.CharEnd,
       });
+      tailEnd = charBase + paragraph.length;
 
       currentX += w + spaceWidth;
     }
@@ -188,7 +194,10 @@ export const LayoutWords = (
   if (style.TextOverflow === 'Ellipsis' && lineRanges.length > 0) {
     const last = lineRanges[lineRanges.length - 1];
     if (truncated || (maxWidth !== null && last.width > maxWidth + 0.5)) {
-      _endWithEllipsis(positions, last, c, maxWidth);
+      _endWithEllipsis(
+        positions, last, c, maxWidth ?? Infinity, spaceWidth,
+        content.slice(positions[last.start].CharStart, tailEnd),
+      );
     }
   }
 
@@ -233,27 +242,70 @@ export const LayoutWords = (
   return positions;
 };
 
-export const ELLIPSIS = '…';
-
-/** Fit an ellipsis after the last line's words: drop whole words that leave no room, and cut a lone word by characters. */
+/**
+ * End the last line in an ellipsis, by the same law the measurer sized the box with.
+ *
+ * `tail` runs from this line's first word to the end of its paragraph -- PAST the words the wrap
+ * dropped -- and `FitWithEllipsis` cuts it at a character. So this both pops tokens the surviving
+ * prefix no longer reaches AND, in the case that rule exists for, appends one the wrap never
+ * placed: `Rehearsal moved to the` regains the `t` of `turf` that Chrome and UILabel both keep.
+ *
+ * Measured from the line's own origin as ONE run, which is what the box was measured as and what
+ * CSS measures a line box as. Pass 2 (alignment) has not run yet, so that origin is still the
+ * flush-left pen and the two sides are asking the identical question.
+ */
 const _endWithEllipsis = (
   positions: WordPosition[],
   line: { start: number; end: number; width: number },
   ctx: Ctx2D,
-  maxWidth: number | null,
+  maxWidth: number,
+  spaceWidth: number,
+  tail: string,
 ): void => {
-  const fits = (p: WordPosition, text: string): boolean => maxWidth === null || p.X + ctx.measureText(text).width <= maxWidth;
-  while (line.end > line.start && !fits(positions[line.end], positions[line.end].Content + ELLIPSIS)) {
-    positions.pop();
-    line.end--;
+  const tokens = TokenizeWithOffsets(tail);
+  if (tokens.length === 0) return;
+  const base = positions[line.start].CharStart;
+  const origin = positions[line.start].X;
+  const kept = FitWithEllipsis(tokens.map((t) => t.Content).join(' '), maxWidth - origin, ctx);
+
+  // Walk the surviving prefix back onto tokens: which one the cut lands in, and how much of it
+  // survives. `kept` is right-trimmed by `FitWithEllipsis`, so the cut can never land on the space
+  // that joins two tokens and `within` is only ever 0 when nothing at all fits.
+  let cut = 0;
+  let within = 0;
+  let at = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const end = at + tokens[i].Content.length;
+    cut = i;
+    within = Math.min(kept.length - at, tokens[i].Content.length);
+    if (kept.length <= end) break;
+    at = end + 1;
   }
-  const word = positions[line.end];
-  let kept = word.Content;
-  while (kept.length > 0 && !fits(word, kept + ELLIPSIS)) kept = kept.slice(0, -1);
-  word.Content = kept + ELLIPSIS;
-  word.CharEnd = word.CharStart + kept.length;
-  word.Width = ctx.measureText(word.Content).width;
-  line.width = word.X + word.Width;
+
+  const placed = line.end - line.start + 1;
+  let carrier: WordPosition;
+  if (cut < placed) {
+    while (line.end > line.start + cut) { positions.pop(); line.end--; }
+    carrier = positions[line.end];
+  } else {
+    // The prefix reached into the word the wrap pushed off the line. It was never placed, so place
+    // it now, at the pen the line still had.
+    const previous = positions[line.end];
+    carrier = {
+      Content: '', X: previous.X + previous.Width + spaceWidth, Y: previous.Y,
+      Width: 0, Height: previous.Height, Line: previous.Line, CharStart: 0, CharEnd: 0,
+    };
+    positions.push(carrier);
+    line.end++;
+  }
+
+  const token = tokens[cut];
+  const head = token.Content.slice(0, within);
+  carrier.Content = head + ELLIPSIS;
+  carrier.CharStart = base + token.CharStart;
+  carrier.CharEnd = carrier.CharStart + head.length;
+  carrier.Width = ctx.measureText(carrier.Content).width;
+  line.width = carrier.X + carrier.Width;
 };
 
 const _alignOffset =(align: TextAlign, lineWidth: number, maxWidth: number): number => {
