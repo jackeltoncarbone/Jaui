@@ -38,6 +38,55 @@ const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
  *  its text as detail. */
 const SHADOW_DETAIL_MIN_PT = 4;
 
+/** Headroom for the shader's fwidth-driven refraction-footprint LOD, which rises where a strong bend
+ *  FOLDS the backdrop and the caustic has to dissolve into blur (Jiv.Panel.frag, `refractLod`). It has
+ *  no closed form, so this is the bound the glass path has always assumed — it used to be the literal
+ *  5 passed to GenerateBlurMipmap. It only counts when `frostReq` is non-zero. */
+const REFRACT_FOLD_LOD = 5;
+
+/** The frost LOD an INSTANCE carries. Mirror of Jiv.InstanceBuffer (`data[offset + 35]`). */
+const _instanceFrostLod = (frostBlurPt: number, dpr: number): number =>
+  Math.max(0, Math.min(10, Math.log2(Math.max(0.5, frostBlurPt * dpr))));
+
+/** Below this instance frost LOD a panel may still take `sampleBackdrop`'s raw-scene branch, so it
+ *  needs a snapshot bound. The shader's own threshold is 0.01; this sits WELL above it because the
+ *  shader reads a float32 attribute and this side computes in float64, and a panel that fell through
+ *  to the u_Scene sampler with no snapshot bound would paint the dummy texture. Every real class is
+ *  either 0 frost or a whole point of it, so the widened band costs nothing. */
+const SCENE_TAP_FROST_LOD = 0.05;
+
+/** The deepest mip LOD a panel can read out of the pyramid built for it — the number that decides how
+ *  much of a mip chain is worth building.
+ *
+ *  Mirror of Jiv.Panel.frag. `sampleBackdrop` reads `max(0, frostLod - u_BaseFrostLod) + extraLod`; the
+ *  glass branch's extraLod is
+ *      lodBoost = ((rimBoost * 1.5 + innerBlur) * glassiness + refractLod) * frostReq
+ *      frostReq = clamp((frostLod - u_BaseFrostLod) * 4, 0, 1)
+ *  with rimBoost <= 1 at the silhouette; the border zone then adds its own `BorderFilter: Blur(n)`
+ *  offset as `bLod = max(0, lodBoost + lodOffset)`.
+ *
+ *  The per-surface glass path builds the pyramid AT the panel's own frost sigma, so frostLod equals
+ *  u_BaseFrostLod, frostReq is exactly 0, and the whole boost collapses: the panel reads LOD 0 and
+ *  nothing above it. That case returned 0 here is what lets the mip chain be skipped outright instead
+ *  of built, blitted and never opened. */
+const _backdropMaxLod = (
+  frostLod: number,
+  baseFrostLod: number,
+  thicknessDev: number,
+  innerBlur: number,
+  borderLodOffset: number,
+): number => {
+  const frostReq = Math.max(0, Math.min(1, (frostLod - baseFrostLod) * 4));
+  let lodBoost = 0;
+  if (frostReq > 0) {
+    const t = Math.max(0, Math.min(1, thicknessDev));
+    const glassiness = t * t * (3 - 2 * t);   // smoothstep(0, 1, thickness)
+    lodBoost = ((1.5 + innerBlur) * glassiness + REFRACT_FOLD_LOD) * frostReq;
+  }
+  const borderLod = Math.max(0, lodBoost + borderLodOffset);
+  return Math.max(0, frostLod - baseFrostLod) + Math.max(lodBoost, borderLod);
+};
+
 /** True when a non-glass panel has any non-default backdrop filter set
  *  (BackdropBrightness / Saturation / Contrast ≠ 1, BackdropFrostBlur > 0).
  *  These flat panels need the blur pyramid bound and the scene flushed just
@@ -1420,10 +1469,22 @@ export class Canvas implements DirtyTracker {
             w: Math.min(w, Math.ceil(pw + margin * 2)),
             h: Math.min(h, Math.ceil(ph + margin * 2)),
           };
-          const sceneSnap = r.SnapshotScreen(scissor);
-          const lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
+          // Same two economies as the glass FILL path: the raw-scene snapshot is only
+          // read where the panel authored no frost (sampleBackdrop's u_Scene fallback),
+          // and the mip chain is only built as deep as this rim can sample —
+          // `BorderFilter: Blur(n)` is the one thing that takes a border-only pass off
+          // LOD 0. Both bounds come from _backdropMaxLod / _instanceFrostLod above.
+          const _boFrostLod = _instanceFrostLod(node.RenderStyle.BackdropFrostBlur, d);
           const lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
-          r.GenerateBlurMipmap(5);
+          const sceneSnap = _boFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(scissor) : null;
+          const lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
+          r.GenerateBlurMipmap(_backdropMaxLod(
+            _boFrostLod,
+            lastBaseFrostLod,
+            _gThicknessDev,
+            node.RenderStyle.InnerBlur,
+            node.RenderStyle.BorderBackdropBlur,
+          ));
           r.RebindSceneTarget();
 
           this._panelBuffer.Begin();
@@ -1877,6 +1938,11 @@ export class Canvas implements DirtyTracker {
           // eslint-disable-next-line no-console
           console.log(`[Jaui.surf] GLASS rect=${Math.round(pw)}x${Math.round(ph)} scissor=${scissor.w}x${scissor.h} (${(scissor.w * scissor.h / 1e6).toFixed(2)}Mpx) frost=${frostCssPx}pt margin=${Math.round(margin)}`);
         }
+        // Hoisted: the mip depth below has to know whether the adaptive shadow will read the
+        // pyramid at its own detail LOD, and the measure pass runs after the pyramid is built.
+        const _rsAdaptiveShadow = node.RenderStyle.ShadowAdaptive > 0
+          && node.RenderStyle.ShadowColor.A > 0.001
+          && !JivInstanceBuffer.DiagNoShadow;
         // Snapshot the raw scene BEFORE the pyramid overwrites anything.
         // The shader's sampleBackdrop falls back to this raw texture when
         // the effective LOD is 0 (no-frost flat panel, or the center of
@@ -1885,7 +1951,9 @@ export class Canvas implements DirtyTracker {
         // texture so there's no per-frame allocation. Scissor the blit to this
         // glass panel's footprint + margin (same rect the blur uses) — the
         // shader only samples the snapshot within the panel, so a full-canvas
-        // copy was pure wasted bandwidth scaling with screen size.
+        // copy was pure wasted bandwidth scaling with screen size. A panel that
+        // DID author frost never reaches that fallback at all, so it takes no
+        // snapshot — see the else branch.
         let sceneSnap: GpuTextureHandle | null;
         if (this._sharedBackdrop) {
           // ── Shared backdrop (fire once, sample many) ──
@@ -1922,8 +1990,16 @@ export class Canvas implements DirtyTracker {
           sceneSnap = this._sharedPyramid;  // level 0 doubles as the low-frost fallback (u_Scene)
           lastBaseFrostLod = 2;             // quarter-res shared pyramid: its level 0 ≈ a full-res pyramid's LOD 2
         } else {
+          // ── The raw-scene snapshot, only when the shader can actually read it ──
+          // `sampleBackdrop` falls back to u_Scene ONLY where `frostLod < 0.01 &&
+          // extraLod < 0.01` — a panel that authored no frost at all. Any frosted
+          // panel (every glass class in the app) never touches that sampler, so the
+          // blit was a scissor-sized copy of the scene made for nobody. The adaptive
+          // shadow DOES need a sharp read, but it runs with its own 1x1 target bound,
+          // so it can sample the live scene texture directly — same pixels, no copy.
+          const instFrostLod = _instanceFrostLod(node.RenderStyle.BackdropFrostBlur, d);
           const _tSnap = performance.now();
-          sceneSnap = r.SnapshotScreen(scissor);
+          sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(scissor) : null;
           const _tBlur = performance.now();
           this._opMs.Snap += _tBlur - _tSnap;
           lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, scissor);
@@ -1933,12 +2009,27 @@ export class Canvas implements DirtyTracker {
           // u_BaseFrostLod) lands on LOD 0 (full res). Only the subtle glass
           // rim/inner boost (≲ 2 LODs) climbs into the now full-sigma mip chain.
           lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
-          // Headroom for the panel shader's refraction-footprint LOD: strong
-          // refraction folds the backdrop and the shader raises the sampled LOD to
-          // blur the caustic away (see Jiv.Panel.frag refractLod). That can reach
-          // ~4-5; cap mip generation high enough that it ramps smoothly instead of
-          // clamping to a too-shallow deepest mip mid-fold.
-          const glassMaxLod = 5;
+          // How deep a chain this panel can actually read. It used to be a flat 5 —
+          // headroom for the refraction-footprint LOD — but that boost is gated by
+          // `frostReq`, which is identically 0 whenever the pyramid is built at the
+          // panel's own frost sigma, which is what the line above just did. So a
+          // frosted glass panel samples LOD 0 and nothing else, and the six DOWN
+          // passes, six mip blits and the driver's own full-chain generateMipmap
+          // were building, at CANVAS size, a pyramid no fragment ever opened.
+          // _backdropMaxLod is the shader's own formula; when a class does ask for a
+          // deeper read (`BorderFilter: Blur(n)`, or any future non-zero frostReq)
+          // the chain comes back on its own.
+          const glassMaxLod = Math.max(
+            _backdropMaxLod(
+              instFrostLod,
+              lastBaseFrostLod,
+              _gThicknessDev,
+              node.RenderStyle.InnerBlur,
+              node.RenderStyle.BorderBackdropBlur,
+            ),
+            // The adaptive shadow reads the pyramid at its own detail LOD.
+            _rsAdaptiveShadow ? Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod : 0,
+          );
           const _tMip = performance.now();
           r.GenerateBlurMipmap(glassMaxLod);
           this._opMs.Mip += performance.now() - _tMip;
@@ -1946,11 +2037,15 @@ export class Canvas implements DirtyTracker {
         }
 
         // Adaptive shadow: read the backdrop this surface just sampled, under its own footprint.
+        // The sharp tap comes from the snapshot when one was taken, and otherwise straight from the
+        // scene texture — this pass renders into its own 1x1 state target, so the scene FBO is not
+        // bound and there is no feedback loop to dodge.
         let shadowBackdrop: ShadowBackdrop | undefined;
         const _rs = node.RenderStyle;
-        if (_rs.ShadowAdaptive > 0 && _rs.ShadowColor.A > 0.001 && !JivInstanceBuffer.DiagNoShadow && lastBackdrop && sceneSnap) {
+        const _shadowScene = sceneSnap ?? r.SceneTexture;
+        if (_rsAdaptiveShadow && lastBackdrop) {
           const detailLod = Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod;
-          const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, sceneSnap, dt);
+          const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt);
           if (slot >= 0) {
             shadowBackdrop = { Slot: slot, Adaptive: _rs.ShadowAdaptive };
             this._adaptiveShadowsDrawn = true;

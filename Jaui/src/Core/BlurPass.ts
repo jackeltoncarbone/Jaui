@@ -115,6 +115,12 @@ export class BlurPass {
    *  optimization). Created lazily the first time a large blur downsamples. */
   private _preA: Framebuffer | null = null;
   private _preB: Framebuffer | null = null;
+  /** The region of level 0 the last Blur() actually wrote, in LEVEL-0 texels
+   *  (already re-based if the σ-adaptive downsample shrank the pyramid). Null
+   *  when the whole level was filled. GenerateOutputMipmap reads it rather than
+   *  taking a rect from its caller: the caller knows its canvas rect, but only
+   *  Blur() knows what scale level 0 ended up at. */
+  private _lastScissor: { x: number; y: number; w: number; h: number } | null = null;
   get LastDepth(): number { return this._lastDepth; }
 
   private _downTexLoc: WebGLUniformLocation | null;
@@ -205,6 +211,7 @@ export class BlurPass {
       if (scissor) gl.disable(gl.SCISSOR_TEST);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       this._lastDepth = 0;
+      this._lastScissor = scissor ? { ...scissor } : null;
       return this._levels[0].Texture;
     }
 
@@ -361,6 +368,7 @@ export class BlurPass {
 
     if (scissor) gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._lastScissor = scissor ? { ...scissor } : null;
 
     return this._levels[0].Texture;
   };
@@ -388,18 +396,27 @@ export class BlurPass {
    *  content is already smoothed by the time we downsample, so blocks
    *  dissolve into a smooth gradient.
    *
-   *  Cost: one DOWN pass per mip level (≤ 8 total) on rapidly-shrinking
-   *  images + matching blits. Same order of work as the prior
-   *  implementation, just with the chain rooted at level 0. */
+   *  Cost: one DOWN pass per mip level on rapidly-shrinking images + matching
+   *  blits, each limited to the region the last Blur() actually wrote. A
+   *  consumer whose deepest sample is LOD 0 (`maxLod <= 0`) gets no chain at
+   *  all — see the first branch. */
   GenerateOutputMipmap = (maxLod?: number): void => {
     const gl = this._gl;
     const out = this._levels[0];
+    const scissor = this._lastScissor;
 
-    // Allocate the mip chain + flip MIN_FILTER to LINEAR_MIPMAP_LINEAR so
-    // textureLod can sample. We overwrite the levels we actually populate
-    // below; the deepest few mips (≤ 4×4) keep the box-filter content but
-    // progressive blur never samples them.
-    out.GenerateMipmap();
+    // A consumer whose deepest sample is LOD 0 reads the base level and nothing
+    // else. Building a chain for it is not a cheap chain, it is an entire chain
+    // nobody opens: on the glass path the pyramid is built AT the panel's own
+    // frost sigma, so `frostLod - u_BaseFrostLod` is 0 and the shader's whole
+    // rim/refraction LOD boost is multiplied by a `frostReq` of 0
+    // (Jiv.Panel.frag, `lodBoost`). Make the texture complete at the base level
+    // and return — same pixels, none of the passes.
+    if (maxLod !== undefined && maxLod <= 0) {
+      out.DisableMipmap();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return;
+    }
 
     // Cap the chain at the consumer's max sampled LOD. Trilinear
     // interpolation between adjacent levels needs both endpoints populated,
@@ -410,6 +427,14 @@ export class BlurPass {
     const stopLevel = maxLod !== undefined
       ? Math.min(MAX_LEVELS - 1, Math.max(1, Math.ceil(maxLod) + 1))
       : MAX_LEVELS - 1;
+
+    // Allocate the mip chain + flip MIN_FILTER to LINEAR_MIPMAP_LINEAR so
+    // textureLod can sample. Storage ONLY: every level a consumer can reach is
+    // written by the DOWN chain below, so `generateMipmap`'s box filter was a
+    // canvas-third of fill thrown away on the next line, and TEXTURE_MAX_LEVEL
+    // clamps a sampler that reaches past what we build (it used to land on the
+    // box-filtered deep mips instead).
+    out.EnsureMipLevels(stopLevel);
 
     // Iterative 5-tap DOWN starting from level 0. _levels[1..N] are
     // re-purposed as scratch FBOs — their previous contents (dual-filter
@@ -422,10 +447,39 @@ export class BlurPass {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(this._quad.Vao);
 
+    // Level 0 is only valid inside the last Blur()'s scissor — it wrote nothing
+    // else — so a chain built over the whole canvas spends most of its fill
+    // filtering whatever the PREVIOUS surface left behind, then blits it into
+    // mips nobody reads. Write the caller's region and stop.
+    //
+    // GUARD BAND: a DOWN texel at level i reads level i-1 within ~1.5 texels of
+    // its footprint, so the valid region erodes by 1.5 texels per level climbed.
+    // Run that backwards and a level-i destination has to be written
+    // 1.5·(2^(n-i) − 1) texels wider than the rect the deepest level n needs —
+    // then level n covers the blur's rect exactly. Same erosion the pyramid
+    // already lives with; this just stops paying for the rest of the canvas.
+    type LevelRect = { X: number; W: number; YFlipped: number; H: number };
+    const levelRect = (i: number): LevelRect | null => {
+      if (!scissor) return null;
+      const scale = 1 / (1 << i);
+      const guard = 1.5 * ((1 << (stopLevel - i)) - 1);
+      const dw = Math.max(1, out.Width >> i);
+      const dh = Math.max(1, out.Height >> i);
+      const x0 = Math.max(0, Math.min(dw, Math.floor(scissor.x * scale - guard)));
+      const x1 = Math.max(x0 + 1, Math.min(dw, Math.ceil((scissor.x + scissor.w) * scale + guard)));
+      const yTop = Math.max(0, Math.min(dh, Math.floor(scissor.y * scale - guard)));
+      const yBot = Math.max(yTop + 1, Math.min(dh, Math.ceil((scissor.y + scissor.h) * scale + guard)));
+      // gl.scissor and blitFramebuffer both count y from the BOTTOM; the caller's
+      // rect counts from the top.
+      return { X: x0, W: x1 - x0, YFlipped: dh - yBot, H: yBot - yTop };
+    };
+
+    if (scissor) gl.enable(gl.SCISSOR_TEST);
     let srcTex = out.Texture;
     let srcW = out.Width;
     let srcH = out.Height;
     let extendedDepth = 0;
+    const written: (LevelRect | null | undefined)[] = [];
     for (let i = 1; i <= stopLevel; i++) {
       const newW = Math.max(1, Math.floor(srcW / 2));
       const newH = Math.max(1, Math.floor(srcH / 2));
@@ -434,6 +488,9 @@ export class BlurPass {
       const dst = this._levels[i];
       dst.Bind();
       gl.viewport(0, 0, newW, newH);
+      const rect = levelRect(i);
+      written[i] = rect;
+      if (rect) gl.scissor(rect.X, rect.YFlipped, rect.W, rect.H);
       gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
@@ -442,6 +499,7 @@ export class BlurPass {
       srcH = newH;
       extendedDepth = i;
     }
+    if (scissor) gl.disable(gl.SCISSOR_TEST);
 
     if (extendedDepth === 0) return;
 
@@ -457,11 +515,18 @@ export class BlurPass {
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._mipBlitFbo);
     for (let i = 1; i <= extendedDepth; i++) {
       const src = this._levels[i];
+      const rect = written[i] ?? null;
+      // Copy only what the pass above actually wrote. The rest of the level still
+      // holds the previous surface's pyramid, and the consumer never reads it.
+      const bx = rect ? rect.X : 0;
+      const by = rect ? rect.YFlipped : 0;
+      const bw = rect ? rect.W : src.Width;
+      const bh = rect ? rect.H : src.Height;
       gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out.Texture, i);
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, src.Framebuffer);
       gl.blitFramebuffer(
-        0, 0, src.Width, src.Height,
-        0, 0, src.Width, src.Height,
+        bx, by, bx + bw, by + bh,
+        bx, by, bx + bw, by + bh,
         gl.COLOR_BUFFER_BIT, gl.NEAREST,
       );
     }

@@ -539,8 +539,11 @@ const float CORNER_SAT_FRAC    = 0.12;  // fraction of the short half-axis the r
 const float CORNER_ASPECT_LO   = 1.02;  // aspect ≤ LO → circle leg
 const float CORNER_ASPECT_HI   = 1.10;  // aspect ≥ HI → pill leg
 
-void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
-                out float distOut, out vec2 gradOut) {
+// The corner field's parameters. Factored out so the distance-only and distance+gradient
+// evaluations below read the SAME expressions in the same order and cannot drift into
+// disagreeing about which regime a corner is in.
+void CornerParams(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
+                  out float pillW, out float n, out float rCorner) {
     float minHalf = min(halfSize.x, halfSize.y);
     float maxHalf = max(halfSize.x, halfSize.y);
     float aspect  = maxHalf / max(minHalf, 0.0001);
@@ -563,15 +566,36 @@ void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
     // Superellipse anchor (Rect↔Circle, continuous). Per-corner radius is
     // preserved via PickRectRadius; the exponent eases to 2 (circle) only for
     // square-ish saturated corners (circleness), never for the pill leg.
-    float rCorner    = min(PickRectRadius(p, radii), minHalf);
+    rCorner          = min(PickRectRadius(p, radii), minHalf);
     float circleness = sat * (1.0 - elong);
-    float n          = mix(SmoothnessToExponent(smoothAmt), 2.0, circleness);
-    float dSuper     = ShapeSDF_inner(p, halfSize, vec2(rCorner), n);
-
+    n                = mix(SmoothnessToExponent(smoothAmt), 2.0, circleness);
     // Pill leg: only elongated saturated corners pull toward the Bezier endcap.
+    pillW = sat * elong;
+}
+
+// DISTANCE ONLY. Two of this shader's three corner-field callers — the clip stack (once per
+// clip per fragment) and the shadow pass — ask for a distance and throw the gradient away,
+// and the gradient is not cheap: ShapeGrad_inner is two pow() calls, a length and a
+// normalize, and in pill mode the closest-point tracking turns a 32-segment scan into a
+// wider one. This returns the same float with none of that. Same expressions, same order,
+// so the number is the one CornerEval would have handed back.
+float CornerDist(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
+    float pillW, n, rCorner;
+    CornerParams(p, halfSize, radii, smoothness, pillW, n, rCorner);
+    if (pillW >= 1.0) return SS_PillSDF(p, halfSize);
+    float dSuper = ShapeSDF_inner(p, halfSize, vec2(rCorner), n);
+    if (pillW <= 0.0) return dSuper;
+    return mix(dSuper, SS_PillSDF(p, halfSize), pillW);
+}
+
+void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
+                out float distOut, out vec2 gradOut) {
+    float pillW, n, rCorner;
+    CornerParams(p, halfSize, radii, smoothness, pillW, n, rCorner);
+    float dSuper = ShapeSDF_inner(p, halfSize, vec2(rCorner), n);
+
     // Outside the band (pillW 0 or 1) exactly one path runs; only the band pays
     // for both the superellipse and the polyline pill, then mixes them.
-    float pillW = sat * elong;
     if (pillW <= 0.0) {
         distOut = dSuper;
         gradOut = ShapeGrad_inner(p, halfSize, vec2(rCorner), n);
@@ -593,9 +617,7 @@ void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
 // compatibility but is no longer used; CornerEval derives the blend from
 // geometry so Rect / Circle / Pill morph continuously instead of switching.
 float ShapeSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
-    float d; vec2 g;
-    CornerEval(p, halfSize, radii, smoothness, d, g);
-    return d;
+    return CornerDist(p, halfSize, radii, smoothness);
 }
 
 vec2 ShapeGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {

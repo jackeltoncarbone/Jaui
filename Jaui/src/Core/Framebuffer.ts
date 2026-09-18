@@ -19,6 +19,9 @@ export class Framebuffer {
    *  32 bits/texel, core WebGL2 (no extension), but 4× finer tonal steps —
    *  removes the visible banding a wide blur bakes into an 8-bit gradient. */
   private _highPrecision: boolean;
+  /** Deepest mip level currently ALLOCATED for the colour texture (0 = base only).
+   *  Storage is allocated empty; contents are written by whoever builds the chain. */
+  private _mipLevels: number = 0;
 
   constructor(gl: WebGL2RenderingContext, opts?: { depth?: boolean; highPrecision?: boolean }) {
     this._gl = gl;
@@ -49,6 +52,9 @@ export class Framebuffer {
   Resize = (width: number, height: number): void => {
     if (width === this._width && height === this._height) return;
     const firstAlloc = this._width === 0 && this._height === 0;
+    // Base level is about to be reallocated, so every mip above it is orphaned
+    // at the old size — the texture is mip-INCOMPLETE until they are re-made.
+    this._mipLevels = 0;
     this._width = Math.max(1, Math.floor(width));
     this._height = Math.max(1, Math.floor(height));
 
@@ -107,7 +113,60 @@ export class Framebuffer {
     gl.bindTexture(gl.TEXTURE_2D, this.Texture);
     gl.generateMipmap(gl.TEXTURE_2D);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, this._mipDepth());
+    this._mipLevels = this._mipDepth();
     gl.bindTexture(gl.TEXTURE_2D, null);
+  };
+
+  /** Allocate (empty) mip levels 1..`levels` and make the texture mip-complete
+   *  to exactly that depth, WITHOUT filtering anything.
+   *
+   *  `generateMipmap` is the usual way to get a sampleable chain, but it also
+   *  box-filters the entire pyramid — on a canvas-sized backdrop that is a third
+   *  of a full-screen fill, per call, and every level a caller then overwrites
+   *  with its own (better) Gaussian is filtered twice. Allocating the storage
+   *  and letting the caller fill it is the same end state for a fraction of the
+   *  bandwidth.
+   *
+   *  TEXTURE_MAX_LEVEL is pinned to the deepest ALLOCATED level, so the texture
+   *  is complete with a short chain and a sampler asking for a deeper LOD clamps
+   *  to the deepest level we built instead of reading undefined storage. */
+  EnsureMipLevels = (levels: number): void => {
+    const gl = this._gl;
+    const want = Math.max(0, Math.min(this._mipDepth(), Math.floor(levels)));
+    gl.bindTexture(gl.TEXTURE_2D, this.Texture);
+    for (let i = this._mipLevels + 1; i <= want; i++) {
+      const lw = Math.max(1, this._width >> i);
+      const lh = Math.max(1, this._height >> i);
+      if (this._highPrecision) {
+        gl.texImage2D(gl.TEXTURE_2D, i, gl.RGB10_A2, lw, lh, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
+      } else {
+        gl.texImage2D(gl.TEXTURE_2D, i, gl.RGBA, lw, lh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      }
+    }
+    if (want > this._mipLevels) this._mipLevels = want;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, this._mipLevels);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  };
+
+  /** Sample the base level only — for consumers whose maximum sampled LOD is 0.
+   *  Leaves any allocated mip storage in place (re-arming it is one texParameteri)
+   *  but makes the texture complete without it. */
+  DisableMipmap = (): void => {
+    const gl = this._gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.Texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  };
+
+  /** Deepest mip level a full chain would have at the current size. */
+  private _mipDepth = (): number => {
+    let levels = 0;
+    let w = this._width, h = this._height;
+    while (w > 1 || h > 1) { w = Math.max(1, w >> 1); h = Math.max(1, h >> 1); levels++; }
+    return levels;
   };
 
   Dispose = (): void => {
