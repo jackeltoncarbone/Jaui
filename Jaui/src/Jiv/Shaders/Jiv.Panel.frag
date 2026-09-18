@@ -1095,8 +1095,16 @@ void main() {
     // drops out — but `edgeLightAlpha` had ALREADY captured fillAlpha here, several
     // hundred lines earlier, so the wide rim glow still composited into a pass whose
     // own comment promises a transparent interior. `JwiftGlass` hides it with
-    // `FresnelStrength: 0`; `JwiftSolidGlass` does NOT (0.55, with `BorderLayer: 10`),
-    // so its overlay has been painting a full-strength interior glow all along.
+    // `FresnelStrength: 0`; `JwiftSolidGlass` did NOT (0.55, with `BorderLayer: 10`),
+    // so its overlay painted a full-strength interior glow all along — the only edge
+    // light that class had, since its fill draws as MATERIAL_NONE where this whole
+    // block is dead code.
+    //
+    // That light was not deleted, it MOVED: `JwiftSolidGlass` now authors it in the
+    // BORDER zone (BorderFade / BorderAlphaVariance / BorderFresnelStrength), where a
+    // border-only pass is entitled to paint. `FresnelStrength` is the BODY's fresnel
+    // and a border-only pass has no body — same reason the hemispherical ambient below
+    // is multiplied by `fillAlpha`.
     if (materialType == 1.0 && borderOnly == 0.0 && fillAlpha > 0.0 && dist > -max(bezelWidth * 0.75, 6.0)) {
         // Wide rim band — at LEAST 6 px so the glow is actually visible,
         // scaled up with bezelWidth (the optical "thickness" of the glass).
