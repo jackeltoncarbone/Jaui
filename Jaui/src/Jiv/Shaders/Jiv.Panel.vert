@@ -17,7 +17,7 @@ layout(location = 10) in vec4 a_Refraction;   // thickness, bezelWidth, refracti
 layout(location = 11) in vec4 a_Lighting;     // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
 layout(location = 12) in vec4 a_Specular;     // specIntensity, specSharpness, chromaticAberration, innerBlur
 layout(location = 13) in vec4 a_RimEdge;      // edgeLightTop, edgeLightBottom, borderVariance, bulge
-layout(location = 14) in vec4 a_Outline;      // borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount
+layout(location = 14) in vec4 a_Outline;      // packed rim amounts, packed Fresnel grade, clipOffset, clipCount
 layout(location = 15) in vec4 a_BorderFilter; // brightnessMul, saturationMul, contrastMul, lodOffset
 
 uniform vec2 u_Resolution;

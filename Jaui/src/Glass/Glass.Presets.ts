@@ -61,7 +61,7 @@ export const LiquidGlass: Partial<JivStyle> = {
   // Variable border width (thicker on lit side)
   BorderVariance: '0.3',
   BorderAlphaVariance: '0.2',
-  BorderFresnelBrightness: '0.25',
+  BorderFresnelStrength: '0.25',
 
   // Center slightly more blurred than rim (longer optical path)
   InnerBlur: '0.25',
@@ -95,6 +95,6 @@ export const ClearGlass: Partial<JivStyle> = {
   EdgeLightBottom: '0.05',
   BorderVariance: '0.4',
   BorderAlphaVariance: '0.05',
-  BorderFresnelBrightness: '0.45',
+  BorderFresnelStrength: '0.45',
   InnerBlur: '0.1',
 };

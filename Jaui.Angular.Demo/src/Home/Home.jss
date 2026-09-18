@@ -210,7 +210,7 @@ LiquidGlass {
   EdgeLightBottom: 0.03
   BorderVariance: 0
   BorderAlphaVariance: 0
-  BorderFresnelBrightness: 0
+  BorderFresnelStrength: 0
   InnerBlur: 0
 }
 

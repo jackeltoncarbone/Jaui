@@ -1,17 +1,23 @@
 /**
- * Filter.Parse — the `Filter` / `BackdropFilter` / `BorderFilter` value parser.
+ * Filter.Parse — the `Filter` / `BackdropFilter` / `BorderFilter` / `BorderFresnelFilter`
+ * value parser.
  *
  * One CSS-shaped, ordered function list per zone. Function names are CSS
  * filter names, PascalCased to match Jaui's other value-functions
  * (`LinearGradient(...)`):
  *
- *   Filter:         Brightness(1.08) Saturate(1.12)
- *   BackdropFilter: Blur(16pt) Brightness(1.25) Saturate(1.25) Contrast(0.75)
- *   BorderFilter:   Blur(3pt) Brightness(2) Saturate(4)
+ *   Filter:              Brightness(1.08) Saturate(1.12)
+ *   BackdropFilter:      Blur(16pt) Brightness(1.25) Saturate(1.25) Contrast(0.75)
+ *   BorderFilter:        Blur(3pt) Brightness(2) Saturate(4)
+ *   BorderFresnelFilter: Brightness(1.1) Saturate(1.6)
  *
  * Supported functions:
  *   Brightness(x)  Saturate(x)  Contrast(x)   — scalar grade multipliers
  *   Blur(len)                                 — a Length (frost / LOD octave)
+ *
+ * … with one exception: the `fresnel` zone takes Brightness + Saturate ONLY, and
+ * REFUSES Blur() and Contrast() rather than accepting and ignoring them. See the
+ * `'fresnel'` paragraph on ParseFilter for the physics behind each refusal.
  *
  * Semantics:
  *   • Identity = the function absent (Brightness/Saturate/Contrast → 1, Blur → none).
@@ -89,9 +95,14 @@ export interface ParsedFilter {
   ForegroundBlur: ForegroundBlur | null;
 }
 
-/** The three author-facing filter properties. Used by the JSS merge layers
+/** Which zone a filter value grades. Each zone reads the SAME function list but
+ *  accepts a different subset — `Blur()` means a foreground blur, a frost radius
+ *  and an LOD octave in the three that take it, and nothing at all in `fresnel`. */
+export type FilterZone = 'foreground' | 'backdrop' | 'border' | 'fresnel';
+
+/** The four author-facing filter properties. Used by the JSS merge layers
  *  to concatenate (merge-by-function) rather than replace these specific keys. */
-export const FILTER_PROPS = ['Filter', 'BackdropFilter', 'BorderFilter'] as const;
+export const FILTER_PROPS = ['Filter', 'BackdropFilter', 'BorderFilter', 'BorderFresnelFilter'] as const;
 
 const _FILTER_KEYS: ReadonlySet<string> = new Set(FILTER_PROPS);
 
@@ -134,6 +145,7 @@ const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Blur
 
 const _cacheBackdrop = new Map<string, ParsedFilter>();
 const _cacheForeground = new Map<string, ParsedFilter>();
+const _cacheFresnel = new Map<string, ParsedFilter>();
 const _FN = /([A-Za-z]+)\s*\(([^)]*)\)/g;
 
 /** Map an edge keyword to the pblur direction (the edge that ramps to fully
@@ -156,6 +168,21 @@ const _edgeToDirection = (raw: string): ProgressiveBlurDirection | null => {
  * progressive functions feather the element's OWN content) from the backdrop/
  * border zones (where `Blur()` is a frost radius / LOD offset, unchanged).
  *
+ * `'fresnel'` — the border's Fresnel highlight (`BorderFresnelFilter`). It takes
+ * Brightness + Saturate and REFUSES Blur() and Contrast(), because neither has a
+ * meaning here and an accepted-and-ignored function is a permanent silent no-op:
+ *
+ *   • Blur() — the Fresnel is a pure color derivation of the gather the border
+ *     zone has ALREADY sampled, at the LOD `BorderFilter: Blur()` chose. Its own
+ *     radius would buy a second per-pixel backdrop tap and change nothing the
+ *     border's own Blur() cannot. Author it on `BorderFilter`.
+ *   • Contrast() — contrast is a lerp about mid grey, and the Fresnel target is
+ *     normalized to max-channel 1 by construction. Pushing it about grey drives the
+ *     off-hue channels BELOW luma, which over the stroke's alpha fade reads as a
+ *     dark ring inside the rim — the exact artefact the hue carry was written to
+ *     avoid. `Saturate()` changes how much color the rim carries; `Brightness()`
+ *     changes how hot it burns. Between them there is nothing left for contrast.
+ *
  * Foreground-only functions (Filter zone):
  *   Blur(<radius>)
  *     — uniform foreground blur of the element's painted content.
@@ -169,8 +196,8 @@ const _edgeToDirection = (raw: string): ProgressiveBlurDirection | null => {
  *       edges fade", which is what keeps it distinct from Linear. `feather` is
  *       the band depth from each edge to the sharp center.
  */
-export const ParseFilter = (raw: string, zone: 'foreground' | 'backdrop' = 'backdrop'): ParsedFilter => {
-  const cache = zone === 'foreground' ? _cacheForeground : _cacheBackdrop;
+export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedFilter => {
+  const cache = zone === 'foreground' ? _cacheForeground : zone === 'fresnel' ? _cacheFresnel : _cacheBackdrop;
   const cached = cache.get(raw);
   if (cached) return cached;
 
@@ -191,8 +218,12 @@ export const ParseFilter = (raw: string, zone: 'foreground' | 'backdrop' = 'back
     switch (fn) {
       case 'brightness': out.Brightness = _num(arg, 'Brightness', raw); break;
       case 'saturate':   out.Saturation = _num(arg, 'Saturate', raw); break;
-      case 'contrast':   out.Contrast = _num(arg, 'Contrast', raw); break;
+      case 'contrast':
+        if (zone === 'fresnel') throw new Error(_refuseInFresnel('Contrast', raw));
+        out.Contrast = _num(arg, 'Contrast', raw);
+        break;
       case 'blur':
+        if (zone === 'fresnel') throw new Error(_refuseInFresnel('Blur', raw));
         if (zone === 'foreground') {
           // Uniform foreground blur — the whole element blurs evenly.
           out.ForegroundBlur = { Mode: 'uniform', Direction: 'ToBottom', Edges: 'All', FeatherRaw: null, Easing: 1, Uniform: true, RadiusRaw: arg || '0' };
@@ -201,15 +232,19 @@ export const ParseFilter = (raw: string, zone: 'foreground' | 'backdrop' = 'back
         }
         break;
       case 'linearprogressiveblur':
+        if (zone === 'fresnel') throw new Error(_refuseInFresnel('LinearProgressiveBlur', raw));
         out.ForegroundBlur = _parseLinear(arg, raw);
         break;
       case 'edgeprogressiveblur':
+        if (zone === 'fresnel') throw new Error(_refuseInFresnel('EdgeProgressiveBlur', raw));
         out.ForegroundBlur = _parseEdge(arg, raw);
         break;
       default:
         throw new Error(
-          `[Jaui] Unknown filter function "${m[1]}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
-          (zone === 'foreground' ? ', LinearProgressiveBlur, EdgeProgressiveBlur.' : '.'),
+          zone === 'fresnel'
+            ? `[Jaui] Unknown BorderFresnelFilter function "${m[1]}" in "${raw}". The Fresnel takes Brightness and Saturate only.`
+            : `[Jaui] Unknown filter function "${m[1]}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
+              (zone === 'foreground' ? ', LinearProgressiveBlur, EdgeProgressiveBlur.' : '.'),
         );
     }
   }
@@ -300,6 +335,17 @@ const _parseEdge = (arg: string, raw: string): ForegroundBlur => {
   const easing = tail >= 3 ? _num(parts[2], 'EdgeProgressiveBlur easing', raw) : 1;
   return { Mode: 'edge', Direction: 'ToTop', Edges: edges, FeatherRaw: feather, Easing: easing, Uniform: false, RadiusRaw: radius };
 };
+
+/** Why a function the other three zones take is refused on the Fresnel. Names the
+ *  property that DOES own it, so the author's next move is obvious. */
+const _refuseInFresnel = (fn: string, raw: string): string =>
+  `[Jaui] BorderFresnelFilter takes Brightness and Saturate only; got ${fn}() in "${raw}". ` +
+  (fn === 'Contrast'
+    ? 'The Fresnel target is normalized to max-channel 1, so a lerp about mid grey only darkens its ' +
+      'off-hue channels and draws a dark ring inside the stroke. Saturate() sets how much color the ' +
+      'rim carries; Brightness() sets how hot it burns.'
+    : 'The Fresnel derives its color from the gather the border zone already sampled, at the LOD that ' +
+      'the BorderFilter Blur() chose. Author the radius there.');
 
 const _num = (arg: string, fn: string, raw: string): number => {
   const n = parseFloat(arg);

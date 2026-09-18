@@ -33,7 +33,11 @@ struct JivInstance {
   lighting: vec4f,       // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
   specular: vec4f,       // specIntensity, specSharpness, chromaticAberration, innerBlur
   rim_edge: vec4f,       // edgeLightTop, edgeLightBottom, borderVariance, bulge
-  outline: vec4f,        // borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount
+  outline: vec4f,        // packed rim amounts, packed Fresnel grade, clipOffset, clipCount
+                         // .x = alphaVariance*2047 * 4096 + fresnelStrength*1024
+                         // .y = fresnelBrightness*256 * 1024 + fresnelSaturation*256
+                         // (Jiv.InstanceBuffer packs both; this struct mirrors the WebGL2 layout
+                         //  float-for-float, so it must unpack them the same way.)
   border_filter: vec4f,  // brightnessMul, saturationMul, contrastMul, lodOffset
 }
 
@@ -152,8 +156,11 @@ fn inside_clip_stack(pixel: vec2f, offset: u32, count: u32) -> bool {
     let base = (offset + i) * 3u;
     let rect = clip_stack[base];
     let radii = clip_stack[base + 1u];
-    let meta = clip_stack[base + 2u];
-    if (!inside_clip_shape(pixel, rect, radii, meta.x)) {
+    // `meta` is a RESERVED WORD in WGSL, and naming it that made this entire module fail to
+    // compile ("'meta' is a reserved keyword") on every WebGPU device. Nothing caught it because
+    // nothing constructs WebGPURenderer: the app boots WebGL2Renderer in Jaui.ts and Worker.Boot.
+    let clip_meta = clip_stack[base + 2u];
+    if (!inside_clip_shape(pixel, rect, radii, clip_meta.x)) {
       return false;
     }
   }
@@ -680,9 +687,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         contrast * inst.border_filter.z,
       ), body_tint);
       let light_facing = max(alignment, 0.0);
-      let alpha_floor = 1.0 - inst.outline.x;
+      let av_code = floor(inst.outline.x / 4096.0);
+      let border_alpha_variance = av_code / 2047.0;
+      let border_fresnel_strength = (inst.outline.x - av_code * 4096.0) / 1024.0;
+      let fb_code = floor(inst.outline.y / 1024.0);
+      let border_fresnel_brightness = fb_code / 256.0;
+      let border_fresnel_saturation = (inst.outline.y - fb_code * 1024.0) / 256.0;
+      let alpha_floor = 1.0 - border_alpha_variance;
       let stroke_brightness = mix(alpha_floor, 1.0, pow(light_facing, 2.0));
-      let stroke_tint = mix(inst.border_color.rgb, vec3f(1.0), pow(light_facing, 3.0) * inst.outline.y);
+      // The Fresnel target, identical to Jiv.Panel.frag: the rim's own gather driven to full value,
+      // saturated ABOUT WHITE by BorderFresnelFilter's Saturate(), scaled by its Brightness(), and
+      // blended back to white by how little chroma the gather actually has. This backend used to mix
+      // to a flat vec3f(1.0), which is only right over a neutral backdrop; over a colored one it drew
+      // a white rim where WebGL2 drew a hued one.
+      let gather = clamp(border_backdrop, vec3f(0.0), vec3f(1.0));
+      let gather_hi = max(max(gather.r, gather.g), gather.b);
+      let gather_lo = min(min(gather.r, gather.g), gather.b);
+      let hued_target = clamp(
+        mix(vec3f(1.0), gather / max(gather_hi, 0.001), border_fresnel_saturation),
+        vec3f(0.0), vec3f(1.0),
+      );
+      let rim_carry = smoothstep(0.0, 0.18, gather_hi - gather_lo) * smoothstep(0.015, 0.09, gather_hi);
+      let fresnel_target = clamp(
+        mix(vec3f(1.0), hued_target, rim_carry) * border_fresnel_brightness,
+        vec3f(0.0), vec3f(1.0),
+      );
+      let stroke_tint = mix(inst.border_color.rgb, fresnel_target, pow(light_facing, 3.0) * border_fresnel_strength);
       let border_rgb = mix(border_backdrop, stroke_tint, inst.border_color.a * stroke_brightness);
       result = vec4f(mix(result.rgb, border_rgb, border_base), max(result.a, border_base * fill_alpha));
     }

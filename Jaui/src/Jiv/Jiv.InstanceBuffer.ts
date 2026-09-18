@@ -32,7 +32,9 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 //          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur + borderFade packed)
 //   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, bulge)
-//   loc 14: a_Outline      (borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount)
+//   loc 14: a_Outline      (packed rim amounts, packed Fresnel grade, clipOffset, clipCount)
+//          .x  = _packOutlineAmounts(borderAlphaVariance, borderFresnelStrength)
+//          .y  = _packFresnelGrade(fresnelBrightness, fresnelSaturation)
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
 //   loc 15: a_BorderFilter (brightnessMul, saturationMul, contrastMul, lodOffset)
@@ -61,6 +63,39 @@ const _q = (v: number, scale: number, max: number): number => {
 // unpacks it the same way.
 const _packInnerBlurFade = (innerBlur: number, fadePx: number): number =>
   Math.round(Math.min(63.75, Math.max(0, fadePx)) * 4) * 1024 + Math.round(Math.min(1, Math.max(0, innerBlur)) * 1000);
+
+/** Both rim AMOUNTS in one lane. `BorderFresnelFilter` needed somewhere to live and
+ *  WebGL2 guarantees only 16 vertex attributes, every one of which is already spoken
+ *  for — so the two amounts that used to hold a_Outline.xy share .x, and .y carries
+ *  the Fresnel's grade.
+ *
+ *  BorderAlphaVariance is a true 0..1 fraction (the stroke's alpha floor is 1 - it),
+ *  so it gets 11 bits over [0,1]. BorderFresnelStrength is a mix WEIGHT and authors
+ *  deliberately push it past 1 to overshoot the target (Toggle.jss sits at 1.1), so
+ *  it gets 12 bits over [0,2] instead of being clamped to a range it does not have.
+ *  Steps are 1/2047 and 1/1024; both modulate an 8-bit output, so neither can be the
+ *  thing a gradient bands on. Max code 2047*4096 + 2048 = 8_386_560, exact in a
+ *  24-bit mantissa. The panel frag and Panel.wgsl both reverse this. */
+const _packOutlineAmounts = (alphaVariance: number, fresnelStrength: number): number =>
+  _qAmount(alphaVariance, 1, 2047) * 4096 + _qAmount(fresnelStrength, 2, 1024);
+
+/** Quantize an AMOUNT over [0, `ceiling`] to `codes` steps per unit-of-ceiling.
+ *  Unlike `_q` the identity here is 0 (absent), not 1, so a non-finite value turns
+ *  the effect OFF rather than to full. */
+const _qAmount = (v: number, ceiling: number, codes: number): number => {
+  const x = Number.isFinite(v) ? v : 0;
+  const max = Math.round(ceiling * codes);
+  const code = Math.round(x * codes);
+  return code < 0 ? 0 : code > max ? max : code;
+};
+
+/** The Fresnel highlight's grade in one lane: brightness*256 over [0,4) in the high
+ *  10 bits, saturation*256 over [0,4) in the low 10. Both are animated through the
+ *  StyleAnimator as plain scalars and only quantize HERE, at push, so a spring runs
+ *  at full float precision and lands on a 1/256 step. Max code 1023*1024+1023 =
+ *  1_048_575. The panel frag reverses this. */
+const _packFresnelGrade = (brightness: number, saturation: number): number =>
+  _q(brightness, 256, 1023) * 1024 + _q(saturation, 256, 1023);
 
 const _packFgGrade = (brightness: number, saturation: number, contrast: number): number => {
   const b = _q(brightness, 256, 1023);
@@ -294,8 +329,8 @@ export class JivInstanceBuffer {
     data[offset + 50] = style.BorderVariance;
     data[offset + 51] = style.Fillet;
 
-    data[offset + 52] = style.BorderAlphaVariance;
-    data[offset + 53] = style.BorderFresnelBrightness;
+    data[offset + 52] = _packOutlineAmounts(style.BorderAlphaVariance, style.BorderFresnelStrength);
+    data[offset + 53] = _packFresnelGrade(style.BorderFresnelBrightness, style.BorderFresnelSaturation);
     data[offset + 54] = clipOffset;
     data[offset + 55] = clipCount;
 

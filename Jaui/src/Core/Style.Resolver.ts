@@ -171,6 +171,10 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   const fg = ParseFilter(_resolveGradeArgs(ResolveTernary(s.Filter, ctx), ctx), 'foreground');
   const backdrop = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BackdropFilter, ctx), ctx));
   const border = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BorderFilter, ctx), ctx));
+  // The rim's Fresnel highlight grades separately from the rim's gather: the gather is
+  // the backdrop seen THROUGH the bevel, the highlight is what the lit face throws back.
+  // Brightness + Saturate only; the 'fresnel' zone throws on Blur()/Contrast().
+  const fresnel = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BorderFresnelFilter, ctx), ctx), 'fresnel');
   const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
   // A gradient-driven blur spectrum implies the ProgressiveBlur material and the
   // ramp axis on its own, so the author doesn't also need ProgressiveBlurDirection.
@@ -256,7 +260,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     EdgeLightBottom: Resolve(s.EdgeLightBottom, ctx, 'W'),
     BorderVariance: Resolve(s.BorderVariance, ctx, 'W'),
     BorderAlphaVariance: Resolve(s.BorderAlphaVariance, ctx, 'W'),
-    BorderFresnelBrightness: Resolve(s.BorderFresnelBrightness, ctx, 'W'),
+    BorderFresnelStrength: Resolve(s.BorderFresnelStrength, ctx, 'W'),
     InnerBlur: Resolve(s.InnerBlur, ctx, 'W'),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
@@ -290,6 +294,9 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderBrightness: border.Brightness,
     BorderSaturation: border.Saturation,
     BorderContrast: border.Contrast,
+
+    BorderFresnelBrightness: fresnel.Brightness,
+    BorderFresnelSaturation: fresnel.Saturation,
 
     ShadowColor: ParseColor(ResolveVars(ResolveTernary(s.ShadowColor, ctx), ctx)),
     ShadowBlur: Resolve(s.ShadowBlur, ctx, 'W'),

@@ -18,7 +18,11 @@ flat in vec4 v_Refraction;     // thickness, bezelWidth, refractionStrength, bez
 flat in vec4 v_Lighting;       // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
 flat in vec4 v_Specular;       // specIntensity, specSharpness, chromaticAberration, innerBlur
 flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance, bulge
-flat in vec4 v_Outline;        // borderAlphaVariance, borderFresnelBrightness, clipOffset, clipCount
+flat in vec4 v_Outline;        // packed rim amounts, packed Fresnel grade, clipOffset, clipCount
+                               // .x = alphaVariance*2047 * 4096 + fresnelStrength*1024
+                               // .y = fresnelBrightness*256 * 1024 + fresnelSaturation*256
+                               // (Jiv.InstanceBuffer._packOutlineAmounts / _packFresnelGrade. There is
+                               //  no 17th vertex attribute to be had: WebGL2 caps at 16.)
 flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lodOffset
 
 // Dual-filter blurred backdrop pyramid (base sigma = u_BaseFrostLod equivalent).
@@ -1301,9 +1305,18 @@ void main() {
 
             // Optional tint stroke from BorderColor — alpha controls strength
             // of the colored overlay on top of the refiltered backdrop.
-            // Directional brightness from BorderAlphaVariance / FresnelBrightness.
+            // Directional brightness from BorderAlphaVariance / BorderFresnelStrength. Both are
+            // amounts sharing v_Outline.x (11 bits over [0,1] and 12 over [0,2]); v_Outline.y
+            // carries the Fresnel's own grade (BorderFresnelFilter) at 10 bits each. Named
+            // `border*` because the body has its own, different fresnel in v_Lighting.w.
             float lightFacing = max(alignment, 0.0);
-            float alphaFloor = 1.0 - v_Outline.x;
+            float avCode = floor(v_Outline.x / 4096.0);
+            float borderAlphaVariance = avCode / 2047.0;
+            float borderFresnelStrength = (v_Outline.x - avCode * 4096.0) / 1024.0;
+            float fbCode = floor(v_Outline.y / 1024.0);
+            float borderFresnelBrightness = fbCode / 256.0;
+            float borderFresnelSaturation = (v_Outline.y - fbCode * 1024.0) / 256.0;
+            float alphaFloor = 1.0 - borderAlphaVariance;
             float strokeBrightness = mix(alphaFloor, 1.0, pow(lightFacing, 2.0));
             // ── What the Fresnel converges on ──
             // The lit side of a real bevel INTENSIFIES what is behind it; it does not turn white.
@@ -1313,8 +1326,8 @@ void main() {
             // and blended back to white by how little chroma the gather actually has.
             //
             // This is the same operation the wide rim glow already performs a hundred lines up
-            // (`rimVibrant`: saturate 1.6, brighten 1.25), which is why RIM_CHROMA_GAIN restates
-            // its 1.6 rather than inventing a number.
+            // (`rimVibrant`: saturate 1.6, brighten 1.25), which is where the DEFAULT Saturate(1.6)
+            // comes from rather than an invented number.
             //
             // It saturates about WHITE, not about luma, and that is the whole difference from the
             // attempt that was backed out. applyGrading's saturation is a lerp about luma, so any
@@ -1326,18 +1339,26 @@ void main() {
             // Over a neutral gather (grey, black, white) chroma is 0, carry is 0 and the target is
             // exactly vec3(1.0) — byte-identical to the old line, so every sheet calibrated over
             // black keeps its measured numbers.
-            const float RIM_CHROMA_GAIN = 1.6;
+            //
+            // Both knobs are authored PER CLASS as `BorderFresnelFilter: Brightness(b) Saturate(s)`.
+            // The gain was a hard-coded RIM_CHROMA_GAIN = 1.6 here until it became authorable, which
+            // meant every glass class in the app carried the same edge saturation and no sheet could
+            // see it, let alone change it. 1.6 is now only the default (Jiv.Defaults), so nothing
+            // moved when the constant left.
             vec3 gather = clamp(borderBackdrop, 0.0, 1.0);
             float gatherHi = max(max(gather.r, gather.g), gather.b);
             float gatherLo = min(min(gather.r, gather.g), gather.b);
             vec3 huedTarget = gather / max(gatherHi, 0.001);
-            huedTarget = clamp(mix(vec3(1.0), huedTarget, RIM_CHROMA_GAIN), 0.0, 1.0);
+            huedTarget = clamp(mix(vec3(1.0), huedTarget, borderFresnelSaturation), 0.0, 1.0);
             // Carry colour only where there IS colour, and only where the gather is bright enough
             // for its hue to be trustworthy — normalising a near-black pixel amplifies noise.
             float rimCarry = smoothstep(0.0, 0.18, gatherHi - gatherLo)
                            * smoothstep(0.015, 0.09, gatherHi);
-            vec3 fresnelTarget = mix(vec3(1.0), huedTarget, rimCarry);
-            vec3 strokeTint = mix(v_BorderColor.rgb, fresnelTarget, pow(lightFacing, 3.0) * v_Outline.y);
+            // Brightness() is the last word on the highlight's value, applied after its hue is
+            // settled. The target is pinned to full value by construction, so this is the only way
+            // to author a cooler flare (below 1) or burn a hued one back toward white (above 1).
+            vec3 fresnelTarget = clamp(mix(vec3(1.0), huedTarget, rimCarry) * borderFresnelBrightness, 0.0, 1.0);
+            vec3 strokeTint = mix(v_BorderColor.rgb, fresnelTarget, pow(lightFacing, 3.0) * borderFresnelStrength);
             vec3 borderRgb = mix(borderBackdrop, strokeTint, v_BorderColor.a * strokeBrightness);
 
             // Replace the panel result in the border zone (alpha-blended by mask).

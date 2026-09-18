@@ -85,7 +85,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['EdgeLightBottom',        s => s.EdgeLightBottom,              (s, v) => { s.EdgeLightBottom = v; }],
   ['BorderVariance',         s => s.BorderVariance,               (s, v) => { s.BorderVariance = v; }],
   ['BorderAlphaVariance',    s => s.BorderAlphaVariance,          (s, v) => { s.BorderAlphaVariance = v; }],
-  ['BorderFresnelBrightness',s => s.BorderFresnelBrightness,      (s, v) => { s.BorderFresnelBrightness = v; }],
+  ['BorderFresnelStrength',  s => s.BorderFresnelStrength,         (s, v) => { s.BorderFresnelStrength = v; }],
   ['InnerBlur',              s => s.InnerBlur,                    (s, v) => { s.InnerBlur = v; }],
 
   // Transform — per-channel (legacy compound; superseded by Visual*).
@@ -134,6 +134,10 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BorderFilter',           s => s.BorderBrightness,             (s, v) => { s.BorderBrightness = v; }],
   ['BorderFilter',           s => s.BorderSaturation,             (s, v) => { s.BorderSaturation = v; }],
   ['BorderFilter',           s => s.BorderContrast,               (s, v) => { s.BorderContrast = v; }],
+  // Fresnel-highlight grade — bucket `BorderFresnelFilter`. Springs as plain scalars;
+  // the quantization into a_Outline.y happens per-frame at push, not here.
+  ['BorderFresnelFilter',    s => s.BorderFresnelBrightness,      (s, v) => { s.BorderFresnelBrightness = v; }],
+  ['BorderFresnelFilter',    s => s.BorderFresnelSaturation,      (s, v) => { s.BorderFresnelSaturation = v; }],
 
   // Shadow
   ['ShadowColor',            s => s.ShadowColor.R,                (s, v) => { s.ShadowColor.R = v; }],

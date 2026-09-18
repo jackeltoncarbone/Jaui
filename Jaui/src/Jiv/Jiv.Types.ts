@@ -176,6 +176,26 @@ export interface JivStyle {
    *  rim region only. Per-box. `Blur(len)` is the LOD octave offset vs the
    *  panel face (negative = sharper rim, positive = softer). */
   BorderFilter: string;
+  /** Grade on the border's FRESNEL HIGHLIGHT — the lit-side flare the rim throws
+   *  where it faces `LightAngle`. A filter, like its three siblings, but over the
+   *  highlight's color rather than the zone's gather:
+   *
+   *    BorderFresnelFilter: Brightness(1.1) Saturate(1.6)
+   *
+   *  • `Saturate(x)` — chroma gain ABOUT WHITE. The highlight's hue is the border
+   *    gather's own, driven to full value; `x` is how far past that hue it pushes.
+   *    1 = the gather's hue exactly, 0 = plain white, >1 = more saturated than the
+   *    thing it reflects (what a real bevel does). Engine default 1.6.
+   *  • `Brightness(x)` — a final multiplier on the highlight's value. 1 = pinned to
+   *    full value (the default); below 1 dims the flare, above 1 burns it toward
+   *    white. Identity 1.
+   *
+   *  `Blur()` and `Contrast()` are REFUSED here and throw — see Filter.Parse's
+   *  `'fresnel'` zone for why neither has a meaning on a normalized highlight.
+   *  HOW MUCH of the highlight there is at all is `BorderFresnelStrength`; this
+   *  property only says what color it is, exactly as `BorderColor.a` and
+   *  `BorderFilter` already split amount from grade for the rim itself. */
+  BorderFresnelFilter: string;
   /** Cascade barrier for the foreground `Filter`. `true` stops an ancestor's
    *  Filter grade from folding into this element + its subtree (CSS
    *  `isolation: isolate`). Default `false`. */
@@ -216,7 +236,16 @@ export interface JivStyle {
   // Shape-driven variables
   BorderVariance: string;
   BorderAlphaVariance: string;
-  BorderFresnelBrightness: string;
+  /** How much Fresnel highlight the border carries on its lit side, 0..1. 0 = the
+   *  stroke is its `BorderColor` all the way round; 1 = the lit side reaches the
+   *  full highlight. Falls off as `pow(lightFacing, 3)` away from `LightAngle`, so
+   *  even at 1 only the facing arc burns. Default 0, which is what keeps a plain
+   *  border a plain uniform stroke. The highlight's COLOR is `BorderFresnelFilter`.
+   *
+   *  This was spelled `BorderFresnelBrightness` until the Fresnel got a filter, and
+   *  that name was the bug: it is an amount, never a brightness, and a request to
+   *  saturate the rim kept being answered with it. */
+  BorderFresnelStrength: string;
   InnerBlur: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.
@@ -352,7 +381,8 @@ export interface JivRenderStyle {
   EdgeLightBottom: number;
   BorderVariance: number;
   BorderAlphaVariance: number;
-  BorderFresnelBrightness: number;
+  /** Resolved `BorderFresnelStrength` — the 0..1 amount of the border's Fresnel. */
+  BorderFresnelStrength: number;
   InnerBlur: number;
 
   Transform: Transform;
@@ -387,6 +417,12 @@ export interface JivRenderStyle {
   BorderBrightness: number;
   BorderSaturation: number;
   BorderContrast: number;
+
+  /** Resolved `BorderFresnelFilter` grade over the rim's Fresnel highlight.
+   *  Brightness is a final value multiplier (identity 1); Saturation is the
+   *  highlight's chroma gain about white (engine default 1.6). */
+  BorderFresnelBrightness: number;
+  BorderFresnelSaturation: number;
 
   ShadowColor: Color;
   ShadowBlur: number;
