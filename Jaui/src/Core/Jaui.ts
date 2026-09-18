@@ -9,6 +9,7 @@ import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
 import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intrinsic';
 import { TextCache } from '../Text/Text.Cache';
+import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
 import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
@@ -156,6 +157,16 @@ export class Canvas implements DirtyTracker {
   private _jssVars: Map<string, string> = new Map();
   private _textCache!: TextCache;
   private _imageCache!: ImageCache;
+
+  // ── First-frame ledger ──
+  // Written once each on the way to the first present and read by the marks in `_tickInner`.
+  // `_ffPresented` is the latch: it flips at the present, which is also where the first-frame hook
+  // fires, so it is true for the same instant the app's `jaui:first-frame` mark names.
+  private _ffPresented = false;
+  private _ffTicked = false;
+  /** Ticks that bailed on a 0x0 canvas before the bridge delivered a real size. A non-zero count
+   *  here means the first frame was waiting on a `resize` message, not on the engine. */
+  private _ffZeroSizeTicks = 0;
 
   /** Public image cache — load images/SVGs here, reference them from Jivs. */
   get Images(): ImageCache { return this._imageCache; }
@@ -1013,7 +1024,22 @@ export class Canvas implements DirtyTracker {
     // texSubImage2D (whose upload path implicitly checks the current
     // framebuffer's completeness). Skip the entire frame at zero size —
     // the next rAF after the first resize delivery picks up cleanly.
-    if (this._width === 0 || this._height === 0) return false;
+    if (this._width === 0 || this._height === 0) {
+      if (!this._ffPresented) this._ffZeroSizeTicks++;
+      return false;
+    }
+
+    // ── First-frame ledger ──────────────────────────────────────────────────
+    // Nobody could see inside the boot gap: the app's tracer went straight from
+    // `jaui:worker-ready` to `jaui:first-frame` with two seconds of nothing between them, so the
+    // term that owned those two seconds was a guess. `ff` is true for exactly the ticks up to and
+    // including the first present, and it turns on the phase timers the HUD already owns — so the
+    // marks below cost a released build nothing and report the same numbers `?wkr-jaui-prof` does.
+    const ff = !this._ffPresented;
+    if (ff && !this._ffTicked) {
+      this._ffTicked = true;
+      JTrace(`jaui:tick:first zero-size-ticks=${this._ffZeroSizeTicks}`);
+    }
 
     // Feed the HUD BEFORE we overwrite _lastTime — the HUD uses it to derive
     // the rAF-to-rAF delta (which, on iOS, includes time the main thread spent
@@ -1036,7 +1062,7 @@ export class Canvas implements DirtyTracker {
     // Phase timing — active when the debug HUD is on OR `?wkr-jaui-prof` was
     // set. Gate reads at each boundary rather than branching inside hot loops;
     // performance.now() is cheap but we skip it entirely in release.
-    const hud = this._debugHud !== null || this._consoleProfilingEnabled;
+    const hud = this._debugHud !== null || this._consoleProfilingEnabled || ff;
     let t0 = 0, tDirtyEnd = 0, tLayoutEnd = 0, tTextEnd = 0;
     if (hud) t0 = performance.now();
 
@@ -1059,10 +1085,20 @@ export class Canvas implements DirtyTracker {
       // tree is all-Jivs (Root is a Jiv, AddChild only mounts Jivs), so the
       // Element-typed path back from Parent walks safely casts to Jiv at
       // these consumers.
+      if (ff) JTrace(`jaui:layout:start nodes=${_countNodes(scopedRoot)}`);
+      const tCascade = ff ? performance.now() : 0;
       CascadePointScale(scopedRoot, this._viewport(), this._jssVars);
+      const tScale = ff ? performance.now() : 0;
       this._measureDirtyText(scopedRoot as Jiv);
+      const tMeasure = ff ? performance.now() : 0;
       ComputeIntrinsicSizes(scopedRoot, this._viewport(), this._jssVars);
+      const tIntrinsic = ff ? performance.now() : 0;
       this._solveAndAnimate(scopedRoot);
+      if (ff) {
+        const tSolve = performance.now();
+        JTrace(`jaui:layout:end scale=${JMs(tScale - tCascade)} measure=${JMs(tMeasure - tScale)}`
+          + ` intrinsic=${JMs(tIntrinsic - tMeasure)} solve=${JMs(tSolve - tIntrinsic)} ms`);
+      }
       this._clearDirty(scopedRoot as Jiv);
       // The Layout flag was bubbled to the root by MarkLayoutDirty so the
       // O(1) gate above could see it. After a scoped solve, the bubble path
@@ -1135,7 +1171,22 @@ export class Canvas implements DirtyTracker {
     const shouldRender = this._renderHold > 0 || time < this._shadowSettleUntil;
     if (shouldRender) {
       if (this._renderHold > 0) this._renderHold--;
+      if (ff) JTrace('jaui:render:start');
+      const tRender = ff ? performance.now() : 0;
       this._render(dt);
+      if (ff && this._ffPresented) {
+        // `_render` sets the latch at the present, beside the first-frame hook — `_resize` renders
+        // inline as well, so the tick is not the only way pixels can arrive. This mark lands just
+        // after that present and carries what the walk actually drew.
+        const c = this._counts;
+        const glyphs = this._textCache.RasterCount;
+        JTrace(`jaui:render:end ${JMs(performance.now() - tRender)}ms`
+          + ` panels=${c.Panels} glass=${c.Glass} text=${c.Text} images=${c.Image} pblur=${c.PBlur}`);
+        JTrace(`jaui:glyphs:first n=${glyphs} ${JMs(this._textCache.RasterMs)}ms`);
+        // Images never gate a frame — a decode that finishes asks for the next one. These say how
+        // many were still out when the first frame painted, so that stays a reading, not a claim.
+        JTrace(`jaui:images:at-first-frame inflight=${this._imageCache.InFlight} queued=${this._imageCache.Queued}`);
+      }
       // Debug layout overlay — rainbow 1px outlines on every Jiv. Enabled by
       // `?debug-layout`; no cost when disabled.
       if (this._debugLayout) this._drawDebugLayout();
@@ -2436,6 +2487,7 @@ export class Canvas implements DirtyTracker {
     // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
     if (!this._headless) {
       r.PresentScene();
+      this._ffPresented = true;
       if (_firstFrameHook) { const hook = _firstFrameHook; _firstFrameHook = null; hook(); }
       // Screenshot capture: read the freshly-presented swap chain BEFORE the
       // transient discard below (the back buffer isn't preserved between frames).
@@ -3327,6 +3379,12 @@ export class Canvas implements DirtyTracker {
     // of this — the clientWidth reads — and should be addressed by
     // deferring size reads on first call, not by skipping the render.
     if (this._running) {
+      // On a cold boot this inline path is very often what paints FIRST: the size settles after the
+      // loop has started, so the resize's own solve+render beats the next rAF to the punch. Name it,
+      // or the first frame appears to arrive from nowhere.
+      const ff = !this._ffPresented;
+      const tResize = ff ? performance.now() : 0;
+      if (ff) JTrace(`jaui:resize:render ${Math.round(this._width)}x${Math.round(this._height)}`);
       if ((this.Root.Dirty & (DirtyFlag.Layout | DirtyFlag.Text)) !== 0) {
         CascadePointScale(this.Root, this._viewport(), this._jssVars);
         this._measureDirtyText(this.Root);
@@ -3340,6 +3398,12 @@ export class Canvas implements DirtyTracker {
       }
       this._processTextTransitions(this.Root);
       this._render(0);
+      if (ff && this._ffPresented) {
+        const c = this._counts;
+        JTrace(`jaui:resize:painted ${JMs(performance.now() - tResize)}ms`
+          + ` panels=${c.Panels} glass=${c.Glass} text=${c.Text} glyphs=${this._textCache.RasterCount}`
+          + ` rasterms=${JMs(this._textCache.RasterMs)}`);
+      }
     }
   };
 
@@ -4386,6 +4450,15 @@ export class Canvas implements DirtyTracker {
   }
 }
 
+/** Nodes in a subtree. First-frame instrumentation only — it says how big the tree the first
+ *  layout solved actually was, which is the difference between "layout is slow" and "the page is
+ *  big". Never called on a steady-state frame. */
+const _countNodes = (node: JauiElement): number => {
+  let n = 1;
+  for (const child of node.Children) n += _countNodes(child);
+  return n;
+};
+
 /**
  * Jaui — top-level app instance. Thin facade over `Canvas` that owns the
  * renderer creation and exposes the user-facing surface as a single
@@ -4539,6 +4612,9 @@ export { THEME_DARK_VAR, THEME_LIGHT_VAR } from './Style.Resolver';
 export { ParseSvgElement, ParseSvgString, FlatnessTol2 } from '../Svg/Svg.Parse';
 export { BuildVectorPaint, type SvgVectorPaint, type SvgFillShape, type SvgStrokeShape, type SvgTextRun } from '../Svg/Svg.VectorPaint';
 export type { ParsedSvg, SvgNode, SvgPathNode, SvgTextNode, SvgContour, SvgFillRule } from '../Svg/Svg.Types';
+
+// Boot tracing — the host installs a sink and every engine mark lands on its timeline.
+export { OnJauiTrace, JauiTracing, type JauiTraceSink } from '../Diagnostics/Jaui.Trace';
 
 // Worker boot — apps call CheckBrowserSupport() before mounting Angular.
 export { CheckBrowserSupport, type BrowserSupportResult } from '../Worker/Browser.Support';

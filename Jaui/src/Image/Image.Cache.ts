@@ -136,6 +136,12 @@ export class ImageCache {
     }
   };
 
+  /** Fetches running, and fetches waiting behind the concurrency cap. Read by the first-frame trace:
+   *  decoding is fully async — a finished bitmap asks for a frame, nothing waits on one — and these
+   *  two numbers are what turn that claim into a reading. */
+  get InFlight(): number { return this._inFlight; }
+  get Queued(): number { return this._queue.length; }
+
   /** Pull the next queued URL (FIFO) and start its fetch. Called whenever
    *  an in-flight load resolves (success OR failure). */
   private _drainQueue = (): void => {

@@ -8,7 +8,8 @@
  */
 
 import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop } from './Renderer';
-import { ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
+import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
+import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer } from './Framebuffer';
 import { BlurPass } from './BlurPass';
 import { QuadGeometry } from './Geometry.Quad';
@@ -450,7 +451,9 @@ export class WebGL2Renderer implements Renderer {
     }) as WebGL2RenderingContext | null;
     if (!gl) throw new Error('[Jaui] WebGL2 not supported');
     this._gl = gl;
-    // A restored context re-runs Init: the adaptive shadow state belonged to the lost one.
+    // A restored context re-runs Init: the adaptive shadow state belonged to the lost one. The
+    // batch below rebuilds the program; these clear what the dead context owned.
+    this._pendingShaders = null;
     this._shadowShader = null;
     this._shadowLocs = null;
     this._shadowStateTex = null;
@@ -469,7 +472,6 @@ export class WebGL2Renderer implements Renderer {
     // gradient. NOTE: this trades alpha to 2-bit — fine for an opaque scene
     // (the canvas fills its background); revisit if alpha precision matters.
     this._sceneFbo = new Framebuffer(gl, { depth: true, highPrecision: true });
-    this._blur = new BlurPass(gl);
 
     // Probe for GPU timer-query support. The extension object exposes the
     // two enums we need; if it's missing, _timerExt stays null and
@@ -479,14 +481,30 @@ export class WebGL2Renderer implements Renderer {
       this._timerExt = timerExt;
     }
 
-    this._initPanelShader(gl);
-    this._initTextShader(gl);
-    this._initStrokeShader(gl);
-    this._initSvgFillShader(gl);
-    this._initSvgStrokeShader(gl);
-    this._initBlitShader(gl);
-    this._initClipMaskShader(gl);
-    this._initProgBlurShader(gl);
+    // ── One compile batch for every program the engine can draw with ──
+    // Thirteen programs stand between a cold tab and its first pixel. Compiled one at a time —
+    // compile, ask, link, ask — they run the driver's compiler pool one deep and the waits add up
+    // in a line; issued together they overlap, and the whole set costs about what its slowest
+    // member costs. See `ShaderBatch` for the named source (KHR_parallel_shader_compile). Nothing
+    // about WHAT is compiled changes: same sources, same defines, same programs.
+    //
+    // ISSUED HERE, COLLECTED AT THE FIRST FRAME. Init does not wait: see `_ensureShaders`. The
+    // caller posts `ready` the moment Init returns, so everything downstream of ready that does not
+    // touch GL — the whole backlogged jiv tree, its text measure, its layout solve — runs beside the
+    // compile instead of behind it.
+    const batch = new ShaderBatch(gl);
+    this._blur = new BlurPass(gl, batch);
+    this._compilePanelShader(batch);
+    this._compileTextShader(batch);
+    this._compileStrokeShader(batch);
+    this._compileSvgFillShader(batch);
+    this._compileSvgStrokeShader(batch);
+    this._compileBlitShader(batch);
+    this._compileClipMaskShader(batch);
+    this._compileProgBlurShader(batch);
+    this._compileShadowBackdropShader(batch);
+    this._pendingShaders = batch;
+    JTrace(`jaui:shaders:issued n=${batch.Count} ${JMs(batch.IssueMs)}ms`);
 
     // 1x1 black placeholder texture
     const dummy = gl.createTexture();
@@ -588,9 +606,44 @@ export class WebGL2Renderer implements Renderer {
     this._sceneFbo.Resize(width, height);
   };
 
+  // ── Shader collection ─────────────────────────────────────────────────────
+  // Programs `Init` handed the driver and has not collected. Init returns WITHOUT waiting for them,
+  // which is the point: the worker posts `ready` immediately, main drains the whole backlogged jiv
+  // tree, and the tree build, the text measure and the layout solve — none of which touch GL —
+  // all run while the driver's compiler pool works. They used to run AFTER it, in series, for no
+  // reason other than that Init happened to wait.
+  //
+  // This is the one wait, taken at the top of the first frame: the first moment a program is
+  // genuinely needed. `BeginFrame` is the choke point because every draw in the engine is inside a
+  // frame and every frame starts there.
+  private _pendingShaders: ShaderBatch | null = null;
+
+  private _ensureShaders = (): void => {
+    const batch = this._pendingShaders;
+    if (!batch) return;
+    this._pendingShaders = null;
+    batch.Resolve();
+    // A wait near zero means the compile finished behind the tree build and cost the frame nothing.
+    JTrace(`jaui:shaders:linked n=${batch.Count} wait=${JMs(batch.ResolveMs)}ms`);
+    const gl = this._gl;
+    this._blur.WireLocations();
+    this._wirePanelShader(gl);
+    this._wireTextShader(gl);
+    this._wireStrokeShader(gl);
+    this._wireSvgFillShader(gl);
+    this._wireSvgStrokeShader(gl);
+    this._wireBlitShader(gl);
+    this._wireClipMaskShader(gl);
+    this._wireProgBlurShader(gl);
+    this._wireShadowBackdrop(gl);
+  };
+
   // ── Per-Frame ──
 
   BeginFrame = (): void => {
+    // Before the GPU timer starts: collecting the boot batch is CPU spent waiting on the driver,
+    // and folding it into the frame's GPU reading would make the first frame lie about itself.
+    this._ensureShaders();
     this._clipLastFloatsUploaded = 0;
     // Start a fresh GPU timer query for this frame. If the extension
     // isn't available or query creation fails silently, _timerActive stays
@@ -1080,7 +1133,6 @@ export class WebGL2Renderer implements Renderer {
     dtSeconds: number,
   ): number => {
     const gl = this._gl;
-    if (!this._shadowShader) this._initShadowBackdrop(gl);
     let entry = this._shadowSlots.get(key);
     const fresh = entry === undefined;
     if (!entry) {
@@ -1137,9 +1189,19 @@ export class WebGL2Renderer implements Renderer {
     this._shadowFrame++;
   };
 
-  private _initShadowBackdrop = (gl: WebGL2RenderingContext): void => {
-    const program = ShaderCompiler.Compile(gl, BLIT_VERT, shadowBackdropFragSrc);
-    this._shadowShader = program;
+  /** The adaptive-shadow probe used to compile on its first draw — which is the FIRST FRAME on
+   *  any page with a shadowed surface, so a cold tab paid a full synchronous compile-and-link
+   *  after everything else was already waiting on it. It joins the boot batch instead, where it
+   *  overlaps the other twelve and costs the first frame nothing. A page that never measures a
+   *  shadow now carries one more linked program it does not draw with, which is a few hundred
+   *  kilobytes of driver state, not time. */
+  private _compileShadowBackdropShader = (batch: ShaderBatch): void => {
+    this._shadowShader = batch.Add(BLIT_VERT, shadowBackdropFragSrc);
+  };
+
+  private _wireShadowBackdrop = (gl: WebGL2RenderingContext): void => {
+    const program = this._shadowShader;
+    if (!program) return;
     this._shadowLocs = {
       scene: gl.getUniformLocation(program.Program, 'u_Scene'),
       backdrop: gl.getUniformLocation(program.Program, 'u_Backdrop'),
@@ -1161,6 +1223,10 @@ export class WebGL2Renderer implements Renderer {
     this._shadowStateFbo = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._shadowStateFbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    // Hand the binding back. The lazy path this replaced ran mid-draw, where the very next line
+    // rebound the scene target; at Init nothing follows it, and leaving a non-default framebuffer
+    // bound out of boot is how a first frame ends up rendering into the wrong attachment.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     for (let slot = SHADOW_STATE_SLOTS - 1; slot >= 0; slot--) this._shadowFreeSlots.push(slot);
   };
 
@@ -1466,7 +1532,7 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Shader Initialization ─────────────────────────────────────────────────
 
-  private _initPanelShader = (gl: WebGL2RenderingContext): void => {
+  private _compilePanelShader = (batch: ShaderBatch): void => {
     // Two compiled variants from one source. The `materialType` local in
     // Jiv.Panel.frag is a compile-time constant when either define is set,
     // so the GLSL dead-code-elimination strips every `if (materialType ==
@@ -1474,9 +1540,11 @@ export class WebGL2Renderer implements Renderer {
     // glass panels (~60% of screen pixels on Home) now run a shader with
     // no backdrop sampling, no refraction, no rim, no specular — just
     // fill + shadow + border.
-    this._panelShaderGlass = ShaderCompiler.Compile(gl, panelVertSrc, panelFragSrc, { MATERIAL_GLASS: true });
-    this._panelShaderNone  = ShaderCompiler.Compile(gl, panelVertSrc, panelFragSrc, { MATERIAL_NONE:  true });
+    this._panelShaderGlass = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_GLASS: true });
+    this._panelShaderNone  = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_NONE:  true });
+  };
 
+  private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
     this._panelLocsGlass = _extractPanelLocs(gl, this._panelShaderGlass.Program);
     this._panelLocsNone  = _extractPanelLocs(gl, this._panelShaderNone.Program);
 
@@ -1488,9 +1556,11 @@ export class WebGL2Renderer implements Renderer {
     this._panelVao = this._createInstancedVao(gl, this._panelInstanceBuffer, PANEL_ATTR_COUNT, PANEL_BYTES_PER_INSTANCE);
   };
 
-  private _initTextShader = (gl: WebGL2RenderingContext): void => {
-    this._textShader = ShaderCompiler.Compile(gl, textVertSrc, textFragSrc);
+  private _compileTextShader = (batch: ShaderBatch): void => {
+    this._textShader = batch.Add(textVertSrc, textFragSrc);
+  };
 
+  private _wireTextShader = (gl: WebGL2RenderingContext): void => {
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jaui] Failed to create text instance buffer');
     this._textInstanceBuffer = buf;
@@ -1505,8 +1575,11 @@ export class WebGL2Renderer implements Renderer {
     this._textVao = this._createInstancedVao(gl, this._textInstanceBuffer, TEXT_ATTR_COUNT, TEXT_BYTES_PER_INSTANCE);
   };
 
-  private _initStrokeShader = (gl: WebGL2RenderingContext): void => {
-    this._strokeShader = ShaderCompiler.Compile(gl, strokeVertSrc, strokeFragSrc);
+  private _compileStrokeShader = (batch: ShaderBatch): void => {
+    this._strokeShader = batch.Add(strokeVertSrc, strokeFragSrc);
+  };
+
+  private _wireStrokeShader = (gl: WebGL2RenderingContext): void => {
     this._strokeLocs = _extractStrokeLocs(gl, this._strokeShader.Program);
 
     const buf = gl.createBuffer();
@@ -1517,8 +1590,11 @@ export class WebGL2Renderer implements Renderer {
     this._strokeVao = this._createInstancedVao(gl, this._strokeInstanceBuffer, STROKE_ATTR_COUNT, STROKE_BYTES_PER_INSTANCE);
   };
 
-  private _initSvgFillShader = (gl: WebGL2RenderingContext): void => {
-    this._svgFillShader = ShaderCompiler.Compile(gl, svgFillVertSrc, svgFillFragSrc);
+  private _compileSvgFillShader = (batch: ShaderBatch): void => {
+    this._svgFillShader = batch.Add(svgFillVertSrc, svgFillFragSrc);
+  };
+
+  private _wireSvgFillShader = (gl: WebGL2RenderingContext): void => {
     const p = this._svgFillShader.Program;
     this._svgFillLocs = {
       resolution: gl.getUniformLocation(p, 'u_Resolution'),
@@ -1540,8 +1616,11 @@ export class WebGL2Renderer implements Renderer {
     gl.bindVertexArray(null);
   };
 
-  private _initSvgStrokeShader = (gl: WebGL2RenderingContext): void => {
-    this._svgStrokeShader = ShaderCompiler.Compile(gl, svgStrokeVertSrc, svgStrokeFragSrc);
+  private _compileSvgStrokeShader = (batch: ShaderBatch): void => {
+    this._svgStrokeShader = batch.Add(svgStrokeVertSrc, svgStrokeFragSrc);
+  };
+
+  private _wireSvgStrokeShader = (gl: WebGL2RenderingContext): void => {
     const p = this._svgStrokeShader.Program;
     this._svgStrokeLocs = {
       resolution: gl.getUniformLocation(p, 'u_Resolution'),
@@ -1592,8 +1671,11 @@ export class WebGL2Renderer implements Renderer {
     return vao;
   };
 
-  private _initBlitShader = (gl: WebGL2RenderingContext): void => {
-    this._blitShader = ShaderCompiler.Compile(gl, BLIT_VERT, BLIT_FRAG);
+  private _compileBlitShader = (batch: ShaderBatch): void => {
+    this._blitShader = batch.Add(BLIT_VERT, BLIT_FRAG);
+  };
+
+  private _wireBlitShader = (gl: WebGL2RenderingContext): void => {
     this._blitTexLoc = gl.getUniformLocation(this._blitShader.Program, 'u_Tex');
   };
 
@@ -1603,8 +1685,11 @@ export class WebGL2Renderer implements Renderer {
   private _clipMaskRadiusLoc!: WebGLUniformLocation | null;
   private _clipMaskSmoothnessLoc!: WebGLUniformLocation | null;
   private _clipMaskResLoc!: WebGLUniformLocation | null;
-  private _initClipMaskShader = (gl: WebGL2RenderingContext): void => {
-    this._clipMaskShader = ShaderCompiler.Compile(gl, CLIP_MASK_VERT, CLIP_MASK_FRAG);
+  private _compileClipMaskShader = (batch: ShaderBatch): void => {
+    this._clipMaskShader = batch.Add(CLIP_MASK_VERT, CLIP_MASK_FRAG);
+  };
+
+  private _wireClipMaskShader = (gl: WebGL2RenderingContext): void => {
     const p = this._clipMaskShader.Program;
     this._clipMaskDrawRectLoc = gl.getUniformLocation(p, 'u_DrawRect');
     this._clipMaskClipRectLoc = gl.getUniformLocation(p, 'u_ClipRect');
@@ -1635,8 +1720,11 @@ export class WebGL2Renderer implements Renderer {
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
   };
 
-  private _initProgBlurShader = (gl: WebGL2RenderingContext): void => {
-    this._progBlurShader = ShaderCompiler.Compile(gl, PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG);
+  private _compileProgBlurShader = (batch: ShaderBatch): void => {
+    this._progBlurShader = batch.Add(PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG);
+  };
+
+  private _wireProgBlurShader = (gl: WebGL2RenderingContext): void => {
     const p = this._progBlurShader.Program;
     this._progBlurLocs = {
       resolution: gl.getUniformLocation(p, 'u_Resolution'),

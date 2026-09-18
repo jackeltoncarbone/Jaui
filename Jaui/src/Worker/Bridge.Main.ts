@@ -15,6 +15,7 @@
  * its bridge-routed properties; they never see message types.
  */
 
+import { JTrace } from '../Diagnostics/Jaui.Trace';
 import type {
   M2W,
   W2M,
@@ -276,6 +277,8 @@ export class MainBridge {
     const dpr = window.devicePixelRatio || 1;
     const isCoarse = !!window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
 
+    this._lastPostedSize = { W: Math.round(rect.width), H: Math.round(rect.height) };
+    JTrace(`worker:init-posted ${Math.round(rect.width)}x${Math.round(rect.height)}`);
     worker.postMessage(
       {
         T: 'init',
@@ -289,6 +292,9 @@ export class MainBridge {
       },
       [offscreen as unknown as Transferable],
     );
+    // Start looking for the real size NOW, not after ready: the poll's settle frames run while the
+    // worker compiles shaders instead of after it.
+    this._settleSize();
   };
 
   private _onMessage = (msg: unknown): void => {
@@ -407,38 +413,54 @@ export class MainBridge {
         }
       }
     }
-    // Defensive rebase against the canvas's actually-rendered size. _sendInit
-    // snapshots `getBoundingClientRect()` synchronously in the MainBridge
-    // constructor — that fires while Angular is still in its initial CD pass,
-    // so the canvas's parent-relative percent dimensions may not have flowed
-    // through layout yet. Pre-worker-migration this was hidden by the slow
-    // Jaui worker boot (~6 seconds of import + parse gave the page time to
-    // settle, and the ResizeObserver's first callback corrected the dims
-    // before the worker became ready). Post-Reality-lazy-load the worker is
-    // ready in ~500ms — well before ResizeObserver fires its first delta —
-    // and if the canvas's CSS size never *changes* after init the RO never
-    // fires at all, so the worker stays at the stale init dims and the page
-    // renders as if the viewport were the size captured at construction.
-    // One post-ready `resize` with the live `getBoundingClientRect` brings
-    // the worker to the actually-rendered size — cheap (single message) and
-    // idempotent (a same-size RO callback would just no-op the second one).
-    // The init rect is snapshotted before layout flows, so it can be 0 or
-      // stale; if the canvas size then settles WITHOUT changing, the RO never
-      // fires and the OffscreenCanvas stays at its transferred 300x150 default.
-      // Poll until the live rect is real and matches twice, then post it once.
-      let lastW = 0, lastH = 0, tries = 0;
-      const settleSize = (): void => {
-        const rect = this.Canvas.getBoundingClientRect();
-        const w = Math.round(rect.width), h = Math.round(rect.height);
-        if (w > 0 && h > 0 && w === lastW && h === lastH) {
-          this.Worker!.postMessage({ T: 'resize', Width: rect.width, Height: rect.height });
-          return;
-        }
-        lastW = w; lastH = h;
-        if (tries++ < 20) requestAnimationFrame(settleSize);
-        else if (w > 0 && h > 0) this.Worker!.postMessage({ T: 'resize', Width: rect.width, Height: rect.height });
-      };
-      requestAnimationFrame(settleSize);
+    // Defensive rebase against the canvas's actually-rendered size. The first settle ran from
+    // `_sendInit` and its answer is already in the backlog drained above; this second pass catches
+    // a layout that only finished while the worker was booting, and dedupes to nothing when the
+    // first pass already had it right. See `_settleSize` for why both passes exist.
+    this._settleSize();
+  };
+
+  /** The last size the worker has been told about — the init rect, then whatever a settle posted.
+   *  A repost of the same size is not free on the far side: `Canvas._resize` re-solves the whole
+   *  tree and renders inline, so an identical resize buys a full redundant frame. */
+  private _lastPostedSize: { W: number; H: number } | null = null;
+
+  /**
+   * Post the canvas's real CSS size, once it has one.
+   *
+   * `_sendInit` snapshots `getBoundingClientRect()` in the constructor — while Angular is still in
+   * its first CD pass — so the rect can be 0 or stale, and the canvas's CSS size may then settle
+   * WITHOUT ever changing, so the ResizeObserver never fires to correct it. The worker at a size of
+   * 0 skips EVERY frame (`Canvas._tickInner`'s zero-size gate), so until this lands there are no
+   * pixels at all.
+   *
+   * Run from construction as well as from ready. The poll needs the live rect to hold still across
+   * two frames, and doing that only after `ready` put those two frames in SERIES behind the whole
+   * worker boot — shaders, context, registry — when they could have run alongside it. Posting from
+   * construction backlogs the size (`PostMessage` holds messages until ready), so the worker's very
+   * first frame after ready already has a size to draw at. Both passes dedupe against
+   * `_lastPostedSize`, so the common case where the init rect was already right costs one message
+   * and no redundant solve.
+   */
+  private _settleSize = (): void => {
+    if (typeof requestAnimationFrame !== 'function') return;
+    let lastW = 0, lastH = 0, tries = 0;
+    const post = (rect: DOMRect): void => {
+      const w = Math.round(rect.width), h = Math.round(rect.height);
+      if (this._lastPostedSize && this._lastPostedSize.W === w && this._lastPostedSize.H === h) return;
+      this._lastPostedSize = { W: w, H: h };
+      JTrace(`worker:size-settled ${w}x${h}`);
+      this.PostMessage({ T: 'resize', Width: rect.width, Height: rect.height });
+    };
+    const step = (): void => {
+      const rect = this.Canvas.getBoundingClientRect();
+      const w = Math.round(rect.width), h = Math.round(rect.height);
+      if (w > 0 && h > 0 && w === lastW && h === lastH) { post(rect); return; }
+      lastW = w; lastH = h;
+      if (tries++ < 20) requestAnimationFrame(step);
+      else if (w > 0 && h > 0) post(rect);
+    };
+    requestAnimationFrame(step);
   };
 
   private _onCursor = (m: W2M_Cursor): void => {

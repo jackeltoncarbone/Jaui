@@ -79,6 +79,16 @@ export class TextCache {
   get Size(): number { return this._cache.size; }
   get Atlas(): GpuTextureHandle | null { return this._atlas; }
 
+  // ── Raster meter ──
+  // How many word rasters this cache has cut, and what they cost. The first frame's reading is the
+  // glyph-atlas term of the boot gap: every word on screen is measured, drawn to a 2D canvas and
+  // uploaded before anything paints, and until this existed that cost was indistinguishable from
+  // layout's. Only a cache MISS is timed, so a settled page pays nothing.
+  private _rasterCount = 0;
+  private _rasterMs = 0;
+  get RasterCount(): number { return this._rasterCount; }
+  get RasterMs(): number { return this._rasterMs; }
+
   BeginFrame = (): void => {
     this._frameCounter++;
   };
@@ -91,8 +101,11 @@ export class TextCache {
       return existing;
     }
 
+    const t0 = performance.now();
     const measurement = MeasureText(content, style, maxWidth);
     const entry = this._rasterize(content, style, measurement, maxWidth, dpr);
+    this._rasterCount++;
+    this._rasterMs += performance.now() - t0;
     this._cache.set(key, entry);
 
     if (this._cache.size > this._maxEntries) this._evict();

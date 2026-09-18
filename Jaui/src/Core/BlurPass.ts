@@ -1,4 +1,4 @@
-import { ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
+import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
 import { QuadGeometry } from './Geometry.Quad';
 import { Framebuffer } from './Framebuffer';
 import { BACKDROP_REGION_FULL, type BackdropRegion } from './Renderer';
@@ -203,22 +203,31 @@ export class BlurPass {
   get LastDepth(): number { return this._lastDepth; }
   get LastRegion(): BackdropRegion { return this._lastRegion; }
 
-  private _downTexLoc: WebGLUniformLocation | null;
-  private _downHpLoc: WebGLUniformLocation | null;
-  private _downOffLoc: WebGLUniformLocation | null;
-  private _downSrcLoc: WebGLUniformLocation | null;
-  private _upTexLoc: WebGLUniformLocation | null;
-  private _upHpLoc: WebGLUniformLocation | null;
-  private _upOffLoc: WebGLUniformLocation | null;
-  private _upSrcLoc: WebGLUniformLocation | null;
-  private _copyTexLoc: WebGLUniformLocation | null;
-  private _copySrcLoc: WebGLUniformLocation | null;
+  // Filled by `WireLocations`, not the constructor: reading a uniform location blocks until the
+  // program has linked, which is exactly what a batched compile is avoiding.
+  private _downTexLoc: WebGLUniformLocation | null = null;
+  private _downHpLoc: WebGLUniformLocation | null = null;
+  private _downOffLoc: WebGLUniformLocation | null = null;
+  private _downSrcLoc: WebGLUniformLocation | null = null;
+  private _upTexLoc: WebGLUniformLocation | null = null;
+  private _upHpLoc: WebGLUniformLocation | null = null;
+  private _upOffLoc: WebGLUniformLocation | null = null;
+  private _upSrcLoc: WebGLUniformLocation | null = null;
+  private _copyTexLoc: WebGLUniformLocation | null = null;
+  private _copySrcLoc: WebGLUniformLocation | null = null;
 
-  constructor(gl: WebGL2RenderingContext) {
+  /**
+   * `batch` joins the blur's three programs to a caller's compile batch so all of them reach the
+   * driver's compiler pool before anyone asks how they went — the renderer passes its Init batch,
+   * which is what keeps these three off the serial cold-boot chain. Without one the pass compiles
+   * and wires itself, exactly as before. Same sources, same programs either way.
+   */
+  constructor(gl: WebGL2RenderingContext, batch?: ShaderBatch) {
     this._gl = gl;
-    this._down = ShaderCompiler.Compile(gl, VERT, DOWN_FRAG);
-    this._up = ShaderCompiler.Compile(gl, VERT, UP_FRAG);
-    this._copy = ShaderCompiler.Compile(gl, VERT, COPY_FRAG);
+    const b = batch ?? new ShaderBatch(gl);
+    this._down = b.Add(VERT, DOWN_FRAG);
+    this._up = b.Add(VERT, UP_FRAG);
+    this._copy = b.Add(VERT, COPY_FRAG);
     this._quad = new QuadGeometry(gl);
 
     // Level chains are built on demand by `_useChain` — which size to build is not known
@@ -228,6 +237,12 @@ export class BlurPass {
     // gradient finely enough that the bands vanish; the consumers' output dither then
     // handles the final 8-bit canvas write.
 
+    if (!batch) { b.Resolve(); this.WireLocations(); }
+  }
+
+  /** Read the uniform locations. The owner of a shared batch calls this after `Resolve`. */
+  WireLocations = (): void => {
+    const gl = this._gl;
     this._downTexLoc = gl.getUniformLocation(this._down.Program, 'u_Tex');
     this._downHpLoc = gl.getUniformLocation(this._down.Program, 'u_HalfPixel');
     this._downOffLoc = gl.getUniformLocation(this._down.Program, 'u_Offset');
@@ -238,7 +253,7 @@ export class BlurPass {
     this._upSrcLoc = gl.getUniformLocation(this._up.Program, 'u_SrcRect');
     this._copyTexLoc = gl.getUniformLocation(this._copy.Program, 'u_Tex');
     this._copySrcLoc = gl.getUniformLocation(this._copy.Program, 'u_SrcRect');
-  }
+  };
 
   /**
    * Blur `input` and return the resulting texture (level 0 of the pyramid).

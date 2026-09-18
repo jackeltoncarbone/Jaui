@@ -12,6 +12,7 @@
  */
 
 import type { Canvas } from '../Core/Jaui';
+import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
 import { WorkerPlatform, type WorkerPlatformInit } from './Worker.Platform';
 import type { JivRegistry } from './Jiv.Registry';
 import { PrimeFontInSharedCtx } from '../Text/Text.WordLayout';
@@ -251,8 +252,20 @@ export class WorkerBridge {
     });
   };
 
+  /** The first batch is the whole page's tree, backlogged on main since before the worker was
+   *  ready. Its size and its cost are the opening term of the first-frame gap, so they are named. */
+  private _firstOpsSeen = false;
+
   private _onJivOps = (m: M2W_JivOps): void => {
     if (!this._registry) return;
+    if (!this._firstOpsSeen) {
+      this._firstOpsSeen = true;
+      const t0 = performance.now();
+      this._registry.ApplyOps(m);
+      JTrace(`jaui:ops:first n=${m.Ops.length} ${JMs(performance.now() - t0)}ms`);
+      this._canvas?.Animations.Kick();
+      return;
+    }
     this._registry.ApplyOps(m);
     // After any tree op, wake the animation tick so the new state actually
     // animates — without this, idle Spring targets sit unrealized until

@@ -26,6 +26,7 @@ import { WebGL2Renderer } from '../Core/WebGL2.Renderer';
 import { WorkerPlatform } from './Worker.Platform';
 import { WorkerBridge, PlatformInitFromMessage } from './Bridge.Worker';
 import { JivRegistry } from './Jiv.Registry';
+import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
 import type { W2M, M2W_Init } from './Bridge.Types';
 
 const _self: DedicatedWorkerGlobalScope =
@@ -97,6 +98,13 @@ export const BootJauiWorker = (): void => {
   const bridge = new WorkerBridge(post);
 
   bridge.OnInit = async (m: M2W_Init): Promise<void> => {
+    // `jaui:booted` below only says the message handler is installed. THIS is where the worker
+    // starts doing work, and the distance from `booted` to here is the page's half of the
+    // handshake — how long the page took to lay the canvas out and hand over the OffscreenCanvas.
+    // The size is in the mark because an init rect of 0 means the render loop will bail on every
+    // frame until a `resize` arrives (see `_tickInner`'s zero-size gate).
+    JTrace(`jaui:init:received ${Math.round(m.Width)}x${Math.round(m.Height)}`);
+    const _t0 = performance.now();
     // Gate noisy worker logs behind `?debug` (or `?jdebug`) on the launching
     // page. Production / casual reload should see a clean console; we only
     // want fps/phase chatter when explicitly profiling.
@@ -108,7 +116,9 @@ export const BootJauiWorker = (): void => {
     });
     try {
       const renderer = new WebGL2Renderer();
+      JTrace('jaui:renderer-init:start');
       await renderer.Init(m.Canvas);
+      JTrace(`jaui:renderer-init:end ${JMs(performance.now() - _t0)}ms`);
 
       const platform = new WorkerPlatform(PlatformInitFromMessage(m));
       bridge.AttachPlatform(platform);
@@ -206,9 +216,17 @@ export const BootJauiWorker = (): void => {
         }
       });
 
+      JTrace(`jaui:registry:end ${JMs(performance.now() - _t0)}ms`);
+
       canvas.ResizeFromBridge(m.Width, m.Height);
 
       if (_debug) console.log('[Jaui.Worker] ready');
+      // READY MEANS "SEND ME THE TREE", NOT "THE GPU IS WARM". `WebGL2Renderer.Init` issues its
+      // shader compiles and returns without waiting for them; the first frame collects them. So
+      // posting here releases main's whole backlogged jiv tree to a worker that can build, measure
+      // and solve it while the driver is still compiling — work that used to queue behind the
+      // compile for no reason other than that Init happened to block.
+      JTrace(`jaui:ready:posted init=${JMs(performance.now() - _t0)}ms`);
       post({ T: 'ready' });
     } catch (err) {
       console.error('[Jaui.Worker] init failed:', err);
