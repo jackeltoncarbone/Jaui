@@ -14,6 +14,7 @@
  */
 
 import type { GradientCurve } from './Gradient.Curve';
+import type { PassProfile } from './Pass.Timers';
 
 // ─── Opaque Handles ────────────────────────────────────────────────────────
 // Callers never inspect these. The WebGPU implementation stores GPUTexture
@@ -194,6 +195,16 @@ export interface Renderer {
    *  Callers MUST tolerate null and should average/smooth on their side;
    *  the raw per-frame value lags 2-3 frames because of the async resolve. */
   GetFrameGpuMs(): number | null;
+
+  /** Arm per-pass GPU timing. DIAGNOSTIC ONLY -- `?wkr-jaui-prof` or `?trace`. Unarmed, a backend
+   *  must render exactly what it renders today: this is an instrument, not a mode. */
+  ArmPassTimers(): void;
+
+  /** The cumulative per-pass GPU reading, or null where there is none -- no timer extension
+   *  (Safari, so every iPhone), an unimplemented backend, or nothing armed. NULL, never a table
+   *  of zeros: a zeroed row reads as "this pass is free" rather than "this pass was not measured".
+   *  Two snapshots subtract into a window; see `PassWindowOf` in `Pass.Timers`. */
+  GetPassProfile(): PassProfile | null;
 
   // ── Render Targets ──
 

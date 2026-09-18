@@ -22,6 +22,7 @@ import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
 import { XformBuffer } from '../Transform/Xform.Buffer';
 import { SHADOW_EASE_SECONDS, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop } from './Renderer';
+import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
 // `Renderer.Factory.ts` and handed in. Canvas has no opinion about
@@ -313,6 +314,9 @@ export class Canvas implements DirtyTracker {
    *  query has resolved yet. We skip nulls when averaging. */
   private _phaseGpu: Float32Array = new Float32Array(30);
   private _phaseGpuCount: number = 0;
+  /** The per-pass profile as it stood at the last console dump, so each line reports ITS second
+   *  rather than everything since the flag was parsed. Null until the first dump. */
+  private _passProfileMark: PassProfile | null = null;
 
   /** Canvas takes a pre-initialized renderer. No backend selection happens
    *  here — callers build a renderer via `Renderer.Factory` (or their own
@@ -1294,11 +1298,18 @@ export class Canvas implements DirtyTracker {
           let gpuSum = 0;
           for (let g = 0; g < gpuFilled; g++) gpuSum += this._phaseGpu[g];
           const gpuStr = gpuFilled > 0 ? `${(gpuSum / gpuFilled).toFixed(2)}ms` : 'n/a';
+          // The same second's frame, split by pass. `_passProfileMark` is the profile as it stood
+          // at the last dump, so this line is the window between two dumps and not since boot.
+          const passNow = this._renderer.GetPassProfile();
+          const passLine = PassWindowText(PassWindowOf(this._passProfileMark, passNow));
+          this._passProfileMark = passNow;
           // eslint-disable-next-line no-console
           console.log(
             `[Jaui] ${n}f over ${(tEnd - this._profLastDumpMs).toFixed(0)}ms — avg total ${avg(this._profSum.Total)}ms;` +
             ` Dirty ${avg(this._profSum.Dirty)} Layout ${avg(this._profSum.Layout)}` +
             ` Text ${avg(this._profSum.Text)} Render ${avg(this._profSum.Render)} | gpu ${gpuStr}` +
+            `
+       ${passLine}` +
             ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur} SB${this._counts.SharedBuilds} cap${this._counts.CacheCap} comp${this._counts.CacheComp}` +
             ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
@@ -4241,6 +4252,25 @@ export class Canvas implements DirtyTracker {
     // the per-second log dumps Dirty/Layout/Text/Render averages.
     if (params.has('wkr-jaui-prof') || hash.includes('wkr-jaui-prof')) {
       this._consoleProfilingEnabled = true;
+    }
+    // Per-PASS GPU timing. Armed by the profiling flag OR by `?trace`, whose gesture meter is the
+    // only instrument a phone has -- and which needs this reading from the Mac to interpret what
+    // it sees. Not a mode: armed, the frame ALTERNATES between the existing whole-frame query and
+    // a per-pass split, and nothing about what is drawn changes. See `Core/Pass.Timers.ts`.
+    if (this._consoleProfilingEnabled || params.has('trace') || hash.includes('trace')) {
+      this._renderer.ArmPassTimers();
+      // The reading has to cross out of the engine to two readers that must not reach into it: the
+      // gesture meter, which lives in the app and runs inside this same worker, and the perf
+      // harness, which evaluates in the worker over CDP. A named global is the whole channel --
+      // no bridge message, no protocol, and nothing at all when the flag is absent.
+      const g = globalThis as unknown as {
+        __jauiPassProfile?: () => PassProfile | null;
+        __jauiPassWindow?: (mark: PassProfile | null) => unknown;
+      };
+      g.__jauiPassProfile = () => this._renderer.GetPassProfile();
+      // The window is reduced HERE rather than by the reader, so the perf harness (which cannot
+      // import TypeScript) and the gesture meter and the console dump all run the same arithmetic.
+      g.__jauiPassWindow = (mark) => PassWindowOf(mark, this._renderer.GetPassProfile());
     }
     // TEMP perf-isolation toggles (exact-key query params). See field decls.
     if (params.has('no-pblur')) this._diagNoPblur = true;

@@ -6,6 +6,7 @@
  */
 
 import type { Renderer, GpuTextureHandle, ProgressiveBlurParams, StrokeStyle } from './Renderer';
+import type { PassProfile } from './Pass.Timers';
 import { WebGPUDevice } from './WebGPU.Device';
 import { WebGPUBlurPass } from './WebGPU.BlurPass';
 import { WebGPUPipelineCache } from './WebGPU.Pipeline.Cache';
@@ -261,6 +262,12 @@ export class WebGPURenderer implements Renderer {
    *  falls back to the "GPU: —" display. Proper implementation needs a
    *  query set + resolveQuerySet pass in BeginFrame/EndFrame. */
   GetFrameGpuMs = (): number | null => null;
+
+  /** Same gap, one level finer: no timestamp queries means no per-pass split either. Arming is
+   *  accepted and does nothing; the reading is null, which the consumers print as
+   *  `gpu n/a (no timer query)` and never as zeros. */
+  ArmPassTimers = (): void => { /* no timestamp query set on this backend yet */ };
+  GetPassProfile = (): PassProfile | null => null;
 
   // ── Render Targets ──
 

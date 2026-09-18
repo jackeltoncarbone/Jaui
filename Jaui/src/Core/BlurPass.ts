@@ -2,6 +2,7 @@ import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
 import { QuadGeometry } from './Geometry.Quad';
 import { Framebuffer } from './Framebuffer';
 import { BACKDROP_REGION_FULL, type BackdropRegion } from './Renderer';
+import type { PassTimers } from './Pass.Timers';
 
 /**
  * Dual Filter blur (Marius Bjørge, ARM, "Bandwidth-Efficient Rendering",
@@ -442,6 +443,14 @@ export class BlurPass {
    * which is what keeps these three off the serial cold-boot chain. Without one the pass compiles
    * and wires itself, exactly as before. Same sources, same programs either way.
    */
+  /** Per-pass GPU timing, or null (the shipping case). Set by the renderer when `?wkr-jaui-prof`
+   *  or `?trace` arms it; see `Pass.Timers`. Every bind site below reports its target through it
+   *  so a bracket can tell a real attachment change from an inherited one. */
+  Timers: PassTimers<WebGLQuery> | null = null;
+  /** Which BlurPass this is, so its level FBOs get distinct target keys. Three coexist per
+   *  renderer -- the per-surface chain, the sharp-root chain and the shared backdrop's. */
+  TimerTag: string = 'blur';
+
   constructor(gl: WebGL2RenderingContext, batch?: ShaderBatch) {
     this._gl = gl;
     const b = batch ?? new ShaderBatch(gl);
@@ -541,13 +550,19 @@ export class BlurPass {
     if (radius <= 0) {
       this._useChain(rect.W, rect.H);
       this._levels[0].Resize(rect.W, rect.H);
-      this._bindTarget(this._levels[0]);
+      this._bindTarget(this._levels[0], 'l0');
+      // The 1-tap copy that seeds level 0 is the down side of the chain -- it is how the source
+      // gets into the pyramid -- so it is billed to `blur-down` rather than opening a fourth row
+      // for a single pass nothing can remove independently.
+      const timedCopy = this.Timers !== null && this.Timers.Begin('blur-down');
       gl.useProgram(this._copy.Program);
       gl.uniform1i(this._copyTexLoc, 0);
       this._setSrcRect(this._copySrcLoc, rect, width, height);
       gl.bindTexture(gl.TEXTURE_2D, input);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._target('default');
+      if (timedCopy) this.Timers!.End();
       this._lastDepth = 0;
       this._lastRegion = this._region(rect, scaleX, scaleY);
       return this._levels[0].Texture;
@@ -565,10 +580,17 @@ export class BlurPass {
     let srcTex = input;
     let srcW = width, srcH = height;
     let srcRect: RegionRect = rect;
+    // One bracket spans the pre-downsample AND the pyramid's down hops: they are one chain, and
+    // splitting them would put a query boundary in the middle of a ping-pong whose tile work
+    // resolves at the far end of it.
+    let timedDown = false;
     if (k > 1) {
       if (!this._preA) this._preA = new Framebuffer(gl, { highPrecision: true });
       if (!this._preB) this._preB = new Framebuffer(gl, { highPrecision: true });
       const pp = [this._preA, this._preB];
+      // The sigma-adaptive pre-downsample is the first half of the down side; it shares the
+      // `blur-down` bucket with the pyramid's own hops rather than splitting a chain in two.
+      timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
       gl.useProgram(this._down.Program);
       gl.uniform1i(this._downTexLoc, 0);
       gl.uniform1f(this._downOffLoc, 1.0);
@@ -579,7 +601,7 @@ export class BlurPass {
         curH = Math.max(1, Math.floor(curH / 2));
         const fb = pp[s % 2];
         fb.Resize(curW, curH);
-        this._bindTarget(fb);
+        this._bindTarget(fb, `pre${s % 2}`);
         // Only the FIRST pre-pass reads the canvas-sized input, so only it carries the
         // region's source rect; from there the chain reads whole region-sized levels.
         this._setSrcRect(this._downSrcLoc, s === 0 ? rect : null, srcW, srcH);
@@ -614,13 +636,17 @@ export class BlurPass {
     }
 
     // ── Downsample chain: input → level 1 → level 2 → ... → level depth ──
+    // `depth` can legitimately be 0 -- a small sigma on a large canvas -- and then neither chain
+    // below draws anything. An empty bracket is two GL calls, a near-zero row and a target
+    // boundary the next pass would be judged against, so it is not opened at all.
+    if (!timedDown && depth >= 1) timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
     gl.useProgram(this._down.Program);
     gl.uniform1i(this._downTexLoc, 0);
     gl.uniform1f(this._downOffLoc, tapOffset);
 
     for (let i = 1; i <= depth; i++) {
       const dst = this._levels[i];
-      this._bindTarget(dst);
+      this._bindTarget(dst, `l${i}`);
       // Again: only the first hop reads the canvas-sized input through the region rect.
       this._setSrcRect(this._downSrcLoc, i === 1 ? srcRect : null, srcW, srcH);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
@@ -636,6 +662,10 @@ export class BlurPass {
 
     // ── Upsample chain: level depth → level depth-1 → ... → level 0 ──
     // Every hop reads a region-sized level, so the source rect is the identity throughout.
+    // The down chain closes HERE and the up chain opens: the first up hop binds level depth-1
+    // while the last down hop wrote level depth, so this boundary is a real attachment change.
+    if (timedDown) this.Timers!.End();
+    const timedUp = depth >= 1 && this.Timers !== null && this.Timers.Begin('blur-up');
     gl.useProgram(this._up.Program);
     gl.uniform1i(this._upTexLoc, 0);
     gl.uniform1f(this._upOffLoc, tapOffset);
@@ -643,7 +673,7 @@ export class BlurPass {
 
     for (let i = depth - 1; i >= 0; i--) {
       const dst = this._levels[i];
-      this._bindTarget(dst);
+      this._bindTarget(dst, `l${i}`);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.uniform2f(this._upHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
@@ -653,6 +683,8 @@ export class BlurPass {
     }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._target('default');
+    if (timedUp) this.Timers!.End();
     this._lastRegion = this._region(rect, scaleX, scaleY);
 
     return this._levels[0].Texture;
@@ -693,6 +725,14 @@ export class BlurPass {
    *  above DOWN_FRAG); under an implicit `texture()` the first hop's 2:1 minification resolves
    *  to the output's own mip 1, which has just been allocated empty. */
   GenerateOutputMipmap = (maxLod?: number): void => {
+    const timed = this.Timers !== null && this.Timers.Begin('blur-mip');
+    this._generateOutputMipmap(maxLod);
+    if (timed) this.Timers!.End();
+  };
+
+  /** The chain itself. Separate from the bracket above so the timer wraps every exit of it --
+   *  there are three -- without a `finally` on a path that runs sixty times a second. */
+  private _generateOutputMipmap = (maxLod?: number): void => {
     const gl = this._gl;
     const out = this._levels[0];
     // Level chains are built by Blur, so there is nothing to build a mip chain OF until one
@@ -709,6 +749,7 @@ export class BlurPass {
     if (maxLod !== undefined && maxLod <= 0) {
       out.DisableMipmap();
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._target('default');
       return;
     }
 
@@ -752,7 +793,7 @@ export class BlurPass {
       if (newW === srcW && newH === srcH) break; // already at 1×1
       this._levels[i].Resize(newW, newH);
       const dst = this._levels[i];
-      this._bindTarget(dst);
+      this._bindTarget(dst, `mip${i}`);
       gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
@@ -773,7 +814,11 @@ export class BlurPass {
     }
     const prevRead = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
     const prevDraw = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    // The key is saved beside the binding it names, so the restore below restores BOTH and the
+    // next pass is judged against what is really bound rather than against the last mip level.
+    const prevKey = this.Timers === null ? '' : this.Timers.Target;
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._mipBlitFbo);
+    if (this.Timers !== null) this.Timers.SetTarget(`${this.TimerTag}:mipblit`);
     for (let i = 1; i <= extendedDepth; i++) {
       const src = this._levels[i];
       gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out.Texture, i);
@@ -788,6 +833,7 @@ export class BlurPass {
 
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, prevDraw);
+    if (this.Timers !== null) this.Timers.SetTarget(prevKey);
   };
 
   // ── Region plumbing ───────────────────────────────────────────────────────
@@ -857,11 +903,18 @@ export class BlurPass {
    *  LoadAction.DontCare). ARM's bandwidth guidance names this as the cheapest win available on
    *  a deferred renderer. Safe precisely because the viewport is the full level and the quad
    *  covers all of it. */
-  private _bindTarget = (fb: Framebuffer): void => {
+  private _bindTarget = (fb: Framebuffer, key: string): void => {
     const gl = this._gl;
     fb.Bind();
+    if (this.Timers !== null) this.Timers.SetTarget(`${this.TimerTag}:${key}`);
     gl.viewport(0, 0, fb.Width, fb.Height);
     gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
+  };
+
+  /** Report the bound framebuffer to the pass timer. `default` is the unbound (swap chain) state,
+   *  which every chain here leaves behind and which makes the next pass's boundary a hard one. */
+  private _target = (key: string): void => {
+    if (this.Timers !== null) this.Timers.SetTarget(key === 'default' ? 'default' : `${this.TimerTag}:${key}`);
   };
 
   /** `null` rect = read the whole source. The identity (0,0,1,1) reproduces the varying the

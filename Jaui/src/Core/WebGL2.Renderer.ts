@@ -12,6 +12,7 @@ import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer } from './Framebuffer';
 import { BlurPass } from './BlurPass';
+import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
 import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
@@ -424,6 +425,27 @@ export class WebGL2Renderer implements Renderer {
   private _timerActive: WebGLQuery | null = null;
   private _lastGpuMs: number | null = null;
 
+  // ── Per-PASS GPU timing (diagnostic, off unless armed) ──
+  // The frame timer above says how much and never what. `Pass.Timers` splits the frame by pass
+  // type — read its header before reading any table it produces, because on a tile-based GPU a
+  // query boundary and a render-pass boundary are not the same thing.
+  //
+  // ARMED, NOT SHIPPED. `_passArmed` is set only by `?wkr-jaui-prof` or `?trace`. Unarmed, the
+  // whole mechanism is one null check per pass entry point and the frame path below is exactly
+  // what it was: one query per frame, opened in BeginFrame, closed in EndFrame.
+  private _passArmed: boolean = false;
+  private _pass: PassTimers<WebGLQuery> | null = null;
+  /** Key of the framebuffer currently bound, mirrored into `_pass.Target` so a bracket can tell a
+   *  real attachment change from an inherited target. Null-guarded: unarmed it costs one check. */
+  private _tgt = (key: string): void => { if (this._pass !== null) this._pass.SetTarget(key); };
+  /** Name a lazily-built blur chain so its level FBOs get target keys distinct from the other
+   *  chains', and hand it the timer if one is already running. */
+  private _tagBlur = (pass: BlurPass, tag: string): BlurPass => {
+    pass.TimerTag = tag;
+    pass.Timers = this._pass;
+    return pass;
+  };
+
   // ── GL state cache (C4) ──
   // Skip the JS→GL crossing when the requested state equals the last state
   // we set. Driver-side this is already a no-op for identical values, but
@@ -460,6 +482,14 @@ export class WebGL2Renderer implements Renderer {
     this._shadowStateFbo = null;
     this._shadowSlots.clear();
     this._shadowFreeSlots.length = 0;
+    // Same reason, for the GPU timers: every query object belongs to the context that is gone, and
+    // polling one of them after a restore asks a dead handle for a result. The rings are dropped
+    // and both timers rebuild themselves on the next frame -- `_passArmed` survives, so a restore
+    // does not silently disarm the instrument.
+    this._timerQueries.length = 0;
+    this._timerActive = null;
+    this._lastGpuMs = null;
+    this._pass = null;
 
     // ── One compile batch for every program the engine can draw with ──
     // Thirteen programs stand between a cold tab and its first pixel. Compiled one at a time —
@@ -656,6 +686,10 @@ export class WebGL2Renderer implements Renderer {
     // null and EndFrame / GetFrameGpuMs become no-ops.
     const ext = this._timerExt;
     if (ext) {
+      // Armed, every OTHER frame belongs to the per-pass split instead, and must not open a
+      // whole-frame query: only one TIME_ELAPSED query may be active at a time, so the two
+      // readings cannot share a frame. The frames this skips are exactly the split ones.
+      if (this._passArmed && this._beginPassFrame(ext)) return;
       const gl = this._gl;
       const q = gl.createQuery();
       if (q) {
@@ -664,10 +698,29 @@ export class WebGL2Renderer implements Renderer {
       }
     }
   };
+
+  /** Build the per-pass timer on first use (Init may not have run when the flag was parsed) and
+   *  open its frame. True when this frame is a SPLIT frame and the caller must skip its own
+   *  whole-frame query. */
+  private _beginPassFrame = (ext: { TIME_ELAPSED_EXT: number; GPU_DISJOINT_EXT: number }): boolean => {
+    let pass = this._pass;
+    if (pass === null) {
+      pass = new PassTimers<WebGLQuery>(this._gl, ext);
+      this._pass = pass;
+      JTrace(`jaui:passtimers:armed counterBits=${pass.CounterBits}`);
+    }
+    // Re-handed every frame rather than once: `Init` rebuilds `_blur` on a context restore, and
+    // the two lazy chains below are created the first time a surface asks for them.
+    this._blur.Timers = pass;
+    if (this._rootBlur !== null) this._rootBlur.Timers = pass;
+    if (this._sharedBlur !== null) this._sharedBlur.Timers = pass;
+    return pass.BeginFrame();
+  };
+
   EndFrame = (): void => {
     const ext = this._timerExt;
     const q = this._timerActive;
-    if (!ext || !q) return;
+    if (!ext || !q) { this._endPassFrame(); return; }
     const gl = this._gl;
     gl.endQuery(ext.TIME_ELAPSED_EXT);
     // Park this query in a ring slot for GetFrameGpuMs to poll later.
@@ -679,7 +732,26 @@ export class WebGL2Renderer implements Renderer {
     this._timerQueries[slot] = q;
     this._timerFrameIdx = (slot + 1) % 4; // 4 in-flight is plenty
     this._timerActive = null;
+    this._endPassFrame();
   };
+
+  /** Close the per-pass frame and harvest. Also drains the whole-frame ring, because the reference
+   *  half of the reading is those queries and nothing else polls them unless the HUD is on. */
+  private _endPassFrame = (): void => {
+    const pass = this._pass;
+    if (pass === null) return;
+    this.GetFrameGpuMs();
+    pass.EndFrame();
+  };
+
+  /** Arm per-pass GPU timing. Diagnostic only — `?wkr-jaui-prof` or `?trace`. Takes effect at the
+   *  next frame; the timer itself is built there, since Init may not have run yet. */
+  ArmPassTimers = (): void => { this._passArmed = true; };
+
+  /** The cumulative per-pass reading, or null on a device with no timer query (Safari, so every
+   *  iPhone) or before anything was armed. Two snapshots subtract into a window — see
+   *  `PassWindowOf`. NEVER a table of zeros: absence and free must not print alike. */
+  GetPassProfile = (): PassProfile | null => (this._pass === null ? null : this._pass.Snapshot());
 
   GetFrameGpuMs = (): number | null => {
     const ext = this._timerExt;
@@ -704,6 +776,9 @@ export class WebGL2Renderer implements Renderer {
       if (gl.getQueryParameter(q, gl.QUERY_RESULT_AVAILABLE)) {
         const ns = gl.getQueryParameter(q, gl.QUERY_RESULT) as number;
         this._lastGpuMs = ns / 1_000_000;
+        // While armed these queries only exist on REFERENCE frames — the ones carrying no per-pass
+        // queries at all — so each is a clean whole-frame cost to check the pass table against.
+        if (this._pass !== null) this._pass.AddRefSample(this._lastGpuMs);
         gl.deleteQuery(q);
         this._timerQueries[i] = null;
       }
@@ -734,6 +809,7 @@ export class WebGL2Renderer implements Renderer {
   BeginScenePass = (clearR: number, clearG: number, clearB: number, persist = false): void => {
     const gl = this._gl;
     this._sceneFbo.Bind();
+    this._tgt('scene');
     gl.viewport(0, 0, this._width, this._height);
     // Damage-region: when persisting, skip the clear so last frame's pixels
     // survive; only the dirty rect is re-rendered over them this frame.
@@ -779,6 +855,9 @@ export class WebGL2Renderer implements Renderer {
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
+    // SOFT wherever a panel batch follows another draw into the same scene FBO, which is the
+    // common case: see the bracket note in `Pass.Timers`.
+    const timed = this._pass !== null && this._pass.Begin('panel');
 
     // Upload instance data
     gl.bindBuffer(gl.ARRAY_BUFFER, this._panelInstanceBuffer);
@@ -844,6 +923,7 @@ export class WebGL2Renderer implements Renderer {
 
     gl.bindVertexArray(this._panelVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
+    if (timed) this._pass!.End();
   };
 
   private _bindBgPaint = (locs: _PanelLocs, bgPaint: BgPaint | undefined): void => {
@@ -903,6 +983,7 @@ export class WebGL2Renderer implements Renderer {
   TextDrawBatch = (canvasWidth: number, canvasHeight: number, atlas: GpuTextureHandle): void => {
     if (this._textInstanceCount === 0) return;
     const gl = this._gl;
+    const timed = this._pass !== null && this._pass.Begin('text');
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this._textInstanceBuffer);
     gl.bufferData(gl.ARRAY_BUFFER,
@@ -925,6 +1006,7 @@ export class WebGL2Renderer implements Renderer {
 
     gl.bindVertexArray(this._textVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._textInstanceCount);
+    if (timed) this._pass!.End();
   };
 
   // ── Jline (stroke) Rendering — instanced per segment ──
@@ -949,6 +1031,7 @@ export class WebGL2Renderer implements Renderer {
   StrokeDrawBatch = (canvasWidth: number, canvasHeight: number, style: StrokeStyle): void => {
     if (this._strokeInstanceCount === 0) return;
     const gl = this._gl;
+    const timed = this._pass !== null && this._pass.Begin('stroke');
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this._strokeInstanceBuffer);
     gl.bufferData(gl.ARRAY_BUFFER,
@@ -981,6 +1064,7 @@ export class WebGL2Renderer implements Renderer {
 
     gl.bindVertexArray(this._strokeVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._strokeInstanceCount);
+    if (timed) this._pass!.End();
   };
 
   /** Read the current default-framebuffer pixels into a PNG blob. Call IMMEDIATELY after a
@@ -1016,6 +1100,7 @@ export class WebGL2Renderer implements Renderer {
   ): void => {
     if (vertCount === 0) return;
     const gl = this._gl;
+    const timed = this._pass !== null && this._pass.Begin('svg');
     gl.bindBuffer(gl.ARRAY_BUFFER, this._svgFillVertBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, verts.subarray(0, vertCount * 3), gl.DYNAMIC_DRAW);
     const l = this._svgFillLocs;
@@ -1026,6 +1111,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform4f(l.tint, tint[0], tint[1], tint[2], tint[3]);
     gl.bindVertexArray(this._svgFillVao);
     gl.drawArrays(gl.TRIANGLES, 0, vertCount);
+    if (timed) this._pass!.End();
   };
 
   SvgStrokeDraw = (
@@ -1036,6 +1122,7 @@ export class WebGL2Renderer implements Renderer {
   ): void => {
     if (segCount === 0) return;
     const gl = this._gl;
+    const timed = this._pass !== null && this._pass.Begin('svg');
     gl.bindBuffer(gl.ARRAY_BUFFER, this._svgStrokeInstanceBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, segCount * 8), gl.DYNAMIC_DRAW);
     const l = this._svgStrokeLocs;
@@ -1047,6 +1134,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1f(l.halfWidth, Math.max(0.5, halfWidthDev));
     gl.bindVertexArray(this._svgStrokeVao);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, segCount);
+    if (timed) this._pass!.End();
   };
 
   // ── Blur ──
@@ -1065,7 +1153,7 @@ export class WebGL2Renderer implements Renderer {
     if (this.DiagNoBlur) return input;
     const pass = radius > 0
       ? this._blur
-      : (this._rootBlur ?? (this._rootBlur = new BlurPass(this._gl)));
+      : (this._rootBlur ?? (this._rootBlur = this._tagBlur(new BlurPass(this._gl), 'root')));
     this._lastBlur = pass;
     const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
@@ -1094,7 +1182,7 @@ export class WebGL2Renderer implements Renderer {
    *  many"). Level 0 is the raw scene, so the same texture doubles as the
    *  no-frost LOD-0 fallback. Restores the scene FBO before returning. */
   BuildSharedBackdrop = (width: number, height: number, maxLod: number): GpuTextureHandle => {
-    const pass = this._sharedBlur ?? (this._sharedBlur = new BlurPass(this._gl));
+    const pass = this._sharedBlur ?? (this._sharedBlur = this._tagBlur(new BlurPass(this._gl), 'shared'));
     // radius 0 → level 0 is the raw scene (1-tap copy, no dual-filter pre-blur);
     // GenerateOutputMipmap then builds the Gaussian stack from that sharp root.
     // Quarter-res build: blur is low-frequency, so a 1/4-res pyramid upsamples to
@@ -1152,6 +1240,8 @@ export class WebGL2Renderer implements Renderer {
     const program = this._shadowShader!;
     const locs = this._shadowLocs!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._shadowStateFbo);
+    this._tgt('shadow-state');
+    const timed = this._pass !== null && this._pass.Begin('shadow');
     gl.viewport(entry.Slot, 0, 1, 1);
     gl.disable(gl.SCISSOR_TEST);
     // A new surface takes its first reading whole; after that each frame moves a time-based share toward
@@ -1182,6 +1272,7 @@ export class WebGL2Renderer implements Renderer {
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
     gl.blendColor(0, 0, 0, 0);
     this.RebindSceneTarget();
+    if (timed) this._pass!.End();
     return entry.Slot;
   };
 
@@ -1241,6 +1332,9 @@ export class WebGL2Renderer implements Renderer {
   DrawProgressiveBlur = (params: ProgressiveBlurParams): void => {
     const gl = this._gl;
     const p = this._progBlurShader.Program;
+    // HARD in practice: the pyramid build that precedes it ends on a blur level or the default
+    // framebuffer, so the bind back to the scene is a genuine attachment change.
+    const timed = this._pass !== null && this._pass.Begin('pblur');
 
     this._useProgram(p);
     gl.uniform2f(this._progBlurLocs.resolution, this._width, this._height);
@@ -1299,6 +1393,7 @@ export class WebGL2Renderer implements Renderer {
 
     gl.bindVertexArray(this._quad.Vao);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    if (timed) this._pass!.End();
   };
 
   // ── Snapshot ──
@@ -1337,6 +1432,7 @@ export class WebGL2Renderer implements Renderer {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this._snapshotFbo);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._snapshotTex, 0);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._tgt('default');
       this._snapshotW = this._width;
       this._snapshotH = this._height;
     }
@@ -1348,6 +1444,8 @@ export class WebGL2Renderer implements Renderer {
     // sample while rendering into sceneFbo itself.
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._snapshotFbo);
+    this._tgt('snapshot');
+    const timed = this._pass !== null && this._pass.Begin('snapshot');
     if (scissor) {
       // Flip y=0-top → GL y=0-bottom, matching BlurPass. src and dst use the
       // same rect, so every copied texel stays at its framebuffer position;
@@ -1364,6 +1462,8 @@ export class WebGL2Renderer implements Renderer {
       gl.blitFramebuffer(0, 0, this._width, this._height, 0, 0, this._width, this._height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
+    if (timed) this._pass!.End();
     return _wrap(this._snapshotTex);
   };
 
@@ -1460,6 +1560,7 @@ export class WebGL2Renderer implements Renderer {
   BindDefaultTarget = (clear?: { R: number; G: number; B: number }): void => {
     const gl = this._gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
     gl.viewport(0, 0, this._width, this._height);
     if (clear) {
       // Disable blend so the clear color fully overwrites — otherwise a
@@ -1478,6 +1579,7 @@ export class WebGL2Renderer implements Renderer {
   RebindSceneTarget = (): void => {
     const gl = this._gl;
     this._sceneFbo.Bind();
+    this._tgt('scene');
     gl.viewport(0, 0, this._width, this._height);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -1503,12 +1605,15 @@ export class WebGL2Renderer implements Renderer {
     const gl = this._gl;
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    this._tgt('default');
+    const timed = this._pass !== null && this._pass.Begin('present');
     gl.blitFramebuffer(
       0, 0, this._width, this._height,
       0, 0, this._width, this._height,
       gl.COLOR_BUFFER_BIT, gl.NEAREST, // NEAREST: 1:1 same-size copy, no filter cost
     );
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (timed) this._pass!.End();
   };
 
   InvalidateFrameTransients = (persistScene = false): void => {
@@ -1520,6 +1625,7 @@ export class WebGL2Renderer implements Renderer {
     // Note: default FB attachment names differ from FBO attachment names —
     // use DEPTH / STENCIL / COLOR, not DEPTH_ATTACHMENT / etc.
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
     gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.DEPTH, gl.STENCIL]);
     // Scene FBO: we just blit it out; its contents won't be read again this
     // frame and the next BeginScenePass will clear it. Drop the tile.
@@ -1529,6 +1635,7 @@ export class WebGL2Renderer implements Renderer {
       this._sceneFbo.Bind();
       gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._tgt('default');
     }
   };
 
