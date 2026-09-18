@@ -66,6 +66,37 @@ export class TextInstanceBuffer {
 
   Begin = (): void => { this._count = 0; };
 
+  /** The buffer's ONE reusable command, with every optional field reset to its
+   *  passthrough default. Fill the required fields and hand it straight back to
+   *  `Push`, which copies the whole thing into the packed array before it
+   *  returns — nothing retains it.
+   *
+   *  This exists because the emit loop runs once per drawn WORD per frame, and
+   *  a fresh object literal there is several hundred short-lived objects a frame
+   *  on an ordinary page of prose and thousands on a dense one, every one of
+   *  them garbage by the next word. It also keeps the shape monomorphic: the 2D
+   *  and 3D emit paths used to build two DIFFERENT literals.
+   *
+   *  The contract is single-use-at-a-time: fill it, push it, then call this
+   *  again for the next word. Do not hold the returned object across a Push. */
+  Command = (): TextDrawCommand => {
+    const c = this._scratch;
+    c.Cos = 1;
+    c.Sin = 0;
+    c.PivotX = 0;
+    c.PivotY = 0;
+    c.XformIndex = -1;
+    return c;
+  };
+
+  private _scratch: TextDrawCommand = {
+    X: 0, Y: 0, Width: 0, Height: 0,
+    Uv: { U: 0, V: 0, UWidth: 0, UHeight: 0 },
+    Opacity: 1, ClipOffset: 0, ClipCount: 0,
+    TintR: 1, TintG: 1, TintB: 1, TintA: 1,
+    Cos: 1, Sin: 0, PivotX: 0, PivotY: 0, XformIndex: -1,
+  };
+
   Push = (cmd: TextDrawCommand): void => {
     if (this._count >= this._capacity) this._grow();
 

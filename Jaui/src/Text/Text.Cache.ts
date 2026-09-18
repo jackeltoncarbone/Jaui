@@ -20,6 +20,9 @@ export interface TextCacheEntry {
   CssHeight: number;
   Measurement: TextMeasurement;
   LastUsed: number;
+  /** Index into `_shelves` of the shelf this raster sits on. Eviction needs it
+   *  to hand the atlas space back — see `_release`. */
+  Shelf: number;
 }
 
 /** Shelf in the shelf-packing atlas. */
@@ -27,9 +30,27 @@ interface AtlasShelf {
   Y: number;           // top pixel row
   Height: number;      // tallest word placed on this shelf
   Cursor: number;      // next free X position
+  Live: number;        // entries still pointing into this shelf
 }
 
 const ATLAS_SIZE = 2048;
+
+/** Default entry cap.
+ *
+ *  Entries are per WORD — `Core/Jaui.ts` `_emitTextFor` fetches one per glyph
+ *  run it emits — so a screen of prose is several hundred of them and a dense
+ *  page is well past a thousand. The old default of 256 was smaller than one
+ *  screen of body text, and the access ORDER is identical every frame, which is
+ *  the textbook worst case for LRU: a working set one entry over capacity
+ *  cycles the whole cache and hits nothing. Every word then re-measured,
+ *  re-rasterized into a resized canvas and re-uploaded to the GPU, every frame.
+ *
+ *  The ceiling is the atlas, not the counter: 2048² device px hold roughly 1,300
+ *  word rasters at dpr 2 (a 17px word is about 60×50 device px) before shelf
+ *  waste. The count cap is deliberately set BELOW that so LRU eviction — which
+ *  hands shelf space back — is what governs, rather than `_allocate` running
+ *  out and wiping the whole atlas mid-frame. */
+const MAX_ENTRIES = 1024;
 
 /**
  * Text atlas cache. Rasterizes text to an offscreen canvas, packs into a
@@ -50,7 +71,7 @@ export class TextCache {
   private _shelves: AtlasShelf[] = [];
   private _nextShelfY: number = 0;
 
-  constructor(renderer: Renderer, maxEntries: number = 256) {
+  constructor(renderer: Renderer, maxEntries: number = MAX_ENTRIES) {
     this._renderer = renderer;
     this._maxEntries = maxEntries;
   }
@@ -63,7 +84,7 @@ export class TextCache {
   };
 
   Get = (content: string, style: ResolvedTextStyle, maxWidth: number | null, dpr: number): TextCacheEntry => {
-    const key = HashTextKey(content, style, dpr) + '|' + (maxWidth ?? 'null');
+    const key = HashTextKey(content, style, dpr, maxWidth);
     const existing = this._cache.get(key);
     if (existing) {
       existing.LastUsed = this._frameCounter;
@@ -111,30 +132,81 @@ export class TextCache {
     return this._atlas;
   };
 
-  private _allocate = (pxW: number, pxH: number): { X: number; Y: number } => {
+  private _allocate = (pxW: number, pxH: number): { X: number; Y: number; Shelf: number } => {
+    const found = this._tryAllocate(pxW, pxH);
+    if (found) return found;
+
+    // Out of room. Before doing anything drastic, hand back the space held by
+    // rasters nobody drew this frame — `_release` resets a shelf the moment its
+    // last entry goes, so this recovers whole contiguous strips rather than
+    // holes. Without it, eviction dropped Map entries and left the cursors
+    // where they were: the pixels were gone for good and the atlas could only
+    // ever fill up.
+    this._reclaim();
+    const afterReclaim = this._tryAllocate(pxW, pxH);
+    if (afterReclaim) return afterReclaim;
+
+    // Everything in the atlas was drawn THIS frame and it still doesn't fit —
+    // one frame is asking for more glyph raster than 2048² device pixels hold.
+    // The wipe below costs a frame of missing text (entries already handed out
+    // this frame keep UVs into the texture we are about to replace), so it is
+    // said out loud rather than happening silently.
+    console.warn(
+      `[Jaui] Text atlas exhausted by a single frame (${this._cache.size} live rasters); `
+      + 'rebuilding. Text will flash for one frame.',
+    );
+    this._rebuildAtlas();
+    const shelf: AtlasShelf = { Y: 0, Height: pxH, Cursor: pxW, Live: 1 };
+    this._shelves.push(shelf);
+    this._nextShelfY = pxH;
+    return { X: 0, Y: 0, Shelf: 0 };
+  };
+
+  private _tryAllocate = (pxW: number, pxH: number): { X: number; Y: number; Shelf: number } | null => {
     const size = this._atlasSize;
 
-    for (const shelf of this._shelves) {
+    for (let i = 0; i < this._shelves.length; i++) {
+      const shelf = this._shelves[i];
       if (shelf.Cursor + pxW <= size && shelf.Height >= pxH) {
         const x = shelf.Cursor;
         shelf.Cursor += pxW;
-        return { X: x, Y: shelf.Y };
+        shelf.Live++;
+        return { X: x, Y: shelf.Y, Shelf: i };
       }
     }
 
     if (this._nextShelfY + pxH <= size) {
-      const shelf: AtlasShelf = { Y: this._nextShelfY, Height: pxH, Cursor: pxW };
+      const shelf: AtlasShelf = { Y: this._nextShelfY, Height: pxH, Cursor: pxW, Live: 1 };
       this._shelves.push(shelf);
-      const origin = { X: 0, Y: this._nextShelfY };
+      const origin = { X: 0, Y: this._nextShelfY, Shelf: this._shelves.length - 1 };
       this._nextShelfY += pxH;
       return origin;
     }
 
-    this._rebuildAtlas();
-    const shelf: AtlasShelf = { Y: 0, Height: pxH, Cursor: pxW };
-    this._shelves.push(shelf);
-    this._nextShelfY = pxH;
-    return { X: 0, Y: 0 };
+    return null;
+  };
+
+  /** Drop the entry's claim on its shelf. A shelf with no live entries has no
+   *  UV pointing into it, so its cursor rewinds and the strip is allocatable
+   *  again — stale pixels there are overwritten by the next upload. */
+  private _release = (entry: TextCacheEntry): void => {
+    const shelf = this._shelves[entry.Shelf];
+    if (!shelf) return;
+    shelf.Live--;
+    if (shelf.Live <= 0) {
+      shelf.Live = 0;
+      shelf.Cursor = 0;
+    }
+  };
+
+  /** Evict every entry that wasn't drawn this frame. Called only when the
+   *  packer is out of room — the ordinary path is `_evict`'s LRU trim. */
+  private _reclaim = (): void => {
+    for (const [key, entry] of this._cache) {
+      if (entry.LastUsed >= this._frameCounter) continue;
+      this._release(entry);
+      this._cache.delete(key);
+    }
   };
 
   private _rebuildAtlas = (): void => {
@@ -222,6 +294,7 @@ export class TextCache {
       CssHeight: cssH,
       Measurement: measurement,
       LastUsed: this._frameCounter,
+      Shelf: origin.Shelf,
     };
   };
 
@@ -243,7 +316,8 @@ export class TextCache {
     entries.sort((a, b) => a[1].LastUsed - b[1].LastUsed);
     const dropCount = Math.ceil(entries.length * 0.25);
     for (let i = 0; i < dropCount; i++) {
-      const [key] = entries[i];
+      const [key, entry] = entries[i];
+      this._release(entry);
       this._cache.delete(key);
     }
   };

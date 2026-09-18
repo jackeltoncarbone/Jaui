@@ -2586,14 +2586,14 @@ export class Canvas implements DirtyTracker {
       const entry = this._textCache.Get(run.Text, style, null, this._dpr);
       const ax = matApplyX(ft, run.X, run.Y), ay = matApplyY(ft, run.X, run.Y);
       const shift = run.Anchor === 'middle' ? entry.Width / 2 : run.Anchor === 'end' ? entry.Width : 0;
-      this._textBuffer.Push({
-        X: ax - shift, Y: ay - sizeDev * 0.8, // SVG y is baseline; ascent ≈ 0.8·size
-        Width: entry.Width, Height: entry.Height,
-        Uv: entry.Uv, Opacity: a,
-        ClipOffset: 0, ClipCount: 0,
-        TintR: c.R, TintG: c.G, TintB: c.B, TintA: 1,
-        Cos: matCos(ft), Sin: matSin(ft), PivotX: ax, PivotY: ay,
-      });
+      const cmd = this._textBuffer.Command();
+      cmd.X = ax - shift; cmd.Y = ay - sizeDev * 0.8; // SVG y is baseline; ascent ≈ 0.8·size
+      cmd.Width = entry.Width; cmd.Height = entry.Height;
+      cmd.Uv = entry.Uv; cmd.Opacity = a;
+      cmd.ClipOffset = 0; cmd.ClipCount = 0;
+      cmd.TintR = c.R; cmd.TintG = c.G; cmd.TintB = c.B; cmd.TintA = 1;
+      cmd.Cos = matCos(ft); cmd.Sin = matSin(ft); cmd.PivotX = ax; cmd.PivotY = ay;
+      this._textBuffer.Push(cmd);
     }
   };
 
@@ -2691,38 +2691,38 @@ export class Canvas implements DirtyTracker {
         const natH = (entry.Height / dpr) * wordScale;
         const natX = wlx + (entry.Width / dpr - natW) / 2;
         const natY = wly + (entry.Height / dpr - natH) / 2;
-        this._textBuffer.Push({
-          X: natX, Y: natY, Width: natW, Height: natH,
-          Uv: entry.Uv,
-          Opacity: opacity,
-          ClipOffset: clipOffset,
-          ClipCount: clipCount,
-          TintR: w.TintR.Value,
-          TintG: w.TintG.Value,
-          TintB: w.TintB.Value,
-          TintA: w.TintA.Value,
-          XformIndex: xformIndex,
-        });
+        const cmd3 = this._textBuffer.Command();
+        cmd3.X = natX; cmd3.Y = natY; cmd3.Width = natW; cmd3.Height = natH;
+        cmd3.Uv = entry.Uv;
+        cmd3.Opacity = opacity;
+        cmd3.ClipOffset = clipOffset;
+        cmd3.ClipCount = clipCount;
+        cmd3.TintR = w.TintR.Value;
+        cmd3.TintG = w.TintG.Value;
+        cmd3.TintB = w.TintB.Value;
+        cmd3.TintA = w.TintA.Value;
+        cmd3.XformIndex = xformIndex;
+        this._textBuffer.Push(cmd3);
         continue;
       }
-      this._textBuffer.Push({
-        X: wx * this._dpr + dxCenter * this._dpr,
-        Y: wy * this._dpr + dyCenter * this._dpr,
-        Width: drawW,
-        Height: drawH,
-        Uv: entry.Uv,
-        Opacity: opacity,
-        ClipOffset: clipOffset,
-        ClipCount: clipCount,
-        TintR: w.TintR.Value,
-        TintG: w.TintG.Value,
-        TintB: w.TintB.Value,
-        TintA: w.TintA.Value,
-        Cos: tCos,
-        Sin: tSin,
-        PivotX: pivotX,
-        PivotY: pivotY,
-      });
+      const cmd = this._textBuffer.Command();
+      cmd.X = wx * this._dpr + dxCenter * this._dpr;
+      cmd.Y = wy * this._dpr + dyCenter * this._dpr;
+      cmd.Width = drawW;
+      cmd.Height = drawH;
+      cmd.Uv = entry.Uv;
+      cmd.Opacity = opacity;
+      cmd.ClipOffset = clipOffset;
+      cmd.ClipCount = clipCount;
+      cmd.TintR = w.TintR.Value;
+      cmd.TintG = w.TintG.Value;
+      cmd.TintB = w.TintB.Value;
+      cmd.TintA = w.TintA.Value;
+      cmd.Cos = tCos;
+      cmd.Sin = tSin;
+      cmd.PivotX = pivotX;
+      cmd.PivotY = pivotY;
+      this._textBuffer.Push(cmd);
     }
   };
 
@@ -3767,6 +3767,12 @@ export class Canvas implements DirtyTracker {
    *  bridge). Light — just clears the text atlas cache; the caller re-renders next frame. Does NOT
    *  re-layout (the turf's SnapLayout base must not be reset to 0). */
   RefreshFonts = (): void => {
+    // Bump first: the generation rides in the canvas font string, so it is what
+    // makes Chromium re-resolve a face it had already bound to a fallback — and
+    // it drops the shared measurement cache, whose entries were shaped against
+    // that fallback. Clearing only the glyph atlas would re-rasterize with the
+    // new font at the OLD advance widths.
+    BumpFontGeneration();
     this._textCache.Clear();
     this._needsRender = true;
   };
