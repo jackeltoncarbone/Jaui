@@ -342,8 +342,21 @@ const _solveNode = (
         if (v === 'MinContent') return intrinsicMin ?? intrinsic ?? fallback;
         return intrinsic ?? fallback;   // Auto + MaxContent → max-content intrinsic
       };
-      const w = resolveKeyword(declW, child.IntrinsicWidth, child.IntrinsicMinWidth, child.LayoutWidth);
-      const h = resolveKeyword(declH, child.IntrinsicHeight, child.IntrinsicMinHeight, child.LayoutHeight);
+      // A POPPED-OUT CHILD IS STILL BOUND BY ITS OWN Min/Max. Every flow child is clamped by the flex
+      // pass; this branch resolved the declared size and stopped, so `MaxHeight` / `MaxWidth` on anything
+      // Placed, Fixed, Sticky or Pinned was accepted by the parser, filed by the applier, and then
+      // silently dropped by the solver. That is how an open menu authored `Height: MinContent` grew past
+      // the bottom of the screen with a cap sitting right there in its sheet doing nothing, and how
+      // `Jwift_ContextMenuPanel`'s `MaxWidth: 280pt` never held. CSS clamps an absolutely-positioned box
+      // the same way; so do we.
+      const w = clamp(
+        resolveKeyword(declW, child.IntrinsicWidth, child.IntrinsicMinWidth, child.LayoutWidth),
+        _r(child.ChildLayout.MinWidth, childCtx, 'W'),
+        ResolveBound(child.ChildLayout.MaxWidth, childCtx, 'W'));
+      const h = clamp(
+        resolveKeyword(declH, child.IntrinsicHeight, child.IntrinsicMinHeight, child.LayoutHeight),
+        _r(child.ChildLayout.MinHeight, childCtx, 'H'),
+        ResolveBound(child.ChildLayout.MaxHeight, childCtx, 'H'));
 
       // Fixed: cl.Left/Top are viewport-absolute. Placed/Sticky: relative
       // to the parent's box. Falling back to child.X/Y would feed the
