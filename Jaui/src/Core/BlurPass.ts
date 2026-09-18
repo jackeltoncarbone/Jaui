@@ -186,7 +186,7 @@ interface LevelChain {
 
 /** The part of the input a pyramid is built over, in input texels. `YBottom` counts from the
  *  BOTTOM (GL's convention) because that is the axis every pass and every consumer works in. */
-interface RegionRect {
+export interface RegionRect {
   X: number;
   YBottom: number;
   W: number;
@@ -195,6 +195,208 @@ interface RegionRect {
    *  rect is the identity, so the passes are bit-for-bit what they always were. */
   Full: boolean;
 }
+
+/** A rect of the input in device px with y=0 at the TOP — the shape every backdrop consumer
+ *  already speaks, and the shape the union planner takes its members in. */
+export interface BackdropRect { x: number; y: number; w: number; h: number }
+
+/** How far the σ-adaptive base downsample may shrink the backdrop before the pyramid runs.
+ *  Unchanged in substance: only a blur over a BIG fraction of the canvas re-bases, because
+ *  that is where the fill saving is real and the sample margins are ample. The area is
+ *  still measured against the CANVAS — a region-sized pyramid must not read as "100% of the
+ *  area" and start re-basing every little glass card, which would drop its device density.
+ *
+ *  Module scope, not a method, because `PlanBackdropUnion` has to predict the EXACT k a
+ *  member's own `Blur` call will choose. A planner with its own copy of this rule is a planner
+ *  that can silently disagree with the pass it is planning for, and the whole identity argument
+ *  below rests on those two numbers being the same number. */
+export const BaseDownsampleFactor = (
+  radius: number, width: number, height: number, region?: BackdropRect,
+): number => {
+  if (radius <= BASE_SIGMA) return 1;
+  const fullArea = width * height;
+  const area = region ? region.w * region.h : fullArea;
+  if (area < 0.15 * fullArea) return 1;
+  return Math.min(K_MAX, 1 << Math.floor(Math.log2(radius / BASE_SIGMA)));
+};
+
+/** Pick pyramid depth from desired sigma. Each Down/Up pair roughly doubles the effective
+ *  sigma, with a baseline of ~3 px per level:
+ *    depth 1: σ ≈ 4   depth 2: σ ≈ 9   depth 3: σ ≈ 20   depth 4: σ ≈ 45
+ *  Capped at MAX_LEVELS-1 (need 1 level above the input for the down chain). `minDepth`
+ *  lets callers guarantee enough levels exist for textureLod sampling. */
+export const PyramidDepth = (radius: number, minDepth: number): number => {
+  const target = Math.max(1, radius);
+  return Math.max(Math.max(1, minDepth), Math.min(MAX_LEVELS - 1, Math.ceil(Math.log2(target / 3 + 1))));
+};
+
+/** Turn the caller's sample rect into the rect the pyramid is actually built over.
+ *
+ *  ORIGIN snaps DOWN to the downsample grid (`phase` = the σ-adaptive factor times 2^depth).
+ *  Level i of the chain averages source texels [origin + j·2^i, …]; putting the origin on a
+ *  multiple of 2^depth makes every level a texel-exact SUB-GRID of the canvas-sized pyramid
+ *  this used to build. Same texels averaged together, same phase — a CROP, not a resample.
+ *  An unaligned origin would pair different neighbours at every level and move real pixels.
+ *
+ *  EXTENT rounds UP to the same grid and clamps to the input, so the result always CONTAINS
+ *  the caller's rect and every halving in the chain is exact.
+ *
+ *  Snapping to `phase` rather than to some coarser bucket is also what keeps the level FBOs
+ *  from thrashing between surfaces: anything laid out on a regular pitch shares `x mod phase`,
+ *  so a grid of equal cards resolves to ONE extent and re-allocates nothing after the first
+ *  frame. (glass-grid's twenty cards sit on a 236pt pitch — 472 device px at DPR 2, a multiple
+ *  of the depth-2 phase of 4 — so every one of them lands on exactly 568x436.) A page whose
+ *  glass surfaces genuinely differ in size pays one `Resize` per distinct size per frame, which
+ *  is a texture allocation against 47MB of attachment traffic saved. */
+export const ResolveRegionRect = (
+  region: BackdropRect | undefined, width: number, height: number, phase: number,
+): RegionRect => {
+  if (!region) return { X: 0, YBottom: 0, W: width, H: height, Full: true };
+  const rx = Math.max(0, Math.min(width - 1, Math.floor(region.x)));
+  const ry = Math.max(0, Math.min(height - 1, Math.floor(region.y)));
+  const rw = Math.max(1, Math.min(width - rx, Math.ceil(region.w)));
+  const rh = Math.max(1, Math.min(height - ry, Math.ceil(region.h)));
+  const ryb = height - (ry + rh);
+
+  const x0 = Math.floor(rx / phase) * phase;
+  const y0 = Math.floor(ryb / phase) * phase;
+  const w = Math.min(width - x0, Math.ceil((rx + rw - x0) / phase) * phase);
+  const h = Math.min(height - y0, Math.ceil((ryb + rh - y0) / phase) * phase);
+  const full = x0 === 0 && y0 === 0 && w === width && h === height;
+  return { X: x0, YBottom: y0, W: w, H: h, Full: full };
+};
+
+/** Destination pixels one `Blur` writes for a resolved rect at (k, depth) — the pre-downsample
+ *  chain, the DOWN chain and the UP chain, counted with the SAME Math.floor halvings the loops
+ *  use rather than a 4/3 closed form. This is the only currency the union decision is allowed to
+ *  trade in: blur fill is what the phone is short of, and a closed form that is 2% off at depth 2
+ *  is 2% of the number the whole decision turns on. */
+export const PyramidFill = (rectW: number, rectH: number, k: number, depth: number): number => {
+  let w = rectW, h = rectH, fill = 0;
+  for (let s = k; s > 1; s >>= 1) {
+    w = Math.max(1, Math.floor(w / 2));
+    h = Math.max(1, Math.floor(h / 2));
+    fill += w * h;
+  }
+  const lw: number[] = [w], lh: number[] = [h];
+  for (let i = 1; i <= depth; i++) {
+    w = Math.max(1, Math.floor(w / 2));
+    h = Math.max(1, Math.floor(h / 2));
+    lw.push(w); lh.push(h);
+  }
+  for (let i = 1; i <= depth; i++) fill += lw[i] * lh[i];          // DOWN chain
+  for (let i = depth - 1; i >= 0; i--) fill += lw[i] * lh[i];      // UP chain
+  return fill;
+};
+
+/** One pyramid serving a whole (σ, k) CLASS of surfaces, instead of one per surface. */
+export interface BackdropUnionPlan {
+  /** The rect to build over, already snapped — pass it straight to `Blur` as the region. */
+  Region: BackdropRect;
+  /** The factor the union MUST be pinned to. Not the one it would pick for itself: the union is
+   *  bigger than its members, and `BaseDownsampleFactor`'s 15%-of-canvas gate is exactly where a
+   *  union of small cards crosses into k=2 while each card stays at k=1. */
+  K: number;
+  Depth: number;
+  Phase: number;
+  /** Destination pixels the union writes once. */
+  Fill: number;
+  /** Destination pixels the members write between them today. */
+  MemberFill: number;
+}
+
+/**
+ * Plan ONE pyramid over the union of `members`, or return null when no such pyramid is both
+ * texel-identical to what each member builds for itself and cheaper than all of them together.
+ *
+ * WHY THIS CAN BE IDENTICAL AT ALL, in one line: `depth` is a function of `radius / k` alone, so
+ * equal σ plus equal k gives equal depth, gives equal phase, and two rects snapped down to the
+ * same phase differ by a multiple of it — which is precisely the condition under which every
+ * level of the union chain averages the same source texels, in the same groups, that the
+ * member's own chain does. A CROP, not a resample; `ResolveRegionRect` above argues the same
+ * thing for one surface against the canvas-sized pyramid this all used to be.
+ *
+ * The conditions, each of which is a way that argument can fail and each of which is checked:
+ *
+ *  1. TWO OR MORE MEMBERS. A class of one has a union equal to its own region, so it would pay
+ *     a build to save nothing. It must come out of here as null and take the path it takes
+ *     today, untouched.
+ *  2. ONE k ACROSS THE CLASS. k depends on the REGION as well as σ, so two surfaces at the same
+ *     frost can genuinely land on different factors (a small card at 1, a near-full-screen panel
+ *     at 4). Those are different classes; mixing them is a resample.
+ *  3. EXACT HALVINGS, for the union AND for every member. `ResolveRegionRect` rounds the extent
+ *     UP to phase and then CLAMPS it to the input — and at the canvas edge that clamp can hand
+ *     back an extent that is not a multiple of phase. Then floor(W/2) stops being W/2, the
+ *     level-i grid drifts by a sub-texel that grows with depth, and the crop argument is gone.
+ *     A clamped rect on EITHER side disqualifies the class.
+ *  4. CONTAINMENT. The union has to hold every member's resolved rect, not merely its requested
+ *     one. Snapping the bounding box is monotone in both directions, so this holds by
+ *     construction — it is checked rather than assumed because it is cheap and load bearing.
+ *  5. THE ARITHMETIC. Fill < MemberFill, strictly, with no fudge factor in either direction.
+ *     Two chips at opposite corners union to most of the screen and lose here; twenty chips on
+ *     one toolbar row win by about 5x. It is the same test either way, which is why this needs
+ *     no separate "are they close enough to each other" heuristic bolted on beside it.
+ *
+ * What it deliberately does NOT decide: whether the members may share a pyramid in the first
+ * place. That is a question about DRAW ORDER — a surface's backdrop contains everything drawn
+ * before it, including earlier glass — and only the render walk knows the walk.
+ *
+ * NOTHING IN src CALLS THIS, AND THAT IS THE FINDING RATHER THAN AN OMISSION. Wired to the walk
+ * it is correct and it is nearly worthless, because the two conditions a union must satisfy pull
+ * against each other. It saves in proportion to how much the member regions OVERLAP, so it wants
+ * a pitch below a region's own width; it is only legal where an earlier surface's paint stays out
+ * of a later one's sample margin, so it needs a pitch above the box plus one margin plus that
+ * paint's outset. Those two bounds are `margin - outset` apart — about 16pt of pitch for
+ * JwiftGlass — and the saving has decayed to nothing by the time the pitch clears the lower one.
+ * `tests/Blur.Union.test.ts` sweeps it: on glass-grid's own cards the union becomes legal at a
+ * 52pt gap and has stopped paying by 68pt, and is worth at most 1.12x in between. glass-grid ships
+ * a 20pt gap, where it is worth 1.385x and is not available.
+ *
+ * It is kept, with its test, because the question gets asked about once a quarter and the answer
+ * is arithmetic that takes a day to re-derive and five minutes to run. It becomes live code the
+ * day someone decides glass should stop refracting the glass BESIDE it — which is a change to the
+ * picture, so it is not a decision this file gets to make.
+ */
+export const PlanBackdropUnion = (
+  members: readonly BackdropRect[], width: number, height: number, radius: number,
+): BackdropUnionPlan | null => {
+  if (members.length < 2) return null;                                        // (1)
+  if (radius <= 0) return null;
+
+  const k = BaseDownsampleFactor(radius, width, height, members[0]);
+  for (let i = 1; i < members.length; i++) {                                  // (2)
+    if (BaseDownsampleFactor(radius, width, height, members[i]) !== k) return null;
+  }
+  const depth = PyramidDepth(radius / k, 0);
+  const phase = k * (1 << depth);
+
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  let memberFill = 0;
+  const resolved: RegionRect[] = [];
+  for (const m of members) {
+    const rr = ResolveRegionRect(m, width, height, phase);
+    if (rr.W % phase !== 0 || rr.H % phase !== 0) return null;                 // (3)
+    resolved.push(rr);
+    memberFill += PyramidFill(rr.W, rr.H, k, depth);
+    if (m.x < x0) x0 = m.x;
+    if (m.y < y0) y0 = m.y;
+    if (m.x + m.w > x1) x1 = m.x + m.w;
+    if (m.y + m.h > y1) y1 = m.y + m.h;
+  }
+
+  const region: BackdropRect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  const u = ResolveRegionRect(region, width, height, phase);
+  if (u.W % phase !== 0 || u.H % phase !== 0) return null;                     // (3)
+  for (const rr of resolved) {                                                // (4)
+    if (rr.X < u.X || rr.YBottom < u.YBottom
+        || rr.X + rr.W > u.X + u.W || rr.YBottom + rr.H > u.YBottom + u.H) return null;
+  }
+
+  const fill = PyramidFill(u.W, u.H, k, depth);
+  if (fill >= memberFill) return null;                                        // (5)
+
+  return { Region: region, K: k, Depth: depth, Phase: phase, Fill: fill, MemberFill: memberFill };
+};
 
 export class BlurPass {
   private _gl: WebGL2RenderingContext;
@@ -292,6 +494,16 @@ export class BlurPass {
    *
    * Omit `region` for a pyramid over the whole input (the shared backdrop). Then every pass
    * is bit-for-bit what it always was.
+   *
+   * `baseFactor` PINS the sigma-adaptive downsample instead of deriving it from the region.
+   * Only one caller needs it and only for one reason: a union pyramid is bigger than the
+   * surfaces it serves, so it can cross the 15%-of-canvas gate that each of them sits below and
+   * pick a coarser factor than they did. Different factor, different phase, different texels —
+   * and the crop argument that makes a union identical is gone. Lowering it is never a fidelity
+   * loss (see the re-base note below: it discards only what the blur was about to erase), it
+   * costs fill and buys correctness. A value that is not a power of two is a caller bug and
+   * throws rather than quietly rounding into a third rendering. No caller passes it today; see
+   * `PlanBackdropUnion` for the one that would, and for why it does not exist yet.
    */
   Blur = (
     input: WebGLTexture,
@@ -299,15 +511,19 @@ export class BlurPass {
     height: number,
     radius: number,
     minDepth: number = 0,
-    region?: { x: number; y: number; w: number; h: number },
+    region?: BackdropRect,
+    baseFactor?: number,
   ): WebGLTexture => {
     const gl = this._gl;
 
     // The σ-adaptive factor and the pyramid depth both have to be known BEFORE the region is
     // resolved: together they set the downsample grid the region's origin must land on.
-    const k = this._baseDownsampleFactor(radius, width, height, region);
-    const depth = radius > 0 ? this._pyramidDepth(radius / k, minDepth) : 0;
-    const rect = this._resolveRegion(region, width, height, k * (1 << depth));
+    const k = baseFactor ?? BaseDownsampleFactor(radius, width, height, region);
+    if (baseFactor !== undefined && (k < 1 || (k & (k - 1)) !== 0)) {
+      throw new Error(`[Jaui] Blur baseFactor must be a power of two, got ${k}`);
+    }
+    const depth = radius > 0 ? PyramidDepth(radius / k, minDepth) : 0;
+    const rect = ResolveRegionRect(region, width, height, k * (1 << depth));
     // Computed from the ORIGINAL canvas units: Scale and Offset are ratios, so they survive
     // the σ-adaptive re-base below untouched — a coarser level 0 still covers the same rect.
     const scaleX = width / rect.W, scaleY = height / rect.H;
@@ -672,66 +888,4 @@ export class BlurPass {
     };
   };
 
-  /** How far the σ-adaptive base downsample may shrink the backdrop before the pyramid runs.
-   *  Unchanged in substance: only a blur over a BIG fraction of the canvas re-bases, because
-   *  that is where the fill saving is real and the sample margins are ample. The area is
-   *  still measured against the CANVAS — a region-sized pyramid must not read as "100% of the
-   *  area" and start re-basing every little glass card, which would drop its device density. */
-  private _baseDownsampleFactor = (
-    radius: number, width: number, height: number,
-    region?: { x: number; y: number; w: number; h: number },
-  ): number => {
-    if (radius <= BASE_SIGMA) return 1;
-    const fullArea = width * height;
-    const area = region ? region.w * region.h : fullArea;
-    if (area < 0.15 * fullArea) return 1;
-    return Math.min(K_MAX, 1 << Math.floor(Math.log2(radius / BASE_SIGMA)));
-  };
-
-  /** Pick pyramid depth from desired sigma. Each Down/Up pair roughly doubles the effective
-   *  sigma, with a baseline of ~3 px per level:
-   *    depth 1: σ ≈ 4   depth 2: σ ≈ 9   depth 3: σ ≈ 20   depth 4: σ ≈ 45
-   *  Capped at MAX_LEVELS-1 (need 1 level above the input for the down chain). `minDepth`
-   *  lets callers guarantee enough levels exist for textureLod sampling. */
-  private _pyramidDepth = (radius: number, minDepth: number): number => {
-    const target = Math.max(1, radius);
-    return Math.max(Math.max(1, minDepth), Math.min(MAX_LEVELS - 1, Math.ceil(Math.log2(target / 3 + 1))));
-  };
-
-  /** Turn the caller's sample rect into the rect the pyramid is actually built over.
-   *
-   *  ORIGIN snaps DOWN to the downsample grid (`phase` = the σ-adaptive factor times 2^depth).
-   *  Level i of the chain averages source texels [origin + j·2^i, …]; putting the origin on a
-   *  multiple of 2^depth makes every level a texel-exact SUB-GRID of the canvas-sized pyramid
-   *  this used to build. Same texels averaged together, same phase — a CROP, not a resample.
-   *  An unaligned origin would pair different neighbours at every level and move real pixels.
-   *
-   *  EXTENT rounds UP to the same grid and clamps to the input, so the result always CONTAINS
-   *  the caller's rect and every halving in the chain is exact.
-   *
-   *  Snapping to `phase` rather than to some coarser bucket is also what keeps the level FBOs
-   *  from thrashing between surfaces: anything laid out on a regular pitch shares `x mod phase`,
-   *  so a grid of equal cards resolves to ONE extent and re-allocates nothing after the first
-   *  frame. (glass-grid's twenty cards sit on a 236pt pitch — 472 device px at DPR 2, a multiple
-   *  of the depth-2 phase of 4 — so every one of them lands on exactly 568x436.) A page whose
-   *  glass surfaces genuinely differ in size pays one `Resize` per distinct size per frame, which
-   *  is a texture allocation against 47MB of attachment traffic saved. */
-  private _resolveRegion = (
-    region: { x: number; y: number; w: number; h: number } | undefined,
-    width: number, height: number, phase: number,
-  ): RegionRect => {
-    if (!region) return { X: 0, YBottom: 0, W: width, H: height, Full: true };
-    const rx = Math.max(0, Math.min(width - 1, Math.floor(region.x)));
-    const ry = Math.max(0, Math.min(height - 1, Math.floor(region.y)));
-    const rw = Math.max(1, Math.min(width - rx, Math.ceil(region.w)));
-    const rh = Math.max(1, Math.min(height - ry, Math.ceil(region.h)));
-    const ryb = height - (ry + rh);
-
-    const x0 = Math.floor(rx / phase) * phase;
-    const y0 = Math.floor(ryb / phase) * phase;
-    const w = Math.min(width - x0, Math.ceil((rx + rw - x0) / phase) * phase);
-    const h = Math.min(height - y0, Math.ceil((ryb + rh - y0) / phase) * phase);
-    const full = x0 === 0 && y0 === 0 && w === width && h === height;
-    return { X: x0, YBottom: y0, W: w, H: h, Full: full };
-  };
 }
