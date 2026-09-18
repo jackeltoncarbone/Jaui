@@ -2,6 +2,8 @@ import type { Jiv } from '../Jiv/Jiv';
 import type { Animatable } from '../Animation/Animation.Manager';
 import { type Mat2x3, MAT_IDENTITY, matMul, matInvApply } from '../Transform/Mat2x3';
 import { PageTarget, type PageSpan } from './Scroll.Page';
+import { AlignTarget } from './Scroll.Align';
+import type { ScrollAlign, ScrollAxis, ScrollMotion } from './Scroll.Types';
 
 /**
  * Scroll physics for Overflow:Scroll Jivs. Two behaviors share the same state:
@@ -138,18 +140,51 @@ export class ScrollManager implements Animatable {
     s.velY = 0;
   };
 
-  /** Start a drag (touch/pointer). Disables physics; caller will push
-   *  positions via DragMove until DragEnd. */
-  /** Scroll a container to an ABSOLUTE offset. 'smooth' rides the same ease
-   *  the wheel uses; 'instant' lands this frame. This is the consumer-facing
+  /** Scroll a container to an ABSOLUTE offset. `Smooth` rides the same ease
+   *  the wheel uses; `Instant` lands this frame. This is the consumer-facing
    *  primitive the engine never had — callers were poking ScrollY directly,
    *  bypassing the physics and racing the per-frame sync. */
-  ScrollTo = (jiv: Jiv, x: number | null, y: number | null, behavior: 'smooth' | 'instant' = 'smooth'): void => {
+  ScrollTo = (jiv: Jiv, x: number | null, y: number | null, motion: ScrollMotion = 'Smooth'): void => {
     const s = this._ensureState(jiv);
     const dx = x === null ? 0 : x - s.targetX;
     const dy = y === null ? 0 : y - s.targetY;
-    if (behavior === 'smooth') this.ApplyDelta(jiv, dx, dy);
+    if (motion === 'Smooth') this.ApplyDelta(jiv, dx, dy);
     else this.ApplyDeltaInstant(jiv, dx, dy);
+  };
+
+  /** Scroll a container so a descendant's box lands at an alignment inside the
+   *  window — the element half of the scroll-to primitive, and what a rail that
+   *  jumps to a section presses.
+   *
+   *  `rect` is the element in the CONTAINER'S un-scrolled content coordinates;
+   *  the caller resolves it, because only the canvas knows the tree. `pad` is
+   *  the container's resolved padding, which is the line the element lands on
+   *  (see Scroll.Align). `offset` is added AFTER alignment and before the
+   *  clamp, so a sticky head's height can pull the landing down without
+   *  letting the request run off the end of the content.
+   *
+   *  Alignment is measured from the PENDING target, so a second jump made
+   *  while the first is still easing composes with it instead of restarting
+   *  the arithmetic from a position halfway through an animation. */
+  AlignInto = (
+    jiv: Jiv,
+    rect: { x: number; y: number; width: number; height: number },
+    pad: { Left: number; Right: number; Top: number; Bottom: number },
+    align: ScrollAlign,
+    axis: ScrollAxis,
+    offset: { X: number; Y: number },
+    motion: ScrollMotion,
+  ): void => {
+    const s = this._ensureState(jiv);
+    const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
+    const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
+    const x = axis === 'Y' ? null
+      : AlignTarget({ Start: rect.x, Size: rect.width }, s.targetX, jiv.Width, pad.Left, pad.Right, maxX, align) + offset.X;
+    const y = axis === 'X' ? null
+      : AlignTarget({ Start: rect.y, Size: rect.height }, s.targetY, jiv.Height, pad.Top, pad.Bottom, maxY, align) + offset.Y;
+    // No clamp here: ScrollTo resolves to a delta and ApplyDelta clamps the
+    // target to the content bounds, so an offset past an edge lands AT it.
+    this.ScrollTo(jiv, x, y, motion);
   };
 
   /** Page a row one screen of whole cards along X (see `PageTarget`). The
@@ -164,14 +199,14 @@ export class ScrollManager implements Animatable {
     }
     spans.sort((a, b) => a.Start - b.Start);
     const max = Math.max(0, jiv.ContentWidth - jiv.Width);
-    this.ScrollTo(jiv, PageTarget(spans, s.targetX, jiv.Width, padStart, padEnd, max, direction), null, 'smooth');
+    this.ScrollTo(jiv, PageTarget(spans, s.targetX, jiv.Width, padStart, padEnd, max, direction), null, 'Smooth');
   };
 
   /** Scroll the nearest scrollable ancestor the minimum distance that brings
    *  `rect` (container-content coordinates) fully into view, plus a margin —
    *  the web's scrollIntoView({block:'nearest'}), which focus-reveal and the
    *  caret both need. */
-  ScrollRectIntoView = (jiv: Jiv, rect: { x: number; y: number; width: number; height: number }, marginPx = 8, behavior: 'smooth' | 'instant' = 'smooth'): void => {
+  ScrollRectIntoView = (jiv: Jiv, rect: { x: number; y: number; width: number; height: number }, marginPx = 8, motion: ScrollMotion = 'Smooth'): void => {
     // Measure against the PENDING target so stacked reveals compose instead
     // of re-fighting an ease already in flight.
     const st = this._ensureState(jiv);
@@ -185,10 +220,12 @@ export class ScrollManager implements Animatable {
     if (rect.x - marginPx < viewLeft) dx = rect.x - marginPx - viewLeft;
     else if (rect.x + rect.width + marginPx > viewRight) dx = rect.x + rect.width + marginPx - viewRight;
     if (dx === 0 && dy === 0) return;
-    if (behavior === 'smooth') this.ApplyDelta(jiv, dx, dy);
+    if (motion === 'Smooth') this.ApplyDelta(jiv, dx, dy);
     else this.ApplyDeltaInstant(jiv, dx, dy);
   };
 
+  /** Start a drag (touch/pointer). Disables physics; caller will push
+   *  positions via DragMove until DragEnd. */
   DragStart = (jiv: Jiv): void => {
     const s = this._ensureState(jiv);
     s.dragging = true;

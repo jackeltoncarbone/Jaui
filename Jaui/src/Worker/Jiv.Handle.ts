@@ -31,6 +31,14 @@ import type { ChildLayout, LayoutConfig } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
 import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import type { EmbedBox } from '../Embed/Embed.Geometry';
+import type { ScrollToOptions } from '../Scroll/Scroll.Types';
+
+/** `ScrollToOptions` as a CONSUMER states it: the element is the handle they
+ *  are holding, not an id they would have to go and find. `JivHandle.ScrollTo`
+ *  swaps it for `ElementId` on the way to the bridge. */
+export interface ScrollTarget extends Omit<ScrollToOptions, 'ElementId'> {
+  Element?: JivHandle | null;
+}
 
 export class JivHandle {
   readonly Id: number;
@@ -292,6 +300,36 @@ export class JivHandle {
   /** Page this scroll row one screen of whole cards; the worker eases it. */
   ScrollPageX = (direction: 1 | -1): void => {
     this._bridge.Enqueue({ K: 'scroll-page', Id: this.Id, Direction: direction });
+  };
+
+  /**
+   * Send this scroll container somewhere — the main-thread scroll-to the bridge
+   * never carried, and what anything that JUMPS presses: a rail naming a
+   * section, a search result revealing its row, a validation error pulling its
+   * field into view.
+   *
+   *     row.Node.ScrollTo({ Element: card.Node, Align: 'Start' });
+   *     page.Node.ScrollTo({ Y: 0, Motion: 'Instant' });
+   *     page.Node.ScrollTo({ Element: section.Node, OffsetY: -HeadHeight });
+   *
+   * `Element` is a handle here and an id on the wire, because a `JivHandle`
+   * cannot be structured-cloned and — more to the point — main does not know
+   * where it is. Geometry reads 0 on a handle without a `WatchRect` lease, so
+   * a caller that resolved its own coordinate would be leasing every jumpable
+   * node every frame to answer a question asked once per press. The worker has
+   * the layout; it resolves the rect. Every other field is passed through
+   * untouched (`ScrollToOptions`).
+   *
+   * Ordered in the same buffered op stream as every other command, so a jump
+   * issued in the same tick as the content it names arrives after the creates.
+   */
+  ScrollTo = (to: ScrollTarget): void => {
+    const { Element, ...rest } = to;
+    this._bridge.Enqueue({
+      K: 'scroll-to',
+      Id: this.Id,
+      To: Element ? { ...rest, ElementId: Element.Id } : rest,
+    });
   };
 
   private _takeRect = (box: EmbedBox, scroll: ScrollExtent | null): void => {

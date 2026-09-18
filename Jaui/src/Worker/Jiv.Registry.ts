@@ -37,6 +37,7 @@ import type {
   JivOp,
   M2W_JivOps,
   ScrollExtent,
+  ScrollToOptions,
   W2M,
   PointerPayload,
   WheelPayload,
@@ -53,6 +54,9 @@ const ROOT_ID = 0;
 export interface RegistryScroller {
   Measure: (node: JivCore) => void;
   PageX: (node: JivCore, direction: 1 | -1) => void;
+  /** Send a container to an absolute offset, or to `target`'s box. The canvas
+   *  resolves padding and geometry; the registry only resolves the ids. */
+  ScrollTo: (node: JivCore, target: JivCore | null, to: ScrollToOptions) => void;
 }
 
 const _scrollExtentsEqual = (a: ScrollExtent | undefined, b: ScrollExtent | undefined): boolean => {
@@ -184,6 +188,32 @@ export class JivRegistry {
     this._scroller.PageX(core, direction);
   };
 
+  /** `scroll-to`: resolve the container, and the element target if one was
+   *  named, then hand both to the canvas.
+   *
+   *  A TARGET THAT IS NOT UNDER THE CONTAINER IS REFUSED. Its rect would still
+   *  subtract to a number, and that number would scroll the container to a
+   *  place with no relationship to what the caller asked for — a rail pointed
+   *  at the wrong scroller would look like a physics bug rather than a wiring
+   *  one. The tree walk is O(depth) and runs once per press. */
+  private _scrollTo = (id: number, to: ScrollToOptions): void => {
+    const core = this._nodes.get(id);
+    if (!core) { console.warn(`[JivRegistry] scroll-to: missing id=${id}`); return; }
+    if (!this._scroller) { console.warn('[JivRegistry] scroll-to: no scroller attached'); return; }
+    let target: JivCore | null = null;
+    if (to.ElementId !== undefined) {
+      target = this._nodes.get(to.ElementId) ?? null;
+      if (!target) { console.warn(`[JivRegistry] scroll-to: missing target id=${to.ElementId}`); return; }
+      let inside = false;
+      for (let p = target.Parent; p; p = p.Parent) if (p === core) { inside = true; break; }
+      if (!inside) {
+        console.warn(`[JivRegistry] scroll-to: target ${to.ElementId} is not inside container ${id}`);
+        return;
+      }
+    }
+    this._scroller.ScrollTo(core, target, to);
+  };
+
   // ─── Op dispatch ────────────────────────────────────────────────────────
 
   private _apply = (op: JivOp): void => {
@@ -199,6 +229,7 @@ export class JivRegistry {
       case 'svg-set':       return this._svgSet(op.Id, op.Paint);
       case 'svg-clear':     return this._svgClear(op.Id);
       case 'scroll-page':   return this._scrollPage(op.Id, op.Direction);
+      case 'scroll-to':     return this._scrollTo(op.Id, op.To);
     }
   };
 

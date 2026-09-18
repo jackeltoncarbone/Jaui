@@ -37,6 +37,9 @@ export { LiquidGlass, ClearGlass, ParseJss, Canvas } from 'jaui';
 // consumer needs to place or inspect one imperatively.
 export { IsInsideEmbed, EMBED_ATTRIBUTE } from 'jaui';
 export type { EmbedBox } from 'jaui';
+// Scrolling — `JivHandle.ScrollTo` is how a rail, a reveal or an error jumps a
+// container, and these are the words it takes.
+export type { ScrollTarget, ScrollAlign, ScrollAxis, ScrollMotion, ScrollToOptions } from 'jaui';
 
 // Worker bootstrap helpers — apps call `CheckBrowserSupport()` at boot
 // to feature-detect OffscreenCanvas + Worker before kicking Angular.

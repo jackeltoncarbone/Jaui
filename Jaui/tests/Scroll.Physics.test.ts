@@ -77,7 +77,7 @@ describe('rubber-band: the edge stretches and springs home', () => {
     const m = makeManager(jiv);
     const maxY = 2000 - 600;
     // Park just shy of the end with a hot velocity, then let physics run.
-    m.ScrollTo(jiv, null, maxY - 50, 'instant');
+    m.ScrollTo(jiv, null, maxY - 50, 'Instant');
     m.Tick(1 / 120);
     // A fast downward drag: 12.5px per 8ms frame ≈ 1560 px/s.
     drag(m, jiv, 12.5, 4);
@@ -107,10 +107,10 @@ describe('ScrollTo and ScrollRectIntoView: the public primitives', () => {
   it('instant lands this frame; smooth only moves the target', () => {
     const jiv = makeJiv();
     const m = makeManager(jiv);
-    m.ScrollTo(jiv, null, 500, 'instant');
+    m.ScrollTo(jiv, null, 500, 'Instant');
     m.Tick(1 / 120);
     expect(jiv.ScrollY).toBe(500);
-    m.ScrollTo(jiv, null, 900, 'smooth');
+    m.ScrollTo(jiv, null, 900, 'Smooth');
     m.Tick(1 / 120);
     expect(jiv.ScrollY).toBeGreaterThan(500);     // easing toward…
     expect(jiv.ScrollY).toBeLessThan(900);        // …not teleported
@@ -121,10 +121,10 @@ describe('ScrollTo and ScrollRectIntoView: the public primitives', () => {
   it('IntoView scrolls the MINIMUM distance, and not at all when visible', () => {
     const jiv = makeJiv();
     const m = makeManager(jiv);
-    m.ScrollRectIntoView(jiv, { x: 0, y: 300, width: 100, height: 40 }, 8, 'instant');
+    m.ScrollRectIntoView(jiv, { x: 0, y: 300, width: 100, height: 40 }, 8, 'Instant');
     m.Tick(1 / 120);
     expect(jiv.ScrollY).toBe(0);                  // already visible: no-op
-    m.ScrollRectIntoView(jiv, { x: 0, y: 900, width: 100, height: 40 }, 8, 'instant');
+    m.ScrollRectIntoView(jiv, { x: 0, y: 900, width: 100, height: 40 }, 8, 'Instant');
     m.Tick(1 / 120);
     expect(jiv.ScrollY).toBe(900 + 40 + 8 - 600); // bottom edge + margin, no more
   });

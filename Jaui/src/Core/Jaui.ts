@@ -55,6 +55,7 @@ import { DirtyFlag } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
+import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer } from './WebGL2.Renderer';
@@ -3681,6 +3682,53 @@ export class Canvas implements DirtyTracker {
     this._animationManager.Kick();
   };
 
+  /**
+   * Send a scroll container somewhere: an absolute offset, or an element's box.
+   * The main-thread half of this is `JivHandle.ScrollTo`; the bridge carries the
+   * request as a `scroll-to` op and `JivRegistry` resolves the ids to nodes.
+   *
+   * THE REQUEST WAITS FOR LAYOUT WHEN LAYOUT IS DIRTY. An element target is
+   * read out of `X`/`Y`, and those are last frame's numbers until the solve
+   * runs. A rail pressed in the same tick that its sections mounted would
+   * otherwise scroll to where nothing is yet — silently, which is the worst
+   * kind. So a dirty tree defers the whole resolve to one post-frame callback
+   * and lands on real geometry. Exactly one retry: if a frame's solve did not
+   * settle the numbers, a loop waiting for it is a scroll that never happens.
+   */
+  ScrollTo = (node: Jiv, target: Jiv | null, to: ScrollToOptions): void => {
+    if (node.Overflow !== 'Scroll') {
+      console.warn('[Jaui] ScrollTo: container does not scroll (Overflow is not Scroll)');
+      return;
+    }
+    if (target && (this.Root.Dirty & (DirtyFlag.Layout | DirtyFlag.Text)) !== 0) {
+      const off = this.RegisterPostFrame(() => { off(); this._scrollToNow(node, target, to); });
+      this._animationManager.Kick();
+      return;
+    }
+    this._scrollToNow(node, target, to);
+  };
+
+  private _scrollToNow = (node: Jiv, target: Jiv | null, to: ScrollToOptions): void => {
+    this.MeasureScrollContent(node);
+    const motion = to.Motion ?? 'Smooth';
+    const axis = to.Axis ?? 'Both';
+    const offset = { X: to.OffsetX ?? 0, Y: to.OffsetY ?? 0 };
+    if (target) {
+      const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
+      const [padT, padR, padB, padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
+      // Layout positions are un-scrolled, so the difference IS the element's
+      // place in the container's content coordinates however deep it sits.
+      const rect = { x: target.X - node.X, y: target.Y - node.Y, width: target.Width, height: target.Height };
+      const pad = { Left: padL, Right: padR, Top: padT, Bottom: padB };
+      this._scrollManager.AlignInto(node, rect, pad, to.Align ?? 'Start', axis, offset, motion);
+    } else {
+      const x = axis === 'Y' || to.X === undefined || to.X === null ? null : to.X + offset.X;
+      const y = axis === 'X' || to.Y === undefined || to.Y === null ? null : to.Y + offset.Y;
+      this._scrollManager.ScrollTo(node, x, y, motion);
+    }
+    this._animationManager.Kick();
+  };
+
   /** Re-rasterize every text node against the current font set. Called
    *  when fonts finish loading after the engine has already rendered —
    *  cached glyph rasters captured with the fallback font are now stale.
@@ -4189,7 +4237,7 @@ export type { ImageStyle, ObjectFit } from '../Image/Image.Types';
 export { ImageCache, RecolorSvg, type ImageEntry } from '../Image/Image.Cache';
 
 // Scroll
-export type { ScrollConfig } from '../Scroll/Scroll.Types';
+export type { ScrollConfig, ScrollAlign, ScrollAxis, ScrollMotion, ScrollToOptions } from '../Scroll/Scroll.Types';
 
 // Animation
 export type {
@@ -4224,7 +4272,7 @@ export type { ParsedSvg, SvgNode, SvgPathNode, SvgTextNode, SvgContour, SvgFillR
 // Worker boot — apps call CheckBrowserSupport() before mounting Angular.
 export { CheckBrowserSupport, type BrowserSupportResult } from '../Worker/Browser.Support';
 export { MainBridge, RootId, type BridgeOptions, type JivHitHandlers } from '../Worker/Bridge.Main';
-export { JivHandle } from '../Worker/Jiv.Handle';
+export { JivHandle, type ScrollTarget } from '../Worker/Jiv.Handle';
 export { CanvasProxy } from '../Worker/Canvas.Proxy';
 export { SpawnJauiWorker } from '../Worker/Worker.Spawn';
 export { BootJauiWorker } from '../Worker/Worker.Boot';

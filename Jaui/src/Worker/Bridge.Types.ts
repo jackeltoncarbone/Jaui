@@ -15,6 +15,7 @@
 import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import type { ProbeSnapshot } from '../Probe/Probe.Types';
 import type { EmbedBox } from '../Embed/Embed.Geometry';
+import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 
 // ─── Main → Worker ────────────────────────────────────────────────────────
 
@@ -279,7 +280,10 @@ export type JivOp =
   | { K: 'svg-set'; Id: number; Paint: SvgVectorPaint }
   | { K: 'svg-clear'; Id: number }
   /** Page a horizontal scroll row one screen of whole cards (Canvas.ScrollPageX). */
-  | { K: 'scroll-page'; Id: number; Direction: 1 | -1 };
+  | { K: 'scroll-page'; Id: number; Direction: 1 | -1 }
+  /** Send a scroll container somewhere — an absolute offset, or an element
+   *  resolved on the worker. See `ScrollToOptions`. */
+  | { K: 'scroll-to'; Id: number; To: ScrollToOptions };
 
 /** Batched Jiv tree ops, flushed once per Angular CD on main. Ordering is
  *  significant: a `create` must precede the `attach` that places it. */
