@@ -3,7 +3,10 @@
  * Used by Canvas for the scene FBO that glass panels sample from.
  *
  * On resize, re-allocates the texture + framebuffer to the new dimensions.
- * Mipmap generation is on-demand via GenerateMipmap() — caller invokes after writes.
+ * Mip storage is opt-in via EnsureMipLevels(); whoever asks for it fills it. There is
+ * deliberately no generateMipmap() wrapper: the driver's box filter is not the Gaussian any
+ * consumer here samples, and a wrapper that flipped MIN_FILTER as a side effect is how the
+ * progressive blur's pyramid ended up reading its own empty mip 1 (BlurPass, DOWN_FRAG).
  */
 export class Framebuffer {
   readonly Framebuffer: WebGLFramebuffer;
@@ -68,7 +71,7 @@ export class Framebuffer {
     } else {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     }
-    // Start with plain LINEAR. Caller calls GenerateMipmap() to opt into mipmap filtering.
+    // Start with plain LINEAR. Caller calls EnsureMipLevels() to opt into mipmap filtering.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -104,18 +107,6 @@ export class Framebuffer {
   /** Bind for rendering. */
   Bind = (): void => {
     this._gl.bindFramebuffer(this._gl.FRAMEBUFFER, this.Framebuffer);
-  };
-
-  /** Generate mipmap chain for the color texture. Call after rendering into the FBO.
-   *  Also flips filter to mipmap mode so subsequent samples can use textureLod. */
-  GenerateMipmap = (): void => {
-    const gl = this._gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.Texture);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, this._mipDepth());
-    this._mipLevels = this._mipDepth();
-    gl.bindTexture(gl.TEXTURE_2D, null);
   };
 
   /** Allocate (empty) mip levels 1..`levels` and make the texture mip-complete
