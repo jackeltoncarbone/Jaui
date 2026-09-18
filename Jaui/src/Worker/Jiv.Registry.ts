@@ -339,6 +339,14 @@ export class JivRegistry {
     if (opts.Style) {
       _resetTo(core.Style as unknown as Record<string, unknown>, DefaultJivStyle as unknown as Record<string, unknown>);
       Object.assign(core.Style, opts.Style as Partial<JivStyle>);
+      // THE authored-style write in this engine: every style the app sets, from a
+      // `[class]` swap down to `Node.Style.Background = …` on a handle, arrives
+      // here. `MarkLayoutDirty` at the end of this method is not enough — it is a
+      // LAYOUT flag, and the renderer reads `RenderStyle`, which only
+      // `JivStyleAnimator.Tick` rewrites and which skips its resolve unless the
+      // animator is marked. Without this line a paint-only property changed the
+      // node and never the canvas. See `Jiv.MarkStyleDirty`.
+      core.MarkStyleDirty();
     }
     if (opts.Layout) {
       _resetTo(core.Layout as unknown as Record<string, unknown>, DefaultLayoutConfig as unknown as Record<string, unknown>);

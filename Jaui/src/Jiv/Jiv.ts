@@ -182,10 +182,10 @@ export class Jiv extends Element {
 
   private _syncState = (name: string, on: boolean): void => {
     if (on) this._states.add(name); else this._states.delete(name);
-    // Wake the style animator — a `:Hover`/`:Pressed`/… predicate may change the
-    // resolved style, and in the sleep-when-idle model the animator skips its
-    // resolve unless flagged. (Visual-only predicates don't MarkLayoutDirty.)
-    this.StyleAnimator?.Wake();
+    // A `:Hover`/`:Pressed`/… predicate may change the resolved style, and in the
+    // sleep-when-idle model the animator skips its resolve unless marked.
+    // (Visual-only predicates don't MarkLayoutDirty.)
+    this.MarkStyleDirty();
   };
 
   /** Captured Interactive/Cursor values from BEFORE Disabled was set, so
@@ -203,7 +203,7 @@ export class Jiv extends Element {
   private _invalidateText = (): void => {
     this.Dirty |= DirtyFlag.Text;
     this.MarkLayoutDirty();
-    this.StyleAnimator?.Wake();
+    this.MarkStyleDirty();
   };
 
   /** A live state changed (pointer-driven Hover/Active/Focus/Disabled/GroupHover, or a custom state set
@@ -211,7 +211,7 @@ export class Jiv extends Element {
    *  depend on state, so `@If (SomeState) { Width: … }` re-applies reactively — not just style/text.
    *  Both checks are gated by the cheap `_has*Predicates` flags, so state-only elements pay nothing. */
   private _onStateChange = (): void => {
-    this.StyleAnimator?.Wake();
+    this.MarkStyleDirty();
     if (this._hasTextPredicates) this._invalidateText();
     if (this._hasLayoutPredicates) this.RecomputeResponsiveLayout();
   };
@@ -261,6 +261,40 @@ export class Jiv extends Element {
     Wake: () => void;
     readonly HasAnimations: boolean;
   } | null = null;
+
+  /**
+   * The paint counterpart of `MarkLayoutDirty`: this Jiv's RESOLVED style may
+   * have changed, so re-resolve it on the next tick.
+   *
+   * `RenderStyle` — the only thing the renderer reads — is a function of five
+   * inputs: the authored `Style` bag, `PredicateStyles`, the live state set,
+   * the live `@var` map, and the `ResolveCtx` (PointScale, viewport, and this
+   * element, which scoped ternaries read for Self/Parent/Ancestor size). It is
+   * recomputed ONLY inside `JivStyleAnimator.Tick`, whose sleep guard skips the
+   * whole resolve unless something marked the animator. **So a write to any of
+   * those five inputs that does not call this method never reaches the screen.**
+   *
+   * That is not a theoretical hazard: the authored `Style` bag had no mark at
+   * all. `JivRegistry._applyOpts` assigned into `core.Style` and called only
+   * `MarkLayoutDirty` — which is a LAYOUT flag, so layout re-solved and the
+   * frame re-rendered, but from the stale `RenderStyle`. A paint-only change
+   * (`Background`, `Opacity`, `BorderColor`, a shadow, a filter) therefore
+   * landed on the node and never on the canvas. What hid it was the animator's
+   * 60-frame backstop re-resolve: while the frame loop kept ticking, every
+   * missed mark self-healed inside a second, so the defect read as latency
+   * nobody had measured rather than as a wrong pixel. Once the loop parks on a
+   * still page there are no idle frames to self-heal on and the change is lost
+   * outright — which is how `video-glass` caught it (canvas tracked its own
+   * moving backdrop by 11/255 where the DOM control tracked it by 195/255).
+   *
+   * Cheap and idempotent: sets one flag. Deliberately NOT a Proxy trap on the
+   * `Style` bag — `ResolveStyle` reads all ~56 properties per Jiv per tick, and
+   * putting a Proxy between the resolver and its inputs would tax the exact hot
+   * path the still-page work exists to shrink.
+   */
+  MarkStyleDirty = (): void => {
+    this.StyleAnimator?.Wake();
+  };
 
   constructor(options?: {
     X?: number;
@@ -330,6 +364,10 @@ export class Jiv extends Element {
 
   private _setPredicateStylesInternal = (list: readonly PredicateStyle[] | null): void => {
     this.PredicateStyles = list;
+    // A new predicate list is a new resolved style even when the states behind
+    // it never moved — a class swap that changes only `:Hover { Background }`
+    // reaches the screen because of this mark, not because of the Style bag's.
+    this.MarkStyleDirty();
     let hasText = false;
     let hasLayout = false;
     let hasScoped = false;
@@ -411,6 +449,13 @@ export class Jiv extends Element {
   RecomputeResponsiveText = (): void => {
     if (this._hasTextPredicates) this._invalidateText();
   };
+
+  /** True when any predicate reads this element's box or ancestry, which makes
+   *  this Jiv's RESOLVED style a function of the rect the solver produces — so a
+   *  solve that MOVES it has to re-resolve it even though no state changed.
+   *  `Canvas._solveAndAnimate` reads this to scope that mark to the nodes that
+   *  actually care. */
+  get HasScopedPredicates(): boolean { return this._hasScopedPredicates; }
 
   override OnAncestryChanged = (): void => {
     if (!this._hasScopedPredicates) return;
