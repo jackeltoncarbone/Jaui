@@ -15,7 +15,7 @@
  * its bridge-routed properties; they never see message types.
  */
 
-import { JTrace } from '../Diagnostics/Jaui.Trace';
+import { JTrace, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import type {
   M2W,
   W2M,
@@ -36,6 +36,11 @@ import { EmbedLayer, IsInsideEmbed } from '../Embed/Embed.Layer';
 import type { EmbedBox } from '../Embed/Embed.Geometry';
 
 const ROOT_ID = 0;
+
+/** How long the font scan waits for its fan-out of fetches to go quiet before it puts one
+ *  rolled-up line on the trace timeline. Long enough that a phone's whole webfont set lands in a
+ *  single line; short enough that the line is there before the boot report renders. */
+const SCAN_SUMMARY_DELAY_MS = 400;
 
 const _DEBUG: boolean =
   typeof window !== 'undefined' &&
@@ -129,7 +134,10 @@ export class MainBridge {
   /** True after worker posts {T:'ready'}. Until then, events queue locally
    *  and flush after ready (avoid dropping a fast first-click). */
   private _ready = false;
-  private _eventBacklog: M2W[] = [];
+  /** Backlogged messages, each with the transfer list it was posted with. The list travels WITH the
+   *  message: a backlog that kept only the message would re-post a transferable by structured
+   *  CLONE, which for a font binary is a silent full copy of every webfont the page carries. */
+  private _eventBacklog: { Msg: M2W; Transfer?: Transferable[] }[] = [];
 
   /** Main-thread eviction self-heal — see Context.Watchdog. */
   private readonly _watchdog: ContextWatchdog;
@@ -268,7 +276,7 @@ export class MainBridge {
     const worker = this.Worker;
     if (!worker) return;
     if (!this._ready) {
-      this._eventBacklog.push(msg);
+      this._eventBacklog.push({ Msg: msg, Transfer: transfer });
       return;
     }
     try {
@@ -439,15 +447,19 @@ export class MainBridge {
       const drain = this._eventBacklog;
       this._eventBacklog = [];
       if (_DEBUG) console.log(`[Jaui.MainBridge] draining ${drain.length} backlogged message(s):`,
-        drain.map(m => (m as { T: string }).T));
-      for (const m of drain) {
+        drain.map(e => e.Msg.T));
+      for (const entry of drain) {
         try {
-          // A worker exists: `_ready` only flips when one posts back.
-          this.Worker!.postMessage(m);
+          // A worker exists: `_ready` only flips when one posts back. Nothing has claimed these
+          // transferables in the meantime — the backlog path never called postMessage, so the
+          // buffers are still attached here and this is their first and only hand-off.
+          if (entry.Transfer && entry.Transfer.length > 0) this.Worker!.postMessage(entry.Msg, entry.Transfer);
+          else this.Worker!.postMessage(entry.Msg);
         } catch (err) {
-          const t = (m as { T: string }).T;
-          const shape = _describeShape(m);
-          console.error(`[Jaui.MainBridge] backlog drain FAILED for T=${t}\n${JSON.stringify(shape, null, 2)}`, { msg: m, err });
+          const t = entry.Msg.T;
+          const shape = _describeShape(entry.Msg);
+          console.error(`[Jaui.MainBridge] backlog drain FAILED for T=${t}\n${JSON.stringify(shape, null, 2)}`, { msg: entry.Msg, err });
+          JTrace(`jaui:backlog:drain-failed ${t}`);
         }
       }
     }
@@ -783,136 +795,119 @@ export class MainBridge {
     // `new FontFace(family, ArrayBuffer)`), fall back to `local(family)`
     // — works for system fonts but not for webfonts.
     if (document.fonts) {
-      const sentFamilies = new Set<string>();
+      const sentFaces = new Set<string>();
+      let sheetsWalked = 0;
+      let binariesOk = 0;
+      let binariesFailed = 0;
+      let summaryTimer: ReturnType<typeof setTimeout> | null = null;
 
-      const post = (
-        family: string, srcRaw: string, baseUrl: string,
-        weight?: string, style?: string, stretch?: string,
-        unicodeRange?: string, display?: string,
-      ): void => {
-        const cleanFamily = family.replace(/['"]/g, '').trim();
-        if (!cleanFamily) return;
-        // Extract the first url(...) — that's the binary we'll fetch.
-        // `format(...)` clauses and additional sources are ignored; if
-        // the first URL fails the FontFace simply isn't installed.
-        const urlMatch = /url\(\s*(['"]?)([^'")]+)\1\s*\)/.exec(srcRaw);
-        if (!urlMatch) return;
-        let resolved: string;
-        try { resolved = new URL(urlMatch[2], baseUrl).href; } catch { return; }
-        const key = `${cleanFamily}|${weight ?? ''}|${style ?? ''}|${stretch ?? ''}|${unicodeRange ?? ''}`;
-        if (sentFamilies.has(key)) return;
-        sentFamilies.add(key);
-        // Fetch the binary on main (where cross-origin font fetches
-        // aren't blocked) and ship as a transferred ArrayBuffer. Worker
-        // constructs `new FontFace(family, buffer)` which works
-        // identically across Chromium and WebKit. `crossorigin` headers
-        // for Google Fonts allow this — they emit `access-control-allow-origin: *`.
-        fetch(resolved).then((r) => {
+      // The scan is a fan-out of independent fetches, so its OUTCOME has no single moment. Roll the
+      // counts up once they stop arriving and put ONE line on the trace timeline. That line is the
+      // whole answer to "did this device's worker get the page's fonts", and it is the only form of
+      // the answer a person holding a phone can read.
+      const traceSummary = (): void => {
+        if (!JauiTracing()) return;
+        if (summaryTimer !== null) clearTimeout(summaryTimer);
+        summaryTimer = setTimeout(() => {
+          summaryTimer = null;
+          JTrace(`fonts:scan sheets=${sheetsWalked} faces=${sentFaces.size} ok=${binariesOk} failed=${binariesFailed}`);
+        }, SCAN_SUMMARY_DELAY_MS);
+      };
+
+      const send = (face: ScannedFontFace): void => {
+        const key = `${face.Family}|${face.Weight ?? ''}|${face.Style ?? ''}|${face.Stretch ?? ''}|${face.UnicodeRange ?? ''}`;
+        if (sentFaces.has(key)) return;
+        sentFaces.add(key);
+        // Fetch the binary on main (where cross-origin font fetches aren't blocked) and ship it as
+        // a transferred ArrayBuffer. The worker constructs `new FontFace(family, buffer)`, which
+        // behaves identically across Chromium and WebKit. Google Fonts sends
+        // `access-control-allow-origin: *` on the gstatic binaries, which is what allows the fetch.
+        fetch(face.Url).then((r) => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.arrayBuffer();
         }).then((buf) => {
+          binariesOk++;
           this.PostMessage({
             T: 'font-face',
-            Family: cleanFamily,
+            Family: face.Family,
             Buffer: buf,
-            Descriptors: { Weight: weight, Style: style, Stretch: stretch, UnicodeRange: unicodeRange, Display: display },
+            Descriptors: {
+              Weight: face.Weight, Style: face.Style, Stretch: face.Stretch,
+              UnicodeRange: face.UnicodeRange, Display: face.Display,
+            },
           }, [buf]);
+          traceSummary();
         }).catch((err) => {
-          console.warn(`[FontScan] failed to fetch ${resolved}:`, err?.message ?? err);
+          binariesFailed++;
+          const why = err?.message ?? String(err);
+          console.warn(`[FontScan] failed to fetch ${face.Url}:`, why);
+          JTrace(`fonts:fetch-failed ${face.Family} ${face.Weight ?? ''} ${why}`);
+          traceSummary();
         });
-      };
-
-      const sendFromCssRule = (rule: CSSFontFaceRule): void => {
-        post(
-          rule.style.getPropertyValue('font-family'),
-          rule.style.getPropertyValue('src'),
-          (rule.parentStyleSheet as CSSStyleSheet | null)?.href || window.location.href,
-          rule.style.getPropertyValue('font-weight') || undefined,
-          rule.style.getPropertyValue('font-style') || undefined,
-          rule.style.getPropertyValue('font-stretch') || undefined,
-          rule.style.getPropertyValue('unicode-range') || undefined,
-          rule.style.getPropertyValue('font-display') || undefined,
-        );
-      };
-
-      // Parse @font-face blocks from raw CSS text — used for CORS-locked
-      // stylesheets where `cssRules` throws but we can still `fetch()` the
-      // URL (Google Fonts sends permissive CORS on the CSS endpoint).
-      const parseFontFacesFromText = (cssText: string, baseUrl: string): void => {
-        const blockRe = /@font-face\s*\{([^}]+)\}/g;
-        let m: RegExpExecArray | null;
-        while ((m = blockRe.exec(cssText)) !== null) {
-          const body = m[1];
-          const get = (prop: string): string | undefined => {
-            const r = new RegExp(`${prop}\\s*:\\s*([^;]+);?`, 'i').exec(body);
-            return r ? r[1].trim() : undefined;
-          };
-          const family = get('font-family');
-          const src = get('src');
-          if (!family || !src) continue;
-          post(
-            family, src, baseUrl,
-            get('font-weight'), get('font-style'), get('font-stretch'),
-            get('unicode-range'), get('font-display'),
-          );
-        }
       };
 
       const fetchedSheets = new Set<string>();
       const fetchAndParse = (url: string): void => {
         if (fetchedSheets.has(url)) return;
         fetchedSheets.add(url);
-        if (_DEBUG) console.log(`[FontScan] fetching CORS-locked sheet: ${url}`);
+        if (_DEBUG) console.log(`[FontScan] fetching sheet text: ${url}`);
         fetch(url).then((r) => {
-          if (!r.ok) {
-            console.warn(`[FontScan] fetch ${url} failed: HTTP ${r.status}`);
-            return '';
-          }
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.text();
         }).then((txt) => {
-          if (!txt) return;
-          const beforeCount = sentFamilies.size;
-          parseFontFacesFromText(txt, url);
-          if (_DEBUG) console.log(`[FontScan] parsed ${url}: +${sentFamilies.size - beforeCount} font-face(s)`);
+          const faces = ParseFontFacesFromCss(txt, url);
+          if (_DEBUG) console.log(`[FontScan] parsed ${url}: ${faces.length} font-face(s)`);
+          if (faces.length === 0) JTrace(`fonts:sheet-empty ${url}`);
+          for (const face of faces) send(face);
+          traceSummary();
         }).catch((err) => {
-          console.warn(`[FontScan] fetch ${url} threw:`, err?.message ?? err);
+          const why = err?.message ?? String(err);
+          console.warn(`[FontScan] fetch ${url} threw:`, why);
+          JTrace(`fonts:sheet-failed ${url} ${why}`);
+          traceSummary();
         });
       };
 
       const walk = (sheet: CSSStyleSheet): void => {
+        sheetsWalked++;
         let rules: CSSRuleList | null = null;
-        let corsBlocked = false;
-        try { rules = sheet.cssRules; } catch { corsBlocked = true; }
+        try { rules = sheet.cssRules; } catch { rules = null; }
+        let facesFromRules = 0;
         if (rules) {
           for (let i = 0; i < rules.length; i++) {
             const r = rules[i];
             if (r instanceof CSSFontFaceRule) {
-              sendFromCssRule(r);
+              const base = (r.parentStyleSheet as CSSStyleSheet | null)?.href || window.location.href;
+              const face = FontFaceFromDeclarations(
+                (prop) => r.style.getPropertyValue(prop) || undefined, base,
+              );
+              if (face) { facesFromRules++; send(face); }
             } else if (r instanceof CSSImportRule) {
               if (r.styleSheet) walk(r.styleSheet);
               else if (r.href) fetchAndParse(new URL(r.href, sheet.href || window.location.href).href);
             }
           }
-        } else if (sheet.href) {
-          // Log gated by the dedup state so re-scans of an already-fetched
-          // CORS sheet don't print a misleading "fetching" line — the
-          // actual fetch ran once on the first scan. fetchAndParse's
-          // own no-op short-circuit on cache hit keeps the network cost
-          // at one request per sheet across the lifetime of the page.
-          if (corsBlocked && _DEBUG && !fetchedSheets.has(sheet.href)) {
-            console.log(`[FontScan] CORS-blocked, fetching: ${sheet.href}`);
-          }
-          fetchAndParse(sheet.href);
+        }
+        // See `ShouldFetchSheetText` for why the question is "did this sheet give me a face?" and
+        // not "how did it refuse?" — the engines answer the second one three different ways.
+        if (ShouldFetchSheetText(facesFromRules, rules !== null, sheet.href, window.location.href)) {
+          fetchAndParse(sheet.href!);
         }
       };
 
       const scan = (): void => {
+        sheetsWalked = 0;
         if (_DEBUG) console.log(`[FontScan] scanning ${document.styleSheets.length} stylesheet(s)`);
         for (let i = 0; i < document.styleSheets.length; i++) walk(document.styleSheets[i]);
+        traceSummary();
       };
 
-      // Initial scan after a microtask so first-paint stylesheets are
-      // attached. Re-scan on `loadingdone` to catch lazy @font-face rules.
+      // Initial scan after a microtask so first-paint stylesheets are attached, then again on every
+      // `loadingdone` for lazily-added @font-face rules. `load` is the backstop: a `<link>` that has
+      // not finished loading is not in `document.styleSheets` yet and contributes NOTHING to the
+      // microtask scan, and `loadingdone` only fires if the FontFaceSet actually had work to do - so
+      // without this pass a slow stylesheet could be missed by both. Every step dedupes
+      // (`sentFaces`, `fetchedSheets`), so a re-scan costs a walk and no network.
       queueMicrotask(scan);
       if (document.fonts.addEventListener) {
         document.fonts.addEventListener('loadingdone', () => {
@@ -920,6 +915,8 @@ export class MainBridge {
           this.PostMessage({ T: 'fonts-done' });
         });
       }
+      if (document.readyState === 'complete') queueMicrotask(scan);
+      else window.addEventListener('load', () => scan(), { once: true });
     }
 
     // Focus state — engine's selection-key suppression looks at this. A
@@ -942,6 +939,114 @@ export class MainBridge {
 /** Convenience: id of the Canvas root in the worker. Use this as the
  *  parent in attach ops for top-level Jivs. */
 export const RootId = ROOT_ID;
+
+// ─── Font discovery ────────────────────────────────────────────────────────────────────────────
+//
+// Canvas text is rasterised in the WORKER, so every webface the page carries has to be mirrored
+// into the worker's own FontFaceSet or the engine draws every string in a fallback face while the
+// DOM — which the browser styles itself — stays perfectly correct. That asymmetry is what a font
+// bug here looks like from the outside, and it is why the parts of the discovery that can be
+// silently wrong are exported and unit-tested rather than sealed inside a closure.
+
+/** One `@font-face`, reduced to what the worker needs to reconstruct it. */
+export interface ScannedFontFace {
+  Family: string;
+  /** Absolute URL of the first `url(...)` in `src`. */
+  Url: string;
+  Weight?: string;
+  Style?: string;
+  Stretch?: string;
+  UnicodeRange?: string;
+  Display?: string;
+}
+
+/** The first `url(...)` in a `src` descriptor, resolved against `baseUrl`. `format(...)` clauses
+ *  and later sources are ignored: if the first URL fails, the face is simply not installed. */
+export const FirstFontUrl = (srcRaw: string, baseUrl: string): string | null => {
+  const m = /url\(\s*(['"]?)([^'")]+)\1\s*\)/.exec(srcRaw);
+  if (!m) return null;
+  try { return new URL(m[2], baseUrl).href; } catch { return null; }
+};
+
+/** Build a face from a descriptor reader — the one shape shared by a CSSOM `CSSFontFaceRule`
+ *  (`style.getPropertyValue`) and a block parsed out of raw CSS text. Returns null when the block
+ *  has no family or no usable URL, which is the only thing that makes a face unsendable. */
+export const FontFaceFromDeclarations = (
+  get: (prop: string) => string | undefined,
+  baseUrl: string,
+): ScannedFontFace | null => {
+  const family = (get('font-family') ?? '').replace(/['"]/g, '').trim();
+  const src = get('src');
+  if (!family || !src) return null;
+  const url = FirstFontUrl(src, baseUrl);
+  if (!url) return null;
+  return {
+    Family: family,
+    Url: url,
+    Weight: get('font-weight'),
+    Style: get('font-style'),
+    Stretch: get('font-stretch'),
+    UnicodeRange: get('unicode-range'),
+    Display: get('font-display'),
+  };
+};
+
+/** Pull every `@font-face` out of raw CSS text. This is how the app's own faces are found: the
+ *  Google Fonts `css2` endpoint is cross-origin, so its rules are unreadable from script, and its
+ *  CSS text is the only place the gstatic binary URLs appear. */
+export const ParseFontFacesFromCss = (cssText: string, baseUrl: string): ScannedFontFace[] => {
+  const out: ScannedFontFace[] = [];
+  const blockRe = /@font-face\s*\{([^}]*)\}/g;
+  let block: RegExpExecArray | null;
+  while ((block = blockRe.exec(cssText)) !== null) {
+    const body = block[1];
+    // The leading boundary keeps `font-style` from being answered by a longer property that ends
+    // in the same characters, which a bare `prop:` match would accept.
+    const get = (prop: string): string | undefined => {
+      const r = new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+)`, 'i').exec(body);
+      return r ? r[1].trim() : undefined;
+    };
+    const face = FontFaceFromDeclarations(get, baseUrl);
+    if (face) out.push(face);
+  }
+  return out;
+};
+
+/** Whether a stylesheet belongs to another origin, and so cannot be read through the CSSOM.
+ *  A sheet with no href (an inline `<style>`) is the page's own. */
+export const IsCrossOriginSheet = (href: string | null | undefined, pageUrl: string): boolean => {
+  if (!href) return false;
+  try { return new URL(href, pageUrl).origin !== new URL(pageUrl).origin; }
+  catch { return false; }
+};
+
+/**
+ * Whether a stylesheet's TEXT still has to be fetched after walking whatever rules it gave up.
+ *
+ * A cross-origin stylesheet is unreadable from script, but the engines do not AGREE on how to say
+ * so: Chromium throws a SecurityError from `.cssRules`, WebKit has answered `null`, and an
+ * empty-but-present `CSSRuleList` is a third answer that is indistinguishable from a sheet which
+ * honestly has no rules. The scan used to take the fetch-the-text path only for the first two, so
+ * on an engine giving the third answer the page's webfonts were never discovered, never reached
+ * the worker, and the canvas drew every string in a fallback face — while the DOM, styled by the
+ * browser itself, looked exactly right.
+ *
+ * Asking "did this sheet give me a face?" rather than "how did it refuse?" is correct under all
+ * three answers, and on an honestly-empty cross-origin sheet it costs one cache hit.
+ *
+ * @param facesFromRules How many `@font-face` rules the CSSOM walk actually yielded.
+ * @param rulesReadable  False when `.cssRules` threw or answered null.
+ */
+export const ShouldFetchSheetText = (
+  facesFromRules: number,
+  rulesReadable: boolean,
+  href: string | null | undefined,
+  pageUrl: string,
+): boolean => {
+  if (facesFromRules > 0) return false;
+  if (!href) return false;
+  return !rulesReadable || IsCrossOriginSheet(href, pageUrl);
+};
 
 // Diagnostic — describes shape of an unclonable message so the console
 // points at the offending field. Recurses deeply (depth 8) and fully

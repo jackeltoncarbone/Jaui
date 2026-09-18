@@ -39,8 +39,13 @@ export interface M2W_Init {
    *  directly, but the engine's debug flags live there). */
   UrlSearch: string;
   UrlHash: string;
-  /** Snapshot of `document.fonts` ready state at boot. The worker still
-   *  receives `M2W_FontsLoadingDone` on subsequent loads. */
+  /** Snapshot of `document.fonts` ready state at boot.
+   *
+   *  NOTHING READS IT. It travels to `WorkerPlatform`'s init and the constructor drops it on the
+   *  floor; no engine decision is latched on it. Which is just as well, because with early boot
+   *  the init message is posted at ~218ms, long before any webfont has landed, so the flag is
+   *  false on every cold load whatever the page's fonts end up doing. The worker learns about
+   *  fonts the only way that stays true: `M2W_FontsLoadingDone`, and a `font-face` per face. */
   FontsAlreadyReady: boolean;
 }
 
