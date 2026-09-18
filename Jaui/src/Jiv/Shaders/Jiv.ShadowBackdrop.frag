@@ -8,8 +8,11 @@ precision highp float;
 
 // Sharp snapshot of what lies behind the surface.
 uniform sampler2D u_Scene;
-// The blur pyramid the surface itself samples.
+// The blur pyramid the surface itself samples. It is sized to that surface, so a screen UV maps
+// into it as `uv * u_BackdropXf.xy + u_BackdropXf.zw` (identity for a full-canvas pyramid).
+// u_Scene is always canvas-sized and is sampled at the screen UV directly.
 uniform sampler2D u_Backdrop;
+uniform vec4 u_BackdropXf;
 uniform vec2 u_Resolution;
 // The surface's footprint in device px, y down.
 uniform vec4 u_Rect;
@@ -52,7 +55,7 @@ void main() {
         vec2 uv = pixel / u_Resolution;
         uv.y = 1.0 - uv.y;
         float sharp = dot(textureLod(u_Scene, uv, 0.0).rgb, LUMA);
-        float local = dot(textureLod(u_Backdrop, uv, u_DetailLod).rgb, LUMA);
+        float local = dot(textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, u_DetailLod).rgb, LUMA);
         sum += local;
         detail += abs(sharp - local);
     }

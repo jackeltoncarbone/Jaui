@@ -31,9 +31,17 @@ flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lod
 // plus rim-boost LODs. Single textureLod sample per fragment = one real Gaussian,
 // no disparate-tier mixing and no ghosting at intermediate values.
 uniform sampler2D u_Backdrop;
+// Where u_Backdrop's texels sit on screen: `regionUv = screenUv * xy + zw`, identity (1,1,0,0)
+// for a pyramid that covers the whole canvas. The pyramid is built at the size of the SURFACE
+// that needs it — a card is a 562x430 patch of a 2560x1600 screen — because a canvas-sized
+// attachment costs a full load+store per render pass on a tile-based GPU no matter how small
+// the scissor. Same texels, same device density; only the address changes. See BackdropRegion
+// in Core/Renderer.ts for the derivation and a worked round trip.
+uniform vec4 u_BackdropXf;
 // Raw scene snapshot — sampled when effective LOD is 0 (no-frost,
 // no-refraction) so panels with just BackdropBrightness/Saturation/
-// Contrast don't inherit the pyramid's baked-in 1px base blur.
+// Contrast don't inherit the pyramid's baked-in 1px base blur. This one is ALWAYS canvas-sized,
+// so screen UV addresses it directly and u_BackdropXf does not apply to it.
 uniform sampler2D u_Scene;
 uniform float u_BaseFrostLod;
 uniform vec2 u_Resolution;
@@ -664,6 +672,10 @@ vec3 applyTint(vec3 color, float tint) {
 // call = no filter.
 vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
     float lod = max(0.0, frostLod - u_BaseFrostLod) + extraLod;
+    // Every displaced/rim/CA tap comes through here, so the region map is applied ONCE, in one
+    // place: two mads. `uv` stays the screen UV every caller computed, which is also what the
+    // u_Scene branch below needs.
+    vec2 backdropUv = uv * u_BackdropXf.xy + u_BackdropXf.zw;
     // Raw (unblurred) scene ONLY for panels that authored NO frost and have
     // no rim/inner boost (e.g. a flat panel with just BackdropBrightness).
     // Gate on frostLod, NOT the derived lod: the pyramid is now built at the
@@ -672,7 +684,7 @@ vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
     // still sample the pyramid, or the frosted center shows the raw scene
     // (refracted but unblurred).
     if (frostLod < 0.01 && extraLod < 0.01) return texture(u_Scene, uv).rgb;
-    return textureLod(u_Backdrop, uv, lod).rgb;
+    return textureLod(u_Backdrop, backdropUv, lod).rgb;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
