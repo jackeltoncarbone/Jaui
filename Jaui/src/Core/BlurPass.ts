@@ -42,6 +42,28 @@ void main() {
 }
 `;
 
+// EVERY PASS IN THIS FILE READS ITS SOURCE'S BASE LEVEL, and says so with `textureLod(..., 0.0)`
+// instead of leaving it to the derivative and to whatever filter state the source happens to be in.
+//
+// This is not a stylistic preference, it is the progressive blur's black scrim. `texture()` takes
+// its LOD from the derivative of the coordinate, and every pass here draws into a destination HALF
+// its source's size -- so lambda is exactly 1.0 and the sampler reads the source's MIP 1. That is
+// harmless while a source is not mip-complete, which every level FBO is not... except `_levels[0]`
+// inside `GenerateOutputMipmap`, where `EnsureMipLevels` has just allocated mips 1..N as empty
+// storage and flipped MIN_FILTER to LINEAR_MIPMAP_LINEAR before the DOWN chain reads that same
+// texture. Level 1 was therefore built out of the output's own uninitialised mip 1 (zero-filled on
+// ANGLE/D3D11), blitted back into it, and read again next frame: a black fixed point, and every
+// level above it a downsample of black. Only the progressive blur sampled it -- a glass panel's
+// pyramid is built AT its own frost sigma, so `_backdropMaxLod` returns 0 and it takes
+// `DisableMipmap()` instead -- which is exactly the shape of the report: the glass is fine and the
+// pblur is black past the clear edge of its ramp.
+//
+// An explicit LOD 0 is PIXEL-IDENTICAL at every call site that was already correct: those sources
+// are not mip-filtered, so `texture()` was already resolving to a bilinear tap on level 0, and
+// lambda <= 0 selects the magnification filter (LINEAR) on level 0 either way (GL ES 3.0, 3.8.10).
+// The fix belongs here rather than in the ordering of `GenerateOutputMipmap`, because the level a
+// pyramid pass reads must be a property of the pass, not of its source's current sampler state.
+
 // Downsample: 5-tap (center + 4 corners at half-pixel offsets, all weighted)
 // Reads the SOURCE half-pixel; halfpixel = (0.5/srcW, 0.5/srcH).
 // This is run when rendering into a destination half the source's size.
@@ -55,11 +77,11 @@ out vec4 fragColor;
 
 void main() {
     vec2 hp = u_HalfPixel * u_Offset;
-    vec3 sum = texture(u_Tex, v_Uv).rgb * 4.0;
-    sum += texture(u_Tex, v_Uv - hp).rgb;
-    sum += texture(u_Tex, v_Uv + hp).rgb;
-    sum += texture(u_Tex, v_Uv + vec2(hp.x, -hp.y)).rgb;
-    sum += texture(u_Tex, v_Uv - vec2(hp.x, -hp.y)).rgb;
+    vec3 sum = textureLod(u_Tex, v_Uv, 0.0).rgb * 4.0;
+    sum += textureLod(u_Tex, v_Uv - hp, 0.0).rgb;
+    sum += textureLod(u_Tex, v_Uv + hp, 0.0).rgb;
+    sum += textureLod(u_Tex, v_Uv + vec2(hp.x, -hp.y), 0.0).rgb;
+    sum += textureLod(u_Tex, v_Uv - vec2(hp.x, -hp.y), 0.0).rgb;
     fragColor = vec4(sum / 8.0, 1.0);
 }
 `;
@@ -75,14 +97,14 @@ out vec4 fragColor;
 
 void main() {
     vec2 hp = u_HalfPixel * u_Offset;
-    vec3 sum  = texture(u_Tex, v_Uv + vec2(-hp.x * 2.0, 0.0)).rgb;
-    sum += texture(u_Tex, v_Uv + vec2(-hp.x,  hp.y)).rgb * 2.0;
-    sum += texture(u_Tex, v_Uv + vec2( 0.0,  hp.y * 2.0)).rgb;
-    sum += texture(u_Tex, v_Uv + vec2( hp.x,  hp.y)).rgb * 2.0;
-    sum += texture(u_Tex, v_Uv + vec2( hp.x * 2.0, 0.0)).rgb;
-    sum += texture(u_Tex, v_Uv + vec2( hp.x, -hp.y)).rgb * 2.0;
-    sum += texture(u_Tex, v_Uv + vec2( 0.0, -hp.y * 2.0)).rgb;
-    sum += texture(u_Tex, v_Uv + vec2(-hp.x, -hp.y)).rgb * 2.0;
+    vec3 sum  = textureLod(u_Tex, v_Uv + vec2(-hp.x * 2.0, 0.0), 0.0).rgb;
+    sum += textureLod(u_Tex, v_Uv + vec2(-hp.x,  hp.y), 0.0).rgb * 2.0;
+    sum += textureLod(u_Tex, v_Uv + vec2( 0.0,  hp.y * 2.0), 0.0).rgb;
+    sum += textureLod(u_Tex, v_Uv + vec2( hp.x,  hp.y), 0.0).rgb * 2.0;
+    sum += textureLod(u_Tex, v_Uv + vec2( hp.x * 2.0, 0.0), 0.0).rgb;
+    sum += textureLod(u_Tex, v_Uv + vec2( hp.x, -hp.y), 0.0).rgb * 2.0;
+    sum += textureLod(u_Tex, v_Uv + vec2( 0.0, -hp.y * 2.0), 0.0).rgb;
+    sum += textureLod(u_Tex, v_Uv + vec2(-hp.x, -hp.y), 0.0).rgb * 2.0;
     fragColor = vec4(sum / 12.0, 1.0);
 }
 `;
@@ -97,7 +119,7 @@ in vec2 v_Uv;
 uniform sampler2D u_Tex;
 out vec4 fragColor;
 void main() {
-    fragColor = vec4(texture(u_Tex, v_Uv).rgb, 1.0);
+    fragColor = vec4(textureLod(u_Tex, v_Uv, 0.0).rgb, 1.0);
 }
 `;
 
@@ -110,24 +132,35 @@ const MAX_LEVELS = 9;
 const BASE_SIGMA = 4;
 const K_MAX = 8;
 
-/** ── THE SWITCH ───────────────────────────────────────────────────────────────────────
- *  Whether a pyramid is ALLOCATED to the caller's region (true) or allocated at the whole
- *  input and SCISSORED to the region (false, the model that shipped before region sizing).
+/** -- WHY THERE IS NO SWITCH HERE ------------------------------------------------------------
+ *  A pyramid is ALLOCATED to the caller's region. There used to be a `REGION_SIZED_PYRAMIDS`
+ *  constant here, documented as restoring the pre-region model - allocate the whole input,
+ *  scissor to the region - when flipped to `false`, "same pixels either way". It did not.
+ *  Measured on `idle`, win32, one build, flipping only that constant: 639,299 of 4,096,000
+ *  pixels differed, max channel delta 31, mean 3.61, over a bbox spanning most of the canvas.
+ *  Region-ON against the genuine pre-region build measured 1,107 px at max delta 1. So ON was
+ *  faithful and OFF was a THIRD rendering, and the lever someone reaches for in an emergency
+ *  would have handed them a different picture while telling them they had reverted.
  *
- *  It is one constant because the answer is measured, it differs by GPU architecture, and
- *  the two readings are not yet in from the same room. On a tile-based deferred GPU (Apple
- *  Metal) a render pass loads and stores its WHOLE attachment — `MTLRenderPassDescriptor`
- *  has no partial render area — so a scissored draw into a canvas-sized level still moves
- *  16.4 MB, and sizing the attachment down is the only way to stop paying for it
- *  (ARM, *Bandwidth-Efficient Rendering*, SIGGRAPH 2015). On an immediate-mode GPU behind
- *  D3D11 there is no whole-attachment load/store to save, so the same change buys nothing
- *  and costs a few more render targets and binds: measured on win32 at +5.3% GPU process
- *  (1524.3 ms against a scissored 1447.5 ms) on the glass-grid scene, with every other
- *  variable held.
+ *  It could not have been faithful, and that is the part worth keeping. The two models differ
+ *  in what lies OUTSIDE the region, not only in where it is stored: a region-sized level ends
+ *  at the rect and CLAMP_TO_EDGE repeats its border texels, while a scissored canvas-sized
+ *  level holds the neighbouring scene and, past the guard band, the PREVIOUS surface's
+ *  pyramid. Every consumer clamps its reads in SCREEN UV - the frame its clip AABB is in, not
+ *  the pyramid's - so that difference is reachable rather than theoretical. Making `false`
+ *  bit-faithful means giving the scissored path the region's clamp, which is the region path.
  *
- *  Flip it to `false` to get the scissored model back — same pixels either way, because
- *  both write the same texels of the same pyramid; only the allocation differs. */
-const REGION_SIZED_PYRAMIDS = true;
+ *  What the constant recorded, and this keeps: on a tile-based deferred GPU (Apple Metal) a
+ *  render pass loads and stores its WHOLE attachment - `MTLRenderPassDescriptor` has no
+ *  partial render area - so a scissored draw into a canvas-sized level still moves 16.4 MB,
+ *  and sizing the attachment down is the only way to stop paying for it (ARM,
+ *  *Bandwidth-Efficient Rendering*, SIGGRAPH 2015). On an immediate-mode GPU behind D3D11
+ *  there is no whole-attachment load/store to save, so region sizing buys nothing there and
+ *  costs a few more render targets and binds: measured on win32 at +5.3% GPU process
+ *  (1524.3 ms against a scissored 1447.5 ms) on the glass-grid scene, every other variable
+ *  held. That is the open question, and it is a question about which model to SHIP. It gets
+ *  answered by measuring on a Mac and changing this file, not by a runtime flag that has to
+ *  keep a second rendering alive in order to be flipped. */
 
 /** Ceiling on the level-FBO storage ONE BlurPass keeps resident across region sizes, and
  *  the most distinct sizes it will hold. See `_useChain` for why more than one is needed.
@@ -149,14 +182,6 @@ interface LevelChain {
   Bytes: number;
   /** `_tick` of the last Blur that selected it — the LRU key. */
   Used: number;
-}
-
-/** A destination-space scissor rect, bottom-origin, in the level's OWN texels. */
-interface LevelRect {
-  X: number;
-  Y: number;
-  W: number;
-  H: number;
 }
 
 /** The part of the input a pyramid is built over, in input texels. `YBottom` counts from the
@@ -193,13 +218,6 @@ export class BlurPass {
   /** Where the last pyramid's texels sit on screen. Consumers read it off the returned
    *  texture handle and map their screen UV through it before sampling. */
   private _lastRegion: BackdropRegion = BACKDROP_REGION_FULL;
-  /** Set when REGION_SIZED_PYRAMIDS is off and the caller gave a region: the rect each pass
-   *  scissors to, in ORIGINAL INPUT texels, plus the input size it is stated against. Null on
-   *  the region-sized path and for an unregioned build, where every pass covers its whole
-   *  destination. `GenerateOutputMipmap` reads it to limit the mip chain the same way. */
-  private _lastClip: RegionRect | null = null;
-  private _lastClipW: number = 1;
-  private _lastClipH: number = 1;
   get LastDepth(): number { return this._lastDepth; }
   get LastRegion(): BackdropRegion { return this._lastRegion; }
 
@@ -293,15 +311,6 @@ export class BlurPass {
     // Computed from the ORIGINAL canvas units: Scale and Offset are ratios, so they survive
     // the σ-adaptive re-base below untouched — a coarser level 0 still covers the same rect.
     const scaleX = width / rect.W, scaleY = height / rect.H;
-    // `sized` is the whole switch: allocate to the region, or allocate the whole input and
-    // scissor to the region. `clip` is non-null only in the second case — it is the rect in
-    // ORIGINAL INPUT texels, and each pass scales it by its own destination's size, so the
-    // σ-adaptive re-base below needs no separate bookkeeping.
-    const sized = REGION_SIZED_PYRAMIDS && !rect.Full;
-    const clip: RegionRect | null = sized || rect.Full ? null : rect;
-    this._lastClip = clip;
-    this._lastClipW = width;
-    this._lastClipH = height;
 
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
@@ -314,20 +323,17 @@ export class BlurPass {
     // progressive-blur shader's continuous LOD ramps from truly clear → heavy
     // with no sharp/blurred crossfade. Also cheaper than the dual filter: one pass.
     if (radius <= 0) {
-      this._useChain(sized ? rect.W : width, sized ? rect.H : height);
-      this._levels[0].Resize(sized ? rect.W : width, sized ? rect.H : height);
-      this._bindTarget(this._levels[0], clip, width, height);
+      this._useChain(rect.W, rect.H);
+      this._levels[0].Resize(rect.W, rect.H);
+      this._bindTarget(this._levels[0]);
       gl.useProgram(this._copy.Program);
       gl.uniform1i(this._copyTexLoc, 0);
-      this._setSrcRect(this._copySrcLoc, sized ? rect : null, width, height);
+      this._setSrcRect(this._copySrcLoc, rect, width, height);
       gl.bindTexture(gl.TEXTURE_2D, input);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-      gl.disable(gl.SCISSOR_TEST);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       this._lastDepth = 0;
-      this._lastRegion = sized
-        ? this._region(rect, scaleX, scaleY)
-        : this._region({ ...rect, Full: true }, 1, 1);
+      this._lastRegion = this._region(rect, scaleX, scaleY);
       return this._levels[0].Texture;
     }
 
@@ -350,17 +356,17 @@ export class BlurPass {
       gl.useProgram(this._down.Program);
       gl.uniform1i(this._downTexLoc, 0);
       gl.uniform1f(this._downOffLoc, 1.0);
-      let curW = sized ? rect.W : width, curH = sized ? rect.H : height;
+      let curW = rect.W, curH = rect.H;
       const passes = Math.round(Math.log2(k));
       for (let s = 0; s < passes; s++) {
         curW = Math.max(1, Math.floor(curW / 2));
         curH = Math.max(1, Math.floor(curH / 2));
         const fb = pp[s % 2];
         fb.Resize(curW, curH);
-        this._bindTarget(fb, clip, width, height);
+        this._bindTarget(fb);
         // Only the FIRST pre-pass reads the canvas-sized input, so only it carries the
         // region's source rect; from there the chain reads whole region-sized levels.
-        this._setSrcRect(this._downSrcLoc, s === 0 && sized ? rect : null, srcW, srcH);
+        this._setSrcRect(this._downSrcLoc, s === 0 ? rect : null, srcW, srcH);
         gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
         gl.bindTexture(gl.TEXTURE_2D, srcTex);
         gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
@@ -398,9 +404,9 @@ export class BlurPass {
 
     for (let i = 1; i <= depth; i++) {
       const dst = this._levels[i];
-      this._bindTarget(dst, clip, width, height);
+      this._bindTarget(dst);
       // Again: only the first hop reads the canvas-sized input through the region rect.
-      this._setSrcRect(this._downSrcLoc, i === 1 && sized ? srcRect : null, srcW, srcH);
+      this._setSrcRect(this._downSrcLoc, i === 1 ? srcRect : null, srcW, srcH);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       // The tap offset is HALF A SOURCE TEXEL either way — `u_HalfPixel` is normalized
       // against the source's own size, so it is the same half-texel it was when level 0
@@ -421,7 +427,7 @@ export class BlurPass {
 
     for (let i = depth - 1; i >= 0; i--) {
       const dst = this._levels[i];
-      this._bindTarget(dst, clip, width, height);
+      this._bindTarget(dst);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.uniform2f(this._upHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
@@ -430,11 +436,8 @@ export class BlurPass {
       srcH = dst.Height;
     }
 
-    gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this._lastRegion = sized
-      ? this._region(rect, scaleX, scaleY)
-      : this._region({ ...rect, Full: true }, 1, 1);
+    this._lastRegion = this._region(rect, scaleX, scaleY);
 
     return this._levels[0].Texture;
   };
@@ -466,7 +469,13 @@ export class BlurPass {
    *  blits. Every level is the REGION's, not the canvas's, so there is no rect to
    *  track and no guard band to erode — the whole level is valid because the whole
    *  level was written. A consumer whose deepest sample is LOD 0 (`maxLod <= 0`)
-   *  gets no chain at all — see the first branch. */
+   *  gets no chain at all — see the first branch.
+   *
+   *  ORDER MATTERS AND IT IS NOT THE ORDER IT LOOKS LIKE. `EnsureMipLevels` below makes `out`
+   *  mip-COMPLETE and mip-FILTERED before the DOWN chain reads that same texture as its source.
+   *  That is safe only because every pass in this file names its LOD explicitly (see the note
+   *  above DOWN_FRAG); under an implicit `texture()` the first hop's 2:1 minification resolves
+   *  to the output's own mip 1, which has just been allocated empty. */
   GenerateOutputMipmap = (maxLod?: number): void => {
     const gl = this._gl;
     const out = this._levels[0];
@@ -517,43 +526,17 @@ export class BlurPass {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(this._quad.Vao);
 
-    // With REGION_SIZED_PYRAMIDS off, level 0 is the whole input and is only VALID inside the
-    // last Blur's scissor — a chain built over all of it would spend most of its fill filtering
-    // whatever the previous surface left behind, then blit that into mips nobody reads.
-    //
-    // GUARD BAND: a DOWN texel at level i reads level i-1 within ~1.5 texels of its footprint,
-    // so the valid region erodes by 1.5 texels per level climbed. Run that backwards and a
-    // level-i destination has to be written 1.5 * (2^(n-i) - 1) texels wider than the rect the
-    // deepest level n needs — then level n covers the blur's rect exactly. Same erosion the
-    // pyramid already lives with. On the region-sized path `clip` is null: the whole level is
-    // valid because the whole level was written, so there is no rect to track and no band to
-    // erode.
-    const clip = this._lastClip;
-    const levelRect = (dw: number, dh: number, i: number): LevelRect | null => {
-      if (clip === null) return null;
-      const sx = dw / this._lastClipW, sy = dh / this._lastClipH;
-      const guard = 1.5 * ((1 << (stopLevel - i)) - 1);
-      const x0 = Math.max(0, Math.min(dw - 1, Math.floor(clip.X * sx - guard)));
-      const x1 = Math.max(x0 + 1, Math.min(dw, Math.ceil((clip.X + clip.W) * sx + guard)));
-      const y0 = Math.max(0, Math.min(dh - 1, Math.floor(clip.YBottom * sy - guard)));
-      const y1 = Math.max(y0 + 1, Math.min(dh, Math.ceil((clip.YBottom + clip.H) * sy + guard)));
-      return { X: x0, Y: y0, W: x1 - x0, H: y1 - y0 };
-    };
-
     let srcTex = out.Texture;
     let srcW = out.Width;
     let srcH = out.Height;
     let extendedDepth = 0;
-    const written: (LevelRect | null)[] = [];
     for (let i = 1; i <= stopLevel; i++) {
       const newW = Math.max(1, Math.floor(srcW / 2));
       const newH = Math.max(1, Math.floor(srcH / 2));
       if (newW === srcW && newH === srcH) break; // already at 1×1
       this._levels[i].Resize(newW, newH);
       const dst = this._levels[i];
-      const lr = levelRect(newW, newH, i);
-      written[i] = lr;
-      this._bindRect(dst, lr);
+      this._bindTarget(dst);
       gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
@@ -562,7 +545,6 @@ export class BlurPass {
       srcH = newH;
       extendedDepth = i;
     }
-    gl.disable(gl.SCISSOR_TEST);
 
     if (extendedDepth === 0) return;
 
@@ -578,16 +560,11 @@ export class BlurPass {
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._mipBlitFbo);
     for (let i = 1; i <= extendedDepth; i++) {
       const src = this._levels[i];
-      // Copy only what the pass above actually wrote. On the scissored path the rest of the
-      // level still holds the previous surface's pyramid and the consumer never reads it.
-      const lr = written[i] ?? null;
-      const bx = lr ? lr.X : 0, by = lr ? lr.Y : 0;
-      const bw = lr ? lr.W : src.Width, bh = lr ? lr.H : src.Height;
       gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out.Texture, i);
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, src.Framebuffer);
       gl.blitFramebuffer(
-        bx, by, bx + bw, by + bh,
-        bx, by, bx + bw, by + bh,
+        0, 0, src.Width, src.Height,
+        0, 0, src.Width, src.Height,
         gl.COLOR_BUFFER_BIT, gl.NEAREST,
       );
     }
@@ -658,40 +635,17 @@ export class BlurPass {
 
   /** Bind a level and tell the driver its previous contents are dead.
    *
-   *  On the region-sized path every pass covers its WHOLE destination, which is the other half
-   *  of why the region matters: a tile-based GPU has to LOAD an attachment it might only partly
-   *  overwrite, and `invalidateFramebuffer` is how WebGL2 says "don't" (ANGLE turns it into
-   *  Metal's LoadAction.DontCare). ARM's bandwidth guidance names this as the cheapest win
-   *  available on a deferred renderer. Safe there precisely because the viewport is the full
-   *  level and the quad covers all of it.
-   *
-   *  With REGION_SIZED_PYRAMIDS off, `clip` is the rect in ORIGINAL INPUT texels that this
-   *  pass may write, scaled here by the destination's own size against the input's. The
-   *  invalidate is NOT issued then: a scissored pass leaves the rest of the level holding the
-   *  previous surface's pyramid, and discarding it would show. */
-  private _bindTarget = (fb: Framebuffer, clip: RegionRect | null, baseW: number, baseH: number): void => {
-    if (clip === null) { this._bindRect(fb, null); return; }
-    const sx = fb.Width / baseW, sy = fb.Height / baseH;
-    const x = Math.max(0, Math.min(fb.Width - 1, Math.floor(clip.X * sx)));
-    const y = Math.max(0, Math.min(fb.Height - 1, Math.floor(clip.YBottom * sy)));
-    const w = Math.max(1, Math.min(fb.Width - x, Math.ceil(clip.W * sx)));
-    const h = Math.max(1, Math.min(fb.Height - y, Math.ceil(clip.H * sy)));
-    this._bindRect(fb, { X: x, Y: y, W: w, H: h });
-  };
-
-  /** Bind a level at its own full viewport, scissored to `rect` (in that level's texels) or
-   *  invalidated when the pass covers the whole thing. */
-  private _bindRect = (fb: Framebuffer, rect: LevelRect | null): void => {
+   *  Every pass covers its WHOLE destination, which is the other half of why the region matters:
+   *  a tile-based GPU has to LOAD an attachment it might only partly overwrite, and
+   *  `invalidateFramebuffer` is how WebGL2 says "don't" (ANGLE turns it into Metal's
+   *  LoadAction.DontCare). ARM's bandwidth guidance names this as the cheapest win available on
+   *  a deferred renderer. Safe precisely because the viewport is the full level and the quad
+   *  covers all of it. */
+  private _bindTarget = (fb: Framebuffer): void => {
     const gl = this._gl;
     fb.Bind();
     gl.viewport(0, 0, fb.Width, fb.Height);
-    if (rect === null) {
-      gl.disable(gl.SCISSOR_TEST);
-      gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
-      return;
-    }
-    gl.enable(gl.SCISSOR_TEST);
-    gl.scissor(rect.X, rect.Y, rect.W, rect.H);
+    gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
   };
 
   /** `null` rect = read the whole source. The identity (0,0,1,1) reproduces the varying the
