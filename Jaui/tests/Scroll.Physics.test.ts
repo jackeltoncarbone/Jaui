@@ -33,15 +33,18 @@ const makeManager = (jiv: Jiv): ScrollManager => {
 beforeEach(() => { vi.useFakeTimers({ toFake: ['performance'] }); });
 afterEach(() => { vi.useRealTimers(); });
 
-/** A drag gesture with honest timing: samples spaced in (fake) real time so
- *  the release-window velocity means what it means on a device. */
+/** A drag gesture with honest timing: samples carry the EVENT time the finger
+ *  was at each position, which is what the release window measures. The fake
+ *  clock is advanced alongside so the two agree. */
 const drag = (m: ScrollManager, jiv: Jiv, dyPerFrame: number, frames: number): void => {
   m.DragStart(jiv);
+  let t = performance.now();
   for (let i = 0; i < frames; i++) {
     vi.advanceTimersByTime(8);
-    m.DragMove(jiv, 0, dyPerFrame, 8 / 1000);
+    t += 8;
+    m.DragMove(jiv, 0, dyPerFrame, t);
   }
-  m.DragEnd(jiv);
+  m.DragEnd(jiv, t);
 };
 
 const settle = (m: ScrollManager, maxSec = 10): number => {
@@ -58,7 +61,7 @@ describe('rubber-band: the edge stretches and springs home', () => {
     const m = makeManager(jiv);
     m.DragStart(jiv);
     vi.advanceTimersByTime(8);
-    m.DragMove(jiv, 0, -100, 1 / 60); // pull DOWN past the top edge
+    m.DragMove(jiv, 0, -100, performance.now()); // pull DOWN past the top edge
     expect(jiv.ScrollY).toBeLessThan(0);          // it moved past the edge
     expect(jiv.ScrollY).toBeGreaterThan(-100);    // but the curve resisted
   });
@@ -141,7 +144,7 @@ describe('no overflow, no scroll — the drill-sentence bug', () => {
     const jiv = makeJiv({ ContentHeight: 600, ContentWidth: 400 });
     const m = makeManager(jiv);
     m.DragStart(jiv);
-    m.DragMove(jiv, 0, -80, 1 / 60); // pull hard; there is nowhere to go
+    m.DragMove(jiv, 0, -80, performance.now()); // pull hard; there is nowhere to go
     expect(jiv.ScrollY).toBe(0);
   });
 
@@ -149,7 +152,7 @@ describe('no overflow, no scroll — the drill-sentence bug', () => {
     const jiv = makeJiv({ ContentHeight: 2000, ContentWidth: 400 }); // Y scrolls, X does not
     const m = makeManager(jiv);
     m.DragStart(jiv);
-    m.DragMove(jiv, -50, 50, 1 / 60);       // pull content up = scroll down
+    m.DragMove(jiv, -50, 50, performance.now()); // pull content up = scroll down
     expect(jiv.ScrollX).toBe(0);            // X pinned (no room)
     expect(jiv.ScrollY).toBeGreaterThan(0); // Y moved
   });

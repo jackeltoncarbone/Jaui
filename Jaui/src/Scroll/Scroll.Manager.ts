@@ -4,6 +4,12 @@ import { type Mat2x3, MAT_IDENTITY, matMul, matInvApply } from '../Transform/Mat
 import { PageTarget, type PageSpan } from './Scroll.Page';
 import { AlignTarget } from './Scroll.Align';
 import type { ScrollAlign, ScrollAxis, ScrollMotion } from './Scroll.Types';
+import {
+  ComputeReleaseVelocity,
+  PruneReleaseSamples,
+  type ReleaseSample,
+} from './Scroll.Release';
+import { JTrace, JauiTracing, JMs } from '../Diagnostics/Jaui.Trace';
 
 /**
  * Scroll physics for Overflow:Scroll Jivs. Two behaviors share the same state:
@@ -15,22 +21,14 @@ import type { ScrollAlign, ScrollAxis, ScrollMotion } from './Scroll.Types';
  *                        browser/OS smooth-scroll convention.
  *
  *   • Touch / pointer drag — velocity model with momentum + rubber-band.
- *                            Position tracks the finger 1:1; release captures
- *                            EMA velocity which decays over ~0.6 s. Past
+ *                            Position tracks the finger 1:1; release takes the
+ *                            trailing-window velocity (Scroll.Release.ts) and
+ *                            coasts it down under FRICTION_PER_SEC. Past
  *                            content bounds an elastic spring pulls back.
  *
  * Tick() integrates whichever path is active per Jiv. While dragging, both
  * paths are suspended and the caller drives position directly via DragMove.
  */
-
-/** One DragMove sample: how much the content moved (after edge clamp) and
- *  when. The trailing window of these is what determines release velocity. */
-interface DragSample {
-  dx: number;
-  dy: number;
-  /** performance.now() ms timestamp. */
-  t: number;
-}
 
 interface ScrollState {
   posX: number;
@@ -45,12 +43,16 @@ interface ScrollState {
   /** While true, physics is suspended — position is externally driven (drag). */
   dragging: boolean;
   /** Trailing-window of recent DragMove samples (oldest first). Pruned to the
-   *  last RELEASE_WINDOW_MS each move. At DragEnd we sum these for momentum
-   *  velocity — using a fixed time window (not an EMA) prevents older, faster
-   *  samples from biasing the release: if you decelerate the finger before
-   *  lifting, only the slow recent motion contributes, so content can't
-   *  briefly outpace your finger after release. */
-  samples: DragSample[];
+   *  last RELEASE_WINDOW_MS each move. At DragEnd these become momentum
+   *  velocity — a fixed time window, not an EMA, so that if you decelerate the
+   *  finger before lifting, only the slow recent motion contributes and the
+   *  content can't briefly outpace your finger after release. Each sample
+   *  carries the DURATION of its own interval; see Scroll.Release.ts for why
+   *  that pairing is the whole model. */
+  samples: ReleaseSample[];
+  /** Event time (ms, main-thread clock) of the previous drag sample, so the
+   *  next one can measure its own interval. -1 before the first move. */
+  lastSampleT: number;
   /** performance.now() of the last real scroll activity — drives the
    *  published @ScrollActive var's idle timeout. */
   lastActiveAt: number;
@@ -232,6 +234,7 @@ export class ScrollManager implements Animatable {
     s.velX = 0;
     s.velY = 0;
     s.samples.length = 0;
+    s.lastSampleT = -1;
   };
 
   /** Direct positional update during a drag — position tracks the finger 1:1
@@ -240,8 +243,17 @@ export class ScrollManager implements Animatable {
    *  ever supposed to be visible inside the scroll, so we'd rather the finger
    *  feel "stuck" at the edge than peel back the curtain).
    *  Also records the move into the trailing window so DragEnd can derive
-   *  release velocity from the most recent ~RELEASE_WINDOW_MS only. */
-  DragMove = (jiv: Jiv, dx: number, dy: number, _dt: number): void => {
+   *  release velocity from the most recent ~RELEASE_WINDOW_MS only.
+   *
+   *  `tMs` is the EVENT's own time, not the moment this call happened. The two
+   *  are different numbers and the difference is bridge latency: pointer samples
+   *  cross to the worker in batches, so several samples can arrive within the
+   *  same microsecond carrying tens of milliseconds of finger travel between
+   *  them. Stamping arrival would price that travel at the queue's speed rather
+   *  than the finger's. Any single consistent millisecond clock will do — only
+   *  DIFFERENCES are ever taken — but every sample of one drag must use the
+   *  same one, and it must be the one the finger moved on. */
+  DragMove = (jiv: Jiv, dx: number, dy: number, tMs: number): void => {
     const s = this._ensureState(jiv);
     if (!s.dragging) return;
 
@@ -269,21 +281,19 @@ export class ScrollManager implements Animatable {
     s.targetX = s.posX;
     s.targetY = s.posY;
 
-    const now = performance.now();
-    s.samples.push({ dx: scaledDx, dy: scaledDy, t: now });
+    // The first move of a drag has no predecessor to measure against, so it has
+    // no honest duration. It still moves the content; it just carries no weight
+    // in the release — better than guessing a nominal frame time for it.
+    const dt = s.lastSampleT < 0 ? 0 : Math.max(0, tMs - s.lastSampleT);
+    s.lastSampleT = tMs;
+    s.samples.push({ dx: scaledDx, dy: scaledDy, dt, t: tMs });
     // Drop anything older than the trailing window so the buffer can never
     // grow unbounded and DragEnd's sum is O(window-size).
-    const cutoff = now - RELEASE_WINDOW_MS;
-    while (s.samples.length > 0 && s.samples[0].t < cutoff) s.samples.shift();
+    PruneReleaseSamples(s.samples, tMs, RELEASE_WINDOW_MS);
 
     this._syncJiv(jiv, s);
   };
 
-  /** Release a drag — physics resumes, exit velocity drives momentum.
-   *  Velocity is the average over the trailing RELEASE_WINDOW_MS:
-   *  total displacement in the window ÷ span. Held-still releases collapse
-   *  to zero (samples drained by the prune in DragMove), and decelerated
-   *  releases match the actual recent finger speed instead of a stale EMA. */
   /** Stop a drag with NO momentum — the gesture was claimed by something
    *  else (a selection handle), so the container must freeze where it is
    *  rather than flick onward from the finger's speed. */
@@ -292,44 +302,28 @@ export class ScrollManager implements Animatable {
     if (!s) return;
     s.dragging = false;
     s.samples.length = 0;
+    s.lastSampleT = -1;
     s.velX = 0;
     s.velY = 0;
   };
 
-  DragEnd = (jiv: Jiv): void => {
+  /** Release a drag — physics resumes and the trailing window becomes momentum.
+   *  `tMs` is the lift event's own time, on the same clock the samples carry.
+   *  A finger that held still before lifting releases nothing: its samples have
+   *  either drained out of the window or carry no distance across real time. */
+  DragEnd = (jiv: Jiv, tMs: number): void => {
     const s = this._states.get(jiv);
     if (!s) return;
     s.dragging = false;
 
-    const now = performance.now();
-    const cutoff = now - RELEASE_WINDOW_MS;
-    while (s.samples.length > 0 && s.samples[0].t < cutoff) s.samples.shift();
-
-    if (s.samples.length === 0) {
-      s.velX = 0;
-      s.velY = 0;
-      return;
+    const v = ComputeReleaseVelocity(s.samples, tMs, RELEASE_WINDOW_MS);
+    s.velX = v.vx;
+    s.velY = v.vy;
+    if (JauiTracing()) {
+      JTrace(`scroll:fling:${JMs(v.vx)}x${JMs(v.vy)}px/s:n${s.samples.length}`);
     }
-
-    let totalDx = 0;
-    let totalDy = 0;
-    for (let i = 0; i < s.samples.length; i++) {
-      totalDx += s.samples[i].dx;
-      totalDy += s.samples[i].dy;
-    }
-    // Span from the first sample's timestamp to now — using `now` (not the
-    // last sample's t) is what makes a "decelerate-then-release" release
-    // honest: a long quiet tail between the last sample and lift-off
-    // stretches the denominator and lowers velocity, instead of being
-    // hidden by the EMA.
-    const span = (now - s.samples[0].t) / 1000;
-    if (span > 0) {
-      s.velX = totalDx / span;
-      s.velY = totalDy / span;
-    } else {
-      s.velX = 0;
-      s.velY = 0;
-    }
+    s.samples.length = 0;
+    s.lastSampleT = -1;
   };
 
   /** Snap immediately to ScrollTargetX/Y (used for resize / programmatic jumps). */
@@ -537,6 +531,7 @@ export class ScrollManager implements Animatable {
         velY: 0,
         dragging: false,
         samples: [],
+        lastSampleT: -1,
         lastActiveAt: 0,
         autoHold: 0,
       };

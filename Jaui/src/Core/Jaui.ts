@@ -3943,7 +3943,7 @@ export class Canvas implements DirtyTracker {
     // ─── Pointer drag (touch + trackpad + mouse) ───
     // Only consume drag for touch/pen; mouse drag stays available for selection
     // once we have selection. Track per pointer id so multi-touch doesn't collide.
-    interface DragCtx { target: Jiv; lastX: number; lastY: number; lastT: number; }
+    interface DragCtx { target: Jiv; lastX: number; lastY: number; }
     const drags = new Map<number, DragCtx>();
 
     this._on('pointerdown', (e: PointerEvent) => {
@@ -3958,7 +3958,7 @@ export class Canvas implements DirtyTracker {
 
       this._capturePointer(e.pointerId);
       this._scrollManager.DragStart(target);
-      drags.set(e.pointerId, { target, lastX: e.clientX, lastY: e.clientY, lastT: performance.now() });
+      drags.set(e.pointerId, { target, lastX: e.clientX, lastY: e.clientY });
     });
 
     this._on('pointermove', (e: PointerEvent) => {
@@ -3975,17 +3975,23 @@ export class Canvas implements DirtyTracker {
           ? (e.getCoalescedEvents() as PointerEvent[]) : [];
       const events: readonly PointerEvent[] = samples.length > 0 ? samples : [e];
 
+      // Each sample is timed by its OWN event timeStamp, never by the moment it
+      // reached us. A coalesced batch arrives all at once: reading the clock in
+      // this loop stamps every sample in it with the same instant, which reports
+      // a batch's worth of finger travel as having taken no time at all, and
+      // DragEnd then divides real distance by near-zero. Bridge latency and
+      // worker-thread jitter would be measured as finger speed the same way.
+      // timeStamp comes from the main thread (Bridge carries it per sample, and
+      // per coalesced sample); the manager only ever takes differences, so the
+      // two threads' differing time origins never enter the arithmetic.
       for (const sample of events) {
-        const now = performance.now();
-        const dt = Math.max(1e-3, (now - ctx.lastT) / 1000);
         // Dragging pulls content the opposite direction of finger motion (finger
         // moves up → content scrolls down, same as native).
         const dx = -(sample.clientX - ctx.lastX);
         const dy = -(sample.clientY - ctx.lastY);
-        this._scrollManager.DragMove(ctx.target, dx, dy, dt);
+        this._scrollManager.DragMove(ctx.target, dx, dy, sample.timeStamp);
         ctx.lastX = sample.clientX;
         ctx.lastY = sample.clientY;
-        ctx.lastT = now;
       }
       this._animationManager.Kick();
       // No preventDefault — listener is passive. `touch-action: none` on the
@@ -4005,7 +4011,16 @@ export class Canvas implements DirtyTracker {
     const finish = (e: PointerEvent): void => {
       const ctx = drags.get(e.pointerId);
       if (!ctx) return;
-      this._scrollManager.DragEnd(ctx.target);
+      // The lift carries a position, and the finger really was travelling
+      // between the last pointermove and here — typically most of a frame. Feed
+      // it as the drag's final sample so that distance lands on the content AND
+      // so the release window's last interval is measured rather than read as
+      // the finger having stopped. Without it a flick is systematically slow by
+      // the fraction of the window that gap occupies.
+      const dx = -(e.clientX - ctx.lastX);
+      const dy = -(e.clientY - ctx.lastY);
+      if (dx !== 0 || dy !== 0) this._scrollManager.DragMove(ctx.target, dx, dy, e.timeStamp);
+      this._scrollManager.DragEnd(ctx.target, e.timeStamp);
       this._animationManager.Kick();
       drags.delete(e.pointerId);
       if (this._hasCapture(e.pointerId)) {
