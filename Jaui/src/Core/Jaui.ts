@@ -242,14 +242,17 @@ export class Canvas implements DirtyTracker {
   private _phaseRender:  Float32Array = new Float32Array(30);
   private _frameIdx:     number = 0;
   private _frameCount:   number = 0;
-  // `SceneReads` / `SceneRestarts` come from the renderer's ledger rather than from the walk: the
-  // one place that knows whether the scene FBO has been DRAWN INTO since it was last sampled is
-  // `WebGL2.Renderer`, and a walk-side count would have to re-derive that and could disagree with
-  // it. `SceneRestarts` is the count the read-after-write hypothesis multiplies by the canvas; see
-  // `SceneReadLedger` in `Core/Scene.Ledger.ts`.
-  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0 };
+  // `SceneReads` / `SceneRestarts` / `SceneSwitches` come from the renderer's ledger rather than from
+  // the walk: the one place that knows whether the scene FBO has been DRAWN INTO since it was last
+  // sampled or last unbound is `WebGL2.Renderer`, and a walk-side count would have to re-derive that
+  // and could disagree with it. `SceneRestarts` is the count the read-after-write hypothesis
+  // multiplied by the canvas - and `?snap-once` took it from 40 to 1 on `glass-grid` without moving
+  // the frame, which refuted it. `SceneSwitches` is what survived: encoder ENDS, a non-scene target
+  // bound over a dirty scene, which a pyramid build does between every pair of card draws whether or
+  // not the read was rerouted. See `SceneReadLedger` in `Core/Scene.Ledger.ts`.
+  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0 };
   private _cacheDiag = { reached: 0, effH: 0, teleport: 0, opacity: 0, rot: 0, xform: 0, visual: 0, persp: 0, samples: 0, ok: 0 };
-  private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SceneReads: 0, SceneRestarts: 0 };
+  private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0 };
   /** Per-op CPU time (ms) inside the glass/pblur backdrop pipeline, summed
    *  per frame. A call that forces a CPU↔GPU sync shows its GPU cost here as
    *  inflated CPU time — so the dominant op points at the bottleneck. */
@@ -1200,6 +1203,7 @@ export class Canvas implements DirtyTracker {
       this._counts.CacheComp = 0;
       this._counts.SceneReads = 0;
       this._counts.SceneRestarts = 0;
+      this._counts.SceneSwitches = 0;
       { const d = this._cacheDiag; d.reached = d.effH = d.teleport = d.opacity = d.rot = d.xform = d.visual = d.persp = d.samples = d.ok = 0; }
       this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
     }
@@ -1241,6 +1245,7 @@ export class Canvas implements DirtyTracker {
       if (this._renderer instanceof WebGL2Renderer) {
         this._counts.SceneReads = this._renderer.SceneReads;
         this._counts.SceneRestarts = this._renderer.SceneRestarts;
+        this._counts.SceneSwitches = this._renderer.SceneSwitches;
       }
       if (ff && this._ffPresented) {
         // `_render` sets the latch at the present, beside the first-frame hook — `_resize` renders
@@ -1250,7 +1255,7 @@ export class Canvas implements DirtyTracker {
         const glyphs = this._textCache.RasterCount;
         JTrace(`jaui:render:end ${JMs(performance.now() - tRender)}ms`
           + ` panels=${c.Panels} glass=${c.Glass} text=${c.Text} images=${c.Image} pblur=${c.PBlur}`
-          + ` sceneReads=${c.SceneReads} sceneRestarts=${c.SceneRestarts}`);
+          + ` sceneReads=${c.SceneReads} sceneRestarts=${c.SceneRestarts} sceneSwitches=${c.SceneSwitches}`);
         JTrace(`jaui:glyphs:first n=${glyphs} ${JMs(this._textCache.RasterMs)}ms`);
         // Images never gate a frame — a decode that finishes asks for the next one. These say how
         // many were still out when the first frame painted, so that stays a reading, not a claim.
@@ -1281,6 +1286,7 @@ export class Canvas implements DirtyTracker {
       this._countsRolling.PBlur  = this._counts.PBlur;
       this._countsRolling.SceneReads    = this._counts.SceneReads;
       this._countsRolling.SceneRestarts = this._counts.SceneRestarts;
+      this._countsRolling.SceneSwitches = this._counts.SceneSwitches;
       // Poll whatever GPU timer result is now available. The reading lags
       // 2-3 frames behind what we just submitted — writing it into the same
       // rolling window is still useful because we're averaging, not trying
@@ -1328,9 +1334,12 @@ export class Canvas implements DirtyTracker {
             `
        ${passLine}` +
             ` | P${this._counts.Panels} G${this._counts.Glass} T${this._counts.Text} I${this._counts.Image} Pb${this._counts.PBlur} SB${this._counts.SharedBuilds} cap${this._counts.CacheCap} comp${this._counts.CacheComp}` +
-            // `restart/read`: scene taps that followed a draw into the scene, over all scene taps.
-            // The first number is what the read-after-write hypothesis multiplies by the canvas.
-            ` | scene ${this._counts.SceneRestarts}/${this._counts.SceneReads}` +
+            // `restart/read/switch`: scene taps that followed a draw into the scene, over all scene
+            // taps, over encoder ENDS - a non-scene target bound over a dirty scene. The first was
+            // the read-after-write hypothesis's lever and `?snap-once` refuted it; the third is what
+            // survived. On `glass-grid` the first and third read alike at baseline and part company
+            // under the flag, which is the comparison this line exists to make readable at a glance.
+            ` | scene ${this._counts.SceneRestarts}/${this._counts.SceneReads}/${this._counts.SceneSwitches}` +
             ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
           );
@@ -4293,14 +4302,15 @@ export class Canvas implements DirtyTracker {
       g.__jauiPassWindow = (mark) => PassWindowOf(mark, this._renderer.GetPassProfile());
       // The scene ledger travels the same way, and CUMULATIVELY: a gesture reads it at both ends and
       // subtracts, exactly as it does the pass profile. Per-frame restarts are `(Restarts_end -
-      // Restarts_start) / (Frames_end - Frames_start)`. Null on a non-WebGL2 backend, never a zero -
-      // an absence and "no restarts" are opposite findings and must not print the same.
+      // Restarts_start) / (Frames_end - Frames_start)`, and per-frame SWITCHES the same over
+      // `Switches`. Null on a non-WebGL2 backend, never a zero - an absence and "no restarts" are
+      // opposite findings and must not print the same.
       //
       // The reader for this global is the gesture meter in `ShowStudio.App/src/Diagnostics/Trace.ts`,
       // which this lane does not own and has NOT been given the line. Until it is, the numbers reach a
       // human through the `[Jaui]` per-second console line, the debug HUD and `jaui:render:end`.
       const s = globalThis as unknown as {
-        __jauiSceneLedger?: () => { Reads: number; Restarts: number; Frames: number } | null;
+        __jauiSceneLedger?: () => { Reads: number; Restarts: number; Switches: number; Frames: number } | null;
       };
       s.__jauiSceneLedger = () =>
         (this._renderer instanceof WebGL2Renderer ? this._renderer.SceneLedgerTotals : null);
@@ -4320,6 +4330,14 @@ export class Canvas implements DirtyTracker {
     // removed. Assigned at parse time like `?no-depth` rather than per-frame like `?no-blur`, because
     // Init has to be able to say the flag arrived (`jaui:snap-once` in the trace).
     if (params.has('snap-once') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagSnapOnce = true;
+    // `?blur-dummy` — MEASUREMENT ONLY, WRONG PIXELS. Draw every card over the REAL bed with no
+    // render-target switch between them: `ComputeBlur` / `GenerateBlurMipmap` / `SnapshotScreen` all
+    // issue no GL and hand back a 1x1 grey. `?snap-once` removed the READS and the frame did not
+    // move; this removes the encoder BOUNDARY instead, which is what a pyramid build actually puts
+    // between one card's draw and the next. Parsed at parse time like `?snap-once` so Init can say
+    // the flag arrived. NOT `?no-blur`: every draw still lands, because the dummy is not the scene's
+    // own attachment and so no glass draw is a feedback loop.
+    if (params.has('blur-dummy') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagBlurDummy = true;
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
     if (params.has('no-glass-draw')) this._diagNoGlassDraw = true;
@@ -4505,7 +4523,7 @@ export class Canvas implements DirtyTracker {
       `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | ${w}x${h}\n` +
       `cpu: dirty ${pDirty.toFixed(2)}  layout ${pLayout.toFixed(2)}  text ${pText.toFixed(2)}  render ${pRender.toFixed(2)} | gpu ${gpuDisplay} ms\n` +
       `draws — panels ${c.Panels}  glass ${c.Glass}  text ${c.Text}  img ${c.Image}  pblur ${c.PBlur}\n` +
-      `scene — restarts ${c.SceneRestarts}  reads ${c.SceneReads}`;
+      `scene — restarts ${c.SceneRestarts}  reads ${c.SceneReads}  switches ${c.SceneSwitches}`;
     this._debugHud.textContent = hudText;
     this._debugLatest = hudText;
 

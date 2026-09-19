@@ -325,8 +325,10 @@ export class WebGL2Renderer implements Renderer {
     // key back - so naming it 'cache' here is correct at both ends. Written STRAIGHT to the field,
     // not through `_tgt`: the pass timers never saw a target change here and a new one would move
     // a bracket's `Hard` flag, which would make this lane's counter edit a change to somebody
-    // else's instrument.
+    // else's instrument. The SWITCH column is told by hand for the same reason: the capture's FBO
+    // is a real non-scene target and its bind really does end the scene's encoder.
     this._boundTarget = 'cache';
+    this._sceneLedger.NoteTargetBind('cache');
   };
   private _panelVao!: WebGLVertexArrayObject;
   private _panelInstanceBuffer!: WebGLBuffer;
@@ -450,6 +452,10 @@ export class WebGL2Renderer implements Renderer {
    *  ships and is not a diagnostic. */
   private _tgt = (key: string): void => {
     this._boundTarget = key;
+    // Binding anything but the scene ENDS the scene's render encoder if the walk has drawn into it
+    // since the last time it ended. That, not a read, is what a Metal driver stores and loads back
+    // at `RebindSceneTarget`. The ledger decides which binds count; see `NoteTargetBind`.
+    this._sceneLedger.NoteTargetBind(key);
     if (this._pass !== null) this._pass.SetTarget(key);
   };
   /** Which target this renderer's draw entry points are currently painting into. Every place that
@@ -468,10 +474,13 @@ export class WebGL2Renderer implements Renderer {
    *  `Jaui.ts` into `_counts` the same way `GetFrameGpuMs` and `LastBlurDepth` are read. */
   get SceneReads(): number { return this._sceneLedger.Reads; }
   get SceneRestarts(): number { return this._sceneLedger.Restarts; }
+  /** Encoder ENDS on the frame just walked - a non-scene target bound over a dirty scene. The column
+   *  `?snap-once` did not move, and the one the surviving hypothesis multiplies. */
+  get SceneSwitches(): number { return this._sceneLedger.Switches; }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
-  get SceneLedgerTotals(): { Reads: number; Restarts: number; Frames: number } {
+  get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number } {
     const l = this._sceneLedger;
-    return { Reads: l.TotalReads, Restarts: l.TotalRestarts, Frames: l.TotalFrames };
+    return { Reads: l.TotalReads, Restarts: l.TotalRestarts, Switches: l.TotalSwitches, Frames: l.TotalFrames };
   }
   /** Name a lazily-built blur chain so its level FBOs get target keys distinct from the other
    *  chains', and hand it the timer if one is already running. */
@@ -573,6 +582,7 @@ export class WebGL2Renderer implements Renderer {
     // the reading looked perfectly reasonable; a reading taken with this mark absent is a reading of
     // the wrong build, and that is now checkable from the trace rather than from the command line.
     if (this.DiagSnapOnce) JTrace('jaui:snap-once armed=true pixels=WRONG');
+    if (this.DiagBlurDummy) JTrace('jaui:blur-dummy armed=true pixels=WRONG');
 
     // Probe for GPU timer-query support. The extension object exposes the
     // two enums we need; if it's missing, _timerExt stays null and
@@ -837,6 +847,9 @@ export class WebGL2Renderer implements Renderer {
     // `?snap-once` (measurement only) swaps every backdrop read onto one full-canvas snapshot taken
     // at the frame's FIRST read. The pixels are wrong on purpose - a later surface no longer sees
     // the glass drawn under it - and the flag exists to be measured, never shown. See `DiagSnapOnce`.
+    // `?blur-dummy` first: under it nothing may hand out the scene attachment, or the adaptive
+    // shadow's sharp tap would be a scene READ and the cell would stop being about switches alone.
+    if (this.DiagBlurDummy) return this._blurDummyTexture();
     if (this.DiagSnapOnce) return this._snapOnceTexture();
     return _wrap(this._sceneFbo.Texture);
   }
@@ -1222,8 +1235,58 @@ export class WebGL2Renderer implements Renderer {
    *  because its backdrop is the scene as of the first read. `SceneRestarts` reads 1 under this flag
    *  and that is the whole point of it. Never ship it, never screenshot it. */
   DiagSnapOnce = false;
+
+  /** `?blur-dummy` (MEASUREMENT ONLY - WRONG PIXELS). Draw every card over the REAL bed with NO
+   *  render-target switch between them.
+   *
+   *  `?snap-once` removed the scene READS and the frame did not get cheaper (72.85 -> 73.59 GPU ms on
+   *  `glass-grid`), which killed read-after-write as the mechanism. What it did NOT remove is the
+   *  encoder BOUNDARY: every pyramid build binds the blur FBOs between one card's draw and the next,
+   *  so the scene's Metal encoder still ended and restarted ~40 times with the bed stored and loaded
+   *  back each time. This flag removes the boundary instead of the read. `ComputeBlur` and
+   *  `GenerateBlurMipmap` issue NO GL and hand back a 1x1 opaque mid-grey texture over the identity
+   *  region; `SnapshotScreen` returns the same texture without blitting; `SceneTexture` returns it so
+   *  the adaptive shadow's sharp tap reads it too.
+   *
+   *  What it KEEPS, and the reason it is not `?no-blur` under another name: EVERY DRAW STILL HAPPENS.
+   *  The dummy is not the scene's own attachment, so no glass draw is a rendering feedback loop and
+   *  none is refused - `rejectedDraws` must read 0 and the worker census 0, where `?no-blur` refuses
+   *  all forty. The bed is real, six bands, busy. The panel/rim/text fill is unchanged; only the
+   *  pyramid's own fill and its target binds are gone.
+   *
+   *  The picture is WRONG: every card's backdrop is flat grey. Never ship it, never screenshot it. */
+  DiagBlurDummy = false;
+  /** The 1x1 opaque mid-grey `?blur-dummy` hands to every backdrop consumer. Mid-grey so the glass
+   *  shader's grade, rim and refraction still have something with a value in it to work on - a black
+   *  texture would put the fill on a different arithmetic path in `applyGrading`. LINEAR min filter
+   *  and no mip chain: with a non-mipmap min filter a `textureLod` at any LOD resolves to level 0,
+   *  which is what makes one texel a legal answer to a frost LOD of 3. */
+  private _blurDummyTex: WebGLTexture | null = null;
   /** Whether this frame's one snapshot has been taken yet. Reset in `BeginFrame`. */
   private _snapOnceTaken = false;
+
+  /** The dummy, built on first ask. No region: like `?no-blur`'s passthrough handle it covers the
+   *  whole canvas, so every consumer's backdrop transform is the identity. */
+  private _blurDummyTexture = (): GpuTextureHandle => {
+    if (this._blurDummyTex) return _wrap(this._blurDummyTex);
+    const gl = this._gl;
+    const tex = gl.createTexture();
+    if (!tex) throw new Error('[Jaui] failed to create the ?blur-dummy texture');
+    this._blurDummyTex = tex;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+      new Uint8Array([128, 128, 128, 255]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // Built LAZILY so an unflagged run creates nothing, which costs one binding on whichever unit
+    // happened to be active when the first card asked. Unbound rather than left dangling; every
+    // consumer of a backdrop handle binds all six of its own units before it draws, and this runs
+    // once per context on the first frame, far ahead of any measured window.
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return _wrap(tex);
+  };
 
   /** The one snapshot `?snap-once` serves every read from. The first call in a frame takes a FULL
    *  canvas blit (no scissor - a later surface may sample anywhere); every call after it hands back
@@ -1249,11 +1312,19 @@ export class WebGL2Renderer implements Renderer {
     // `u_Backdrop` while rendering INTO it, which is a rendering feedback loop the WebGL spec
     // requires be rejected.
     if (this.DiagNoBlur) return input;
+    // `?blur-dummy`: no GL, and NOT the input either. Returning the input is what makes `?no-blur`'s
+    // glass draws a feedback loop; returning a foreign texture is what lets every draw land.
+    if (this.DiagBlurDummy) return this._blurDummyTexture();
     if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
     const pass = radius > 0
       ? this._blur
       : (this._rootBlur ?? (this._rootBlur = this._tagBlur(new BlurPass(this._gl), 'root')));
     this._lastBlur = pass;
+    // BlurPass binds its own level FBOs and draws into them, and it does it with raw GL that never
+    // passes through `_tgt`. So the switch is noted HERE, once per build: the encoder ends at the
+    // first level bind and the rest of the pyramid is on the far side of it. The ledger's own dirty
+    // flag makes the repeat calls free, so this line is the build, not the binds.
+    this._sceneLedger.NoteTargetBind('blur');
     const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
@@ -1264,6 +1335,12 @@ export class WebGL2Renderer implements Renderer {
 
   GenerateBlurMipmap = (maxLod?: number): void => {
     if (this.DiagNoBlur) return;
+    if (this.DiagBlurDummy) return;
+    // Same reason as `ComputeBlur`: BlurPass binds mip targets this class never sees. In practice
+    // this call always follows a `ComputeBlur` with no scene draw between them, so the flag is
+    // already clear and it books nothing - which is the correct answer and the reason the column is
+    // "encoder ends" and not "framebuffer binds".
+    this._sceneLedger.NoteTargetBind('blur');
     (this._lastBlur ?? this._blur).GenerateOutputMipmap(maxLod);
     // The blit-to-mip path in BlurPass.GenerateOutputMipmap doesn't touch
     // shader programs, but keep the invalidation paired with ComputeBlur
@@ -1289,6 +1366,7 @@ export class WebGL2Renderer implements Renderer {
     // to their frost LOD (this pyramid's level 0 ≈ a full-res pyramid's LOD 2).
     const qw = Math.max(1, width >> 2), qh = Math.max(1, height >> 2);
     this._sceneLedger.NoteRead();
+    this._sceneLedger.NoteTargetBind('blur');
     const tex = pass.Blur(this._sceneFbo.Texture, qw, qh, 0, undefined, undefined);
     pass.GenerateOutputMipmap(Math.max(1, maxLod - 2));
     // It covers the WHOLE canvas (at quarter resolution), so screen UV addresses it unchanged.
@@ -1521,6 +1599,7 @@ export class WebGL2Renderer implements Renderer {
   SnapshotScreen = (scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {
     // `?snap-once`: the frame's FIRST read takes one full-canvas blit and every read after it gets
     // that same texture, scissor ignored. Measurement only; see `DiagSnapOnce`.
+    if (this.DiagBlurDummy) return this._blurDummyTexture();
     if (this.DiagSnapOnce) return this._snapOnceTexture();
     return this._snapshotBlit(scissor);
   };
@@ -1720,6 +1799,10 @@ export class WebGL2Renderer implements Renderer {
    *  from tile memory at all. */
   PresentScene = (): void => {
     const gl = this._gl;
+    // The present ends the scene's encoder, and so does the invalidate after it - once per frame, in
+    // every configuration. Counting a constant would make `Switches` incomparable with `Restarts`,
+    // which excludes the present for the same reason. Drain the flag rather than exempt each bind.
+    this._sceneLedger.NoteFrameEndDrain();
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     this._tgt('default');

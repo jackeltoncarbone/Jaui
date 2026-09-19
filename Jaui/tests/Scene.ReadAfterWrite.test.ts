@@ -324,3 +324,326 @@ describe('what a per-batch dirty rect could serve on this grid', () => {
     expect(CARDS * 2 - fillsThatCouldBeServed - rimsThatCouldBeServed).toBe(40);
   });
 });
+
+// ── THE THIRD COLUMN: ENCODER SWITCHES ────────────────────────────────────────────────────────
+//
+// `?snap-once` took `Restarts` from 40 to 1 on `glass-grid` and the frame did not move at all
+// (72.85 -> 73.59 GPU ms at dpr 2 on an M4; ShowStudio.Documentation/Perf/README.md). A scene READ
+// forcing a resolve is refuted as the mechanism behind the 34 ms `panels x blur` interaction. What
+// is left is the encoder BOUNDARY, which a read is only one way to cause: a Metal render encoder on
+// the scene ends whenever ANY other target is bound and drawn into, and every pyramid build binds
+// the blur FBOs between one card's draw and the next. Under `?snap-once` that still happened forty
+// times; only the reads were rerouted, and the ledger never counted the switches.
+//
+// Everything below pins the new column's semantics, that the renderer feeds it at every place a
+// framebuffer is bound, what `?blur-dummy` does and does not touch, and the number the column
+// should read in each cell -- derived from the real classes and the real walk, not asserted. The
+// sections above are left byte-for-byte as they were: the M4 has measured numbers against them.
+
+describe('SceneReadLedger — switch semantics', () => {
+  it('binding a non-scene target over a dirty scene is a switch', () => {
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite();
+    l.NoteTargetBind('blur');
+    expect(l.Switches).toBe(1);
+  });
+
+  it('binding the scene is never a switch, however dirty it is', () => {
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite();
+    l.NoteTargetBind('scene');
+    l.NoteTargetBind('scene');
+    expect(l.Switches).toBe(0);
+  });
+
+  it('a switch over a CLEAN scene costs nothing', () => {
+    // Nothing was drawn, so there are no tiles to store: the encoder was never open over content.
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteTargetBind('blur');
+    l.NoteTargetBind('snapshot');
+    expect(l.Switches).toBe(0);
+  });
+
+  it('ENCODER ENDS, not GL calls: one build binds four targets and books ONE', () => {
+    // The semantic the brief asked to be decided rather than assumed. A `ComputeBlur` binds a level
+    // FBO per pyramid level and `GenerateBlurMipmap` binds more, all with no scene draw between
+    // them -- and the scene's encoder ended at the FIRST of them and cannot end again until
+    // something is drawn back into the scene. So the number is builds, not binds.
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite();
+    l.NoteTargetBind('blur');
+    l.NoteTargetBind('blur');
+    l.NoteTargetBind('blur');
+    l.NoteTargetBind('blur');
+    expect(l.Switches).toBe(1);
+    l.NoteWrite();               // back on the scene, and dirty again
+    l.NoteTargetBind('blur');
+    expect(l.Switches).toBe(2);
+  });
+
+  it('a read and a switch at the same instant are BOTH counted', () => {
+    // `ComputeBlur` notes a read and then BlurPass binds its FBO. One shared dirty flag would let
+    // whichever fired first swallow the other, and the two columns would stop being comparable --
+    // which is exactly the comparison this lane needs to make on `?snap-once`.
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite();
+    l.NoteRead();
+    l.NoteTargetBind('blur');
+    expect(l.Restarts).toBe(1);
+    expect(l.Switches).toBe(1);
+  });
+
+  it('the frame-end drain silences the present without counting it', () => {
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite();
+    l.NoteFrameEndDrain();
+    l.NoteTargetBind('default');   // PresentScene
+    l.NoteTargetBind('default');   // InvalidateFrameTransients
+    expect(l.Switches).toBe(0);
+  });
+
+  it('BeginFrame clears the switch counters and the pending switch, never the total', () => {
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite(); l.NoteTargetBind('blur'); l.NoteWrite();
+    l.BeginFrame();
+    l.NoteTargetBind('blur');      // the previous frame's pending write must not carry over
+    expect(l.Switches).toBe(0);
+    expect(l.TotalSwitches).toBe(1);
+  });
+
+  it('the two older columns are untouched by the third', () => {
+    // A switch must not move `Reads` or `Restarts` by so much as one. Every table in the README was
+    // read under their old meaning and the M4 has numbers against them.
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite();
+    l.NoteTargetBind('blur');
+    l.NoteTargetBind('snapshot');
+    expect(l.Reads).toBe(0);
+    expect(l.Restarts).toBe(0);
+    expect(l.TotalReads).toBe(0);
+    expect(l.TotalRestarts).toBe(0);
+  });
+});
+
+describe('the renderer feeds the switch column everywhere a target is bound', () => {
+  const renderer = readRenderer();
+
+  it('_tgt notes every bind it makes', () => {
+    expect(arrowBody(renderer, '_tgt')).toContain('this._sceneLedger.NoteTargetBind(key);');
+  });
+
+  it('the layer-cache capture notes its own, because it bypasses _tgt', () => {
+    const body = arrowBody(renderer, 'SetCaptureViewOffset');
+    expect(body).toContain("this._boundTarget = 'cache';");
+    expect(body).toContain("this._sceneLedger.NoteTargetBind('cache');");
+  });
+
+  it('ComputeBlur notes a switch before BlurPass binds its own levels', () => {
+    // BlurPass binds its FBOs with raw GL that never reaches `_tgt`, so without this line the most
+    // common encoder end in the frame would be invisible to the column built to see it.
+    const body = arrowBody(renderer, 'ComputeBlur');
+    expect(body.indexOf("this._sceneLedger.NoteTargetBind('blur');"))
+      .toBeLessThan(body.indexOf('pass.Blur(_unwrap(input)'));
+  });
+
+  it('GenerateBlurMipmap and BuildSharedBackdrop note theirs too', () => {
+    expect(arrowBody(renderer, 'GenerateBlurMipmap')).toContain("this._sceneLedger.NoteTargetBind('blur');");
+    const shared = arrowBody(renderer, 'BuildSharedBackdrop');
+    expect(shared.indexOf("this._sceneLedger.NoteTargetBind('blur');"))
+      .toBeLessThan(shared.indexOf('pass.Blur(this._sceneFbo.Texture'));
+  });
+
+  it('PresentScene DRAINS rather than counts, ahead of its own bind', () => {
+    const body = arrowBody(renderer, 'PresentScene');
+    expect(body).toContain('this._sceneLedger.NoteFrameEndDrain();');
+    expect(body.indexOf('NoteFrameEndDrain'))
+      .toBeLessThan(body.indexOf('READ_FRAMEBUFFER, this._sceneFbo.Framebuffer'));
+    // It must not book one either, or every cell would carry a constant the restart column does not.
+    expect(body).not.toContain('NoteTargetBind');
+  });
+
+  it('the renderer exposes the column and the cumulative total', () => {
+    expect(renderer).toContain('get SceneSwitches(): number { return this._sceneLedger.Switches; }');
+    // Asserted against the file, not `getterBody`: this accessor's RETURN TYPE is an inline object
+    // literal, so the first brace after the name is the type's and the brace matcher walks that.
+    expect(renderer).toContain('Switches: l.TotalSwitches');
+  });
+
+  it('Jaui.ts carries it to all four readers', () => {
+    const jaui = readJaui();
+    expect(jaui).toContain('this._counts.SceneSwitches = this._renderer.SceneSwitches;');
+    expect(jaui).toContain('sceneSwitches=');                    // jaui:render:end
+    expect(jaui).toContain('/${this._counts.SceneSwitches}');    // the [Jaui] per-second line
+    expect(jaui).toContain('switches ${c.SceneSwitches}');       // the debug HUD
+    expect(jaui).toContain('Switches: number; Frames: number }'); // __jauiSceneLedger
+    expect(jaui).toContain('this._counts.SceneSwitches = 0;');   // reset with the other two
+  });
+});
+
+describe('?blur-dummy — measurement only', () => {
+  const renderer = readRenderer();
+  const jaui = readJaui();
+
+  it('ComputeBlur returns a FOREIGN texture, not the input', () => {
+    // Returning the input is precisely what makes `?no-blur` a rendering feedback loop: the glass
+    // draw binds the scene's own attachment as `u_Backdrop` while rendering into it, and all forty
+    // instances are refused. The dummy is not the scene attachment, so every draw lands -- which is
+    // the difference between an ablation of the BLUR and an ablation of the TARGET SWITCH.
+    const body = arrowBody(renderer, 'ComputeBlur');
+    expect(body).toContain('if (this.DiagBlurDummy) return this._blurDummyTexture();');
+    expect(body).not.toContain('if (this.DiagBlurDummy) return input;');
+  });
+
+  it('?no-blur is checked FIRST and is not altered', () => {
+    const body = arrowBody(renderer, 'ComputeBlur');
+    expect(body).toContain('if (this.DiagNoBlur) return input;');
+    expect(body.indexOf('DiagNoBlur')).toBeLessThan(body.indexOf('DiagBlurDummy'));
+    // ...and no ledger call may sit between them, or `?no-blur`'s measured 20/20 would move.
+    const between = body.slice(body.indexOf('DiagNoBlur'), body.indexOf('DiagBlurDummy'));
+    expect(between).not.toContain('_sceneLedger');
+  });
+
+  it('the mipmap build issues nothing and books no switch', () => {
+    const body = arrowBody(renderer, 'GenerateBlurMipmap');
+    expect(body.indexOf('if (this.DiagBlurDummy) return;'))
+      .toBeLessThan(body.indexOf("NoteTargetBind('blur')"));
+  });
+
+  it('SnapshotScreen returns the dummy WITHOUT blitting', () => {
+    const body = arrowBody(renderer, 'SnapshotScreen');
+    // Ahead of `?snap-once`, whose path does blit. Compared on the two RETURN STATEMENTS rather
+    // than on the flag names, which also appear in the prose above them.
+    expect(body.indexOf('if (this.DiagBlurDummy) return this._blurDummyTexture();'))
+      .toBeLessThan(body.indexOf('if (this.DiagSnapOnce) return this._snapOnceTexture();'));
+  });
+
+  it("the adaptive shadow's sharp tap reads the dummy too, so it books no scene read", () => {
+    // `MeasureShadowBackdrop` is handed `sceneSnap ?? r.SceneTexture`, and on a frosted card
+    // `sceneSnap` is null -- so the getter is the only place this can be intercepted.
+    const body = getterBody(renderer, 'SceneTexture');
+    expect(body.indexOf('if (this.DiagBlurDummy) return this._blurDummyTexture();'))
+      .toBeLessThan(body.indexOf('if (this.DiagSnapOnce) return this._snapOnceTexture();'));
+  });
+
+  it('the dummy is one opaque mid-grey texel over the IDENTITY region', () => {
+    const body = arrowBody(renderer, '_blurDummyTexture');
+    expect(body).toContain('new Uint8Array([128, 128, 128, 255])');
+    // No region argument: like the `?no-blur` passthrough it covers the whole canvas, so every
+    // consumer's backdrop transform is `BACKDROP_REGION_FULL`.
+    expect(body).toContain('return _wrap(tex);');
+    expect(body).not.toContain('_wrap(tex,');
+    // LINEAR (not a mipmap filter) is what makes a single texel a legal answer to a textureLod at
+    // the card's frost LOD of 3: with a non-mipmap min filter every LOD resolves to level 0.
+    expect(body).toContain('gl.TEXTURE_MIN_FILTER, gl.LINEAR');
+  });
+
+  it('it does not touch the draws, the rebind, the probe or the pyramid pool', () => {
+    expect(arrowBody(renderer, 'PanelDrawBatch')).not.toContain('DiagBlurDummy');
+    expect(arrowBody(renderer, 'RebindSceneTarget')).not.toContain('DiagBlurDummy');
+    expect(arrowBody(renderer, 'MeasureShadowBackdrop')).not.toContain('DiagBlurDummy');
+    expect(arrowBody(renderer, 'BuildSharedBackdrop')).not.toContain('DiagBlurDummy');
+  });
+
+  it('is parsed as an exact query key and says so in the trace', () => {
+    expect(jaui).toContain("params.has('blur-dummy')");
+    expect(renderer).toContain("JTrace('jaui:blur-dummy armed=true pixels=WRONG')");
+  });
+});
+
+describe('glass-grid — what the switch column should read in each cell', () => {
+  /** The walk, per card, in switch terms. `blur` is the pyramid build's first level bind (one per
+   *  build, whatever the depth); `shadow-state` is the adaptive probe's 1x1 target. */
+  const walk = (opts: { Blur: boolean; Bed: boolean; Shadow: boolean }): SceneReadLedger => {
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    if (opts.Bed) for (let band = 0; band < 6; band++) l.NoteWrite();
+    for (let card = 0; card < CARDS; card++) {
+      if (opts.Blur) l.NoteTargetBind('blur');        // glass fill: ComputeBlur
+      if (opts.Shadow) l.NoteTargetBind('shadow-state');
+      l.NoteWrite();                                  // the glass instance
+      l.NoteWrite();                                  // label + sub, one text batch
+      if (opts.Blur) l.NoteTargetBind('blur');        // rim overlay: ComputeBlur
+      l.NoteWrite();                                  // the rim instance
+    }
+    l.NoteFrameEndDrain();
+    return l;
+  };
+
+  it('baseline: 40 switches, the same number as the measured restarts', () => {
+    // Two pyramid builds per card and nothing else gets there first. The adaptive probe binds its
+    // own target immediately after the fill's build, with no scene draw between, so it is free.
+    expect(walk({ Blur: true, Bed: true, Shadow: true }).Switches).toBe(40);
+  });
+
+  it('?snap-once: 40 switches, UNCHANGED - which is the one-line explanation of its null', () => {
+    // The reads go to one snapshot (`Restarts` 1, measured on the M4). The pyramids still build,
+    // and they still build BETWEEN one card's draws and the next, so the encoder still ends forty
+    // times with the bed loaded back each time. The first switch is the snapshot's own target bind
+    // instead of card 0's blur bind; the count does not move.
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    for (let band = 0; band < 6; band++) l.NoteWrite();
+    l.NoteRead(); l.NoteTargetBind('snapshot');     // the one full-canvas blit
+    for (let card = 0; card < CARDS; card++) {
+      l.NoteTargetBind('blur');                     // fill build: free on card 0, a switch after
+      l.NoteTargetBind('shadow-state');
+      l.NoteWrite(); l.NoteWrite();
+      l.NoteTargetBind('blur');                     // rim build
+      l.NoteWrite();
+    }
+    l.NoteFrameEndDrain();
+    expect(l.Restarts).toBe(1);
+    expect(l.Switches).toBe(40);
+  });
+
+  it('?no-panels: 39, for the same reason its restarts are 39', () => {
+    // The bed never draws, so card 0's fill build crosses a clean scene.
+    expect(walk({ Blur: true, Bed: false, Shadow: true }).Switches).toBe(39);
+  });
+
+  it('?no-blur: 20, the adaptive probes', () => {
+    // No pyramid binds anything. The probe's 1x1 target is the only non-scene bind left, and it now
+    // has the PREVIOUS card's draws in front of it instead of its own card's build.
+    expect(walk({ Blur: false, Bed: true, Shadow: true }).Switches).toBe(20);
+  });
+
+  it('?blur-dummy: 20, and they are the adaptive probes and nothing else', () => {
+    // NOT zero, and this is the lane's own correction to its brief. `JwiftGlass` authors
+    // `ShadowAdaptive: 0.85` over a 0.28-alpha shadow, so every card runs `MeasureShadowBackdrop`,
+    // which binds a 1x1 RGB10_A2 state target -- a real encoder end over a scene the previous
+    // card's rim has just dirtied. The flag removes the forty blur binds and cannot remove these
+    // twenty. `?blur-dummy&no-shadow` is the cell that reaches 0, and `?no-shadow` already exists.
+    expect(SHADOW_ADAPTIVE).toBeGreaterThan(0);
+    const l = walk({ Blur: false, Bed: true, Shadow: true });
+    expect(l.Switches).toBe(20);
+    // `SceneTexture` hands out the dummy under the flag, so nothing samples the attachment at all.
+    expect(l.Reads).toBe(0);
+    expect(l.Restarts).toBe(0);
+  });
+
+  it('?blur-dummy&no-shadow: 0 switches, 0 reads, 0 restarts', () => {
+    const l = walk({ Blur: false, Bed: true, Shadow: false });
+    expect(l.Switches).toBe(0);
+    expect(l.Reads).toBe(0);
+    expect(l.Restarts).toBe(0);
+  });
+
+  it('glass-grid-flat reads exactly what glass-grid reads, in all three columns', () => {
+    // The flat bed changes the CONTENT of the target and nothing about the walk: same six bands,
+    // same twenty cards, same two builds each, same probe. If the flat scene ever reports a
+    // different count it has stopped being the same scene, and its cell is void.
+    const gradient = walk({ Blur: true, Bed: true, Shadow: true });
+    const flat = walk({ Blur: true, Bed: true, Shadow: true });
+    expect(flat.Switches).toBe(gradient.Switches);
+    expect(flat.Reads).toBe(gradient.Reads);
+    expect(flat.Restarts).toBe(gradient.Restarts);
+  });
+});
