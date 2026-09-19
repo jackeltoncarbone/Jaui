@@ -250,9 +250,9 @@ export class Canvas implements DirtyTracker {
   // the frame, which refuted it. `SceneSwitches` is what survived: encoder ENDS, a non-scene target
   // bound over a dirty scene, which a pyramid build does between every pair of card draws whether or
   // not the read was rerouted. See `SceneReadLedger` in `Core/Scene.Ledger.ts`.
-  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0 };
+  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, CardComposites: 0, CardFallbacks: 0 };
   private _cacheDiag = { reached: 0, effH: 0, teleport: 0, opacity: 0, rot: 0, xform: 0, visual: 0, persp: 0, samples: 0, ok: 0 };
-  private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0 };
+  private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, CardComposites: 0, CardFallbacks: 0 };
   /** Per-op CPU time (ms) inside the glass/pblur backdrop pipeline, summed
    *  per frame. A call that forces a CPU↔GPU sync shows its GPU cost here as
    *  inflated CPU time — so the dominant op points at the bottleneck. */
@@ -1204,6 +1204,8 @@ export class Canvas implements DirtyTracker {
       this._counts.SceneReads = 0;
       this._counts.SceneRestarts = 0;
       this._counts.SceneSwitches = 0;
+      this._counts.CardComposites = 0;
+      this._counts.CardFallbacks = 0;
       { const d = this._cacheDiag; d.reached = d.effH = d.teleport = d.opacity = d.rot = d.xform = d.visual = d.persp = d.samples = d.ok = 0; }
       this._opMs.Snap = this._opMs.Blur = this._opMs.Mip = this._opMs.Draw = 0;
     }
@@ -1246,6 +1248,8 @@ export class Canvas implements DirtyTracker {
         this._counts.SceneReads = this._renderer.SceneReads;
         this._counts.SceneRestarts = this._renderer.SceneRestarts;
         this._counts.SceneSwitches = this._renderer.SceneSwitches;
+        this._counts.CardComposites = this._renderer.CardComposites;
+        this._counts.CardFallbacks = this._renderer.CardFallbacks;
       }
       if (ff && this._ffPresented) {
         // `_render` sets the latch at the present, beside the first-frame hook — `_resize` renders
@@ -1255,7 +1259,8 @@ export class Canvas implements DirtyTracker {
         const glyphs = this._textCache.RasterCount;
         JTrace(`jaui:render:end ${JMs(performance.now() - tRender)}ms`
           + ` panels=${c.Panels} glass=${c.Glass} text=${c.Text} images=${c.Image} pblur=${c.PBlur}`
-          + ` sceneReads=${c.SceneReads} sceneRestarts=${c.SceneRestarts} sceneSwitches=${c.SceneSwitches}`);
+          + ` sceneReads=${c.SceneReads} sceneRestarts=${c.SceneRestarts} sceneSwitches=${c.SceneSwitches}`
+          + ` cards=${c.CardComposites} cardFallbacks=${c.CardFallbacks}`);
         JTrace(`jaui:glyphs:first n=${glyphs} ${JMs(this._textCache.RasterMs)}ms`);
         // Images never gate a frame — a decode that finishes asks for the next one. These say how
         // many were still out when the first frame painted, so that stays a reading, not a claim.
@@ -1287,6 +1292,8 @@ export class Canvas implements DirtyTracker {
       this._countsRolling.SceneReads    = this._counts.SceneReads;
       this._countsRolling.SceneRestarts = this._counts.SceneRestarts;
       this._countsRolling.SceneSwitches = this._counts.SceneSwitches;
+      this._countsRolling.CardComposites = this._counts.CardComposites;
+      this._countsRolling.CardFallbacks = this._counts.CardFallbacks;
       // Poll whatever GPU timer result is now available. The reading lags
       // 2-3 frames behind what we just submitted — writing it into the same
       // rolling window is still useful because we're averaging, not trying
@@ -1409,6 +1416,7 @@ export class Canvas implements DirtyTracker {
     // Per-frame: reset the dynamic-subtree memo; gate the layer cache on a live
     // WebGL2 context (the capture binds FBOs + needs GetGL()).
     this._subtreeDynamicMemo.clear();
+    this._subtreeUnretargetableMemo.clear();
     // [damage] Phase A proof: a small field-only dirty rect; everything outside is culled.
     this._damageRectCss = this._damageTest
       ? { x: this._width * 0.10, y: this._height * 0.40, w: this._width * 0.30, h: this._height * 0.25 }
@@ -1967,6 +1975,10 @@ export class Canvas implements DirtyTracker {
       const xformIndex = effH !== null ? this._xformBuffer.Add(effH, this._dpr) : -1;
 
       const material = node.RenderStyle.Material;
+      // The card-composite bracket. Opened in the glass FILL branch below and closed after this
+      // node's children have walked, because the rim overlay paints among them (`descendChildren`)
+      // and has to land in the same target the fill did.
+      let cardOpen = false;
 
       // BorderLayer: when this Jiv asks for its border to paint at a non-zero
       // position in its children's Layer space, suppress the border on the
@@ -2206,6 +2218,21 @@ export class Canvas implements DirtyTracker {
         const _rsAdaptiveShadow = node.RenderStyle.ShadowAdaptive > 0
           && node.RenderStyle.ShadowColor.A > 0.001
           && !JivInstanceBuffer.DiagNoShadow;
+        // ── Card composite (Perf/SceneRaw.Finding.md 4(c)) ──
+        // Everything from here to the end of this node's subtree -- the pyramid, the fill, the
+        // children, the rim overlay -- paints into a region-sized target seeded with the frame
+        // snapshot and replayed over with the earlier surfaces that reach into it, instead of into
+        // the scene. The scene's render encoder therefore ends ONCE a frame (at the snapshot)
+        // rather than twice per glass surface, and every later touch of it is a blit.
+        //
+        // The region has to contain everything the subtree paints, not just this node's box: the
+        // same `_subtreeMaxPaintMargin` the layer cache uses, which is the same bound and the same
+        // limitation (a child positioned wholly OUTSIDE the parent's box is not covered by either).
+        if (!this._sharedBackdrop && !this._capturing && r2 instanceof WebGL2Renderer
+            && !this._subtreeHasUnretargetable(node)) {
+          const _cardPaint = this._subtreeMaxPaintMargin(node) * d;
+          cardOpen = r2.BeginCardComposite(px, py, pw, ph, margin, _cardPaint, _cardPaint);
+        }
         // Snapshot the raw scene BEFORE the pyramid overwrites anything.
         // The shader's sampleBackdrop falls back to this raw texture when
         // the effective LOD is 0 (no-frost flat panel, or the center of
@@ -2443,8 +2470,49 @@ export class Canvas implements DirtyTracker {
         this._sceneDirtyRects.push(dab.minX * dpr, dab.minY * dpr, dab.maxX * dpr, dab.maxY * dpr);
       }
 
+      // ── What this node committed DIRECTLY to the scene ──
+      // The card composite can replay an earlier SURFACE out of its own target; it cannot replay a
+      // plain panel, a line of text, a stroke or an SVG, because those went straight into the scene
+      // and nothing else holds them. A later surface whose region reaches into one of these has to
+      // re-cut the frame snapshot, which is one real encoder end -- so the push has to be honest
+      // and it has to be tight. The shared-backdrop push above is deliberately NOT this: it skips
+      // opaque content on purpose, which is exactly wrong here.
+      //
+      // Tight, because a container with a transparent background covers the page and would make
+      // every surface on it fall back for nothing: only a node that can actually put ink down
+      // counts -- a visible background, a painted border, or a shadow.
+      if (!this._capturing && r2 instanceof WebGL2Renderer && !r2.CardActive) {
+        const _fs = node.RenderStyle;
+        const _fbg = _fs.Background;
+        const _inked = node.EffectiveOpacity > 0.001 && (
+          (_fbg.Kind !== 'Color' || _fbg.Color.A > 0.001)
+          || _fs.ShadowColor.A > 0.001
+          || this._hasPaintedBorder(node)
+          || (this._textAnimators.get(node)?.Words.length ?? 0) > 0
+          || !!node.SvgVector
+        );
+        if (_inked) {
+          const _fab = this._nodeAabb(node, eff, effH);
+          const _fm = this._subtreeMaxPaintMargin(node);
+          const _fd = this._dpr;
+          r2.NoteSceneFootprint(
+            (_fab.minX - _fm) * _fd, (_fab.minY - _fm) * _fd,
+            (_fab.maxX + _fm) * _fd, (_fab.maxY + _fm) * _fd,
+          );
+        }
+      }
+
       // Walk children in Layer order (ties break by tree order)
       descendChildren(node, eff, stack, scope, effH, childPersp);
+
+      // Close the card composite. The pending batches drain FIRST: anything still buffered belongs
+      // to this subtree and would otherwise be flushed into the scene by the next category
+      // boundary, landing on top of the write-back instead of inside it.
+      if (cardOpen) {
+        flushPanels();
+        flushText();
+        (r2 as WebGL2Renderer).EndCardComposite();
+      }
     };
 
     // Retained-mode layer cache. Capture a stable subtree into its own FBO once,
@@ -2501,8 +2569,10 @@ export class Canvas implements DirtyTracker {
         this._capturing = false;
         flushW = savedW; flushH = savedH;
         r2.SetCaptureViewOffset(0, 0);
+        // Restores the target AND its viewport -- the canvas's, or the card sub-window's when a
+        // composite is open around this subtree. The explicit `viewport(0, 0, w, h)` that used to
+        // follow was the canvas's unconditionally, which is the one case that is now wrong.
         r2.RebindSceneTarget();
-        cgl.viewport(0, 0, w, h);
         entry.Valid = true; entry.DX = adx; entry.DY = ady; entry.DW = adw; entry.DH = adh;
       }
 
@@ -2514,7 +2584,7 @@ export class Canvas implements DirtyTracker {
       cgl.enable(cgl.BLEND);
       cgl.blendFunc(cgl.ONE, cgl.ONE_MINUS_SRC_ALPHA);
       r2.BlitTextureRegion(entry.Fbo.Texture, adx, h - ady - adh, adw, adh);
-      cgl.viewport(0, 0, w, h);
+      r2.RebindSceneTarget();
       this._counts.Panels++;
     };
 
@@ -2533,6 +2603,15 @@ export class Canvas implements DirtyTracker {
     // the authored blur radius.
     this._maxFrostBlur = 0;
     this._scanFrostBlur(this.Root);
+    // The card composite builds each surface's pyramid from a REGION-SIZED source, and
+    // `ResolveRegionRect` snaps a pyramid's origin to the downsample grid in its INPUT's coordinate
+    // space. Aligning every card's origin to the deepest grid any pyramid in this frame can ask for
+    // is what makes that snap land on the same absolute texels it would against the canvas -- the
+    // difference between a crop and a resample. `_maxFrostBlur` is the largest BackdropFrostBlur in
+    // the tree, already scanned above, and `Jaui.ts` floors a surface's own sigma at 1pt.
+    if (this._renderer instanceof WebGL2Renderer) {
+      this._renderer.SetCardGrid(this._renderer.CardGridPhaseFor(Math.max(1, this._maxFrostBlur) * this._dpr));
+    }
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
     if (!this._diagNoUi) renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
     // In-flight teleports with no layered ancestor paint last at root level.
@@ -2542,6 +2621,15 @@ export class Canvas implements DirtyTracker {
     // order than the trailing text, if any).
     flushPanels();
     flushText();
+
+    // Every card target still holding a region of the frame lands in the scene now. The drain is
+    // blits, in walk order, each a blend-disabled replace of exactly the bytes the scene would have
+    // held -- see the card-composite section in `WebGL2.Renderer`. Anything that draws directly
+    // into the scene before this point has already triggered it through `_noteSceneDraw`.
+    if (this._renderer instanceof WebGL2Renderer) {
+      this._renderer.FlushCardComposites();
+      this._renderer.RebindSceneTarget();
+    }
 
     // Apply deferred janvas clip masks. Wiping scene FBO pixels outside the
     // nearest Overflow:Hidden ancestor's rounded rect — done now, after
@@ -2739,6 +2827,35 @@ export class Canvas implements DirtyTracker {
    *  layer-cache FBO so shadows/borders aren't clipped at the box edge. A
    *  clipping cache root bounds its descendants, so scanning the root's own
    *  margin plus its children's covers every painted pixel conservatively. */
+  /** Does this subtree hold anything whose PIXELS depend on where it is rasterised?
+   *
+   *  The card composite rasterises a subtree into a sub-window by offsetting the viewport, which
+   *  leaves every screen-space quantity (`v_PixelPos`, `u_Resolution`, the clip stack) exactly as
+   *  it was -- with one exception. `Jiv.Panel.frag`'s GRADIENT dither hashes `gl_FragCoord`, which
+   *  is in FRAMEBUFFER space, so a gradient-filled panel would take a different dither pattern
+   *  inside a card: sub-LSB, invisible, and not zero. The density rule for this lane is zero
+   *  differing pixels, so a surface wrapping a gradient fill stays on the in-scene path and pays
+   *  the encoder end it always paid. (The glass/backdrop branch dithers on `v_PixelPos` and is
+   *  unaffected, which is why a card of glass over glass is still free.)
+   *
+   *  Memoised per frame beside `_subtreeDynamicMemo`: the walk asks once per glass surface, and a
+   *  card's subtree is small, but a page whose glass wraps a deep tree should not re-scan it. */
+  private _subtreeHasUnretargetable = (node: Jiv): boolean => {
+    const memo = this._subtreeUnretargetableMemo.get(node);
+    if (memo !== undefined) return memo;
+    const _bgk = node.RenderStyle.Background.Kind;
+    let hit = _bgk === 'LinearGradient' || _bgk === 'RadialGradient';
+    if (!hit) {
+      const kids = node.Children as Jiv[];
+      for (let i = 0; i < kids.length; i++) {
+        if (this._subtreeHasUnretargetable(kids[i])) { hit = true; break; }
+      }
+    }
+    this._subtreeUnretargetableMemo.set(node, hit);
+    return hit;
+  };
+  private _subtreeUnretargetableMemo = new Map<Jiv, boolean>();
+
   private _subtreeMaxPaintMargin = (node: Jiv): number => {
     const s = node.RenderStyle;
     let m = 0;
@@ -4325,6 +4442,10 @@ export class Canvas implements DirtyTracker {
     // Renderer exists (assigned before _initDebugFromUrl) and Init has not run yet (it runs at Start),
     // so the field is read when the scene FBO is actually built. See WebGL2.Renderer.DiagNoDepth.
     if (params.has('no-depth') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagNoDepth = true;
+    // `?no-cardcomposite` — take the OLD walk on this build. Not a rendering: the card composite
+    // is pixel-identical by construction (see WebGL2.Renderer, the card-composite section), so
+    // this is here to put the two cost models on one binary for a measurement, and for a bisect.
+    if (params.has('no-cardcomposite') && this._renderer instanceof WebGL2Renderer) this._renderer.CardCompositeEnabled = false;
     // `?snap-once` — MEASUREMENT ONLY, WRONG PIXELS. Serve every backdrop read from one full-canvas
     // snapshot so the frame does the same fill and the same arithmetic with the scene read-after-write
     // removed. Assigned at parse time like `?no-depth` rather than per-frame like `?no-blur`, because
@@ -4523,7 +4644,8 @@ export class Canvas implements DirtyTracker {
       `FPS ${fps.toFixed(1)} | ms ${avg.toFixed(1)} (min ${min === Infinity ? 0 : min.toFixed(1)} max ${max.toFixed(1)}) | dpr ${this._dpr} | ${w}x${h}\n` +
       `cpu: dirty ${pDirty.toFixed(2)}  layout ${pLayout.toFixed(2)}  text ${pText.toFixed(2)}  render ${pRender.toFixed(2)} | gpu ${gpuDisplay} ms\n` +
       `draws — panels ${c.Panels}  glass ${c.Glass}  text ${c.Text}  img ${c.Image}  pblur ${c.PBlur}\n` +
-      `scene — restarts ${c.SceneRestarts}  reads ${c.SceneReads}  switches ${c.SceneSwitches}`;
+      `scene — restarts ${c.SceneRestarts}  reads ${c.SceneReads}  switches ${c.SceneSwitches}`
+      + `  |  cards ${c.CardComposites} (fallback ${c.CardFallbacks})`;
     this._debugHud.textContent = hudText;
     this._debugLatest = hudText;
 

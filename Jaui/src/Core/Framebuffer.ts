@@ -166,3 +166,64 @@ export class Framebuffer {
     if (this.DepthStencil) this._gl.deleteRenderbuffer(this.DepthStencil);
   };
 }
+
+/**
+ * A recycler for REGION-SIZED render targets.
+ *
+ * The card-composite path (`ShowStudio.Documentation/Perf/SceneRaw.Finding.md` 4(c)) gives every
+ * glass surface its own target for the length of one frame: a 216x150pt card at dpr 2 resolves to
+ * ~568x440, about 1 MB, and `glass-grid` holds twenty of them at once. Allocating those per frame
+ * would be twenty `texImage2D` reallocations a frame, which is exactly the thrash `BlurPass`
+ * documents at `_useChain` — so they are kept and handed back out by SIZE.
+ *
+ * Keyed on the exact size because `Framebuffer.Resize` is a no-op at the same dimensions and a full
+ * reallocation at any other, and because a grid of equal cards resolves to ONE size (the region
+ * grid snap in `ResolveRegionRect` sees to that), so one bucket serves the whole grid.
+ *
+ * LIFETIME IS THE FRAME, NOT THE SURFACE. A card's target stays live until the pending write-backs
+ * drain, because any LATER surface in the same run may replay this one's overlap into its own seed.
+ * `Release` is therefore called by the drain and never by the surface that finished drawing.
+ */
+export class FramebufferPool {
+  private _gl: WebGL2RenderingContext;
+  private _free = new Map<string, Framebuffer[]>();
+  private _live = 0;
+  private _peak = 0;
+
+  constructor(gl: WebGL2RenderingContext) { this._gl = gl; }
+
+  /** Targets currently checked out, and the high-water mark since the last `Dispose`. */
+  get Live(): number { return this._live; }
+  get Peak(): number { return this._peak; }
+
+  Acquire = (width: number, height: number): Framebuffer => {
+    const key = `${width}x${height}`;
+    const bucket = this._free.get(key);
+    this._live++;
+    if (this._live > this._peak) this._peak = this._live;
+    if (bucket !== undefined && bucket.length > 0) return bucket.pop()!;
+    // RGB10_A2 to match the scene target exactly: the seed, the replay and the write-back are all
+    // 1:1 same-format blits, and a format conversion would put every one of them on a render path
+    // instead of a copy. No depth — nothing in this renderer tests it, and a foreign 3D pass draws
+    // into the scene in the janvas pre-pass, never into a card.
+    const fb = new Framebuffer(this._gl, { highPrecision: true });
+    fb.Resize(width, height);
+    return fb;
+  };
+
+  Release = (fb: Framebuffer): void => {
+    this._live--;
+    const key = `${fb.Width}x${fb.Height}`;
+    const bucket = this._free.get(key);
+    if (bucket === undefined) this._free.set(key, [fb]);
+    else bucket.push(fb);
+  };
+
+  /** Drop every retained target. Called on resize, where every size in the pool is stale. */
+  Dispose = (): void => {
+    for (const bucket of this._free.values()) for (const fb of bucket) fb.Dispose();
+    this._free.clear();
+    this._live = 0;
+    this._peak = 0;
+  };
+}

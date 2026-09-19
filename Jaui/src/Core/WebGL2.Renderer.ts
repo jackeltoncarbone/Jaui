@@ -10,8 +10,8 @@
 import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop } from './Renderer';
 import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
-import { Framebuffer } from './Framebuffer';
-import { BlurPass } from './BlurPass';
+import { Framebuffer, FramebufferPool } from './Framebuffer';
+import { BlurPass, BaseDownsampleFactor, PyramidDepth } from './BlurPass';
 import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
@@ -155,6 +155,21 @@ const _unwrap = (handle: GpuTextureHandle): WebGLTexture =>
  *  that covers the whole canvas (the raw scene, the shared backdrop, the ?no-blur passthrough). */
 const _regionOf = (handle: GpuTextureHandle | null | undefined): BackdropRegion =>
   handle?.Region ?? BACKDROP_REGION_FULL;
+
+
+/** One glass surface's composite target. `X/Y/W/H` is its region in device px with y=0 at the TOP
+ *  (the frame every caller here speaks); `Paint*` is the strictly smaller rect the surface can
+ *  actually put ink in -- box plus shadow outset -- which is what a later surface replays. */
+interface _CardTarget {
+  Fbo: Framebuffer;
+  X: number; Y: number; W: number; H: number;
+  PaintX0: number; PaintY0: number; PaintX1: number; PaintY1: number;
+  /** Has anything been DRAWN into it since it was seeded? While this is false the target still
+   *  holds the frame snapshot's bytes verbatim, which is what lets the adaptive-shadow probe read
+   *  the snapshot instead of paying a copy. A NESTED surface sees it true -- its parent's fill and
+   *  children are already down -- and takes the copy, which is the only correct answer there. */
+  Dirty: boolean;
+}
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -468,6 +483,12 @@ export class WebGL2Renderer implements Renderer {
    *  encoder. One string compare per draw CALL (not per instance - the panel and text paths are
    *  instanced, so this is a handful of compares a frame). */
   private _noteSceneDraw = (): void => {
+    // A draw is about to land DIRECTLY in the scene, so every card target still waiting to be
+    // written back has to land first or this draw would end up underneath a surface that paints
+    // before it. The drain is blits, not draws, so it cannot recurse through here; see `_drainCards`.
+    if (this._cardQueue.length !== 0 && this._boundTarget === 'scene') this._drainCards(true);
+    // Ink is going down in the active card, so it no longer equals the snapshot over its region.
+    if (this._boundTarget === 'card') { const c = this._activeCard; if (c !== null) c.Dirty = true; }
     if (this._boundTarget === 'scene') this._sceneLedger.NoteWrite();
   };
   /** Scene taps on the frame just walked, and the subset of them that followed a draw. Read by
@@ -687,6 +708,15 @@ export class WebGL2Renderer implements Renderer {
   };
 
   Resize = (width: number, height: number, _dpr: number): void => {
+    if (width !== this._width || height !== this._height) {
+      // Every card target is keyed on a region of the OLD canvas and the frame snapshot is the old
+      // canvas's whole surface. Both are re-made on demand at the new size.
+      this._cardPool?.Dispose();
+      this._cardQueue.length = 0;
+      this._cardStack.length = 0;
+      this._frameSnapValid = false;
+      this._sceneDirectRects.length = 0;
+    }
     this._width = width;
     this._height = height;
     this._sceneFbo.Resize(width, height);
@@ -732,6 +762,18 @@ export class WebGL2Renderer implements Renderer {
     // the previous frame's restarts.
     this._sceneLedger.BeginFrame();
     this._snapOnceTaken = false;
+    // Same reason the ledger resets here rather than below: a split frame returns early, and a card
+    // target left over from the previous frame would be seeded from a snapshot of a frame that no
+    // longer exists. Nothing should be pending -- the walk flushes at the end -- but a throw inside
+    // the tree walk (`Jaui.ts` catches the first three) can leave one, so this is a reset and not an
+    // assertion. The pool keeps the textures; only the bookkeeping is dropped.
+    if (this._cardQueue.length !== 0) { for (const c of this._cardQueue) this._cardPool?.Release(c.Fbo); this._cardQueue.length = 0; }
+    if (this._cardStack.length !== 0) { for (const c of this._cardStack) this._cardPool?.Release(c.Fbo); this._cardStack.length = 0; }
+    this._frameSnapValid = false;
+    this._sceneDirectRects.length = 0;
+    this._cardComposites = 0;
+    this._cardFallbacks = 0;
+    this._cardBlitPixels = 0;
     // Before the GPU timer starts: collecting the boot batch is CPU spent waiting on the driver,
     // and folding it into the frame's GPU reading would make the first frame lie about itself.
     this._ensureShaders();
@@ -851,6 +893,15 @@ export class WebGL2Renderer implements Renderer {
     // shadow's sharp tap would be a scene READ and the cell would stop being about switches alone.
     if (this.DiagBlurDummy) return this._blurDummyTexture();
     if (this.DiagSnapOnce) return this._snapOnceTexture();
+    // Inside a card composite the surface's backdrop IS the card target: it was seeded with the
+    // frame snapshot's pixels for this region and replayed over with every earlier surface that
+    // paints into it, so it holds exactly what the scene held here. See `BeginCardComposite`.
+    const card = this._activeCard;
+    if (card !== null) return _wrap(card.Fbo.Texture);
+    // A surface that FELL BACK to the in-scene path is about to sample the attachment, and the
+    // surfaces before it may still be sitting in card targets. Land them first or this one's
+    // backdrop would be missing every card in the queue. See `_drainCards`.
+    if (this._cardQueue.length !== 0) this._drainCards(true);
     return _wrap(this._sceneFbo.Texture);
   }
   /** The raw scene-FBO `WebGLTexture`. For headless render-to-texture consumers that bind the scene output
@@ -1325,6 +1376,29 @@ export class WebGL2Renderer implements Renderer {
     // first level bind and the rest of the pyramid is on the far side of it. The ledger's own dirty
     // flag makes the repeat calls free, so this line is the build, not the binds.
     this._sceneLedger.NoteTargetBind('blur');
+    // ── Card composite: the pyramid's source is the CARD target, not the canvas ──
+    // Same arithmetic, different input texture. Two things have to be corrected across the change
+    // of frame, and both are exact:
+    //   * `BaseDownsampleFactor` gates the sigma-adaptive pre-downsample on the region's share of
+    //     the INPUT's area. A card-sized input makes every region ~100% of it, so a surface that
+    //     resolves to k=1 against the canvas would resolve to k=4 against its own card and the
+    //     pyramid would be built at quarter density. It is computed at CANVAS scale and PINNED.
+    //   * `LastRegion` comes back as a card-UV map and every consumer addresses it in SCREEN UV.
+    // The region grid snap is the third, and it is handled at the other end: `BeginCardComposite`
+    // aligns the card's origin to the frame's pyramid phase, so `ResolveRegionRect` lands on the
+    // same absolute texels it would have landed on against the canvas. See `_cardGridPhase`.
+    const blurCard = this._activeCard;
+    if (blurCard !== null && _unwrap(input) === blurCard.Fbo.Texture) {
+      const screenRegion = region ?? { x: blurCard.X, y: blurCard.Y, w: blurCard.W, h: blurCard.H };
+      const k = BaseDownsampleFactor(radius, this._width, this._height, screenRegion);
+      const local = {
+        x: screenRegion.x - blurCard.X, y: screenRegion.y - blurCard.Y,
+        w: screenRegion.w, h: screenRegion.h,
+      };
+      const cardTex = pass.Blur(blurCard.Fbo.Texture, blurCard.W, blurCard.H, radius, minDepth, local, k);
+      this._lastProgram = null;
+      return _wrap(cardTex, this._cardRegionToScreen(pass.LastRegion, blurCard));
+    }
     const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
@@ -1365,6 +1439,7 @@ export class WebGL2Renderer implements Renderer {
     // a visually identical result with ~16x less fragment fill. Consumers add +2
     // to their frost LOD (this pyramid's level 0 ≈ a full-res pyramid's LOD 2).
     const qw = Math.max(1, width >> 2), qh = Math.max(1, height >> 2);
+    if (this._cardQueue.length !== 0) this._drainCards(true);
     this._sceneLedger.NoteRead();
     this._sceneLedger.NoteTargetBind('blur');
     const tex = pass.Blur(this._sceneFbo.Texture, qw, qh, 0, undefined, undefined);
@@ -1415,6 +1490,17 @@ export class WebGL2Renderer implements Renderer {
     }
     entry.Frame = this._shadowFrame;
 
+    // The probe samples `u_Scene` in SCREEN UV over a canvas-sized texture, strictly inside `rect`
+    // (its taps are `u_Rect.xy + cell * u_Rect.zw`, cell in [0,1)). A card target is neither
+    // canvas-sized nor screen-addressed, so it is resolved to one that is: the frame snapshot when
+    // no earlier surface in this run painted into `rect` -- the whole of `glass-grid`, where a
+    // 32 px shadow outset cannot cross a 40 px gutter -- and otherwise a copy of the card into its
+    // screen position. Same pixels either way; the first is free. RESOLVED HERE, ahead of the
+    // state-target bind below, because the copy path binds framebuffers of its own.
+    const probeCard = this._activeCard;
+    let sharp = _unwrap(scene);
+    if (probeCard !== null && sharp === probeCard.Fbo.Texture) sharp = this._cardSharpTap(probeCard, rect);
+
     const program = this._shadowShader!;
     const locs = this._shadowLocs!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this._shadowStateFbo);
@@ -1447,7 +1533,7 @@ export class WebGL2Renderer implements Renderer {
     // runs immediately after the surface's `ComputeBlur`, which already ended the encoder.
     if (_unwrap(scene) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, _unwrap(scene));
+    gl.bindTexture(gl.TEXTURE_2D, sharp);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(backdrop));
     gl.bindVertexArray(this._quad.Vao);
@@ -1601,34 +1687,50 @@ export class WebGL2Renderer implements Renderer {
     // that same texture, scissor ignored. Measurement only; see `DiagSnapOnce`.
     if (this.DiagBlurDummy) return this._blurDummyTexture();
     if (this.DiagSnapOnce) return this._snapOnceTexture();
+    // Inside a card composite the live scene does not hold this surface's backdrop -- the card
+    // target does -- so the sharp tap is copied out of the card, INTO ITS SCREEN POSITION in the
+    // canvas-sized snapshot texture. Consumers (`u_Scene` on the panel and the progressive blur)
+    // address that texture in screen UV and go on doing so. Everything outside the copied rect is
+    // last frame's, exactly as it already was for a scissored snapshot.
+    const snapCard = this._activeCard;
+    if (snapCard !== null) return this._cardIntoSnapshot(snapCard, scissor);
     return this._snapshotBlit(scissor);
+  };
+
+  /** Make `_snapshotTex` exist at the canvas's current size. Split out of `_snapshotBlit` because
+   *  the card composite's own copy-out (`_cardIntoSnapshot`) writes into the same texture and must
+   *  not carry a second, drifting copy of its lifecycle. RGB10_A2 to match the (now 10-bit) scene
+   *  FBO -- a blit down to 8-bit here would re-band the progressive blur's input. Same 32 bpp. */
+  private _ensureSnapshotTexture = (): WebGLTexture => {
+    const gl = this._gl;
+    if (this._snapshotTex && this._snapshotW === this._width && this._snapshotH === this._height) return this._snapshotTex;
+    if (this._snapshotTex) gl.deleteTexture(this._snapshotTex);
+    if (this._snapshotFbo) gl.deleteFramebuffer(this._snapshotFbo);
+    this._snapshotTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this._snapshotTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this._snapshotFbo = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._snapshotFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._snapshotTex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
+    this._snapshotW = this._width;
+    this._snapshotH = this._height;
+    return this._snapshotTex;
   };
 
   /** The snapshot blit itself. Split out of `SnapshotScreen` so `?snap-once` can call it exactly
    *  once a frame with no scissor without duplicating the texture lifecycle. */
   private _snapshotBlit = (scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {
     const gl = this._gl;
-    // Ensure snapshot texture exists at current size
-    if (!this._snapshotTex || this._snapshotW !== this._width || this._snapshotH !== this._height) {
-      if (this._snapshotTex) gl.deleteTexture(this._snapshotTex);
-      if (this._snapshotFbo) gl.deleteFramebuffer(this._snapshotFbo);
-      this._snapshotTex = gl.createTexture()!;
-      gl.bindTexture(gl.TEXTURE_2D, this._snapshotTex);
-      // RGB10_A2 to match the (now 10-bit) scene FBO — a blit down to 8-bit
-      // here would re-band the progressive blur's input. Same 32 bpp.
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      this._snapshotFbo = gl.createFramebuffer()!;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this._snapshotFbo);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._snapshotTex, 0);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      this._tgt('default');
-      this._snapshotW = this._width;
-      this._snapshotH = this._height;
-    }
+    // Same reason as `SceneTexture`: a pending card is not in the scene yet, and a snapshot taken
+    // over it would hand a progressive blur a backdrop with the glass missing.
+    if (this._cardQueue.length !== 0) this._drainCards(true);
+    const snap = this._ensureSnapshotTexture();
     // Copy sceneFbo → snapshot texture via blit. The scene FBO is where the
     // tree walk renders now (via BeginScenePass); the default framebuffer
     // stays empty until the final Blit at end-of-frame. Reading from
@@ -1658,8 +1760,412 @@ export class WebGL2Renderer implements Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._tgt('default');
     if (timed) this._pass!.End();
-    return _wrap(this._snapshotTex);
+    return _wrap(snap);
   };
+
+
+  // -- Card composite with neighbour replay -----------------------------------------------------
+  //
+  // `ShowStudio.Documentation/Perf/SceneRaw.Finding.md` 4(c), and the mechanism the M4 resolved on
+  // 2026-09-19: the frame's cost is the number of times the SCENE target's Metal render encoder
+  // ENDS while the bed is in it. Forty ends were ~50-60 of a 73 ms frame at dpr 2 (switches
+  // 40 -> 20 -> 0 gave 72.85 -> 34.32 -> 11.32 GPU ms, two points through the origin). Every end
+  // stores 16 MB of tiles and loads them back at ~1.1-1.5 ms.
+  //
+  // What ends it at baseline is not a READ -- `?snap-once` took reads 40 -> 1 and the frame did not
+  // move -- it is the BIND: each surface's `ComputeBlur` binds the first blur level FBO between one
+  // card's draws and the next, twice per card (fill and rim overlay). So the scene render pass
+  // becomes the bed, once, and after that the scene is only ever touched by region BLITS.
+  //
+  // Per glass surface, in walk order:
+  //   1. SEED a region-sized target with the frame SNAPSHOT's pixels for that region -- one
+  //      full-canvas snapshot per frame, taken at the first backdrop read, which is the frame's ONE
+  //      scene-encoder end.
+  //   2. REPLAY, in ascending walk order, the overlapping part of every EARLIER surface's own
+  //      composite target whose PAINT rect reaches into this region. Later wins where two overlap,
+  //      which is the order the scene composited them.
+  //   3. Build the pyramid FROM the seeded target (`ComputeBlur`), same sigma, same depth.
+  //   4. Draw the fill, the children and the rim overlay INTO the card target, under a retargeted
+  //      projection (`SetCaptureViewOffset` + `u_Resolution`; `v_PixelPos` stays screen space, so
+  //      the clip stack and the xform table are untouched -- the layer cache already proves it).
+  //   5. Queue the WRITE-BACK. It is a blit, and it is deferred to the first thing that draws
+  //      directly into the scene (`_noteSceneDraw`) or to the end of the frame, because performing
+  //      it eagerly would re-dirty the scene and make the NEXT card's seed bind an encoder end.
+  //
+  // Identity: the scene is opaque (`BeginScenePass` clears alpha 1, the canvas fills its
+  // background), so SRC_ALPHA / ONE_MINUS_SRC_ALPHA over a seed equal to the scene's stored bytes
+  // gives exactly the bytes the scene would have held, the 2-bit alpha never quantises at
+  // a = sa + 1*(1 - sa) = 1, and the write-back replaces exactly those bytes. Card i+1's backdrop
+  // must equal background + cards 0..i inside its region: the background is in the snapshot and
+  // each earlier card's target holds scene_as_of_j + card_j, which is what the scene held after
+  // card j.
+  //
+  // EVERY BLIT HERE IS A COPY, NOT A RENDER, and that is the whole reason the count falls. ANGLE's
+  // Metal backend turns `blitFramebuffer` into a MTLBlitCommandEncoder copy when the blit is
+  // same-size, same-format, unflipped, unscaled, unmasked and unscissored, and into a draw into the
+  // destination otherwise. Seed (snapshot -> card), replay (card -> card) and write-back
+  // (card -> scene) are all RGB10_A2 to RGB10_A2 at 1:1 with integer-aligned rects, so all three
+  // take the copy path. A copy does not open a render encoder on the scene and so does not load or
+  // store its tiles.
+  //
+  // THE HONEST LIMIT: anything drawn DIRECTLY into `_sceneFbo` between two glass surfaces -- a
+  // plain panel, a line of text, an SVG, a stroke -- cannot be replayed from a card target. Those
+  // draws push their footprint (`NoteSceneFootprint`), and a later surface whose region intersects
+  // one re-takes the frame snapshot: one real encoder end, counted, and then the run is cheap
+  // again. `glass-grid` is the good case (the bed is before the snapshot, every card's text is
+  // inside its own target) and reads 1. A dense chrome page lands between 1 and the old number.
+
+  /** The stack of targets currently being drawn into. More than one deep is refused today: a glass
+   *  child inside a card reads its PARENT's card target instead, which is correct, region-sized,
+   *  and whose encoder ends cost a 1 MB target rather than a 16 MB one. */
+  private _cardStack: _CardTarget[] = [];
+  /** Finished targets whose region has not been written back into the scene yet, ascending. */
+  private _cardQueue: _CardTarget[] = [];
+  private _cardPool: FramebufferPool | null = null;
+  /** The frame snapshot every seed is cut from. Its own texture, NOT `_snapshotTex`: the sharp-tap
+   *  path writes card pixels into that one, which would corrupt every later card's seed. */
+  private _frameSnapTex: WebGLTexture | null = null;
+  private _frameSnapFbo: WebGLFramebuffer | null = null;
+  private _frameSnapW = 0;
+  private _frameSnapH = 0;
+  private _frameSnapValid = false;
+  /** Footprints drawn directly into the scene since the snapshot was taken, device px, y down,
+   *  flat [x0, y0, x1, y1, ...]. A card region that misses all of them can still be seeded. */
+  private _sceneDirectRects: number[] = [];
+  /** The pyramid grid phase card origins are aligned to. See `SetCardGrid`. */
+  private _cardGridPhase = 1;
+  private _cardComposites = 0;
+  private _cardFallbacks = 0;
+  private _cardBlitPixels = 0;
+
+  /** Off switch for the whole path (`?no-cardcomposite`), so a measurement can take the old walk on
+   *  the same build. Not a mode: the two are the same picture by construction. */
+  CardCompositeEnabled = true;
+
+  private get _activeCard(): _CardTarget | null {
+    const n = this._cardStack.length;
+    return n === 0 ? null : this._cardStack[n - 1];
+  }
+
+  /** True while a surface's subtree is painting into its own target rather than into the scene. */
+  get CardActive(): boolean { return this._cardStack.length !== 0; }
+  /** Aim the CANVAS-sized clip volume at the card's sub-window.
+   *
+   *  The layer cache retargets by shrinking `u_Resolution` to the capture and offsetting the
+   *  projection (`u_ViewOffset`). A GLASS surface cannot: `Jiv.Panel.frag` reads its backdrop at
+   *  `baseUv = v_PixelPos / u_Resolution` -- a SCREEN uv, mapped into the pyramid by
+   *  `u_BackdropXf` -- so a card-sized `u_Resolution` would rescale every refraction, rim and
+   *  chromatic tap by canvas/card. `u_Resolution` therefore stays the canvas, and the sub-window
+   *  is expressed where it costs nothing: the viewport's ORIGIN goes negative, so NDC still spans
+   *  the whole canvas and screen pixel (sx, syb) lands at (sx - X, syb - Ybottom) in the card.
+   *  Everything outside the attachment is clipped by the framebuffer, so no extra fragment is
+   *  shaded. It also means every program projects correctly, including the SVG fill/stroke and
+   *  Jline programs, which carry no view offset at all.
+   *
+   *  `u_ViewOffset` stays 0 for the same reason it is 0 outside a capture: nothing is being
+   *  retargeted at the vertex, only rasterised somewhere else. */
+  private _cardViewport = (card: _CardTarget): void => {
+    this._gl.viewport(-card.X, -(this._height - card.Y - card.H), this._width, this._height);
+  };
+  /** Composites started this frame, surfaces that had to fall back, and the copy traffic in Mpx. */
+  get CardComposites(): number { return this._cardComposites; }
+  get CardFallbacks(): number { return this._cardFallbacks; }
+  get CardBlitMpx(): number { return this._cardBlitPixels / 1e6; }
+  get CardTargetsPeak(): number { return this._cardPool === null ? 0 : this._cardPool.Peak; }
+
+  /** Align card origins to `phase` device px, measured from x=0 and from the BOTTOM of the canvas.
+   *
+   *  This is the one thing standing between a region-sized source and a different picture.
+   *  `ResolveRegionRect` snaps a pyramid's origin DOWN to the downsample grid so every level is a
+   *  texel-exact SUB-GRID of the canvas-sized pyramid -- "an unaligned origin would pair different
+   *  neighbours at every level and move real pixels". It does that snap in the INPUT's coordinate
+   *  space, so a card target whose origin is not itself on the grid would snap to a DIFFERENT set
+   *  of absolute texels than the same region would against the canvas.
+   *
+   *  floor((rx - X) / phase) * phase equals floor(rx / phase) * phase - X exactly when `phase`
+   *  divides X, and the y axis is measured from the bottom (GL's convention, and the axis
+   *  `ResolveRegionRect` works in), so the BOTTOM gap H - Y - H_card carries the same condition.
+   *  Both are guaranteed by construction in `BeginCardComposite`.
+   *
+   *  The caller passes the deepest phase any pyramid in the frame can ask for: k * 2^depth, where
+   *  k is pinned to 1 by the area gate below and depth follows the largest frost in the tree.
+   *  Every shallower pyramid's phase is a power of two dividing it. */
+  SetCardGrid = (phase: number): void => {
+    this._cardGridPhase = Math.max(1, 1 << Math.ceil(Math.log2(Math.max(1, phase))));
+  };
+
+  /** The grid phase a surface at `radiusDevicePx` resolves to, for a caller that has to predict it
+   *  before the pyramid runs. Mirrors BlurPass's own k * (1 << depth) with k pinned to 1. */
+  CardGridPhaseFor = (radiusDevicePx: number): number => 1 << PyramidDepth(Math.max(1, radiusDevicePx), 0);
+
+  /** A draw is about to land DIRECTLY in the scene over this rect (device px, y down). It cannot be
+   *  replayed out of a card target, so any later surface reaching into it has to re-cut the frame
+   *  snapshot. Cheap and conservative: a node's own painted AABB, unioned. */
+  NoteSceneFootprint = (x0: number, y0: number, x1: number, y1: number): void => {
+    if (!this.CardCompositeEnabled) return;
+    if (!this._frameSnapValid) return;
+    this._sceneDirectRects.push(x0, y0, x1, y1);
+  };
+
+  /** Open a composite for one glass surface. `px/py/pw/ph` is the surface's box in device px
+   *  (y down); `sampleMargin` is how far its shader reaches outside that box, `paintMargin*` how far
+   *  its shadow does. Returns false when the surface has to take the old in-scene path -- which is
+   *  always legal, and is what a page with live content between its glass surfaces gets. */
+  BeginCardComposite = (
+    px: number, py: number, pw: number, ph: number,
+    sampleMargin: number, paintMarginX: number, paintMarginY: number,
+  ): boolean => {
+    if (!this.CardCompositeEnabled) return false;
+    if (this._width <= 0 || this._height <= 0) return false;
+    // A surface nested inside a card already reads that card and draws into it: correct,
+    // region-sized, and its encoder ends cost a 1 MB target rather than a 16 MB one. Nothing to
+    // open, and opening one would need a seed cut from a target still being drawn into.
+    if (this._cardStack.length !== 0) return false;
+
+    const W = this._width, H = this._height;
+    const P = this._cardGridPhase;
+    const outX = Math.max(sampleMargin, paintMarginX);
+    const outY = Math.max(sampleMargin, paintMarginY);
+    const x0 = Math.max(0, Math.floor((px - outX) / P) * P);
+    const x1 = Math.min(W, Math.ceil((px + pw + outX) / P) * P);
+    // y from the BOTTOM, because that is the axis the grid condition lives on.
+    const yb0 = Math.max(0, Math.floor((H - (py + ph + outY)) / P) * P);
+    const yb1 = Math.min(H, Math.ceil((H - (py - outY)) / P) * P);
+    const rw = x1 - x0, rh = yb1 - yb0;
+    if (rw <= 0 || rh <= 0) return false;
+    // The area gate does two jobs at once. It keeps `BaseDownsampleFactor` at k=1 for every pyramid
+    // this path builds (its own gate is 15% of the canvas), which is what makes the pinned factor
+    // in `ComputeBlur` a no-op rather than a change; and it keeps a full-screen scrim -- which has
+    // nothing to gain here, its region IS the canvas -- on the ordinary path.
+    if (rw * rh >= 0.15 * W * H) { this._cardFallbacks++; return false; }
+    if (!this._ensureFrameSnapshot(x0, H - yb1, rw, rh)) { this._cardFallbacks++; return false; }
+
+    const gl = this._gl;
+    const pool = this._cardPool !== null ? this._cardPool : (this._cardPool = new FramebufferPool(gl));
+    const fb = pool.Acquire(rw, rh);
+    const card: _CardTarget = {
+      Fbo: fb, X: x0, Y: H - yb1, W: rw, H: rh,
+      PaintX0: px - paintMarginX, PaintY0: py - paintMarginY,
+      PaintX1: px + pw + paintMarginX, PaintY1: py + ph + paintMarginY,
+      Dirty: false,
+    };
+
+    const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
+    if (scissorOn) gl.disable(gl.SCISSOR_TEST);
+    // -- 1. Seed from the frame snapshot, 1:1 and integer-aligned --
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._frameSnapFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fb.Framebuffer);
+    this._tgt('card');
+    gl.blitFramebuffer(x0, yb0, x1, yb1, 0, 0, rw, rh, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this._cardBlitPixels += rw * rh;
+    // -- 2. Replay every earlier surface that paints into this region, ascending --
+    for (let i = 0; i < this._cardQueue.length; i++) {
+      const e = this._cardQueue[i];
+      const ox0 = Math.max(e.PaintX0, card.X), ox1 = Math.min(e.PaintX1, card.X + rw);
+      const oy0 = Math.max(e.PaintY0, card.Y), oy1 = Math.min(e.PaintY1, card.Y + rh);
+      const sx0 = Math.max(Math.floor(ox0), e.X), sx1 = Math.min(Math.ceil(ox1), e.X + e.W);
+      const sy0 = Math.max(Math.floor(oy0), e.Y), sy1 = Math.min(Math.ceil(oy1), e.Y + e.H);
+      if (sx1 <= sx0 || sy1 <= sy0) continue;
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, e.Fbo.Framebuffer);
+      gl.blitFramebuffer(
+        sx0 - e.X, e.H - (sy1 - e.Y), sx1 - e.X, e.H - (sy0 - e.Y),
+        sx0 - card.X, rh - (sy1 - card.Y), sx1 - card.X, rh - (sy0 - card.Y),
+        gl.COLOR_BUFFER_BIT, gl.NEAREST,
+      );
+      this._cardBlitPixels += (sx1 - sx0) * (sy1 - sy0);
+    }
+    if (scissorOn) gl.enable(gl.SCISSOR_TEST);
+
+    // -- 3/4. Make it the target the walk paints into --
+    this._cardStack.push(card);
+    this._cardComposites++;
+    this.RebindSceneTarget();
+    return true;
+  };
+
+  /** Close the surface's composite and queue its region for write-back. The caller must have
+   *  drained its own pending panel/text batches first -- anything still buffered would be flushed
+   *  after this returns and land in the scene instead of in the card. */
+  EndCardComposite = (): void => {
+    const card = this._cardStack.pop();
+    if (card === undefined) return;
+    this._cardQueue.push(card);
+    this.RebindSceneTarget();
+  };
+
+  /** Write back everything still pending. Called at the end of the frame (nothing reads the
+   *  snapshot after that) and automatically ahead of any direct scene draw. */
+  FlushCardComposites = (): void => { this._drainCards(false); };
+
+  private _drainCards = (updateSnapshot: boolean): void => {
+    if (this._cardQueue.length === 0) return;
+    const gl = this._gl;
+    const q = this._cardQueue;
+    this._cardQueue = [];
+    const H = this._height;
+    const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
+    if (scissorOn) gl.disable(gl.SCISSOR_TEST);
+    // Ascending, and each write is a REPLACE: where two regions overlap the later surface's target
+    // wins, and it holds scene_as_of_j + card_j -- what the scene held after card j.
+    for (let i = 0; i < q.length; i++) {
+      const c = q[i];
+      const dyb = H - (c.Y + c.H);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, c.Fbo.Framebuffer);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._sceneFbo.Framebuffer);
+      gl.blitFramebuffer(0, 0, c.W, c.H, c.X, dyb, c.X + c.W, dyb + c.H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      this._cardBlitPixels += c.W * c.H;
+      // Keep the frame snapshot equal to the scene, so a LATER surface whose region misses every
+      // direct-draw footprint can still be seeded from it instead of forcing a fresh cut.
+      if (updateSnapshot && this._frameSnapValid && this._frameSnapFbo !== null) {
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._frameSnapFbo);
+        gl.blitFramebuffer(0, 0, c.W, c.H, c.X, dyb, c.X + c.W, dyb + c.H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+        this._cardBlitPixels += c.W * c.H;
+      }
+      if (this._cardPool !== null) this._cardPool.Release(c.Fbo);
+    }
+    if (scissorOn) gl.enable(gl.SCISSOR_TEST);
+    if (!updateSnapshot) this._frameSnapValid = false;
+    // Hand the binding back to the scene. The two callers are `_noteSceneDraw`, mid-setup for a
+    // draw that is about to land in the scene, and the end-of-frame flush, which rebinds anyway.
+    // A blit touches no program, VAO, viewport or blend state, so nothing else needs restoring.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._sceneFbo.Framebuffer);
+  };
+
+  /** Cut the frame snapshot if there is not a usable one. The ONE scene-encoder end of a clean
+   *  frame, and the only place this path reads the scene at all. */
+  private _ensureFrameSnapshot = (rx: number, ry: number, rw: number, rh: number): boolean => {
+    const gl = this._gl;
+    if (this._frameSnapValid && !this._directRectHit(rx, ry, rx + rw, ry + rh)) return true;
+    // A pending write-back is NOT in the scene yet, so a cut taken now would miss it. Land them
+    // first; the drain is blits and adds no encoder end of its own.
+    if (this._cardQueue.length !== 0) this._drainCards(false);
+    if (!this._frameSnapTex || this._frameSnapW !== this._width || this._frameSnapH !== this._height) {
+      if (this._frameSnapTex) gl.deleteTexture(this._frameSnapTex);
+      if (this._frameSnapFbo) gl.deleteFramebuffer(this._frameSnapFbo);
+      const tex = gl.createTexture();
+      const fbo = gl.createFramebuffer();
+      if (!tex || !fbo) return false;
+      this._frameSnapTex = tex;
+      this._frameSnapFbo = fbo;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      this._tgt('default');
+      this._frameSnapW = this._width;
+      this._frameSnapH = this._height;
+    }
+    const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
+    if (scissorOn) gl.disable(gl.SCISSOR_TEST);
+    this._sceneLedger.NoteRead();
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._frameSnapFbo);
+    // The honest bind. If the bed has been drawn since the encoder last ended, THIS is the end the
+    // ledger should count -- and on a clean frame it is the only one in the frame.
+    this._tgt('snapshot');
+    gl.blitFramebuffer(0, 0, this._width, this._height, 0, 0, this._width, this._height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this._cardBlitPixels += this._width * this._height;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
+    if (scissorOn) gl.enable(gl.SCISSOR_TEST);
+    this._frameSnapValid = true;
+    this._sceneDirectRects.length = 0;
+    return true;
+  };
+
+  private _directRectHit = (x0: number, y0: number, x1: number, y1: number): boolean => {
+    const r = this._sceneDirectRects;
+    for (let i = 0; i < r.length; i += 4) {
+      if (x0 < r[i + 2] && x1 > r[i] && y0 < r[i + 3] && y1 > r[i + 1]) return true;
+    }
+    return false;
+  };
+
+  /** Copy a card target into its SCREEN position in the canvas-sized snapshot texture, so a
+   *  consumer that addresses `u_Scene` in screen UV keeps working unchanged. Same size, same
+   *  format, integer-aligned: a copy, not a render. */
+  private _cardIntoSnapshotTex = (
+    card: _CardTarget, scissor?: { x: number; y: number; w: number; h: number },
+  ): WebGLTexture => {
+    const gl = this._gl;
+    const snap = this._ensureSnapshotTexture();
+    const H = this._height;
+    let sx0 = card.X, sy0 = card.Y, sx1 = card.X + card.W, sy1 = card.Y + card.H;
+    if (scissor) {
+      sx0 = Math.max(sx0, Math.floor(scissor.x));
+      sy0 = Math.max(sy0, Math.floor(scissor.y));
+      sx1 = Math.min(sx1, Math.ceil(scissor.x + scissor.w));
+      sy1 = Math.min(sy1, Math.ceil(scissor.y + scissor.h));
+    }
+    if (sx1 <= sx0 || sy1 <= sy0) return snap;
+    const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
+    if (scissorOn) gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, card.Fbo.Framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._snapshotFbo);
+    this._tgt('snapshot');
+    gl.blitFramebuffer(
+      sx0 - card.X, card.H - (sy1 - card.Y), sx1 - card.X, card.H - (sy0 - card.Y),
+      sx0, H - sy1, sx1, H - sy0,
+      gl.COLOR_BUFFER_BIT, gl.NEAREST,
+    );
+    this._cardBlitPixels += (sx1 - sx0) * (sy1 - sy0);
+    if (scissorOn) gl.enable(gl.SCISSOR_TEST);
+    // The same binding `_snapshotBlit` leaves behind, for the same reason: every caller of a
+    // snapshot follows it with a pyramid build and a `RebindSceneTarget`, and matching the two
+    // paths' end state is what keeps the card path from needing its own call-site handling.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
+    return snap;
+  };
+
+  private _cardIntoSnapshot = (
+    card: _CardTarget, scissor?: { x: number; y: number; w: number; h: number },
+  ): GpuTextureHandle => _wrap(this._cardIntoSnapshotTex(card, scissor));
+
+  /** The canvas-sized, screen-addressed sharp tap the adaptive-shadow probe needs, for a surface
+   *  whose backdrop lives in a card target. The probe samples strictly inside `rect`, so when no
+   *  earlier surface in this run PAINTS into `rect` the frame snapshot already holds those exact
+   *  bytes and costs nothing. On `glass-grid` that is every card: the 32 px shadow outset cannot
+   *  cross the 40 px gutter, so no card's paint reaches its neighbour's box. */
+  private _cardSharpTap = (
+    card: _CardTarget, rect: { x: number; y: number; w: number; h: number },
+  ): WebGLTexture => {
+    // `card.Dirty` is the load-bearing half. A NESTED surface's backdrop is its parent's card with
+    // the parent's own fill and children already in it, and the snapshot holds none of that.
+    if (this._frameSnapTex !== null && this._frameSnapValid && !card.Dirty) {
+      let painted = false;
+      for (let i = 0; i < this._cardQueue.length; i++) {
+        const e = this._cardQueue[i];
+        if (rect.x < e.PaintX1 && rect.x + rect.w > e.PaintX0
+            && rect.y < e.PaintY1 && rect.y + rect.h > e.PaintY0) { painted = true; break; }
+      }
+      if (!painted) return this._frameSnapTex;
+    }
+    return this._cardIntoSnapshotTex(card, undefined);
+  };
+
+  /** Re-express a pyramid's `LastRegion` from CARD UV into SCREEN UV.
+   *
+   *  `BlurPass` builds the map as ScaleX = inputW / rect.W, OffsetX = -rect.X / rect.W, so a screen
+   *  UV lands at (sx - rect.X) / rect.W -- with rect.X in the INPUT's texels. Against a card that
+   *  is rect.X + card.X in screen texels, and the same on y measured from the bottom, where the
+   *  card's bottom gap is H - card.Y - card.H. rect.W is recovered from the map itself
+   *  (card.W / ScaleX) rather than re-derived, so this cannot drift from the pass that produced it.
+   *  A full-input pyramid (`BACKDROP_REGION_FULL`, Scale 1 / Offset 0) falls out of the same two
+   *  lines, because then rect.W IS card.W. */
+  private _cardRegionToScreen = (local: BackdropRegion, card: _CardTarget): BackdropRegion => ({
+    ScaleX: local.ScaleX * (this._width / card.W),
+    ScaleY: local.ScaleY * (this._height / card.H),
+    OffsetX: local.OffsetX - card.X * local.ScaleX / card.W,
+    OffsetY: local.OffsetY - (this._height - card.Y - card.H) * local.ScaleY / card.H,
+    TexelsX: local.TexelsX,
+    TexelsY: local.TexelsY,
+  });
 
   // ── Blit ──
 
@@ -1682,7 +2188,12 @@ export class WebGL2Renderer implements Renderer {
    *  re-shading it. */
   BlitTextureRegion = (tex: WebGLTexture, x: number, y: number, w: number, h: number): void => {
     const gl = this._gl;
-    gl.viewport(x, y, w, h);
+    // (x, y) is a SCREEN rect with GL's bottom-left origin. Under a card composite the bound
+    // target is the card's sub-window, so the same rect has to be expressed in the card's frame --
+    // the layer cache composites through here and would otherwise land at canvas origin.
+    const card = this._activeCard;
+    if (card !== null) gl.viewport(x - card.X, y - (this._height - card.Y - card.H), w, h);
+    else gl.viewport(x, y, w, h);
     this._useProgram(this._blitShader.Program);
     gl.uniform1i(this._blitTexLoc, 0);
     gl.activeTexture(gl.TEXTURE0);
@@ -1774,9 +2285,20 @@ export class WebGL2Renderer implements Renderer {
    *  composite correctly over what's already in the scene FBO. */
   RebindSceneTarget = (): void => {
     const gl = this._gl;
-    this._sceneFbo.Bind();
-    this._tgt('scene');
-    gl.viewport(0, 0, this._width, this._height);
+    // "The scene" means whatever this walk is compositing INTO. Under a card composite that is the
+    // card's own region-sized target, and the projection has to go back to the sub-window offset
+    // the card set up -- the layer cache's closing `SetCaptureViewOffset(0, 0)` runs through here
+    // too, and without this a nested capture would leave the card drawing at canvas origin.
+    const card = this._activeCard;
+    if (card !== null) {
+      card.Fbo.Bind();
+      this._tgt('card');
+      this._cardViewport(card);
+    } else {
+      this._sceneFbo.Bind();
+      this._tgt('scene');
+      gl.viewport(0, 0, this._width, this._height);
+    }
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   };
