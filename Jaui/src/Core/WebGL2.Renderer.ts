@@ -16,6 +16,7 @@ import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
 import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
+import { SceneReadLedger } from './Scene.Ledger';
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
@@ -318,6 +319,14 @@ export class WebGL2Renderer implements Renderer {
   SetCaptureViewOffset = (x: number, y: number): void => {
     this._captureViewOffsetX = x;
     this._captureViewOffsetY = y;
+    // The layer cache binds its own FBO from `Jaui.ts` and brackets the capture with this call, so
+    // this is where the scene ledger learns that the draws in between are NOT scene writes. The
+    // closing call passes (0, 0) and is followed immediately by `RebindSceneTarget`, which puts the
+    // key back - so naming it 'cache' here is correct at both ends. Written STRAIGHT to the field,
+    // not through `_tgt`: the pass timers never saw a target change here and a new one would move
+    // a bracket's `Hard` flag, which would make this lane's counter edit a change to somebody
+    // else's instrument.
+    this._boundTarget = 'cache';
   };
   private _panelVao!: WebGLVertexArrayObject;
   private _panelInstanceBuffer!: WebGLBuffer;
@@ -436,8 +445,34 @@ export class WebGL2Renderer implements Renderer {
   private _passArmed: boolean = false;
   private _pass: PassTimers<WebGLQuery> | null = null;
   /** Key of the framebuffer currently bound, mirrored into `_pass.Target` so a bracket can tell a
-   *  real attachment change from an inherited target. Null-guarded: unarmed it costs one check. */
-  private _tgt = (key: string): void => { if (this._pass !== null) this._pass.SetTarget(key); };
+   *  real attachment change from an inherited target. The pass timer half is null-guarded (unarmed
+   *  it costs one check); `_boundTarget` is set ALWAYS, because the scene read-after-write ledger
+   *  ships and is not a diagnostic. */
+  private _tgt = (key: string): void => {
+    this._boundTarget = key;
+    if (this._pass !== null) this._pass.SetTarget(key);
+  };
+  /** Which target this renderer's draw entry points are currently painting into. Every place that
+   *  binds a framebuffer in THIS file calls `_tgt`; the two that bind one from outside it are the
+   *  layer-cache capture (`SetCaptureViewOffset`, which brackets it) and BlurPass, whose own draws
+   *  never come through this class's entry points. */
+  private _boundTarget: string = 'default';
+  private _sceneLedger = new SceneReadLedger();
+  /** A draw is about to be issued: if it lands in the scene, the next scene read restarts the
+   *  encoder. One string compare per draw CALL (not per instance - the panel and text paths are
+   *  instanced, so this is a handful of compares a frame). */
+  private _noteSceneDraw = (): void => {
+    if (this._boundTarget === 'scene') this._sceneLedger.NoteWrite();
+  };
+  /** Scene taps on the frame just walked, and the subset of them that followed a draw. Read by
+   *  `Jaui.ts` into `_counts` the same way `GetFrameGpuMs` and `LastBlurDepth` are read. */
+  get SceneReads(): number { return this._sceneLedger.Reads; }
+  get SceneRestarts(): number { return this._sceneLedger.Restarts; }
+  /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
+  get SceneLedgerTotals(): { Reads: number; Restarts: number; Frames: number } {
+    const l = this._sceneLedger;
+    return { Reads: l.TotalReads, Restarts: l.TotalRestarts, Frames: l.TotalFrames };
+  }
   /** Name a lazily-built blur chain so its level FBOs get target keys distinct from the other
    *  chains', and hand it the timer if one is already running. */
   private _tagBlur = (pass: BlurPass, tag: string): BlurPass => {
@@ -534,6 +569,10 @@ export class WebGL2Renderer implements Renderer {
     // (the canvas fills its background); revisit if alpha precision matters.
     this._sceneFbo = new Framebuffer(gl, { depth: !this.DiagNoDepth, highPrecision: true });
     JTrace(`jaui:scene-fbo depth=${!this.DiagNoDepth} highPrecision=true`);
+    // The flag has to SAY it arrived. The M4 lost `?no-depth` once to an unquoted shell variable and
+    // the reading looked perfectly reasonable; a reading taken with this mark absent is a reading of
+    // the wrong build, and that is now checkable from the trace rather than from the command line.
+    if (this.DiagSnapOnce) JTrace('jaui:snap-once armed=true pixels=WRONG');
 
     // Probe for GPU timer-query support. The extension object exposes the
     // two enums we need; if it's missing, _timerExt stays null and
@@ -678,6 +717,11 @@ export class WebGL2Renderer implements Renderer {
   // ── Per-Frame ──
 
   BeginFrame = (): void => {
+    // Ahead of the early return below, which skips the whole-frame query on a per-pass split frame:
+    // the scene ledger is not a timer and must reset on EVERY frame or a split frame would report
+    // the previous frame's restarts.
+    this._sceneLedger.BeginFrame();
+    this._snapOnceTaken = false;
     // Before the GPU timer starts: collecting the boot batch is CPU spent waiting on the driver,
     // and folding it into the frame's GPU reading would make the first frame lie about itself.
     this._ensureShaders();
@@ -789,7 +833,13 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Render Targets ──
 
-  get SceneTexture(): GpuTextureHandle { return _wrap(this._sceneFbo.Texture); }
+  get SceneTexture(): GpuTextureHandle {
+    // `?snap-once` (measurement only) swaps every backdrop read onto one full-canvas snapshot taken
+    // at the frame's FIRST read. The pixels are wrong on purpose - a later surface no longer sees
+    // the glass drawn under it - and the flag exists to be measured, never shown. See `DiagSnapOnce`.
+    if (this.DiagSnapOnce) return this._snapOnceTexture();
+    return _wrap(this._sceneFbo.Texture);
+  }
   /** The raw scene-FBO `WebGLTexture`. For headless render-to-texture consumers that bind the scene output
    *  into a foreign pipeline on the SAME GL context (e.g. THREE sampling it as a material map via
    *  `ExternalTexture`) — they need the underlying GL handle, not the wrapped `GpuTextureHandle`. */
@@ -923,6 +973,7 @@ export class WebGL2Renderer implements Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
 
     gl.bindVertexArray(this._panelVao);
+    this._noteSceneDraw();
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
     if (timed) this._pass!.End();
   };
@@ -1006,6 +1057,7 @@ export class WebGL2Renderer implements Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
 
     gl.bindVertexArray(this._textVao);
+    this._noteSceneDraw();
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._textInstanceCount);
     if (timed) this._pass!.End();
   };
@@ -1064,6 +1116,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform3f(l.collision, style.CollisionColor[0], style.CollisionColor[1], style.CollisionColor[2]);
 
     gl.bindVertexArray(this._strokeVao);
+    this._noteSceneDraw();
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._strokeInstanceCount);
     if (timed) this._pass!.End();
   };
@@ -1111,6 +1164,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform3f(l.model1, model1[0], model1[1], model1[2]);
     gl.uniform4f(l.tint, tint[0], tint[1], tint[2], tint[3]);
     gl.bindVertexArray(this._svgFillVao);
+    this._noteSceneDraw();
     gl.drawArrays(gl.TRIANGLES, 0, vertCount);
     if (timed) this._pass!.End();
   };
@@ -1134,6 +1188,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform4f(l.tint, tint[0], tint[1], tint[2], tint[3]);
     gl.uniform1f(l.halfWidth, Math.max(0.5, halfWidthDev));
     gl.bindVertexArray(this._svgStrokeVao);
+    this._noteSceneDraw();
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, segCount);
     if (timed) this._pass!.End();
   };
@@ -1153,6 +1208,32 @@ export class WebGL2Renderer implements Renderer {
    *  mode, and the trace mark below says which FBO was built so the reading cannot be misfiled. */
   DiagNoDepth = false;
 
+  /** `?snap-once` (MEASUREMENT ONLY - WRONG PIXELS). Serve every backdrop read in the frame from ONE
+   *  full-canvas snapshot taken at the frame's first read, instead of from `_sceneFbo` itself.
+   *
+   *  What it removes and nothing else: the scene encoder restarts. Every pyramid still builds, at its
+   *  own region, sigma and depth; every panel, glass, rim, text and pblur draw still happens;
+   *  `RebindSceneTarget` still runs; the draw count does not move (a snapshot is a `blitFramebuffer`,
+   *  not a draw). So this is NOT `?no-blur` with a different name - the arithmetic and the fill are
+   *  identical and only the read-after-write is gone, which is exactly the term the 2^3 factorial
+   *  could not separate from the components it interacts with.
+   *
+   *  The picture under it is WRONG: a later surface no longer refracts the glass drawn beneath it,
+   *  because its backdrop is the scene as of the first read. `SceneRestarts` reads 1 under this flag
+   *  and that is the whole point of it. Never ship it, never screenshot it. */
+  DiagSnapOnce = false;
+  /** Whether this frame's one snapshot has been taken yet. Reset in `BeginFrame`. */
+  private _snapOnceTaken = false;
+
+  /** The one snapshot `?snap-once` serves every read from. The first call in a frame takes a FULL
+   *  canvas blit (no scissor - a later surface may sample anywhere); every call after it hands back
+   *  the same texture with no GL work at all. */
+  private _snapOnceTexture = (): GpuTextureHandle => {
+    if (this._snapOnceTaken && this._snapshotTex) return _wrap(this._snapshotTex);
+    this._snapOnceTaken = true;
+    return this._snapshotBlit(undefined);
+  };
+
   ComputeBlur = (
     input: GpuTextureHandle, width: number, height: number,
     radius: number, minDepth?: number,
@@ -1160,7 +1241,15 @@ export class WebGL2Renderer implements Renderer {
   ): GpuTextureHandle => {
     // The diagnostic hands back the canvas-sized scene, which screen UV addresses directly —
     // so it comes back with no region, and every consumer's transform is the identity.
+    //
+    // It does NOT count as a scene read, and the distinction is the whole of `?no-blur`'s meaning:
+    // under the diagnostic this method issues no GL at all, so nothing is sampled here. What the
+    // CALLER then does with the handle is a different question, and section 3 of
+    // WorkerReports/build-sceneraw.md answers it - the glass draw binds this same texture as
+    // `u_Backdrop` while rendering INTO it, which is a rendering feedback loop the WebGL spec
+    // requires be rejected.
     if (this.DiagNoBlur) return input;
+    if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
     const pass = radius > 0
       ? this._blur
       : (this._rootBlur ?? (this._rootBlur = this._tagBlur(new BlurPass(this._gl), 'root')));
@@ -1199,6 +1288,7 @@ export class WebGL2Renderer implements Renderer {
     // a visually identical result with ~16x less fragment fill. Consumers add +2
     // to their frost LOD (this pyramid's level 0 ≈ a full-res pyramid's LOD 2).
     const qw = Math.max(1, width >> 2), qh = Math.max(1, height >> 2);
+    this._sceneLedger.NoteRead();
     const tex = pass.Blur(this._sceneFbo.Texture, qw, qh, 0, undefined, undefined);
     pass.GenerateOutputMipmap(Math.max(1, maxLod - 2));
     // It covers the WHOLE canvas (at quarter resolution), so screen UV addresses it unchanged.
@@ -1274,6 +1364,10 @@ export class WebGL2Renderer implements Renderer {
     // the second needs the region map.
     const bxf = _regionOf(backdrop);
     gl.uniform4f(locs.backdropXf, bxf.ScaleX, bxf.ScaleY, bxf.OffsetX, bxf.OffsetY);
+    // The sharp tap is the scene's own attachment whenever the surface took no snapshot (every
+    // frosted class does exactly that), so this probe is a scene READ. It is rarely a RESTART: it
+    // runs immediately after the surface's `ComputeBlur`, which already ended the encoder.
+    if (_unwrap(scene) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(scene));
     gl.activeTexture(gl.TEXTURE1);
@@ -1402,6 +1496,7 @@ export class WebGL2Renderer implements Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
 
     gl.bindVertexArray(this._quad.Vao);
+    this._noteSceneDraw();
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
     if (timed) this._pass!.End();
   };
@@ -1424,6 +1519,15 @@ export class WebGL2Renderer implements Renderer {
    *  total canvas area × (glass + pblur count); scissoring makes each snapshot
    *  proportional to the surface, not the screen. */
   SnapshotScreen = (scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {
+    // `?snap-once`: the frame's FIRST read takes one full-canvas blit and every read after it gets
+    // that same texture, scissor ignored. Measurement only; see `DiagSnapOnce`.
+    if (this.DiagSnapOnce) return this._snapOnceTexture();
+    return this._snapshotBlit(scissor);
+  };
+
+  /** The snapshot blit itself. Split out of `SnapshotScreen` so `?snap-once` can call it exactly
+   *  once a frame with no scissor without duplicating the texture lifecycle. */
+  private _snapshotBlit = (scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {
     const gl = this._gl;
     // Ensure snapshot texture exists at current size
     if (!this._snapshotTex || this._snapshotW !== this._width || this._snapshotH !== this._height) {
@@ -1452,6 +1556,7 @@ export class WebGL2Renderer implements Renderer {
     // sceneFbo avoids the feedback-loop issue for progressive blur's
     // `u_Scene` uniform — pblur needs a separate texture it can safely
     // sample while rendering into sceneFbo itself.
+    this._sceneLedger.NoteRead();
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._snapshotFbo);
     this._tgt('snapshot');
@@ -1486,6 +1591,7 @@ export class WebGL2Renderer implements Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(source));
     gl.bindVertexArray(this._quad.Vao);
+    this._noteSceneDraw();
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
   };
 
@@ -1503,6 +1609,7 @@ export class WebGL2Renderer implements Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.bindVertexArray(this._quad.Vao);
+    this._noteSceneDraw();
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
   };
 
@@ -1840,6 +1947,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1f(this._clipMaskSmoothnessLoc, smoothness);
     gl.uniform2f(this._clipMaskResLoc, this._width, this._height);
     gl.bindVertexArray(this._quad.Vao);
+    this._noteSceneDraw();
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
   };
 
