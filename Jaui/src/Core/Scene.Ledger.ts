@@ -55,12 +55,25 @@ export class SceneReadLedger {
    *  yet - the encoder ENDS. Independent of `Restarts`: a switch is not a read, and `?snap-once`
    *  moves one without moving the other. */
   Switches = 0;
+  /** `Switches`, broken down by the target key that took each end. Sums to `Switches` exactly -
+   *  it is incremented in the same branch, not counted separately.
+   *
+   *  The column exists because `Switches` alone cannot answer the question the M4 actually asks.
+   *  An encoder end prices by TARGET SIZE: ~0.12 ms below the 6.4-9.2 MB cliff and 1.1-1.5 ms above
+   *  it (Perf/README.md, the per-end cost floors). A frame with four ends on 1 MB card targets and
+   *  a frame with four ends on the 16 MB scene read the SAME in this column and differ by ~5 ms. So
+   *  the breakdown names the target, and a design that claims to have moved its ends onto small
+   *  targets can be checked rather than believed. Keys today: `scene` (never counted, by
+   *  definition), `snapshot`, `blur`, `card`, `cache`, `shadow-state`, `default`. */
+  EndsByKey: Record<string, number> = {};
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
   TotalRestarts = 0;
   TotalSwitches = 0;
   TotalFrames = 0;
+  /** `EndsByKey` since boot, for the same two-instant reader. Never reset. */
+  TotalEndsByKey: Record<string, number> = {};
   private _written = false;
   /** The SWITCH column's own dirty flag. Separate from `_written` on purpose: a read and a switch
    *  are different events at the same instant (`ComputeBlur` notes a read and then BlurPass binds
@@ -72,6 +85,7 @@ export class SceneReadLedger {
     this.Reads = 0;
     this.Restarts = 0;
     this.Switches = 0;
+    this.EndsByKey = {};
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -101,6 +115,8 @@ export class SceneReadLedger {
     if (!this._writtenSinceSwitch) return;
     this.Switches++;
     this.TotalSwitches++;
+    this.EndsByKey[key] = (this.EndsByKey[key] ?? 0) + 1;
+    this.TotalEndsByKey[key] = (this.TotalEndsByKey[key] ?? 0) + 1;
     this._writtenSinceSwitch = false;
   };
 

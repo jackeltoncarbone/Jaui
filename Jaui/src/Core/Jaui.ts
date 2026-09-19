@@ -116,6 +116,14 @@ import { Janvas } from '../Janvas/Janvas';
 import { FocusManager } from './Focus/FocusManager';
 import { InputRouter } from './Input/InputRouter';
 
+/** `EndsByKey` as one readable token: `snapshot:1,blur:2`, or `none` on a frame that ended no
+ *  encoder at all. Sorted, so two frames' lines can be diffed by eye, and `none` rather than an
+ *  empty string, because an absence and a zero must not print the same. */
+const _endsByKey = (m: Record<string, number>): string => {
+  const keys = Object.keys(m).sort();
+  return keys.length === 0 ? 'none' : keys.map((k) => `${k}:${m[k]}`).join(',');
+};
+
 export class Canvas implements DirtyTracker {
   readonly Element: HTMLCanvasElement;
   readonly Root: Jiv;
@@ -250,7 +258,7 @@ export class Canvas implements DirtyTracker {
   // the frame, which refuted it. `SceneSwitches` is what survived: encoder ENDS, a non-scene target
   // bound over a dirty scene, which a pyramid build does between every pair of card draws whether or
   // not the read was rerouted. See `SceneReadLedger` in `Core/Scene.Ledger.ts`.
-  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, CardComposites: 0, CardFallbacks: 0 };
+  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, SceneEndsByKey: {} as Record<string, number>, CardComposites: 0, CardFallbacks: 0 };
   private _cacheDiag = { reached: 0, effH: 0, teleport: 0, opacity: 0, rot: 0, xform: 0, visual: 0, persp: 0, samples: 0, ok: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, CardComposites: 0, CardFallbacks: 0 };
   /** Per-op CPU time (ms) inside the glass/pblur backdrop pipeline, summed
@@ -1204,6 +1212,7 @@ export class Canvas implements DirtyTracker {
       this._counts.SceneReads = 0;
       this._counts.SceneRestarts = 0;
       this._counts.SceneSwitches = 0;
+      this._counts.SceneEndsByKey = {};
       this._counts.CardComposites = 0;
       this._counts.CardFallbacks = 0;
       { const d = this._cacheDiag; d.reached = d.effH = d.teleport = d.opacity = d.rot = d.xform = d.visual = d.persp = d.samples = d.ok = 0; }
@@ -1248,6 +1257,12 @@ export class Canvas implements DirtyTracker {
         this._counts.SceneReads = this._renderer.SceneReads;
         this._counts.SceneRestarts = this._renderer.SceneRestarts;
         this._counts.SceneSwitches = this._renderer.SceneSwitches;
+        // The switch column priced by TARGET, because an encoder end costs what its attachment
+        // costs: ~0.12 ms below the 6.4-9.2 MB cliff and 1.1-1.5 ms above it. Three columns each
+        // reading low while the frame stayed slow is the failure mode this phase has already paid
+        // for once, so the number that matters -- ends on targets ABOVE the cliff -- is readable
+        // rather than inferred.
+        this._counts.SceneEndsByKey = this._renderer.SceneEndsByKey;
         this._counts.CardComposites = this._renderer.CardComposites;
         this._counts.CardFallbacks = this._renderer.CardFallbacks;
       }
@@ -1260,6 +1275,7 @@ export class Canvas implements DirtyTracker {
         JTrace(`jaui:render:end ${JMs(performance.now() - tRender)}ms`
           + ` panels=${c.Panels} glass=${c.Glass} text=${c.Text} images=${c.Image} pblur=${c.PBlur}`
           + ` sceneReads=${c.SceneReads} sceneRestarts=${c.SceneRestarts} sceneSwitches=${c.SceneSwitches}`
+          + ` endsByKey=${_endsByKey(c.SceneEndsByKey)}`
           + ` cards=${c.CardComposites} cardFallbacks=${c.CardFallbacks}`);
         JTrace(`jaui:glyphs:first n=${glyphs} ${JMs(this._textCache.RasterMs)}ms`);
         // Images never gate a frame — a decode that finishes asks for the next one. These say how
@@ -1347,6 +1363,9 @@ export class Canvas implements DirtyTracker {
             // survived. On `glass-grid` the first and third read alike at baseline and part company
             // under the flag, which is the comparison this line exists to make readable at a glance.
             ` | scene ${this._counts.SceneRestarts}/${this._counts.SceneReads}/${this._counts.SceneSwitches}` +
+            // ...and the ends named by the target that took them, because an end on the 16 MB scene
+            // and an end on a 1 MB card are the same 1 in that column and ~1.4 ms apart on the clock.
+            ` [${_endsByKey(this._counts.SceneEndsByKey)}]` +
             ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
           );
@@ -4427,7 +4446,11 @@ export class Canvas implements DirtyTracker {
       // which this lane does not own and has NOT been given the line. Until it is, the numbers reach a
       // human through the `[Jaui]` per-second console line, the debug HUD and `jaui:render:end`.
       const s = globalThis as unknown as {
-        __jauiSceneLedger?: () => { Reads: number; Restarts: number; Switches: number; Frames: number } | null;
+        // Written as an intersection rather than one flat literal so the three-column shape the
+        // existing readers were built against stays literally intact, and the breakdown reads as
+        // what it is: an addition to it, not a replacement of it.
+        __jauiSceneLedger?: () => ({ Reads: number; Restarts: number; Switches: number; Frames: number }
+          & { EndsByKey: Record<string, number> }) | null;
       };
       s.__jauiSceneLedger = () =>
         (this._renderer instanceof WebGL2Renderer ? this._renderer.SceneLedgerTotals : null);

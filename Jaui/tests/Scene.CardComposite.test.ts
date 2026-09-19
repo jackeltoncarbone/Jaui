@@ -66,11 +66,17 @@ const baseFactor = (radius: number, regionArea: number): number => {
 /** `WebGL2Renderer.SetCardGrid`, mirrored. */
 const cardGrid = (phase: number): number => Math.max(1, 1 << Math.ceil(Math.log2(Math.max(1, phase))));
 
+/** `WebGL2.Renderer.CardReadGuard`, mirrored: one grid phase for the rect `ResolveRegionRect` can
+ *  round out to, plus two texels for the first DOWN hop's tap and its bilinear footprint. */
+const cardReadGuard = (phase: number): number => phase + 2;
+/** The guard rounded UP to a whole number of phases, which is what the box actually grows by. */
+const cardGuardBand = (P: number): number => Math.ceil(cardReadGuard(P) / P) * P;
+
 /** `WebGL2Renderer.BeginCardComposite`'s region derivation, mirrored. Device px, y=0 at TOP. */
 const cardRegion = (
   px: number, py: number, pw: number, ph: number, sampleMargin: number, paintMargin: number, P: number,
 ): { X: number; Y: number; W: number; H: number } => {
-  const out = Math.max(sampleMargin, paintMargin);
+  const out = Math.max(sampleMargin, paintMargin) + cardGuardBand(P);
   const x0 = Math.max(0, Math.floor((px - out) / P) * P);
   const x1 = Math.min(CANVAS_W, Math.ceil((px + pw + out) / P) * P);
   const yb0 = Math.max(0, Math.floor((CANVAS_H - (py + ph + out)) / P) * P);
@@ -125,11 +131,13 @@ describe('the grid law — a region-sized source is a CROP, not a resample', () 
     expect(baseFactor(RADIUS, region.W * region.H)).toBe(1);
   });
 
-  it('a card-sized input would pick k=4 without the pin, which is a QUARTER-RES pyramid', () => {
-    // The reason `ComputeBlur` computes the factor against the canvas and passes it explicitly.
-    // `BaseDownsampleFactor` gates on the region's share of its INPUT's area, and a card-sized
-    // input makes every region ~100% of it -- so the gate that keeps a little glass card at full
-    // density against a 2560x1600 canvas stops holding the moment the source shrinks to the card.
+  it('a card-sized input would pick a COARSER factor, which is why the source is the canvas', () => {
+    // One of the three corrections the card-sourced build needed, kept as the record of why the
+    // source moved rather than of how the correction was written. `BaseDownsampleFactor` gates on
+    // the region's share of its INPUT's area, and a card-sized input makes every region ~100% of
+    // it -- so the gate that keeps a little glass card at full density against a 2560x1600 canvas
+    // stops holding the moment the source shrinks to the card. Against the canvas it needs no
+    // correction at all: it picks what it always picked.
     const region = cardRegion(ORIGIN_X, ORIGIN_Y, BOX_W, BOX_H, fillMarginDev(DPR), paintMarginDev(DPR), P);
     const againstCard = (): number => {
       if (RADIUS <= 4) return 1;
@@ -138,6 +146,34 @@ describe('the grid law — a region-sized source is a CROP, not a resample', () 
     };
     expect(againstCard()).toBe(2);
     expect(againstCard()).not.toBe(baseFactor(RADIUS, region.W * region.H));
+  });
+
+  it('the CORRECTIONS were the bug: a card-sized source rounds every uniform differently', () => {
+    // 4,057 pixels at channel delta 1, all inside card boxes, with the seed, the replay and the
+    // write-back bit-exact around them. `LastRegion.OffsetX` is the smallest example that can be
+    // written down: against the canvas `BlurPass` computes -rect.X / rect.W in one division;
+    // against a card it computes -rectLocal.X / rect.W and the consumer then subtracts
+    // card.X * (card.W / rect.W) / card.W, which is the SAME REAL NUMBER by three more roundings.
+    // They disagree in the last bit, and a bilinear weight one ulp off is a scattered 1 LSB.
+    //
+    // It does not disagree on every card, which is also what the gate measured: the pixels were
+    // scattered, 32 to 430 per card, not a uniform wash. So the claim is scanned, not sampled.
+    const margin = fillMarginDev(DPR);
+    let same = 0, differ = 0;
+    for (const b of boxes()) {
+      const c = cardRegion(b.x, b.y, BOX_W, BOX_H, margin, paintMarginDev(DPR), P);
+      const region = {
+        x: Math.max(0, Math.floor(b.x - margin)), y: Math.max(0, Math.floor(b.y - margin)),
+        w: Math.ceil(BOX_W + margin * 2), h: Math.ceil(BOX_H + margin * 2),
+      };
+      const r = resolveRegionRect(region, CANVAS_W, CANVAS_H, P);
+      const direct = -r.X / r.W;
+      const viaCard = -(r.X - c.X) / r.W - c.X * (c.W / r.W) / c.W;
+      expect(viaCard).toBeCloseTo(direct, 12);    // the same real number, every time...
+      if (Object.is(viaCard, direct)) same++; else differ++;
+    }
+    expect(differ).toBeGreaterThan(0);            // ...and not always the same float
+    expect(same).toBeGreaterThan(0);              // ...and not always a different one either
   });
 
   it('every card origin is on the grid, on BOTH axes, measured from x=0 and from the BOTTOM', () => {
@@ -189,15 +225,66 @@ describe('the grid law — a region-sized source is a CROP, not a resample', () 
     expect(onSkewed.X + skewed.X).not.toBe(onCanvas.X);
   });
 
-  it('the card target is 568 x 436 — the same rect the pyramid already resolves to', () => {
-    // Both are the fill region snapped to the same grid, so the composite adds no new size to the
-    // level-chain LRU: `glass-grid`'s twenty cards share ONE bucket in the pool and ONE chain.
+  it('the card target is 584 x 452 — the pyramid rect plus the read guard on every side', () => {
+    // Still ONE size for twenty cards, so the pool keeps one bucket; and still not a new size for
+    // the blur level chain, which is sized by the RESOLVED RECT (568x436, unmoved) and not by the
+    // target the bytes came out of. The 8 px a side is `CardReadGuard(4)` rounded up to a phase.
     const sizes = new Set(boxes().map((b) => {
       const c = cardRegion(b.x, b.y, BOX_W, BOX_H, fillMarginDev(DPR), paintMarginDev(DPR), P);
       return `${c.W}x${c.H}`;
     }));
     expect(sizes.size).toBe(1);
-    expect([...sizes][0]).toBe('568x436');
+    expect([...sizes][0]).toBe('584x452');
+    expect(cardGuardBand(P)).toBe(8);
+    // The rect the chain is allocated at, which is what the old size named.
+    const margin = fillMarginDev(DPR);
+    const b = boxes()[0];
+    const rect = resolveRegionRect({
+      x: Math.max(0, Math.floor(b.x - margin)), y: Math.max(0, Math.floor(b.y - margin)),
+      w: Math.ceil(BOX_W + margin * 2), h: Math.ceil(BOX_H + margin * 2),
+    }, CANVAS_W, CANVAS_H, P);
+    expect(`${rect.W}x${rect.H}`).toBe('568x436');
+  });
+
+  it('the guard CONTAINS every texel a build can read, on all four edges, for all twenty cards', () => {
+    // The property the whole read path now rests on. The build's source is a canvas-sized texture
+    // that holds this card's bytes over its BOX and last frame's everywhere else, so a tap one
+    // texel outside the box is a wrong pixel -- and the two edges coincide EXACTLY without the
+    // guard, which the negative control below measures rather than asserts by eye.
+    const reach = cardReadGuard(P);
+    for (const b of boxes()) {
+      const c = cardRegion(b.x, b.y, BOX_W, BOX_H, fillMarginDev(DPR), paintMarginDev(DPR), P);
+      const cYBottom = CANVAS_H - c.Y - c.H;
+      // Both builds under a composite: the fill's region, and the rim overlay's smaller one
+      // (frost + 8 px, with no refraction footprint and no chromatic aberration in it).
+      for (const m of [fillMarginDev(DPR), Math.max(1, FROST_PT) * DPR + 8 * DPR]) {
+        const r = resolveRegionRect({
+          x: Math.max(0, Math.floor(b.x - m)), y: Math.max(0, Math.floor(b.y - m)),
+          w: Math.min(CANVAS_W, Math.ceil(BOX_W + m * 2)), h: Math.min(CANVAS_H, Math.ceil(BOX_H + m * 2)),
+        }, CANVAS_W, CANVAS_H, P);
+        expect(r.X - c.X).toBeGreaterThanOrEqual(reach);
+        expect((c.X + c.W) - (r.X + r.W)).toBeGreaterThanOrEqual(reach);
+        expect(r.YBottom - cYBottom).toBeGreaterThanOrEqual(reach);
+        expect((cYBottom + c.H) - (r.YBottom + r.H)).toBeGreaterThanOrEqual(reach);
+      }
+    }
+  });
+
+  it('WITHOUT the guard the fill rect and the box share an edge exactly — zero slack', () => {
+    // The negative control, and the reason the guard is not decoration. The paint margin (36) sits
+    // far inside the sample margin (64.75) and contributes nothing, and both edges land on
+    // floor((px - 64.75) / 4) * 4, the same number -- so the first DOWN hop's 1.15-texel tap reads
+    // past the only pixels the composite has.
+    const margin = fillMarginDev(DPR);
+    const unguarded = (px: number, pw: number): number =>
+      Math.max(0, Math.floor((px - Math.max(margin, paintMarginDev(DPR))) / P) * P);
+    for (const b of boxes()) {
+      const r = resolveRegionRect({
+        x: Math.max(0, Math.floor(b.x - margin)), y: Math.max(0, Math.floor(b.y - margin)),
+        w: Math.ceil(BOX_W + margin * 2), h: Math.ceil(BOX_H + margin * 2),
+      }, CANVAS_W, CANVAS_H, P);
+      expect(r.X - unguarded(b.x, BOX_W)).toBe(0);
+    }
   });
 });
 
@@ -249,9 +336,20 @@ describe('the replay rule — a seeded target equals what the scene held', () =>
     }
   });
 
-  it('the copy traffic is ~15 Mpx a frame against 320 Mpx of store-and-load it replaces', () => {
+  it('the copy traffic is ~24 Mpx a frame against 320 Mpx of store-and-load it replaces', () => {
+    // Four kinds now, not three. The frame snapshot, the seeds, the replays and the write-backs are
+    // what the folded lane paid (~15.0 Mpx, of which ~0.8 is the read guard's 6.6% bigger box); the
+    // BACKDROP RESOLVES are what exactness costs (~8.4 Mpx). Both are priced here so the number the
+    // orchestrator measures has something to be wrong against.
     const all = boxes();
+    const reach = cardReadGuard(P);
+    const rimMargin = Math.max(1, FROST_PT) * DPR + 8 * DPR;
+    const regionOf = (px: number, py: number, m: number): { x: number; y: number; w: number; h: number } => ({
+      x: Math.max(0, Math.floor(px - m)), y: Math.max(0, Math.floor(py - m)),
+      w: Math.min(CANVAS_W, Math.ceil(BOX_W + m * 2)), h: Math.min(CANVAS_H, Math.ceil(BOX_H + m * 2)),
+    });
     let blit = CANVAS_W * CANVAS_H;               // the one frame snapshot
+    let resolves = 0, copies = 0, free = 0;
     for (let i = 0; i < all.length; i++) {
       const me = cardRegion(all[i].x, all[i].y, BOX_W, BOX_H, margin, paint, P);
       blit += me.W * me.H;                        // seed
@@ -262,18 +360,39 @@ describe('the replay rule — a seeded target equals what the scene held', () =>
         const y0 = Math.max(e.y - paint, me.Y), y1 = Math.min(e.y + BOX_H + paint, me.Y + me.H);
         if (x1 > x0 && y1 > y0) blit += (x1 - x0) * (y1 - y0);
       }
+      // The fill's build sees a CLEAN card, so it copies only when an earlier surface's paint can
+      // reach what it reads. The rim's build always sees a dirty one and always copies.
+      const clip = (r: { x: number; y: number; w: number; h: number }): number => {
+        const x0 = Math.max(me.X, r.x - reach), y0 = Math.max(me.Y, r.y - reach);
+        const x1 = Math.min(me.X + me.W, r.x + r.w + reach), y1 = Math.min(me.Y + me.H, r.y + r.h + reach);
+        return (x1 - x0) * (y1 - y0);
+      };
+      const fill = regionOf(all[i].x, all[i].y, margin);
+      let painted = false;
+      for (let j = 0; j < i; j++) {
+        const e = all[j];
+        if (fill.x - reach < e.x + BOX_W + paint && fill.x + fill.w + reach > e.x - paint
+            && fill.y - reach < e.y + BOX_H + paint && fill.y + fill.h + reach > e.y - paint) { painted = true; break; }
+      }
+      if (painted) { copies++; resolves += clip(fill); } else free++;
+      copies++; resolves += clip(regionOf(all[i].x, all[i].y, rimMargin));
     }
+    expect(free).toBe(1);                          // card 0 alone has nothing earlier to reach it
+    expect(copies).toBe(39);                       // 19 fills + 20 rims
+    expect(resolves / 1e6).toBeGreaterThan(8);
+    expect(resolves / 1e6).toBeLessThan(9);
+    const total = blit + resolves;
     const replaced = 39 * 2 * CANVAS_W * CANVAS_H; // 39 encoder ends, store + load, whole canvas
-    expect(blit / 1e6).toBeGreaterThan(14);
-    expect(blit / 1e6).toBeLessThan(17);
-    expect(replaced / blit).toBeGreaterThan(20);
+    expect(total / 1e6).toBeGreaterThan(23);
+    expect(total / 1e6).toBeLessThan(26);
+    expect(replaced / total).toBeGreaterThan(12);
   });
 
   it('twenty live targets is ~20 MB, one pool bucket, released at the drain', () => {
     const c = cardRegion(boxes()[0].x, boxes()[0].y, BOX_W, BOX_H, margin, paint, P);
     const mb = (c.W * c.H * 4 * CARDS) / (1024 * 1024);
-    expect(mb).toBeGreaterThan(18);
-    expect(mb).toBeLessThan(21);
+    expect(mb).toBeGreaterThan(19);
+    expect(mb).toBeLessThan(22);
   });
 });
 
@@ -390,21 +509,58 @@ describe('the renderer actually does what the arithmetic assumes', () => {
     expect(body).not.toContain('EnableBlend');
   });
 
-  it('ComputeBlur pins the downsample factor against the CANVAS, not the card', () => {
+  it('the card branch builds from the CANVAS, with the SCREEN region and no pinned factor', () => {
+    // The whole of the fix. `pass.Blur` is handed `this._width, this._height` and the caller's own
+    // `region` -- the identical arguments the in-scene branch two lines below passes -- so every
+    // uniform downstream (`u_SrcRect`, `u_HalfPixel`, `LastRegion`, and the `u_BackdropXf` the
+    // panel shader taps through) is computed from the same numbers and rounds the same way.
     const body = arrowBody(renderer, 'ComputeBlur');
-    expect(body).toContain('BaseDownsampleFactor(radius, this._width, this._height, screenRegion)');
-    expect(body).toContain('pass.Blur(blurCard.Fbo.Texture, blurCard.W, blurCard.H, radius, minDepth, local, k)');
+    expect(body).toContain('pass.Blur(src, this._width, this._height, radius, minDepth, region)');
+    // No card dimensions and no pinned base factor reach the pass any more.
+    expect(body).not.toContain('blurCard.W, blurCard.H');
+    expect(body).not.toContain('BaseDownsampleFactor(');
+    // The map comes back in screen UV already, so nothing re-expresses it.
+    expect(body).toContain('return _wrap(result, pass.LastRegion);');
+    expect(body).not.toContain('_cardRegionToScreen');
     // ...and the old path, and its ledger note, are untouched ahead of it.
     expect(body).toContain('if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();');
     expect(body.indexOf("NoteTargetBind('blur')")).toBeLessThan(body.indexOf('blurCard'));
   });
 
-  it('the pyramid map is re-expressed in SCREEN uv before any consumer sees it', () => {
-    const body = arrowBody(renderer, '_cardRegionToScreen');
-    expect(body).toContain('ScaleX: local.ScaleX * (this._width / card.W)');
-    expect(body).toContain('OffsetX: local.OffsetX - card.X * local.ScaleX / card.W');
-    // y is measured from the BOTTOM, so the card's bottom gap is the offset, not its top.
-    expect(body).toContain('(this._height - card.Y - card.H)');
+  it('`_cardRegionToScreen` is GONE, not merely unused', () => {
+    // It existed to correct a card-UV map into screen UV, and correcting it is exactly what could
+    // not be made exact. A dead private that still compiles is an invitation to route through it.
+    expect(renderer).not.toContain('_cardRegionToScreen');
+  });
+
+  it('the source is resolved to a canvas-sized texture BEFORE the build, with the read guard', () => {
+    const body = arrowBody(renderer, 'ComputeBlur');
+    expect(body).toContain('this._cardBackdropSource(blurCard, region, CardReadGuard(this._cardGridPhase))');
+    expect(body.indexOf('_cardBackdropSource')).toBeLessThan(body.indexOf('pass.Blur(src'));
+    // A full-input pyramid reads the whole canvas and a composite has truth only over its box.
+    expect(body).toContain('throw new Error');
+  });
+
+  it('a dirty card is copied into the snapshot; a clean, unpainted one is not', () => {
+    const body = arrowBody(renderer, '_cardBackdropSource');
+    expect(body).toContain('!card.Dirty');
+    expect(body).toContain('return this._frameSnapTex;');
+    expect(body).toContain('return this._cardIntoSnapshotTex(');
+    // The queue scan is the other half of the free path: a card's seed carries its earlier
+    // neighbours' ink and the frame snapshot does not.
+    expect(body).toContain('this._cardQueue[i]');
+    // The guard widens BOTH the test and the copy's scissor -- a read that can reach a queued
+    // surface's paint must not take the snapshot, and a copy must cover what the build reads.
+    expect(body).toContain('const x0 = rect.x - guard, y0 = rect.y - guard;');
+    expect(body).toContain('{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }');
+  });
+
+  it('the shadow probe keeps guard 0, so its free path is byte-for-byte what it was', () => {
+    // It samples strictly inside its rect. Widening its test would make 20 free probes into
+    // 20 copies for a reach it does not have.
+    // Asserted against the file rather than `arrowBody`: the tap is now a one-expression arrow
+    // with no braces for the matcher to walk.
+    expect(renderer).toContain('): WebGLTexture => this._cardBackdropSource(card, rect, 0);');
   });
 
   it('the sub-window is the VIEWPORT, so `u_Resolution` stays the canvas', () => {
@@ -521,7 +677,7 @@ describe('nesting — a glass child reads its parent card, and nothing pretends 
     // region. A nested surface's backdrop is its parent's card WITH the parent's fill and children
     // already down, and the snapshot holds none of that -- so `Dirty` gates it, not just the
     // earlier-cards test, which sees nothing because the parent is on the stack and not the queue.
-    const body = arrowBody(renderer, '_cardSharpTap');
+    const body = arrowBody(renderer, '_cardBackdropSource');
     expect(body).toContain('!card.Dirty');
     expect(arrowBody(renderer, '_noteSceneDraw')).toContain("if (this._boundTarget === 'card')");
   });

@@ -11,7 +11,7 @@ import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Re
 import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
-import { BlurPass, BaseDownsampleFactor, PyramidDepth } from './BlurPass';
+import { BlurPass, PyramidDepth } from './BlurPass';
 import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
@@ -156,6 +156,25 @@ const _unwrap = (handle: GpuTextureHandle): WebGLTexture =>
 const _regionOf = (handle: GpuTextureHandle | null | undefined): BackdropRegion =>
   handle?.Region ?? BACKDROP_REGION_FULL;
 
+
+/** How far OUTSIDE the region it was asked for a backdrop pyramid can actually read its source.
+ *
+ *  Two terms, both exact, and both on the SOURCE side where the card composite has to have truth.
+ *
+ *  1. `ResolveRegionRect` snaps the region's origin DOWN to the downsample grid and its extent UP
+ *     to the same grid, and `Jaui.ts` has already floored the origin and ceiled the extent before
+ *     that. So the rect the pyramid is built over can sit up to one grid `phase` past the region.
+ *  2. The first DOWN hop taps its source at +/- `u_HalfPixel * u_Offset` around a destination texel
+ *     whose centre is one source texel inside the rect, and each tap is bilinear. `u_Offset` is
+ *     clamped to 1.3, so the reach is 1.3 * 0.5 + 0.5 = 1.15 texels, rounded up to 2. Every later
+ *     hop reads a region-sized level and cannot leave it, and the UP chain never touches the input.
+ *
+ *  `BeginCardComposite` rounds this UP to a whole number of phases and grows the card's box by it;
+ *  `ComputeBlur` passes it as the reach its source has to cover. Without it the two coincide
+ *  exactly -- on `glass-grid` the region's origin and the box's left edge are both
+ *  `floor((px - 64.75) / 4) * 4`, the same number -- and the build's first hop reads one texel of
+ *  whatever the snapshot texture happened to hold there. */
+const CardReadGuard = (phase: number): number => phase + 2;
 
 /** One glass surface's composite target. `X/Y/W/H` is its region in device px with y=0 at the TOP
  *  (the frame every caller here speaks); `Paint*` is the strictly smaller rect the surface can
@@ -498,10 +517,15 @@ export class WebGL2Renderer implements Renderer {
   /** Encoder ENDS on the frame just walked - a non-scene target bound over a dirty scene. The column
    *  `?snap-once` did not move, and the one the surviving hypothesis multiplies. */
   get SceneSwitches(): number { return this._sceneLedger.Switches; }
+  /** The same ends, named by the target that took them. An end prices by TARGET SIZE -- ~0.12 ms
+   *  below the 6.4-9.2 MB cliff, 1.1-1.5 ms above it -- so a single scalar cannot say whether a
+   *  design moved its ends onto small targets or merely counted fewer of them. Sums to
+   *  `SceneSwitches`. */
+  get SceneEndsByKey(): Record<string, number> { return this._sceneLedger.EndsByKey; }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
-  get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number } {
+  get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number; EndsByKey: Record<string, number> } {
     const l = this._sceneLedger;
-    return { Reads: l.TotalReads, Restarts: l.TotalRestarts, Switches: l.TotalSwitches, Frames: l.TotalFrames };
+    return { Reads: l.TotalReads, Restarts: l.TotalRestarts, Switches: l.TotalSwitches, Frames: l.TotalFrames, EndsByKey: { ...l.TotalEndsByKey } };
   }
   /** Name a lazily-built blur chain so its level FBOs get target keys distinct from the other
    *  chains', and hand it the timer if one is already running. */
@@ -1376,28 +1400,39 @@ export class WebGL2Renderer implements Renderer {
     // first level bind and the rest of the pyramid is on the far side of it. The ledger's own dirty
     // flag makes the repeat calls free, so this line is the build, not the binds.
     this._sceneLedger.NoteTargetBind('blur');
-    // ── Card composite: the pyramid's source is the CARD target, not the canvas ──
-    // Same arithmetic, different input texture. Two things have to be corrected across the change
-    // of frame, and both are exact:
-    //   * `BaseDownsampleFactor` gates the sigma-adaptive pre-downsample on the region's share of
-    //     the INPUT's area. A card-sized input makes every region ~100% of it, so a surface that
-    //     resolves to k=1 against the canvas would resolve to k=4 against its own card and the
-    //     pyramid would be built at quarter density. It is computed at CANVAS scale and PINNED.
-    //   * `LastRegion` comes back as a card-UV map and every consumer addresses it in SCREEN UV.
-    // The region grid snap is the third, and it is handled at the other end: `BeginCardComposite`
-    // aligns the card's origin to the frame's pyramid phase, so `ResolveRegionRect` lands on the
-    // same absolute texels it would have landed on against the canvas. See `_cardGridPhase`.
+    // ── Card composite: the pyramid's source is the CANVAS-SIZED SNAPSHOT, never the card ──
+    // A surface inside a composite reads its backdrop out of its own card target. The pyramid must
+    // NOT be built from that target, and the reason is arithmetic rather than texels.
+    //
+    // Building it from the card was tried and MEASURED (Jaui 1971251, the pixel gate): the seed,
+    // the neighbour replay and the write-back came back bit-exact, and 4,057 pixels at channel
+    // delta 1 appeared inside the twenty card boxes and nowhere else. Every uniform the build and
+    // its consumer use is computed from the INPUT's dimensions -- `u_SrcRect` is
+    // `rect.X / srcW`, `u_HalfPixel` is `0.5 / srcW`, `LastRegion` is `width / rect.W` and
+    // `-rect.X / rect.W`, and the panel shader taps through the `u_BackdropXf` built out of those.
+    // A 568x436 source puts every one of them on different floating-point values than a 2560x1600
+    // one. Same texels, one-ulp-apart bilinear weights, a scattered 1 LSB. The grid law and the
+    // pinned `k` made the pyramid sample the right texels; nothing can make it round the same way
+    // except giving it the same numbers.
+    //
+    // So the card's pixels are resolved to a CANVAS-SIZED texture at their SCREEN position first
+    // (`_cardBackdropSource`), and what follows is the in-scene call with the in-scene arguments:
+    // the canvas's width and height, the ORIGINAL screen region, no pinned base factor -- so
+    // `BaseDownsampleFactor` measures against the canvas again and picks what it always picked --
+    // and `pass.LastRegion` returned unmapped, because it is already in screen UV. Byte-for-byte
+    // the same call on a texture holding the same texels.
     const blurCard = this._activeCard;
     if (blurCard !== null && _unwrap(input) === blurCard.Fbo.Texture) {
-      const screenRegion = region ?? { x: blurCard.X, y: blurCard.Y, w: blurCard.W, h: blurCard.H };
-      const k = BaseDownsampleFactor(radius, this._width, this._height, screenRegion);
-      const local = {
-        x: screenRegion.x - blurCard.X, y: screenRegion.y - blurCard.Y,
-        w: screenRegion.w, h: screenRegion.h,
-      };
-      const cardTex = pass.Blur(blurCard.Fbo.Texture, blurCard.W, blurCard.H, radius, minDepth, local, k);
+      if (region === undefined) {
+        // A full-input pyramid reads the WHOLE canvas, and a composite has truth only over its own
+        // box. Both callers that can reach here pass a region (the glass fill and the glass rim);
+        // a third that does not is a wrong picture, and a wrong picture says so.
+        throw new Error('[Jaui] a card composite cannot build a full-canvas pyramid: pass a region');
+      }
+      const src = this._cardBackdropSource(blurCard, region, CardReadGuard(this._cardGridPhase));
+      const result = pass.Blur(src, this._width, this._height, radius, minDepth, region);
       this._lastProgram = null;
-      return _wrap(cardTex, this._cardRegionToScreen(pass.LastRegion, blurCard));
+      return _wrap(result, pass.LastRegion);
     }
     const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
@@ -1784,7 +1819,10 @@ export class WebGL2Renderer implements Renderer {
   //   2. REPLAY, in ascending walk order, the overlapping part of every EARLIER surface's own
   //      composite target whose PAINT rect reaches into this region. Later wins where two overlap,
   //      which is the order the scene composited them.
-  //   3. Build the pyramid FROM the seeded target (`ComputeBlur`), same sigma, same depth.
+  //   3. Build the pyramid from a CANVAS-SIZED texture holding the seeded target's bytes at their
+  //      screen position (`_cardBackdropSource`), with the screen region and the canvas's own
+  //      dimensions -- the in-scene call, unchanged. Building it from the card target instead was
+  //      tried, and its uniforms round differently: see the card branch of `ComputeBlur`.
   //   4. Draw the fill, the children and the rim overlay INTO the card target, under a retargeted
   //      projection (`SetCaptureViewOffset` + `u_Resolution`; `v_PixelPos` stays screen space, so
   //      the clip stack and the xform table are untouched -- the layer cache already proves it).
@@ -1803,10 +1841,10 @@ export class WebGL2Renderer implements Renderer {
   // EVERY BLIT HERE IS A COPY, NOT A RENDER, and that is the whole reason the count falls. ANGLE's
   // Metal backend turns `blitFramebuffer` into a MTLBlitCommandEncoder copy when the blit is
   // same-size, same-format, unflipped, unscaled, unmasked and unscissored, and into a draw into the
-  // destination otherwise. Seed (snapshot -> card), replay (card -> card) and write-back
-  // (card -> scene) are all RGB10_A2 to RGB10_A2 at 1:1 with integer-aligned rects, so all three
-  // take the copy path. A copy does not open a render encoder on the scene and so does not load or
-  // store its tiles.
+  // destination otherwise. Seed (snapshot -> card), replay (card -> card), the
+  // backdrop resolve (card -> snapshot) and write-back (card -> scene) are all RGB10_A2 to
+  // RGB10_A2 at 1:1 with integer-aligned rects, so all four take the copy path. A copy does not
+  // open a render encoder on the scene and so does not load or store its tiles.
   //
   // THE HONEST LIMIT: anything drawn DIRECTLY into `_sceneFbo` between two glass surfaces -- a
   // plain panel, a line of text, an SVG, a stroke -- cannot be replayed from a card target. Those
@@ -1875,21 +1913,25 @@ export class WebGL2Renderer implements Renderer {
 
   /** Align card origins to `phase` device px, measured from x=0 and from the BOTTOM of the canvas.
    *
-   *  This is the one thing standing between a region-sized source and a different picture.
-   *  `ResolveRegionRect` snaps a pyramid's origin DOWN to the downsample grid so every level is a
-   *  texel-exact SUB-GRID of the canvas-sized pyramid -- "an unaligned origin would pair different
-   *  neighbours at every level and move real pixels". It does that snap in the INPUT's coordinate
-   *  space, so a card target whose origin is not itself on the grid would snap to a DIFFERENT set
-   *  of absolute texels than the same region would against the canvas.
+   *  It STAYS, and what it is load-bearing FOR has changed. It used to be the one thing standing
+   *  between a region-sized source and a different picture: `ResolveRegionRect` snaps a pyramid's
+   *  origin DOWN to the downsample grid in the INPUT's coordinate space, so a card whose origin was
+   *  not itself on the grid would snap to a DIFFERENT set of absolute texels than the same region
+   *  would against the canvas. No pyramid is built against a card any more, and that argument is
+   *  retired with the code that needed it.
    *
-   *  floor((rx - X) / phase) * phase equals floor(rx / phase) * phase - X exactly when `phase`
-   *  divides X, and the y axis is measured from the bottom (GL's convention, and the axis
-   *  `ResolveRegionRect` works in), so the BOTTOM gap H - Y - H_card carries the same condition.
-   *  Both are guaranteed by construction in `BeginCardComposite`.
+   *  Two things it still buys, for a cost of nothing:
+   *    * The READ GUARD in `BeginCardComposite`, whose whole statement is that growing the box by a
+   *      multiple of `phase` moves its edges by exactly that many device px -- floor((v - g) / P)
+   *      * P equals floor(v / P) * P - g precisely when P divides g. The y axis is measured from
+   *      the bottom (GL's convention, and the axis `ResolveRegionRect` works in), so the BOTTOM gap
+   *      H - Y - H_card carries the same condition. Both hold by construction.
+   *    * ONE card size for anything laid out on a regular pitch, so `glass-grid`'s twenty cards
+   *      share a single `FramebufferPool` bucket and re-allocate nothing after the first frame.
    *
    *  The caller passes the deepest phase any pyramid in the frame can ask for: k * 2^depth, where
-   *  k is pinned to 1 by the area gate below and depth follows the largest frost in the tree.
-   *  Every shallower pyramid's phase is a power of two dividing it. */
+   *  k is 1 for every surface small enough to composite and depth follows the largest frost in the
+   *  tree. Every shallower pyramid's phase is a power of two dividing it. */
   SetCardGrid = (phase: number): void => {
     this._cardGridPhase = Math.max(1, 1 << Math.ceil(Math.log2(Math.max(1, phase))));
   };
@@ -1924,8 +1966,20 @@ export class WebGL2Renderer implements Renderer {
 
     const W = this._width, H = this._height;
     const P = this._cardGridPhase;
-    const outX = Math.max(sampleMargin, paintMarginX);
-    const outY = Math.max(sampleMargin, paintMarginY);
+    // The box has to contain every texel this subtree's pyramids can READ, not merely the region
+    // they ask for. Their source is now a canvas-sized texture that holds this card's bytes over
+    // the BOX and last frame's everywhere else, so a tap one texel outside the box is a wrong
+    // pixel -- and without a guard the two edges coincide EXACTLY: on `glass-grid` the region's
+    // origin and the box's left edge are both `floor((px - 64.75) / 4) * 4`, the same number, with
+    // the paint margin (36) far inside the sample margin (64.75) and contributing no slack.
+    // `CardReadGuard` is the reach; rounding it UP to a whole number of grid phases is what keeps
+    // `P | X` and `P | (H - Y - Hcard)` true, which is the condition `SetCardGrid` exists for.
+    // 8 device px a side on `glass-grid`: 568x436 becomes 584x452, 6.6% more seed, replay and
+    // write-back, and the containment becomes a property of the construction rather than of
+    // whatever margins the app's glass class happens to author this week.
+    const guard = Math.ceil(CardReadGuard(P) / P) * P;
+    const outX = Math.max(sampleMargin, paintMarginX) + guard;
+    const outY = Math.max(sampleMargin, paintMarginY) + guard;
     const x0 = Math.max(0, Math.floor((px - outX) / P) * P);
     const x1 = Math.min(W, Math.ceil((px + pw + outX) / P) * P);
     // y from the BOTTOM, because that is the axis the grid condition lives on.
@@ -1933,10 +1987,11 @@ export class WebGL2Renderer implements Renderer {
     const yb1 = Math.min(H, Math.ceil((H - (py - outY)) / P) * P);
     const rw = x1 - x0, rh = yb1 - yb0;
     if (rw <= 0 || rh <= 0) return false;
-    // The area gate does two jobs at once. It keeps `BaseDownsampleFactor` at k=1 for every pyramid
-    // this path builds (its own gate is 15% of the canvas), which is what makes the pinned factor
-    // in `ComputeBlur` a no-op rather than a change; and it keeps a full-screen scrim -- which has
-    // nothing to gain here, its region IS the canvas -- on the ordinary path.
+    // The area gate keeps a full-screen scrim -- which has nothing to gain here, its region IS the
+    // canvas -- on the ordinary path, and it bounds the copy a dirty card pays to reach the
+    // snapshot. It no longer has anything to do with `BaseDownsampleFactor`: the build sees the
+    // canvas as its input again, so the factor it picks is the one the in-scene path picks, at any
+    // area, with nothing pinned.
     if (rw * rh >= 0.15 * W * H) { this._cardFallbacks++; return false; }
     if (!this._ensureFrameSnapshot(x0, H - yb1, rw, rh)) { this._cardFallbacks++; return false; }
 
@@ -2127,45 +2182,56 @@ export class WebGL2Renderer implements Renderer {
     card: _CardTarget, scissor?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle => _wrap(this._cardIntoSnapshotTex(card, scissor));
 
-  /** The canvas-sized, screen-addressed sharp tap the adaptive-shadow probe needs, for a surface
-   *  whose backdrop lives in a card target. The probe samples strictly inside `rect`, so when no
-   *  earlier surface in this run PAINTS into `rect` the frame snapshot already holds those exact
-   *  bytes and costs nothing. On `glass-grid` that is every card: the 32 px shadow outset cannot
-   *  cross the 40 px gutter, so no card's paint reaches its neighbour's box. */
-  private _cardSharpTap = (
-    card: _CardTarget, rect: { x: number; y: number; w: number; h: number },
+  /** The ONE resolver every backdrop read inside a composite goes through: a CANVAS-SIZED,
+   *  screen-addressed texture holding what the scene held over `rect` grown by `guard`.
+   *
+   *  One source of truth, because a reader that addresses the canvas and a reader that addresses a
+   *  568x436 card are not the same reader even when they want the same texels -- see the comment on
+   *  the card branch of `ComputeBlur` for what that difference measured.
+   *
+   *  Which of the two canvas-sized textures answers is a COST question, not a correctness one.
+   *  While the card still holds the frame snapshot's bytes verbatim -- nothing drawn into it, and
+   *  no earlier surface in this run painting anywhere the read can reach -- the frame snapshot IS
+   *  those bytes, canvas-wide, and the answer is free. Otherwise the card is copied into the
+   *  snapshot texture at its screen position: same size, same format, integer-aligned, a
+   *  blit-encoder region copy of exactly the class the twenty write-backs already are.
+   *
+   *  `card.Dirty` is the load-bearing half of the free path. A NESTED surface's backdrop is its
+   *  parent's card with the parent's own fill and children already in it, and the snapshot holds
+   *  none of that. The queue scan is the other half: a card's seed carries its earlier neighbours'
+   *  ink and the frame snapshot does not, so a read that can reach a queued surface's paint rect
+   *  has to take the copy. On `glass-grid` the shadow probe's rect clears every neighbour (the
+   *  36 px paint outset cannot cross the 40 px gutter) and stays free, while a pyramid's rect is
+   *  the whole card and reaches four of them, so it copies.
+   *
+   *  `guard` is how far past `rect` the consumer can read: 0 for the adaptive-shadow probe, which
+   *  samples strictly inside its rect, and `CardReadGuard` for a pyramid, whose first DOWN hop
+   *  reaches past the rect it resolves to. The copy is scissored to the same grown rect, so a rim
+   *  overlay -- whose region is the frost margin alone, not the fill's refraction footprint -- pays
+   *  for what it reads rather than for the whole card. */
+  private _cardBackdropSource = (
+    card: _CardTarget, rect: { x: number; y: number; w: number; h: number }, guard: number,
   ): WebGLTexture => {
-    // `card.Dirty` is the load-bearing half. A NESTED surface's backdrop is its parent's card with
-    // the parent's own fill and children already in it, and the snapshot holds none of that.
+    const x0 = rect.x - guard, y0 = rect.y - guard;
+    const x1 = rect.x + rect.w + guard, y1 = rect.y + rect.h + guard;
     if (this._frameSnapTex !== null && this._frameSnapValid && !card.Dirty) {
       let painted = false;
       for (let i = 0; i < this._cardQueue.length; i++) {
         const e = this._cardQueue[i];
-        if (rect.x < e.PaintX1 && rect.x + rect.w > e.PaintX0
-            && rect.y < e.PaintY1 && rect.y + rect.h > e.PaintY0) { painted = true; break; }
+        if (x0 < e.PaintX1 && x1 > e.PaintX0 && y0 < e.PaintY1 && y1 > e.PaintY0) { painted = true; break; }
       }
       if (!painted) return this._frameSnapTex;
     }
-    return this._cardIntoSnapshotTex(card, undefined);
+    return this._cardIntoSnapshotTex(
+      card, guard === 0 ? undefined : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 },
+    );
   };
 
-  /** Re-express a pyramid's `LastRegion` from CARD UV into SCREEN UV.
-   *
-   *  `BlurPass` builds the map as ScaleX = inputW / rect.W, OffsetX = -rect.X / rect.W, so a screen
-   *  UV lands at (sx - rect.X) / rect.W -- with rect.X in the INPUT's texels. Against a card that
-   *  is rect.X + card.X in screen texels, and the same on y measured from the bottom, where the
-   *  card's bottom gap is H - card.Y - card.H. rect.W is recovered from the map itself
-   *  (card.W / ScaleX) rather than re-derived, so this cannot drift from the pass that produced it.
-   *  A full-input pyramid (`BACKDROP_REGION_FULL`, Scale 1 / Offset 0) falls out of the same two
-   *  lines, because then rect.W IS card.W. */
-  private _cardRegionToScreen = (local: BackdropRegion, card: _CardTarget): BackdropRegion => ({
-    ScaleX: local.ScaleX * (this._width / card.W),
-    ScaleY: local.ScaleY * (this._height / card.H),
-    OffsetX: local.OffsetX - card.X * local.ScaleX / card.W,
-    OffsetY: local.OffsetY - (this._height - card.Y - card.H) * local.ScaleY / card.H,
-    TexelsX: local.TexelsX,
-    TexelsY: local.TexelsY,
-  });
+  /** The canvas-sized, screen-addressed sharp tap the adaptive-shadow probe needs, for a surface
+   *  whose backdrop lives in a card target. Guard 0: the probe samples strictly inside `rect`. */
+  private _cardSharpTap = (
+    card: _CardTarget, rect: { x: number; y: number; w: number; h: number },
+  ): WebGLTexture => this._cardBackdropSource(card, rect, 0);
 
   // ── Blit ──
 

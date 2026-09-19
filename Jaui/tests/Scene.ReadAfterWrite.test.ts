@@ -647,3 +647,93 @@ describe('glass-grid — what the switch column should read in each cell', () =>
     expect(flat.Restarts).toBe(gradient.Restarts);
   });
 });
+
+// ── ADDED: the per-target breakdown of the switch column ──────────────────────────────────────
+//
+// Everything above this line is byte-for-byte what it was: the M4 has measured numbers against
+// every table in it, and `Reads`, `Restarts` and `Switches` must keep meaning exactly what they
+// meant when those numbers were taken.
+//
+// What is new is a FOURTH reading of the same events. An encoder end prices by TARGET SIZE -- the
+// per-end cost floors measured at dpr 0.375/0.5 put it at ~0.12 ms below the 6.4-9.2 MB cliff and
+// 1.1-1.5 ms above it -- so "one end" is not a cost and "four ends" is not four times one. A frame
+// with four ends on 1 MB card targets and a frame with four ends on the 16 MB scene read the same
+// in the scalar and are ~5 ms apart on the clock. Three columns each reading low while the frame
+// stayed slow is the failure mode this phase has already paid for once; this one names the target.
+
+describe('EndsByKey — the switch column priced by what it ended ON', () => {
+  it('sums to Switches exactly, because it is incremented in the same branch', () => {
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite(); l.NoteTargetBind('snapshot');
+    l.NoteWrite(); l.NoteTargetBind('blur');
+    l.NoteWrite(); l.NoteTargetBind('blur');
+    l.NoteWrite(); l.NoteTargetBind('card');
+    const total = Object.values(l.EndsByKey).reduce((a, b) => a + b, 0);
+    expect(total).toBe(l.Switches);
+    expect(l.EndsByKey).toEqual({ snapshot: 1, blur: 2, card: 1 });
+  });
+
+  it('a bind that is NOT an end is not in the breakdown either', () => {
+    // The dirty flag clears on the first end, so the three blur-level binds inside one pyramid
+    // build are one end and one entry -- the same rule the scalar follows, not a second one.
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite();
+    l.NoteTargetBind('blur');
+    l.NoteTargetBind('blur');
+    l.NoteTargetBind('blur');
+    expect(l.EndsByKey).toEqual({ blur: 1 });
+    // `scene` is not a switch by definition and never appears.
+    l.NoteWrite();
+    l.NoteTargetBind('scene');
+    expect(l.EndsByKey.scene).toBeUndefined();
+  });
+
+  it('resets with the frame, and the cumulative copy does not', () => {
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    l.NoteWrite(); l.NoteTargetBind('snapshot');
+    l.BeginFrame();
+    expect(l.EndsByKey).toEqual({});
+    expect(l.TotalEndsByKey).toEqual({ snapshot: 1 });
+    l.NoteWrite(); l.NoteTargetBind('snapshot');
+    expect(l.EndsByKey).toEqual({ snapshot: 1 });
+    expect(l.TotalEndsByKey).toEqual({ snapshot: 2 });
+  });
+
+  it('the composited glass-grid frame ends ONE encoder, and it is the SNAPSHOT that takes it', () => {
+    // The whole claim of the design in one line: the only end in the frame is on a canvas-sized
+    // target above the cliff, and it is the frame snapshot's cut, once. Every card bind, every
+    // pyramid build and every backdrop resolve after it is free, because nothing has drawn into the
+    // scene since. If this ever reads `card: 20` or `snapshot: 21` the write-back went eager.
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    for (let band = 0; band < 6; band++) l.NoteWrite();
+    l.NoteRead(); l.NoteTargetBind('snapshot');
+    for (let card = 0; card < 20; card++) {
+      l.NoteTargetBind('card');                              // the seed blit
+      l.NoteTargetBind('blur');                              // fill build
+      l.NoteTargetBind('snapshot');                          // fill build's backdrop resolve
+      l.NoteTargetBind('shadow-state');                      // the adaptive probe
+      l.NoteTargetBind('snapshot');                          // rim build's backdrop resolve
+      l.NoteTargetBind('blur');                              // rim build
+      l.NoteTargetBind('card');
+    }
+    l.NoteFrameEndDrain();
+    expect(l.Switches).toBe(1);
+    expect(l.EndsByKey).toEqual({ snapshot: 1 });
+  });
+
+  it('the renderer and Jaui.ts both carry it, and the three-column shape is untouched', () => {
+    const renderer = readRenderer();
+    const jaui = readJaui();
+    expect(renderer).toContain('get SceneEndsByKey(): Record<string, number> { return this._sceneLedger.EndsByKey; }');
+    expect(renderer).toContain('EndsByKey: { ...l.TotalEndsByKey }');
+    expect(jaui).toContain('this._counts.SceneEndsByKey = this._renderer.SceneEndsByKey;');
+    expect(jaui).toContain('endsByKey=${_endsByKey(c.SceneEndsByKey)}');   // jaui:render:end
+    expect(jaui).toContain('_endsByKey(this._counts.SceneEndsByKey)');      // the [Jaui] line
+    expect(jaui).toContain('& { EndsByKey: Record<string, number> }');      // __jauiSceneLedger
+    expect(jaui).toContain('this._counts.SceneEndsByKey = {};');            // reset with the rest
+  });
+});
