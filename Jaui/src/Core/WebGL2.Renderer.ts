@@ -532,7 +532,8 @@ export class WebGL2Renderer implements Renderer {
     // 10-bit RGB (1024 levels, same 32 bpp) feeds the blur a band-free
     // gradient. NOTE: this trades alpha to 2-bit — fine for an opaque scene
     // (the canvas fills its background); revisit if alpha precision matters.
-    this._sceneFbo = new Framebuffer(gl, { depth: true, highPrecision: true });
+    this._sceneFbo = new Framebuffer(gl, { depth: !this.DiagNoDepth, highPrecision: true });
+    JTrace(`jaui:scene-fbo depth=${!this.DiagNoDepth} highPrecision=true`);
 
     // Probe for GPU timer-query support. The extension object exposes the
     // two enums we need; if it's missing, _timerExt stays null and
@@ -1142,6 +1143,15 @@ export class WebGL2Renderer implements Renderer {
   /** [diag ?no-blur] When true, ComputeBlur + GenerateBlurMipmap no-op so the
    *  per-surface backdrop blur fill is removed — measures the blur's GPU cost. */
   DiagNoBlur = false;
+  /** `?no-depth` (measurement only). Build the scene FBO WITHOUT its depth+stencil renderbuffer.
+   *  Nothing in the UI renderer tests depth or stencil - every DEPTH_TEST/STENCIL_TEST call in the
+   *  engine disables one - so on a surface with no <janvas> the attachment is never read and never
+   *  written, and whether the driver still pays a load/store for it at each encoder boundary cannot
+   *  be known from source. The M4 measured the empty-frame floor at 2.33 GPU ms (14% of budget) on
+   *  2026-09-18; this flag is how that floor gets a depth term instead of an inference. A <janvas>
+   *  surface under this flag WILL render wrong (the 3D field needs depth) - it is an ablation, not a
+   *  mode, and the trace mark below says which FBO was built so the reading cannot be misfiled. */
+  DiagNoDepth = false;
 
   ComputeBlur = (
     input: GpuTextureHandle, width: number, height: number,

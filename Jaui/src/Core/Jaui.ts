@@ -4279,6 +4279,9 @@ export class Canvas implements DirtyTracker {
     if (params.has('no-reality')) this._diagNoReality = true;
     if (params.has('no-ui')) this._diagNoUi = true;
     if (params.has('no-blur')) this._diagNoBlur = true;
+    // Renderer exists (assigned before _initDebugFromUrl) and Init has not run yet (it runs at Start),
+    // so the field is read when the scene FBO is actually built. See WebGL2.Renderer.DiagNoDepth.
+    if (params.has('no-depth') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagNoDepth = true;
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
     if (params.has('no-glass-draw')) this._diagNoGlassDraw = true;

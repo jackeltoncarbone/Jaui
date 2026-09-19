@@ -127,6 +127,13 @@ export const BootJauiWorker = (): void => {
     });
     try {
       const renderer = new WebGL2Renderer();
+      // `?no-depth` has to land BEFORE Init builds the scene FBO, and in worker mode Init runs here -
+      // before the Canvas (and its _initDebugFromUrl) exists. Same URL idiom as the debug/fps tests
+      // below. Main-thread mode reads the same flag in Jaui._initDebugFromUrl, where Init runs later.
+      renderer.DiagNoDepth = new URLSearchParams(m.UrlSearch ?? '').has('no-depth');
+      // What URL flags did this worker actually receive? Recorded so a flag that did not take is a
+      // reading, not a guess. (2026-09-18: ?no-depth read back depth=true three builds running.)
+      JTrace(`jaui:init:url ${m.UrlSearch ?? '(none)'}`);
       JTrace('jaui:renderer-init:start');
       await renderer.Init(m.Canvas);
       JTrace(`jaui:renderer-init:end ${JMs(performance.now() - _t0)}ms`);
