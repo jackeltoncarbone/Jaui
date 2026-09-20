@@ -2599,6 +2599,24 @@ export class WebGL2Renderer implements Renderer {
   private _shadowFreeSlots: number[] = [];
   private _shadowFrame = 0;
 
+  /** THE SNAP. Set by the engine for the ONE render it runs at the end of a settle window, before it
+   *  parks; every probe in that render writes its state WHOLE instead of easing a share into it.
+   *
+   *  Why a whole write is exact, and an ease never is: the blended path is
+   *  `state = state * (1 - ease) + reading * ease`, so what it leaves behind depends on how many
+   *  frames were rendered and how their dt fell -- which `?tick-pace`, a skipped callback and a
+   *  back-pressured cadence all change. The unblended path is `state = reading`, a single write of a
+   *  deterministic shader over a static scene, so the term carrying the history is gone rather than
+   *  small. Two runs with different render counts land on the same texel, bit for bit.
+   *
+   *  It is a MODE OF A NORMAL RENDER, not a pass of its own, which is what makes "every surface"
+   *  true: the walk probes exactly the adaptive-shadow surfaces it is about to draw, so a snap frame
+   *  covers the same set the frame draws with, and nothing keeps a residual into the parked frame. */
+  ShadowSnap = false;
+
+  /** Probes that wrote a whole reading on the last snap frame. Reset when a snap frame begins. */
+  ShadowSnapped = 0;
+
   MeasureShadowBackdrop = (
     key: object,
     rect: { x: number; y: number; w: number; h: number },
@@ -2642,8 +2660,12 @@ export class WebGL2Renderer implements Renderer {
     gl.viewport(entry.Slot, 0, 1, 1);
     gl.disable(gl.SCISSOR_TEST);
     // A new surface takes its first reading whole; after that each frame moves a time-based share toward
-    // the new reading, so a scroll eases the shadow rather than stepping it.
-    const ease = fresh ? 1 : 1 - Math.exp(-Math.max(0, dtSeconds) / SHADOW_EASE_SECONDS);
+    // the new reading, so a scroll eases the shadow rather than stepping it. `ShadowSnap` is the last
+    // render before the loop parks, where the whole reading is taken again so the parked frame carries
+    // no history -- see the field.
+    const snap = this.ShadowSnap;
+    if (snap) this.ShadowSnapped++;
+    const ease = fresh || snap ? 1 : 1 - Math.exp(-Math.max(0, dtSeconds) / SHADOW_EASE_SECONDS);
     if (ease >= 1) {
       gl.disable(gl.BLEND);
     } else {

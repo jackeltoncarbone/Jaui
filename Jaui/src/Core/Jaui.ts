@@ -21,7 +21,7 @@ import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, mat
 import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
 import { XformBuffer } from '../Transform/Xform.Buffer';
-import { SHADOW_EASE_SECONDS, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop } from './Renderer';
+import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop } from './Renderer';
 // `?blur-first` names the pyramid pool's own chain key so the report can say how many chains
 // forty builds actually resolve to. These three are the exact functions `BlurPass.Blur` uses to
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
@@ -1071,6 +1071,24 @@ export class Canvas implements DirtyTracker {
    *  ease lives on the GPU, so the loop keeps rendering until then after activity stops. */
   private _adaptiveShadowsDrawn = false;
   private _shadowSettleUntil = 0;
+  /** CONVERGE, THEN PARK. The ease is a weighted average of a reading and the state before it, so what
+   *  it leaves behind at the end of the settle window depends on how many frames were RENDERED inside
+   *  that window -- and the tick cadence is not a constant of the page: `?tick-pace` halves it by
+   *  design, and Chromium's own BeginFrame back-pressure moves it between 30 and 120 Hz without being
+   *  asked. Measured, that is 23-48k pixels of the card row moving by one 8-bit level between a paced
+   *  arm and the unflagged one, on a scene where nothing moved (`Perf/TickPace3.Finding.md`).
+   *
+   *  So the loop does not park on a clock alone. When the window has elapsed it renders ONE more frame
+   *  with the ease OFF -- every probe writes its whole reading -- and parks on that frame. The parked
+   *  picture is then the converged reading and nothing else, identical across cadences, across pacing
+   *  modes, and across however many frames the settle took. `?shadow-snap=off` restores the old park.
+   *
+   *  Pending from the moment a settle window opens until a snap render clears it; the park predicate
+   *  reads it, so the loop cannot sleep owing one. Only ever set when the snap is armed. */
+  private _shadowSnapPending = false;
+  private _shadowSnapArmed = true;
+  /** Surfaces the last snap render wrote whole. Read on `[Jaui]` and by `__jauiShadowSnap`. */
+  private _shadowSnapped = 0;
 
   /** True while the rAF loop is stopped because every source of change has said it is still.
    *  See the park block at the end of `_tickInner` for the whole argument. */
@@ -1493,7 +1511,14 @@ export class Canvas implements DirtyTracker {
     this._needsRender = false;
     if (renderActive) {
       this._renderHold = 3; // render this frame + a 2-frame settle tail
-      if (this._adaptiveShadowsDrawn) this._shadowSettleUntil = time + SHADOW_EASE_SECONDS * 3000;
+      if (this._adaptiveShadowsDrawn) {
+        // Five taus armed, three unarmed: the number does NOT decide the parked pixels (the snap
+        // writes the converged reading whatever the state held) -- it decides how big the step AT
+        // the snap is. See `SHADOW_SETTLE_TAUS`.
+        const taus = this._shadowSnapArmed ? SHADOW_SETTLE_TAUS : SHADOW_SETTLE_TAUS_UNSNAPPED;
+        this._shadowSettleUntil = time + SHADOW_EASE_SECONDS * taus * 1000;
+        if (this._shadowSnapArmed) this._shadowSnapPending = true;
+      }
     }
     // ── The pace gate ──────────────────────────────────────────────────────
     // `wantsRender` is the gate above, unchanged, plus a render the pace refused on an earlier tick
@@ -1505,7 +1530,23 @@ export class Canvas implements DirtyTracker {
     // cannot move a pixel, and the pixels it would have drawn are not lost, because `_paceOwed`
     // carries the want forward and the park predicate refuses to sleep while it is set. Unflagged,
     // `_paceOwed` is never set and `Decide` always says render, so this is the same loop it was.
-    const wantsRender = this._renderHold > 0 || time < this._shadowSettleUntil || this._paceOwed;
+    //
+    // THE SNAP is the last of the four wants, and it is the one that survives the clock: the settle
+    // window has elapsed, adaptive shadows were measured inside it, and this render is the one that
+    // takes every reading whole before the loop sleeps. It is a want like the others, so the pace
+    // gate may refuse it -- and then `_paceOwed` carries it exactly as it carries any other refused
+    // render, `_shadowSnapPending` stays set, and BOTH terms keep the park predicate awake until a
+    // tick actually runs it. A skipped snap is deferred, never lost.
+    //
+    // It also waits for the render TAIL, and that is an exactness condition rather than tidiness: an
+    // eased render landing on top of a snapped state re-blends `reading` with `reading`, which is the
+    // same value in real arithmetic and a 10-bit rounding away from it in the state texture. The snap
+    // must be the LAST render of the window, so it takes the tick after the tail has run out. The
+    // tail is three frames and the window is 450 ms, so this costs nothing at any real tick rate; it
+    // is here for the rate that is not real.
+    const settled = time >= this._shadowSettleUntil;
+    const wantsSnap = this._shadowSnapPending && settled && this._renderHold === 0;
+    const wantsRender = this._renderHold > 0 || !settled || this._paceOwed || wantsSnap;
     const decision = wantsRender ? this._tickPace.Decide(this._paceGate, time) : 'skip';
     const shouldRender = wantsRender && decision !== 'skip';
     if (wantsRender) {
@@ -1528,7 +1569,26 @@ export class Canvas implements DirtyTracker {
       // the arm that reads them.
       const wantsCost = this._tickPace.WantsRenderCost;
       const tRender = ff || wantsCost ? performance.now() : 0;
+      // THE SNAP, armed around this one call and nowhere else. `_resize` renders inline too and must
+      // never take a whole reading off the ease -- a resize is motion, and the ease is the ease while
+      // the page moves. The flag is a renderer field rather than an argument for the reason
+      // `DiagNoBlur` is: the walk hands `MeasureShadowBackdrop` its arguments at two call sites and
+      // neither of them is the one that knows the loop is about to park.
+      //
+      // Both probe paths are covered because the snap is a MODE OF THE RENDER rather than a pass
+      // after it. The walk probes each adaptive-shadow surface immediately before its own draw;
+      // `?blur-phased` hoists those probes into `_phasedShadowProbes`, which runs over `_phasedBuilt`
+      // -- the FILL builds of that frame, which is every adaptive-shadow surface in it, because a rim
+      // plan carries `AdaptiveShadow: false` and draws no shadow. Either way the set a snap frame
+      // writes is the set that frame draws with, so no surface can keep a residual into the park.
+      const snapNow = wantsSnap;
+      const gl2 = this._renderer instanceof WebGL2Renderer ? this._renderer : null;
+      if (snapNow) {
+        this._shadowSnapPending = false;
+        if (gl2 !== null) { gl2.ShadowSnapped = 0; gl2.ShadowSnap = true; }
+      }
       this._render(dt);
+      if (snapNow && gl2 !== null) { gl2.ShadowSnap = false; this._shadowSnapped = gl2.ShadowSnapped; }
       if (wantsCost) this._tickPace.NoteRenderCost(performance.now() - tRender);
       // The renderer's ledger reset in `BeginFrame` and has just been filled by the walk. Read it
       // here rather than in the HUD block so a parked frame keeps reporting 0 alongside the other
@@ -1666,7 +1726,13 @@ export class Canvas implements DirtyTracker {
             // Read `r` against the window's PRESENTED frame count, not against `n` above and not
             // against the harness's `ticks`: `n` is ticks the profiler saw and `ticks` is rAF
             // callbacks, and this flag's entire purpose is to make those three different numbers.
-            ` | pace ${TickPaceText(this._tickPace.Mode)} r${this._counts.TicksRendered} s${this._counts.TicksSkipped} f${this._counts.TicksForced}`
+            ` | pace ${TickPaceText(this._tickPace.Mode)} r${this._counts.TicksRendered} s${this._counts.TicksSkipped} f${this._counts.TicksForced}` +
+            // The snap, cumulative-free: surfaces written WHOLE at the last park, so a window that
+            // ends parked reads the number of glass surfaces on screen and a window that never
+            // settled reads 0. Named `shadowSnap` rather than `snap` because `snap` three columns
+            // left is the snapshot pass's milliseconds. `armed` distinguishes "did not park" from
+            // "`?shadow-snap=off`".
+            ` | shadowSnap=${this._shadowSnapped} armed=${this._shadowSnapArmed ? 1 : 0}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
           this._profSum.Render = this._profSum.Total = 0;
@@ -1716,11 +1782,20 @@ export class Canvas implements DirtyTracker {
     // decided to do and has not done. Parking on it would be the one way `?tick-pace` could lose a
     // frame rather than defer one — the loop would sleep holding the render, and nothing would wake
     // it, because the signal that asked for it was consumed on the tick that skipped.
+    //
+    // `_shadowSnapPending` is the same kind of term and is the one that makes the parked frame
+    // cadence-independent. The clock alone says the ease has had long enough; it does not say how
+    // many frames were RENDERED inside that time, and the ease only steps on rendered frames. So the
+    // loop parks on the SNAP having happened, not on the window having elapsed: while this is set the
+    // loop is holding a render whose whole purpose is to be the last one, and sleeping on it would
+    // freeze exactly the residual this lane exists to remove. It is only ever set when the snap is
+    // armed, so `?shadow-snap=off` leaves this line reading false and the park is the old park.
     return (this.Root.Dirty & (DirtyFlag.Layout | DirtyFlag.Text)) === 0
       && this._dirtyNodes.size === 0
       && !this._animationManager.IsRunning
       && !this._needsRender
       && !this._paceOwed
+      && !this._shadowSnapPending
       && this._renderHold === 0
       && time >= this._shadowSettleUntil
       && this._pendingResize === null
@@ -5487,6 +5562,40 @@ export class Canvas implements DirtyTracker {
         : !armed ? ' reason=flat-program-off'
         : blBad ? ` reason=only-on-and-off-are-values-got-${borderless}` : '';
       JTrace(`jaui:borderless-program armed=${blArmed ? 'on' : 'off'} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}${blWhy}`);
+    }
+    // `?shadow-snap=off` — THE DIAGNOSTIC ARM, and the fix is DEFAULT ON.
+    //
+    // Off restores the loop as it parked before this lane: three taus of settle window and no final
+    // whole reading, so the parked frame keeps the ~5% residual the ease had not yet spent and is
+    // deterministic only because the tick cadence is. Both arms are in one binary so the two-arm
+    // glassshot is one build, and the mark prints on every page, armed or not, because a reader has
+    // to be able to tell the ON arm from a build that has not got the lane.
+    //
+    // Parsed HERE and applied to a field the TICK reads, not to anything `Init` builds: in worker
+    // mode `_platform.GetUrlSearch()` is the page's search handed over on the init message, and the
+    // snap is decided per tick in `_tickInner`, so the flag reaches the worker and its effect is
+    // readable on the census rather than only on the boot trace.
+    {
+      const shadowSnap = params.get('shadow-snap');
+      const bad = shadowSnap !== null && shadowSnap !== '' && shadowSnap !== 'on' && shadowSnap !== 'off';
+      this._shadowSnapArmed = bad || shadowSnap !== 'off';
+      const why = bad ? ` reason=only-on-and-off-are-values-got-${shadowSnap}` : '';
+      const taus = this._shadowSnapArmed ? SHADOW_SETTLE_TAUS : SHADOW_SETTLE_TAUS_UNSNAPPED;
+      JTrace(`jaui:shadow-snap armed=${this._shadowSnapArmed ? 'on' : 'off'} settleTaus=${taus}${why}`);
+      // The census, on the same channel `__jauiTickPace` uses and for the same reason: the effect
+      // this lane publishes is a property of the PARKED frame, and a reader outside the engine has
+      // no other way to ask whether the snap ran. `Snapped` is the surfaces the last snap render
+      // wrote whole — zero on a page with no adaptive shadow, zero under `=off`, and the count of
+      // glass surfaces on screen otherwise. `Pending` says a snap is owed right now.
+      const g = globalThis as unknown as {
+        __jauiShadowSnap?: () => { Armed: boolean; SettleTaus: number; Snapped: number; Pending: boolean };
+      };
+      g.__jauiShadowSnap = () => ({
+        Armed: this._shadowSnapArmed,
+        SettleTaus: taus,
+        Snapped: this._shadowSnapped,
+        Pending: this._shadowSnapPending,
+      });
     }
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
