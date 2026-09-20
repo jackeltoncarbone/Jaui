@@ -4465,9 +4465,16 @@ export class Canvas implements DirtyTracker {
     // Renderer exists (assigned before _initDebugFromUrl) and Init has not run yet (it runs at Start),
     // so the field is read when the scene FBO is actually built. See WebGL2.Renderer.DiagNoDepth.
     if (params.has('no-depth') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagNoDepth = true;
-    // `?no-cardcomposite` — take the OLD walk on this build. Not a rendering: the card composite
-    // is pixel-identical by construction (see WebGL2.Renderer, the card-composite section), so
-    // this is here to put the two cost models on one binary for a measurement, and for a bisect.
+    // `?cardcomposite` — take the COMPOSITE walk on this build. The default is OFF: the design was
+    // measured and refuted (ends 40 -> 1, frame +6.6%; see `CardCompositeEnabled`), so the engine
+    // an unflagged run gets is the pre-composite one and the composite is an instrument you ask
+    // for. Not a rendering: it is pixel-identical by construction, so this puts the two cost models
+    // on one binary for a measurement, and for a bisect.
+    //
+    // `?no-cardcomposite` is kept and is assigned SECOND, so it wins when both are present: the
+    // disabling flag is the one that names the shipped default, and a command line that asks for
+    // both should land on the default rather than silently on the instrument.
+    if (params.has('cardcomposite') && this._renderer instanceof WebGL2Renderer) this._renderer.CardCompositeEnabled = true;
     if (params.has('no-cardcomposite') && this._renderer instanceof WebGL2Renderer) this._renderer.CardCompositeEnabled = false;
     // `?snap-once` — MEASUREMENT ONLY, WRONG PIXELS. Serve every backdrop read from one full-canvas
     // snapshot so the frame does the same fill and the same arithmetic with the scene read-after-write

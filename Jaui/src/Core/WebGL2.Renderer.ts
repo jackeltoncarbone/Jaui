@@ -629,6 +629,11 @@ export class WebGL2Renderer implements Renderer {
     if (this.DiagSnapOnce) JTrace('jaui:snap-once armed=true pixels=WRONG');
     if (this.DiagBlurDummy) JTrace('jaui:blur-dummy armed=true pixels=WRONG');
     if (this.DiagBlurSrc !== null) JTrace(`jaui:blur-src armed=${this.DiagBlurSrc} pixels=WRONG`);
+    // The card composite is OFF by default and `?cardcomposite` turns it on, so the mark carries
+    // the same contract as the three above it: a reading of the composite walk WITHOUT this line is
+    // a reading of the wrong build. No `pixels=WRONG` -- this one is pixel-identical by
+    // construction (<= 115 single-LSB rasterisation ties on win32, byte-identical on Metal).
+    if (this.CardCompositeEnabled) JTrace('jaui:cardcomposite armed=true');
 
     // Probe for GPU timer-query support. The extension object exposes the
     // two enums we need; if it's missing, _timerExt stays null and
@@ -2020,9 +2025,24 @@ export class WebGL2Renderer implements Renderer {
   private _cardFallbacks = 0;
   private _cardBlitPixels = 0;
 
-  /** Off switch for the whole path (`?no-cardcomposite`), so a measurement can take the old walk on
-   *  the same build. Not a mode: the two are the same picture by construction. */
-  CardCompositeEnabled = true;
+  /** The whole path's gate. **OFF by default** (`?cardcomposite` turns it on, `?no-cardcomposite`
+   *  wins if both are given), because the design was measured and REFUTED: it does exactly what it
+   *  claims -- scene-encoder ends 40 -> 1, pixels byte-identical on Metal -- and the frame is
+   *  SLOWER for it (66.75 -> 71.49 GPU ms at dpr 2, +6.6% per tick, draws per tick held constant;
+   *  Perf/README.md, "THE CANDIDATE REFUTES ENCODER ENDS"). Encoder ends are not the cost.
+   *
+   *  It stays because it is the ONLY experiment in the sequence that moves encoder ends and nothing
+   *  else, and the rule that came out of that refutation -- an ablation that removes work cannot
+   *  price a boundary -- means any future claim about ends has to be made on this instrument.
+   *
+   *  With it false, every entry point below returns before it touches GL: `BeginCardComposite`
+   *  at its first line, so `_cardStack` and `_cardQueue` are never pushed to, `_cardPool` is never
+   *  constructed, `_ensureFrameSnapshot` is never called and no frame-snapshot texture exists;
+   *  `NoteSceneFootprint` at its own first line; `EndCardComposite` on an empty stack; and
+   *  `FlushCardComposites` / `_drainCards` on an empty queue. Everything else in the renderer
+   *  reaches the path through `_activeCard` (null) or `_cardQueue.length` (0), so the walk is the
+   *  pre-composite walk. Not a mode: the two are the same picture by construction. */
+  CardCompositeEnabled = false;
 
   private get _activeCard(): _CardTarget | null {
     const n = this._cardStack.length;

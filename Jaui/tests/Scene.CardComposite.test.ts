@@ -14,6 +14,14 @@
  *
  * `Scene.ReadAfterWrite.test.ts` is left byte-for-byte as it was: the M4 has measured numbers
  * against every table in it.
+ *
+ * **Everything in this file describes the walk UNDER `?cardcomposite`.** The design was measured
+ * and refuted -- it does exactly what it claims and the frame is 6.6% slower for it at dpr 2, so
+ * encoder ends are not the cost (Perf/README.md, "THE CANDIDATE REFUTES ENCODER ENDS") -- and the
+ * gate therefore defaults to OFF. An unflagged run takes the pre-composite walk, whose numbers are
+ * the `glass-grid` tables in `Scene.ReadAfterWrite.test.ts` (40 ends, all on `blur`), not these.
+ * The last describe in this file is the gate itself: default off, `?cardcomposite` on,
+ * `?no-cardcomposite` winning over both, and nothing allocated on the way past it.
  */
 import { describe, it, expect } from 'vitest';
 import { SceneReadLedger } from '@jaui/Core/Scene.Ledger';
@@ -596,8 +604,9 @@ describe('the renderer actually does what the arithmetic assumes', () => {
     expect(arrowBody(renderer, 'EndCardComposite')).not.toContain('Release');
   });
 
-  it('the whole path has an off switch and a per-frame count', () => {
+  it('the whole path has a gate and a per-frame count', () => {
     const jaui = readJaui();
+    expect(jaui).toContain("params.has('cardcomposite')");
     expect(jaui).toContain("params.has('no-cardcomposite')");
     expect(jaui).toContain('this._counts.CardComposites = this._renderer.CardComposites;');
     expect(jaui).toContain('cards=${c.CardComposites}');
@@ -686,5 +695,94 @@ describe('nesting — a glass child reads its parent card, and nothing pretends 
     // The probe runs between the fill's pyramid build and the fill's draw, so the card it reads has
     // had nothing drawn into it yet: on `glass-grid` all twenty take the free path.
     expect(arrowBody(renderer, 'BeginCardComposite')).toContain('Dirty: false,');
+  });
+});
+
+// ── The gate ──────────────────────────────────────────────────────────────────────────────────
+//
+// The composite is an INSTRUMENT, not a fix. It is the only experiment in the sequence that moves
+// scene-encoder ends and nothing else -- ends 40 -> 1 with draws per tick held constant at ~152 --
+// and what it measured is that the frame gets 6.6% SLOWER (66.75 -> 71.49 GPU ms at dpr 2). So the
+// code stays and the default goes off: an unflagged build must be the engine it was before any of
+// this landed, or every anchor in the ledger was taken against a different renderer than the one
+// the next reading comes off.
+
+describe('the gate — default OFF, `?cardcomposite` on, `?no-cardcomposite` over both', () => {
+  const renderer = readRenderer();
+  const jaui = readJaui();
+
+  it('the field defaults to false, so an unflagged build takes the pre-composite walk', () => {
+    expect(renderer).toMatch(/\n\s*CardCompositeEnabled = false;/);
+    expect(renderer).not.toContain('CardCompositeEnabled = true');
+  });
+
+  it('`?cardcomposite` sets it and `?no-cardcomposite` is assigned SECOND, so it wins', () => {
+    // Both flags on one command line is a mistake, and the mistake should land on the shipped
+    // default rather than silently on the instrument. Last write wins, so the order IS the rule.
+    const on = jaui.indexOf("params.has('cardcomposite') && this._renderer instanceof WebGL2Renderer) this._renderer.CardCompositeEnabled = true;");
+    const off = jaui.indexOf("params.has('no-cardcomposite') && this._renderer instanceof WebGL2Renderer) this._renderer.CardCompositeEnabled = false;");
+    expect(on).toBeGreaterThan(-1);
+    expect(off).toBeGreaterThan(on);
+  });
+
+  it('Init says the flag arrived, beside the other three measurement marks', () => {
+    // Same contract as `?snap-once`, `?blur-dummy` and `?blur-src`: a reading of the composite walk
+    // without this line in the trace is a reading of the wrong build. No `pixels=WRONG` -- this one
+    // is pixel-identical by construction (<= 115 single-LSB ties on win32, 0 on Metal).
+    expect(renderer).toContain("if (this.CardCompositeEnabled) JTrace('jaui:cardcomposite armed=true');");
+    const dummy = renderer.indexOf("JTrace('jaui:blur-dummy armed=true pixels=WRONG');");
+    const mark = renderer.indexOf("JTrace('jaui:cardcomposite armed=true');");
+    expect(dummy).toBeGreaterThan(-1);
+    expect(mark).toBeGreaterThan(dummy);
+  });
+
+  it('with the gate shut every entry point returns before it touches GL', () => {
+    // `BeginCardComposite` is the only door in: its check is the FIRST statement, ahead of the size
+    // test, the region arithmetic, the snapshot and the pool. The other three cannot do anything
+    // without it, and each says so itself rather than by inheritance.
+    const begin = arrowBody(renderer, 'BeginCardComposite');
+    expect(begin.indexOf('if (!this.CardCompositeEnabled) return false;')).toBe(begin.indexOf('if ('));
+    expect(arrowBody(renderer, 'NoteSceneFootprint')).toContain('if (!this.CardCompositeEnabled) return;');
+    expect(arrowBody(renderer, 'EndCardComposite')).toContain('if (card === undefined) return;');
+    expect(arrowBody(renderer, '_drainCards')).toContain('if (this._cardQueue.length === 0) return;');
+  });
+
+  it('no composite texture, pool bucket or snapshot is created without it', () => {
+    // Every allocation the path makes is DOWNSTREAM of the gate, in `BeginCardComposite`'s own
+    // body: the pool is constructed there and nowhere else, the frame snapshot is cut from there
+    // and nowhere else, and the two lists are only ever pushed to from the bracket. With the gate
+    // shut the stack and the queue stay empty, so every other card branch in the renderer -- they
+    // all test `_activeCard` or `_cardQueue.length` -- takes its null arm.
+    const begin = arrowBody(renderer, 'BeginCardComposite');
+    expect(begin).toContain('new FramebufferPool(gl)');
+    expect(renderer.split('new FramebufferPool(').length - 1).toBe(1);
+    expect(begin).toContain('this._ensureFrameSnapshot(');
+    expect(renderer.split('this._ensureFrameSnapshot(').length - 1).toBe(1);
+    expect(begin).toContain('this._cardStack.push(card);');
+    expect(renderer.split('this._cardStack.push(').length - 1).toBe(1);
+    expect(arrowBody(renderer, 'EndCardComposite')).toContain('this._cardQueue.push(card);');
+    expect(renderer.split('this._cardQueue.push(').length - 1).toBe(1);
+  });
+
+  it('an unflagged frame reads cards 0 and cardFallbacks 0, not 0 and 20', () => {
+    // A gate placed after the area test would count twenty fallbacks a frame and read as though the
+    // path had been tried and refused. Both counters are incremented strictly after the gate.
+    const begin = arrowBody(renderer, 'BeginCardComposite');
+    const gate = begin.indexOf('if (!this.CardCompositeEnabled) return false;');
+    expect(gate).toBeGreaterThan(-1);
+    expect(begin.indexOf('this._cardFallbacks++')).toBeGreaterThan(gate);
+    expect(begin.indexOf('this._cardComposites++')).toBeGreaterThan(gate);
+  });
+
+  it('the ledger keeps its columns with the gate shut — they are read, not conditioned', () => {
+    // `cards=` / `cardFallbacks=` / `EndsByKey` stay on the per-second line, on `jaui:render:end`
+    // and on `__jauiSceneLedger()` whatever the flag says. On unflagged `glass-grid` they read
+    // 0 / 0 / {blur: 40}: a zero that is measured, which is the only kind worth printing.
+    expect(jaui).toContain('this._counts.CardFallbacks = this._renderer.CardFallbacks;');
+    expect(jaui).toContain('cardFallbacks=${c.CardFallbacks}');
+    expect(jaui).toContain('endsByKey=${_endsByKey(c.SceneEndsByKey)}');
+    expect(jaui).toContain('_endsByKey(this._counts.SceneEndsByKey)');
+    expect(jaui).toContain('& { EndsByKey: Record<string, number> }');
+    expect(jaui).toContain('cards ${c.CardComposites} (fallback ${c.CardFallbacks})');
   });
 });

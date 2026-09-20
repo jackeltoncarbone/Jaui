@@ -702,7 +702,10 @@ describe('EndsByKey — the switch column priced by what it ended ON', () => {
     expect(l.TotalEndsByKey).toEqual({ snapshot: 2 });
   });
 
-  it('the composited glass-grid frame ends ONE encoder, and it is the SNAPSHOT that takes it', () => {
+  it('UNDER `?cardcomposite` the glass-grid frame ends ONE encoder, and the SNAPSHOT takes it', () => {
+    // Under the FLAG, and only under it: the composite defaults to off (it was measured and the
+    // frame got slower, so encoder ends are not the cost), and an unflagged `glass-grid` frame
+    // ends forty encoders, every one of them on `blur` -- which is the table above in this file.
     // The whole claim of the design in one line: the only end in the frame is on a canvas-sized
     // target above the cliff, and it is the frame snapshot's cut, once. Every card bind, every
     // pyramid build and every backdrop resolve after it is free, because nothing has drawn into the
