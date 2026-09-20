@@ -123,6 +123,15 @@ interface _PanelLocs {
   bgGradPos:        WebGLUniformLocation | null;
 }
 
+/** The sixth panel variant's program and its locations, together. One object because the two are
+ *  only ever read together and only ever valid together: the program is added to a batch and the
+ *  locations are read after that batch resolves, so a draw needs both or neither. Handed out by
+ *  `_panelBorderDirectOrThrow`, which is the one place that decides whether they exist. */
+interface _BorderDirectProgram {
+  Shader: ShaderProgram;
+  Locs: _PanelLocs;
+}
+
 const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelLocs => ({
   resolution:   gl.getUniformLocation(p, 'u_Resolution'),
   viewOffset:   gl.getUniformLocation(p, 'u_ViewOffset'),
@@ -239,12 +248,24 @@ interface _CardTarget {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/** Panel program variants compiled from the ONE `Jiv.Panel.frag`: glass, non-glass, flat,
- *  flat-and-borderless, flat-and-borderless-with-a-two-stop-gradient, and glass-with-a-direct
- *  border backdrop. Exported so `?flat-program` / `?borderless-program` / `?two-stop-gradient` /
- *  `?border-direct`'s init marks cannot claim a count the boot does not build;
- *  `tests/Flat.Program.test.ts` asserts `_compilePanelShader` issues exactly this many. */
-export const PANEL_PROGRAM_COUNT = 6;
+/** Panel program variants compiled from the ONE `Jiv.Panel.frag` AT BOOT: glass, non-glass, flat,
+ *  flat-and-borderless, and flat-and-borderless-with-a-two-stop-gradient. Exported so
+ *  `?flat-program` / `?borderless-program` / `?two-stop-gradient`'s init marks cannot claim a count
+ *  the boot does not build; `tests/Flat.Program.test.ts` asserts `_compilePanelShader` issues
+ *  exactly this many.
+ *
+ *  FIVE, NOT SIX. The sixth variant left the boot batch when `?border-direct` stopped defaulting
+ *  ON -- see `PANEL_PROGRAM_BORDER_DIRECT`. This constant is the count an UNFLAGGED page compiles,
+ *  which is exactly what the three marks that print it are claiming. */
+export const PANEL_PROGRAM_COUNT = 5;
+/** The SIXTH variant, `MATERIAL_GLASS + BORDER_DIRECT`: the glass program with the border zone's
+ *  one backdrop tap gathered from a blit of the scene instead of read out of a pyramid. It is a
+ *  sixth copy of the biggest fragment shader in the engine, and a page that did not arm
+ *  `?border-direct` never binds it -- it fails exactly the test rows 18-22 of the boot table fail.
+ *  So it is compiled when that flag ARMS (`EnsurePanelBorderDirectProgram`, from
+ *  `ArmFlaggedPrograms`) and never at boot, by the mechanism lane bootcompile built for the atlas
+ *  kernels. `tests/Border.Direct.test.ts` asserts the Add lives in that method and nowhere else. */
+export const PANEL_PROGRAM_BORDER_DIRECT = 1;
 
 const PANEL_FLOATS_PER_INSTANCE = 60;
 // Offsets INTO one packed panel instance of the five numbers the fragment's `hasBackdropFilter`
@@ -511,13 +532,27 @@ export class WebGL2Renderer implements Renderer {
   /** MATERIAL_GLASS + BORDER_DIRECT: the glass program with the border zone's ONE backdrop tap
    *  computed from a blit of the scene instead of read out of a pyramid. Only ever bound for a
    *  `'GlassBorderOnly'` draw whose backdrop handle came out of `ComputeBorderDirect`; see
-   *  `_batchTakesBorderDirectProgram`, which refuses rather than reasoning. */
-  private _panelShaderBorderDirect!: ShaderProgram;
-  private _panelLocsBorderDirect!: _PanelLocs;
+   *  `_batchTakesBorderDirectProgram`, which refuses rather than reasoning.
+   *
+   *  NULL UNTIL `?border-direct` ARMS, and null forever on a page that did not. It used to be in
+   *  the boot batch because the flag used to default ON; it does not since `2bb107f`, so by the
+   *  same test lane bootcompile applied to `BlurPass`'s atlas kernels this is a flag-only program
+   *  and the boot batch is not where it belongs. `EnsurePanelBorderDirectProgram` compiles it,
+   *  `_panelBorderDirectOrThrow` refuses a draw that reaches it unarmed. */
+  private _panelShaderBorderDirect: ShaderProgram | null = null;
+  private _panelLocsBorderDirect: _PanelLocs | null = null;
+  /** Have the sixth variant's uniform locations been read? Its program can be resolved by EITHER
+   *  batch -- `Init`'s, in main-thread mode where the URL is parsed first, or its own at arm time
+   *  -- and both paths end at `_wirePanelBorderDirect`, so the guard is what stops the second one
+   *  re-reading locations the first already has. Same shape as `BlurPass._atlasWired`. */
+  private _panelBorderDirectWired = false;
   /** `?border-direct=off` puts every glass rim back on its own four-pass pyramid in the same
-   *  binary - today's engine, byte for byte. Default ON. Set by `Jaui._initDebugFromUrl`, which
-   *  owns the flag and every refusal. */
-  DiagBorderDirect = true;
+   *  binary - today's engine, byte for byte. **Default OFF** since the M4 priced the direct gather
+   *  at +2.59 ms (`2bb107f`); `?border-direct` arms it. Set by `Jaui._initDebugFromUrl` on BOTH
+   *  arms, which owns the flag and every refusal -- unconditionally, because this field now
+   *  decides what is COMPILED and not only what is routed, and a default that disagreed with the
+   *  flag would put the sixth program back in every boot under a name that says it did not. */
+  DiagBorderDirect = false;
   /** WHICH ARM of `?border-direct` -- `'on'` is the one that draws; `'skipgather'` and `'nogather'`
    *  are the two timing probes that decompose the M4's +2.59 ms and draw a sharp rim. See
    *  `Border.Direct.BorderDirectArm`, which is where the decomposition is written down. Set by
@@ -824,7 +859,8 @@ export class WebGL2Renderer implements Renderer {
    * a frame, that the atlas kernels were missing.
    *
    * Programs a page never arms are never compiled. The arms' cost is booked to the arm, and says
-   * so on `jaui:shaders:issued n=<boot> +<late> reason=<flag>`.
+   * so on `jaui:shaders:issued n=<boot> +<late> reason=<flag>`. TWO flags reach it now: the five
+   * atlas kernels under `?pyramid-atlas` and the sixth panel variant under `?border-direct`.
    *
    * A no-op in main-thread mode, where the parse runs BEFORE Init: `_blur` does not exist yet and
    * Init reads `DiagPyramidAtlas` itself, so the same programs land in the boot batch there.
@@ -837,11 +873,20 @@ export class WebGL2Renderer implements Renderer {
     // FIRST so the arming lands on the pass that will actually run, not on one about to be dropped.
     const pool = this._reconcileBlurPool();
     const atlas = this.DiagPyramidAtlas ? this._blur.EnsureAtlasPrograms() : 0;
-    const late = pool + atlas;
+    // The SURVIVING border arm, which is the only one that binds the sixth panel program. The flag
+    // takes `on` / the bare flag / `off` and throws on anything else, and `_initDebugFromUrl` has
+    // already turned every refusal into `DiagBorderDirect = false` by the time this runs -- so the
+    // arms that compile it are `?border-direct` and `?border-direct=on` when nothing refused them,
+    // and NOTHING else: an unflagged page, `?border-direct=off`, and an arm refused for
+    // `card-composite-backdrop-is-not-in-the-scene-target` (or any of the other seven) all leave
+    // it uncompiled. Its own batch, issued and resolved here, exactly like the atlas kernels'.
+    const border = this.DiagBorderDirect ? this.EnsurePanelBorderDirectProgram() : 0;
+    const late = pool + atlas + border;
     if (late === 0) return;
     const reason = [
       pool > 0 ? 'blur-pool' : null,
       this.DiagPyramidAtlas ? 'pyramid-atlas' : null,
+      border > 0 ? 'border-direct' : null,
     ].filter((r) => r !== null).join('+');
     JTrace(`jaui:shaders:issued n=${this._bootShaderCount} +${late}`
       + ` reason=${reason} ${JMs(performance.now() - t0)}ms`);
@@ -895,6 +940,14 @@ export class WebGL2Renderer implements Renderer {
     this._rootBlur = null;
     this._sharedBlur = null;
     this._lastBlur = null;
+    // And the sixth panel program, which is the ONE panel variant the batch below does not
+    // unconditionally overwrite: `EnsurePanelBorderDirectProgram` is idempotent, so a non-null
+    // handle from the dead context would make it return 0 and leave the restored renderer binding
+    // a program that no longer exists. Cleared here, compiled again by whichever of the two batches
+    // owns it on this run.
+    this._panelShaderBorderDirect = null;
+    this._panelLocsBorderDirect = null;
+    this._panelBorderDirectWired = false;
     this._shadowShader = null;
     this._shadowLocs = null;
     this._shadowStateTex = null;
@@ -926,10 +979,12 @@ export class WebGL2Renderer implements Renderer {
     this._paceLastRetiredAt = 0;
 
     // ── One compile batch for every program an UNFLAGGED page can draw with ──
-    // SEVENTEEN programs stand between a cold tab and its first pixel: the six panel variants, the
+    // SIXTEEN programs stand between a cold tab and its first pixel: the five panel variants, the
     // text, stroke, two SVG, blit, clip-mask, progressive-blur and adaptive-shadow singles, and the
-    // three kernels every `BlurPass` has. The five a `BlurPass` binds only under an atlas arm are
-    // NOT here -- see `ArmFlaggedPrograms` and `BlurPass._atlas`. Compiled one at a time —
+    // three kernels every `BlurPass` has. Six programs are NOT here, and each is a flag's: the five
+    // a `BlurPass` binds only under an atlas arm, and the sixth panel variant only `?border-direct`
+    // binds -- see `ArmFlaggedPrograms`, `BlurPass._atlas` and `PANEL_PROGRAM_BORDER_DIRECT`.
+    // Compiled one at a time —
     // compile, ask, link, ask — they run the driver's compiler pool one deep and the waits add up
     // in a line; issued together they overlap, and the whole set costs about what its slowest
     // member costs. See `ShaderBatch` for the named source (KHR_parallel_shader_compile). Nothing
@@ -960,6 +1015,11 @@ export class WebGL2Renderer implements Renderer {
     // parse instead. Either way an unflagged page never issues them. See `BlurPass._atlas`.
     if (this.DiagPyramidAtlas) this._blur.EnsureAtlasPrograms(batch);
     this._compilePanelShader(batch);
+    // Same MAIN-THREAD-ORDER-ONLY story, for the sixth panel variant: on that path the flag is
+    // already parsed and the program joins the boot batch for free; on the worker path
+    // `DiagBorderDirect` is still its OFF default however the URL read and `ArmFlaggedPrograms`
+    // issues it after the parse. Either way a page that did not arm the flag never compiles it.
+    if (this.DiagBorderDirect) this.EnsurePanelBorderDirectProgram(batch);
     this._compileTextShader(batch);
     this._compileStrokeShader(batch);
     this._compileSvgFillShader(batch);
@@ -1488,12 +1548,11 @@ export class WebGL2Renderer implements Renderer {
       // raw scene copy the shader is about to treat as a pyramid, and a wrong picture says so.
       throw new Error('[Jaui] a border-direct backdrop reached a batch that is not a straight-gathering glass rim');
     }
-    const isFlat = !isGlass
-      && this.DiagFlatProgram
-      && backdrop === null
-      && this._batchTakesFlatProgram(baseFrostLod);
-    const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
-    const isTwoStop = isBorderless && this.DiagTwoStopGradient && _paintFitsTwoStops(bgPaint);
+    // Resolved to a LOCAL, before the three classifying scans below, for two reasons. It is the
+    // assertion the brief asks for -- the pick can never name a program that was not compiled,
+    // because the only way to reach that program is through a throw that says so -- and it is what
+    // narrows `ShaderProgram | null` to `ShaderProgram` across the calls that follow, which a
+    // property read could not do.
     // `?border-direct=nogather` keeps the blit, keeps the removed pyramids and keeps every draw,
     // and sends the rim through the ORDINARY glass program instead: `sampleBackdrop` then reads the
     // raw copy at level 0 in one tap. The picture is a sharp rim and the arm is a timing probe, but
@@ -1502,13 +1561,20 @@ export class WebGL2Renderer implements Renderer {
     // It is decided HERE, one line above the pick, so the five-way ladder below is the same text it
     // has been since the two-stop program joined it.
     const isBorderDirect = hasBorderScratch && this.DiagBorderArm !== 'nogather';
-    const program = isBorderDirect ? this._panelShaderBorderDirect
+    const direct = isBorderDirect ? this._panelBorderDirectOrThrow() : null;
+    const isFlat = !isGlass
+      && this.DiagFlatProgram
+      && backdrop === null
+      && this._batchTakesFlatProgram(baseFrostLod);
+    const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
+    const isTwoStop = isBorderless && this.DiagTwoStopGradient && _paintFitsTwoStops(bgPaint);
+    const program = direct !== null ? direct.Shader
       : isGlass ? this._panelShaderGlass
       : isTwoStop ? this._panelShaderTwoStop
       : isBorderless ? this._panelShaderBorderless
       : isFlat ? this._panelShaderFlat
       : this._panelShaderNone;
-    const locs = isBorderDirect ? this._panelLocsBorderDirect
+    const locs = direct !== null ? direct.Locs
       : isGlass ? this._panelLocsGlass
       : isTwoStop ? this._panelLocsTwoStop
       : isBorderless ? this._panelLocsBorderless
@@ -4108,12 +4174,55 @@ export class WebGL2Renderer implements Renderer {
       batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true });
     this._panelShaderTwoStop = batch.Add(panelVertSrc, panelFragSrc,
       { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true, TWO_STOP_GRADIENT: true });
-    // A SIXTH: the glass program with the border zone's backdrop tap computed directly. Stacked on
-    // MATERIAL_GLASS, never on MATERIAL_FLAT, because a flat panel has no border zone to feed and
-    // the whole apparatus is inside `#if !defined(MATERIAL_FLAT)`. Issued unconditionally, in both
-    // arms of `?border-direct`, so the flag changes ROUTING and not the boot.
-    this._panelShaderBorderDirect = batch.Add(panelVertSrc, panelFragSrc,
+    // A SIXTH IS NOT ISSUED HERE. MATERIAL_GLASS + BORDER_DIRECT used to be, on the argument that
+    // the flag changes routing and not the boot -- which was right while `?border-direct` defaulted
+    // ON, because then both arms of the comparison were pages that bind it. Since `2bb107f` the
+    // default is OFF, so an unflagged page compiles a sixth copy of the biggest fragment shader in
+    // the engine and never binds it. See `EnsurePanelBorderDirectProgram`.
+  };
+
+  /**
+   * Compile the SIXTH panel variant -- `MATERIAL_GLASS + BORDER_DIRECT` -- and return how many
+   * programs were issued: `PANEL_PROGRAM_BORDER_DIRECT`, or 0 if this renderer already has it, so
+   * a caller's mark cannot double-count. The `defines` and the two sources are exactly what
+   * `_compilePanelShader`'s sixth `Add` passed; only which `ShaderBatch` calls `Add` has moved.
+   *
+   * WHERE THIS IS CALLED FROM, which is the whole of why it exists. Not at boot: `?border-direct`
+   * is off by default and this program is dead on a page that did not arm it. Not on first use
+   * either -- that would land on the first frame with a glass rim on it, which is the frame every
+   * boot measurement reads. It is called the moment the flag ARMS, from
+   * `ArmFlaggedPrograms`, which `_initDebugFromUrl` runs as its last statement: after the URL is
+   * parsed and after every refusal, and still ahead of the first tick.
+   *
+   * `batch` is the caller's when one is still open -- main-thread mode parses the URL BEFORE
+   * `Init`, so there this joins the boot batch and costs the arm nothing extra. Without one it
+   * issues into a batch of its own, resolves it and wires its own locations.
+   */
+  EnsurePanelBorderDirectProgram = (batch?: ShaderBatch): number => {
+    if (this._panelShaderBorderDirect !== null) return 0;
+    const b = batch ?? new ShaderBatch(this._gl);
+    this._panelShaderBorderDirect = b.Add(panelVertSrc, panelFragSrc,
       { MATERIAL_GLASS: true, BORDER_DIRECT: true });
+    if (batch === undefined) { b.Resolve(); this._wirePanelBorderDirect(); }
+    return PANEL_PROGRAM_BORDER_DIRECT;
+  };
+
+  /** The sixth variant and its locations, or a throw naming exactly what was not armed.
+   *
+   *  THE BUG THIS MAKES IMPOSSIBLE: a page that did not arm `?border-direct` routing a rim to a
+   *  program it never compiled. Falling through to `_panelShaderGlass` would draw the rim with the
+   *  PYRAMID tap against a handle that holds a raw scene copy -- a wrong picture that reads as a
+   *  blur bug -- and falling through to `null` would be a `useProgram(null)` and a blank card. The
+   *  same answer `BlurPass._atlasProgramsOrThrow` gives, for the same reason. */
+  private _panelBorderDirectOrThrow = (): _BorderDirectProgram => {
+    const shader = this._panelShaderBorderDirect;
+    const locs = this._panelLocsBorderDirect;
+    if (shader === null || locs === null) {
+      throw new Error('[Jaui] a border-direct draw reached a renderer whose BORDER_DIRECT panel'
+        + ' program was never compiled. It is issued when ?border-direct arms, not at boot:'
+        + ' call EnsurePanelBorderDirectProgram (ArmFlaggedPrograms does it off DiagBorderDirect).');
+    }
+    return { Shader: shader, Locs: locs };
   };
 
   private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
@@ -4126,7 +4235,13 @@ export class WebGL2Renderer implements Renderer {
     this._panelLocsFlat  = _extractPanelLocs(gl, this._panelShaderFlat.Program);
     this._panelLocsBorderless = _extractPanelLocs(gl, this._panelShaderBorderless.Program);
     this._panelLocsTwoStop = _extractPanelLocs(gl, this._panelShaderTwoStop.Program);
-    this._panelLocsBorderDirect = _extractPanelLocs(gl, this._panelShaderBorderDirect.Program);
+    // The sixth variant's locations when this renderer HAS it and the batch that carried it has
+    // been resolved by whoever owned that batch. `EnsurePanelBorderDirectProgram` wires its own
+    // when it owns the batch, so this is the other case: it joined `Init`'s batch (main-thread
+    // mode, where the URL is parsed first) and this is the call that follows that `Resolve`.
+    if (this._panelShaderBorderDirect !== null && !this._panelBorderDirectWired) {
+      this._wirePanelBorderDirect();
+    }
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jaui] Failed to create panel instance buffer');
@@ -4134,6 +4249,16 @@ export class WebGL2Renderer implements Renderer {
 
     // Dedicated VAO for panel rendering (separate from text)
     this._panelVao = this._createInstancedVao(gl, this._panelInstanceBuffer, PANEL_ATTR_COUNT, PANEL_BYTES_PER_INSTANCE);
+  };
+
+  /** Read the sixth variant's uniform locations. Both compile paths end here, once each. */
+  private _wirePanelBorderDirect = (): void => {
+    const shader = this._panelShaderBorderDirect;
+    if (shader === null) {
+      throw new Error('[Jaui] _wirePanelBorderDirect ran before the BORDER_DIRECT program existed');
+    }
+    this._panelBorderDirectWired = true;
+    this._panelLocsBorderDirect = _extractPanelLocs(this._gl, shader.Program);
   };
 
   private _compileTextShader = (batch: ShaderBatch): void => {

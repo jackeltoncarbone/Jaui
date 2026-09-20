@@ -2,11 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BlurPass, BLUR_PROGRAMS_BOOT, BLUR_PROGRAMS_ATLAS } from '../src/Core/BlurPass';
+import { PANEL_PROGRAM_COUNT, PANEL_PROGRAM_BORDER_DIRECT } from '../src/Core/WebGL2.Renderer';
 import { FakeGl } from './Blur.Chains.Source';
 import { arrowBody, readRenderer, readJaui } from './Scene.ReadAfterWrite.Source';
 
 /**
- * LANE bootcompile -- A PROGRAM AN UNFLAGGED PAGE NEVER BINDS IS NOT COMPILED AT BOOT.
+ * LANES bootcompile + bootcompile2 -- A PROGRAM AN UNFLAGGED PAGE NEVER BINDS IS NOT COMPILED
+ * AT BOOT.
+ *
+ * TWO SETS have left the boot batch by the one mechanism, and the test for both is the same
+ * sentence: does a page that armed no flag ever BIND this program? `BlurPass`'s five atlas
+ * kernels (bootcompile, 22 -> 17) and the sixth panel variant, MATERIAL_GLASS + BORDER_DIRECT
+ * (bootcompile2, 17 -> 16). The second only became flag-only when `2bb107f` flipped
+ * `?border-direct` to default OFF after the M4 priced the gather at +2.59 ms; while it defaulted
+ * ON it belonged at boot, and this file says so rather than pretending it was always wrong.
  *
  * The claim in one line: nothing about WHAT any program computes moves, only WHEN it is compiled.
  * So every assertion here is about the batch a program lands in and the moment that batch is
@@ -134,6 +143,7 @@ describe('WHEN each program is compiled, in source', () => {
     expect(body).toContain('jaui:shaders:issued n=${this._bootShaderCount} +${late}');
     expect(body).toContain('reason=${reason}');
     expect(body).toContain("this.DiagPyramidAtlas ? 'pyramid-atlas' : null");
+    expect(body).toContain("border > 0 ? 'border-direct' : null,");
     // Nothing compiled, nothing printed: an unflagged page's trace is exactly what it was.
     expect(body).toContain('if (late === 0) return;');
   });
@@ -145,6 +155,82 @@ describe('WHEN each program is compiled, in source', () => {
     expect(body).toContain('batch.Resolve();');
     expect(body).toContain('pass.WireLocations();');
     expect(body).toContain('return BLUR_PROGRAMS_BOOT + atlas;');
+  });
+});
+
+describe('the SIXTH panel program leaves the boot batch by the same mechanism', () => {
+  it('nothing in _compilePanelShader mentions it, and exactly one Add in the file does', () => {
+    const compile = arrowBody(RENDERER, '_compilePanelShader');
+    expect(compile).not.toContain('BORDER_DIRECT: true');
+    expect(compile).not.toContain('DiagBorderDirect');
+    expect(compile).not.toContain('_panelShaderBorderDirect');
+    // The whole edit, stated as an identity: ONE `Add`, the same two sources, the same defines,
+    // in a different batch. Nothing about what it computes can have moved.
+    expect((RENDERER.match(/BORDER_DIRECT: true/g) ?? []).length).toBe(1);
+    const ensure = arrowBody(RENDERER, 'EnsurePanelBorderDirectProgram');
+    expect(ensure).toContain('b.Add(panelVertSrc, panelFragSrc,');
+    expect(ensure).toContain('{ MATERIAL_GLASS: true, BORDER_DIRECT: true });');
+  });
+
+  it('it is idempotent, owns its batch when it has none, and returns what it issued', () => {
+    // The same three properties `EnsureAtlasPrograms` has, for the same three reasons: a second
+    // call must compile nothing and return 0 so the late mark cannot double-count, a caller with
+    // an open batch must be joined rather than serialised, and a caller without one gets a
+    // parallel batch of its own that is resolved and wired before it returns.
+    const ensure = arrowBody(RENDERER, 'EnsurePanelBorderDirectProgram');
+    expect(ensure).toContain('if (this._panelShaderBorderDirect !== null) return 0;');
+    expect(ensure).toContain('const b = batch ?? new ShaderBatch(this._gl);');
+    expect(ensure).toContain('if (batch === undefined) { b.Resolve(); this._wirePanelBorderDirect(); }');
+    expect(ensure).toContain('return PANEL_PROGRAM_BORDER_DIRECT;');
+    expect(PANEL_PROGRAM_BORDER_DIRECT).toBe(1);
+  });
+
+  it('an unarmed page cannot route a border to it: the pick throws by name', () => {
+    // The atlas kernels' own answer, for the panel program. A fallback to `_panelShaderGlass`
+    // would shade the rim with the PYRAMID tap against a handle holding a raw scene copy -- a
+    // wrong picture that reads as a blur bug and not as a missing program -- and there is no
+    // other program that could be right.
+    const orThrow = arrowBody(RENDERER, '_panelBorderDirectOrThrow');
+    expect(orThrow).toContain('if (shader === null || locs === null) {');
+    expect(orThrow).toContain('was never compiled');
+    expect(orThrow).toContain('EnsurePanelBorderDirectProgram');
+    expect(RENDERER).toContain(
+      'const direct = isBorderDirect ? this._panelBorderDirectOrThrow() : null;');
+    expect(RENDERER).toContain('const program = direct !== null ? direct.Shader');
+    expect(RENDERER).toContain('const locs = direct !== null ? direct.Locs');
+  });
+
+  it('the wiring follows whichever batch carried it, once', () => {
+    // Two compile paths, one wire. `Init`'s batch (main-thread order) resolves in
+    // `_ensureShaders`, which calls `_wirePanelShader`; the arm's own batch resolves inside
+    // `EnsurePanelBorderDirectProgram`. `_panelBorderDirectWired` is what stops the second from
+    // re-reading locations the first already has -- `BlurPass._atlasWired`'s shape exactly.
+    const wirePanel = arrowBody(RENDERER, '_wirePanelShader');
+    expect(wirePanel).toContain('if (this._panelShaderBorderDirect !== null && !this._panelBorderDirectWired) {');
+    const wireDirect = arrowBody(RENDERER, '_wirePanelBorderDirect');
+    expect(wireDirect).toContain('this._panelBorderDirectWired = true;');
+    expect(wireDirect).toContain('_extractPanelLocs(this._gl, shader.Program)');
+  });
+
+  it('the flag and the renderer field agree on OFF, so the worker path cannot compile it by default', () => {
+    // On the worker path `Init` is awaited BEFORE the URL is parsed, so `Init`'s gate reads this
+    // field's DEFAULT however the URL reads. A `true` default there would have put the program
+    // back in every boot batch while the mark still said the flag was off -- the vacuous shape.
+    expect(RENDERER).toContain('DiagBorderDirect = false;');
+    expect(JAUI).toContain('private _borderDirect: boolean = false;');
+    // And Jaui hands the SURVIVING arm over on both arms, outside the refusal block.
+    expect(JAUI).toContain('this._renderer.DiagBorderDirect = this._borderDirect;');
+    expect(JAUI).not.toContain('if (r instanceof WebGL2Renderer) r.DiagBorderDirect = this._borderDirect;');
+  });
+
+  it('a restored context drops it, because the ensure method would otherwise skip the rebuild', () => {
+    // Every other panel variant is overwritten by `Init`'s batch. This one is guarded by its own
+    // `!== null`, so a handle from the dead context would survive the restore and be bound.
+    expect(INIT).toContain('this._panelShaderBorderDirect = null;');
+    expect(INIT).toContain('this._panelLocsBorderDirect = null;');
+    expect(INIT).toContain('this._panelBorderDirectWired = false;');
+    expect(INIT.indexOf('this._panelShaderBorderDirect = null;'))
+      .toBeLessThan(INIT.indexOf('const batch = new ShaderBatch(gl);'));
   });
 });
 
@@ -160,7 +246,8 @@ describe('the arming moment is after the URL and before the first frame', () => 
     const body = arrowBody(JAUI, '_initDebugFromUrl');
     expect(body).toContain('if (this._renderer instanceof WebGL2Renderer) this._renderer.ArmFlaggedPrograms();');
     // LAST: a `?pyramid-atlas` refused for one of its named conflicts must leave no kernels behind.
-    const armAt = body.indexOf('ArmFlaggedPrograms');
+    // The CALL, not the first mention: a comment elsewhere in the method may name the method.
+    const armAt = body.indexOf('this._renderer.ArmFlaggedPrograms();');
     expect(body.indexOf("jaui:pyramid-atlas armed=false reason=")).toBeLessThan(armAt);
     expect(body.slice(armAt)).not.toContain('params.');
     // And the parse itself is in the constructor, ahead of `Start` and so ahead of the first tick.
@@ -169,17 +256,37 @@ describe('the arming moment is after the URL and before the first frame', () => 
 });
 
 describe('the boot set is every program an unflagged page can bind, and only those', () => {
-  it('Init issues the six panel programs, the eight singles and the blur pass, and no arm-only one', () => {
+  it('Init issues the five panel programs, the eight singles and the blur pass, and no arm-only one', () => {
     const init = INIT;
     for (const compile of [
       '_compilePanelShader', '_compileTextShader', '_compileStrokeShader', '_compileSvgFillShader',
       '_compileSvgStrokeShader', '_compileBlitShader', '_compileClipMaskShader',
       '_compileProgBlurShader', '_compileShadowBackdropShader',
     ]) expect(init).toContain(`this.${compile}(batch);`);
-    // The ONE conditional add in the batch, and its condition is a flag.
-    const adds = init.split('\n').filter((l) => l.includes('EnsureAtlasPrograms'));
-    expect(adds.length).toBe(1);
-    expect(adds[0]).toContain('if (this.DiagPyramidAtlas)');
+    // TWO conditional adds in the batch now, and each one's condition is a flag. Both are
+    // MAIN-THREAD ORDER ONLY -- that path parses the URL in the `Canvas` constructor, ahead of
+    // `Init`, so a flag that armed there joins the boot batch for free. On the worker path both
+    // fields still hold their OFF defaults here however the URL read.
+    const atlasAdds = init.split('\n').filter((l) => l.includes('EnsureAtlasPrograms'));
+    expect(atlasAdds.length).toBe(1);
+    expect(atlasAdds[0]).toContain('if (this.DiagPyramidAtlas)');
+    const borderAdds = init.split('\n')
+      .filter((l) => l.includes('this.EnsurePanelBorderDirectProgram(batch);'));
+    expect(borderAdds.length).toBe(1);
+    expect(borderAdds[0]).toContain('if (this.DiagBorderDirect)');
+  });
+
+  it('the boot set is SIXTEEN, and the three places that say so agree', () => {
+    // Five panel variants, the eight singles (text, stroke, two SVG, blit, clip mask, progressive
+    // blur, adaptive-shadow probe), and a `BlurPass`'s three. Arithmetic rather than a literal so
+    // that a variant added anywhere has to move this line too.
+    const SINGLES = 8;
+    expect(PANEL_PROGRAM_COUNT + SINGLES + BLUR_PROGRAMS_BOOT).toBe(16);
+    expect(INIT).toContain('SIXTEEN programs stand between a cold tab and its first pixel');
+    expect(readFileSync(join(__dirname, '../src/Core/Shader.Compiler.ts'), 'utf8'))
+      .toContain('SIXTEEN IS THE UNFLAGGED SET');
+    // And the six that are NOT in it are exactly the two flags' sets.
+    expect(BLUR_PROGRAMS_ATLAS + PANEL_PROGRAM_BORDER_DIRECT).toBe(6);
   });
 
   it('the restart probe and the instanced VAO stay where they are: off the boot batch', () => {

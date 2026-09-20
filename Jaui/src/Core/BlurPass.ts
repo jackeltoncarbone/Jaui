@@ -801,7 +801,7 @@ export class BlurPass {
    * `batch` is the caller's when there is one still open (main-thread mode parses the URL BEFORE
    * `Init`, so these join the boot batch there and cost that arm nothing extra); otherwise this
    * issues all five into a batch of its own and resolves once, which is the same parallel compile
-   * the boot batch gets, just over five programs instead of seventeen.
+   * the boot batch gets, just over five programs instead of sixteen.
    */
   EnsureAtlasPrograms = (batch?: ShaderBatch): number => {
     if (this._atlas !== null) return 0;

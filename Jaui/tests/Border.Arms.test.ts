@@ -142,8 +142,11 @@ describe('borderdirect3 > the arm gate, read off the source', () => {
     // And the five-way pick below it is the same text it was: the arm is decided ABOVE the
     // ladder, so `?two-stop-gradient`'s and `?borderless-program`'s own routing tests still read
     // the line they pinned.
-    expect(RENDERER).toContain('const program = isBorderDirect ? this._panelShaderBorderDirect');
-    expect(RENDERER).toContain('const locs = isBorderDirect ? this._panelLocsBorderDirect');
+    // Since lane bootcompile2 the pick goes through the null-safe local the deferral demands: the arm
+    // still decides ONE line ('direct' is derived from isBorderDirect) and the ladder reads that local.
+    expect(RENDERER).toContain('const direct = isBorderDirect ? this._panelBorderDirectOrThrow() : null;');
+    expect(RENDERER).toContain('const program = direct !== null ? direct.Shader');
+    expect(RENDERER).toContain('const locs = direct !== null ? direct.Locs');
     // The batch gate still guards the handle on EVERY arm: a rim that is not border-only would
     // shade its interior out of a raw scene copy under the glass program exactly as it would
     // under the direct one.

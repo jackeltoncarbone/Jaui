@@ -5,7 +5,7 @@ import {
   PlanBorderDirect, BORDER_DIRECT_PHASE, BORDER_DIRECT_MAX_TAP_OFFSET,
 } from '../src/Core/Border.Direct';
 import { ResolveRegionRect, type BackdropRect } from '../src/Core/BlurPass';
-import { PANEL_PROGRAM_COUNT } from '../src/Core/WebGL2.Renderer';
+import { PANEL_PROGRAM_COUNT, PANEL_PROGRAM_BORDER_DIRECT } from '../src/Core/WebGL2.Renderer';
 import { SceneReadLedger } from '../src/Core/Scene.Ledger';
 import { arrowBody } from './Scene.ReadAfterWrite.Source';
 import { PROGRAMS, preprocess, codeLines, braceBalance, readPanelFrag } from './Flat.Program.Source';
@@ -241,12 +241,26 @@ describe('border-direct > the wiring, read off the source', () => {
     expect(JAUI).toContain("JTrace(`jaui:border-direct armed=${this._borderDirect ? 'on' : 'off'}`");
   });
 
-  it('the program is a SIXTH variant, issued unconditionally, and gated on the batch', () => {
-    expect(PANEL_PROGRAM_COUNT).toBe(6);
+  it('the program is a SIXTH variant, compiled on the ARM and not at boot, and gated on the batch', () => {
+    // FIVE AT BOOT, A SIXTH ON ARM (lane bootcompile2). It used to be issued unconditionally, on
+    // the argument that `?border-direct` changes routing and not the boot -- sound while the flag
+    // defaulted ON, and false since `2bb107f` flipped it OFF: an unflagged page was compiling a
+    // sixth copy of the biggest fragment program in the engine and never binding it.
+    expect(PANEL_PROGRAM_COUNT).toBe(5);
+    expect(PANEL_PROGRAM_BORDER_DIRECT).toBe(1);
     expect(RENDERER).toContain('{ MATERIAL_GLASS: true, BORDER_DIRECT: true }');
-    // Issued outside any flag test, so `?border-direct=off` is the same binary with the same boot.
+    // The defines are unchanged text; only which `ShaderBatch` calls `Add` moved. The boot batch's
+    // own compile no longer mentions this variant at all.
     const compile = arrowBody(RENDERER, '_compilePanelShader');
     expect(compile).not.toContain('DiagBorderDirect');
+    expect(compile).not.toContain('BORDER_DIRECT: true');
+    // And the one place it IS added is the ensure method, which is idempotent and says how many it
+    // issued so a caller's mark cannot double-count.
+    const ensure = arrowBody(RENDERER, 'EnsurePanelBorderDirectProgram');
+    expect(ensure).toContain('if (this._panelShaderBorderDirect !== null) return 0;');
+    expect(ensure).toContain('{ MATERIAL_GLASS: true, BORDER_DIRECT: true }');
+    expect(ensure).toContain('return PANEL_PROGRAM_BORDER_DIRECT;');
+    expect((RENDERER.match(/BORDER_DIRECT: true/g) ?? []).length).toBe(1);
     // Routed on handle identity, and a batch that is not a straight-gathering border-only rim is a
     // THROW: the walk hands this handle to exactly one draw.
     expect(RENDERER).toContain('backdrop === this._borderScratchHandle');
@@ -255,6 +269,56 @@ describe('border-direct > the wiring, read off the source', () => {
     const gate = arrowBody(RENDERER, '_batchTakesBorderDirectProgram');
     expect(gate).toContain('PANEL_OFF_BORDER_EDGE_AA] < 0');
     expect(gate).toContain('PANEL_OFF_REFRACTION] >= BORDER_STRAIGHT_GATHER_REFRACTION');
+  });
+
+  it('the pick can never name a program that was not compiled -- it throws by name instead', () => {
+    // The bug this lane had to make impossible: an UNARMED page routing a rim to BORDER_DIRECT.
+    // Falling through to the glass program would shade the rim with the pyramid tap against a
+    // handle holding a raw scene copy -- a wrong picture that reads as a blur bug -- so the pick
+    // resolves through `_panelBorderDirectOrThrow` and nothing else.
+    expect(RENDERER).toContain(
+      'const direct = isBorderDirect ? this._panelBorderDirectOrThrow() : null;');
+    expect(RENDERER).toContain('const program = direct !== null ? direct.Shader');
+    expect(RENDERER).toContain('const locs = direct !== null ? direct.Locs');
+    const orThrow = arrowBody(RENDERER, '_panelBorderDirectOrThrow');
+    expect(orThrow).toContain('if (shader === null || locs === null) {');
+    expect(orThrow).toContain('BORDER_DIRECT panel');
+    expect(orThrow).toContain('never compiled');
+    // No fallback anywhere in it: the whole point is that there is no other program to pick.
+    expect(orThrow).not.toContain('_panelShaderGlass');
+  });
+
+  it('the arm compiles it, and an unflagged page never issues it at all', () => {
+    // `ArmFlaggedPrograms` runs as the LAST statement of `_initDebugFromUrl`, after every refusal,
+    // so the arms that compile this program are exactly the arms that survived: `?border-direct`
+    // and `?border-direct=on` when nothing refused them. `off`, absent, and any of the eight
+    // refusals all leave `DiagBorderDirect` false and the program uncompiled.
+    const arm = arrowBody(RENDERER, 'ArmFlaggedPrograms');
+    expect(arm).toContain(
+      'const border = this.DiagBorderDirect ? this.EnsurePanelBorderDirectProgram() : 0;');
+    expect(arm).toContain("border > 0 ? 'border-direct' : null,");
+    expect(arm).toContain('const late = pool + atlas + border;');
+    // Init's copy is main-thread order only, where the parse runs first and it joins the boot batch.
+    expect(RENDERER).toContain('if (this.DiagBorderDirect) this.EnsurePanelBorderDirectProgram(batch);');
+    // The renderer's own default must AGREE with the flag's, or the worker path -- where Init runs
+    // before the URL is parsed -- would compile it on every page under a name that says it did not.
+    expect(RENDERER).toContain('DiagBorderDirect = false;');
+    // And Jaui hands the surviving arm over on BOTH arms, outside the `if (this._borderDirect)`
+    // block: a compile reads this field, so "not assigned" can no longer mean "off".
+    expect(JAUI).toContain('this._renderer.DiagBorderDirect = this._borderDirect;');
+    expect(JAUI).not.toContain('if (r instanceof WebGL2Renderer) r.DiagBorderDirect = this._borderDirect;');
+    // After the refusal block, so what is handed over is what SURVIVED.
+    expect(JAUI.indexOf('jaui:border-direct armed=false reason=${why}'))
+      .toBeLessThan(JAUI.indexOf('this._renderer.DiagBorderDirect = this._borderDirect;'));
+  });
+
+  it('a restored context recompiles it, because the ensure method is idempotent', () => {
+    // `Init` re-runs on the SAME renderer after a context restore. Every other panel variant is
+    // overwritten by the batch; this one would be skipped by its own `!== null` guard and the
+    // restored renderer would bind a program from a context that no longer exists.
+    expect(RENDERER).toContain('this._panelShaderBorderDirect = null;');
+    expect(RENDERER).toContain('this._panelLocsBorderDirect = null;');
+    expect(RENDERER).toContain('this._panelBorderDirectWired = false;');
   });
 
   it('the shader\'s solidness edge is the number the batch gate reads', () => {

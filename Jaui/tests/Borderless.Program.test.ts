@@ -319,9 +319,11 @@ describe('routing: which batches take the borderless program', () => {
     // makes is unchanged and is about the DEFINE SET, not the count - every Add that carries
     // NO_SHAPE_GRADIENT carries MATERIAL_FLAT too.
     // Re-aimed at the constant, not a literal: lane borderdirect issued a SIXTH variant
-    // (MATERIAL_GLASS + BORDER_DIRECT). What this test is about — NO_SHAPE_GRADIENT is never
-    // issued without MATERIAL_FLAT, and the count the constant claims is the count compiled — is
-    // unchanged.
+    // (MATERIAL_GLASS + BORDER_DIRECT), and lane bootcompile2 moved that one out of the boot
+    // batch, so the constant is 5 again and the regex below -- which matches `batch.Add`, the boot
+    // batch's own name for it -- counts exactly the boot set. What this test is about —
+    // NO_SHAPE_GRADIENT is never issued without MATERIAL_FLAT, and the count the constant claims
+    // is the count compiled at boot — is unchanged.
     expect(RENDERER).toContain(`export const PANEL_PROGRAM_COUNT = ${PANEL_PROGRAM_COUNT};`);
     expect(RENDERER).toContain(
       'batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true })');
@@ -354,13 +356,15 @@ describe('routing: which batches take the borderless program', () => {
     // The four-way pick, in order. Glass first (so no glass batch can fall through), then
     // borderless, then flat, then the full program. Lane borderdirect put ONE arm ahead of glass —
     // a glass batch whose backdrop handle is the border scratch — so the anchor moved by one line
-    // and glass is now the second test rather than the first. Nothing below it moved.
-    expect(RENDERER).toContain('const program = isBorderDirect ? this._panelShaderBorderDirect');
+    // and glass is now the second test rather than the first. Lane bootcompile2 made that arm read
+    // a LOCAL, because its program is compiled only when `?border-direct` arms and the pick must
+    // throw rather than name a field that can be null. Nothing below it moved either time.
+    expect(RENDERER).toContain('const program = direct !== null ? direct.Shader');
     expect(RENDERER).toContain(': isGlass ? this._panelShaderGlass');
     expect(RENDERER).toContain(': isBorderless ? this._panelShaderBorderless');
     expect(RENDERER).toContain(': isFlat ? this._panelShaderFlat');
     expect(RENDERER).toContain(': this._panelShaderNone;');
-    expect(RENDERER).toContain('const locs = isBorderDirect ? this._panelLocsBorderDirect');
+    expect(RENDERER).toContain('const locs = direct !== null ? direct.Locs');
     expect(RENDERER).toContain(': isGlass ? this._panelLocsGlass');
     expect(RENDERER).toContain(': isBorderless ? this._panelLocsBorderless');
   });
