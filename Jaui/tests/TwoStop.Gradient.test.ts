@@ -152,7 +152,9 @@ describe('the two-stop program is a BOUND SUBSTITUTION, not a rewrite', () => {
   it('every guard tests PRESENCE, and TWO_STOP_GRADIENT is never issued without the other two', () => {
     for (const m of FRAG.match(/^\s*#\s*(if|elif)\b.*$/gm) ?? []) expect(m).toMatch(/defined\s*\(/);
     expect(FRAG).toContain('#if defined(TWO_STOP_GRADIENT)');
-    // Against the constant, not a literal: lane borderdirect issued a sixth variant. The claim —
+    // Against the constant, not a literal: lane borderdirect issued a sixth variant and lane
+    // bootcompile2 moved it off the boot batch, so this regex -- anchored on `batch.Add`, which is
+    // the boot batch's parameter name -- counts the five the constant claims. The claim —
     // TWO_STOP_GRADIENT is never issued without the other two — is unchanged and asserted below.
     const adds = RENDERER.match(/batch\.Add\(panelVertSrc, panelFragSrc[^)]*\)/g) ?? [];
     expect(adds.length).toBe(PANEL_PROGRAM_COUNT);
@@ -319,8 +321,10 @@ describe('routing: which draws take the two-stop program', () => {
   it('the five-way pick puts it ahead of borderless and behind glass', () => {
     // Six-way since lane borderdirect, which put the border-direct arm ahead of glass. The
     // two-stop arm's own position — after glass, ahead of borderless — is what this tests and it
-    // did not move.
-    expect(RENDERER).toContain('const program = isBorderDirect ? this._panelShaderBorderDirect');
+    // did not move. The first arm is `direct` since lane bootcompile2: that program is compiled
+    // only when `?border-direct` arms, so the pick resolves it through a throw rather than naming
+    // a field that can be null. Position unchanged, and everything below it unchanged.
+    expect(RENDERER).toContain('const program = direct !== null ? direct.Shader');
     expect(RENDERER).toContain(': isGlass ? this._panelShaderGlass');
     expect(RENDERER).toContain(': isTwoStop ? this._panelShaderTwoStop');
     expect(RENDERER).toContain(': isBorderless ? this._panelShaderBorderless');

@@ -6332,7 +6332,16 @@ export class Canvas implements DirtyTracker {
         this._borderDirect = false;
         JTrace(`jaui:border-direct armed=false reason=${why}`);
       }
-      if (r instanceof WebGL2Renderer) r.DiagBorderDirect = this._borderDirect;
+    }
+    // THE SURVIVING ARM, HANDED OVER ON BOTH ARMS. Outside the block above, and unconditional,
+    // because since lane bootcompile2 this field decides what is COMPILED and not only what is
+    // routed: `ArmFlaggedPrograms` issues the sixth panel program off it. It used to be assigned
+    // only when the flag was on -- harmless while the renderer's own default was ON and the walk
+    // gated every call on `this._borderDirect` anyway, and wrong the moment a compile reads it,
+    // because an unflagged page would have left it at a default that says "on" and compiled the
+    // program this lane exists to defer.
+    if (this._renderer instanceof WebGL2Renderer) {
+      this._renderer.DiagBorderDirect = this._borderDirect;
     }
     // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
     // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is

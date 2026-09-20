@@ -18,11 +18,11 @@ interface _Job {
  * `getShaderParameter(COMPILE_STATUS)` and `getProgramParameter(LINK_STATUS)` are the calls that
  * BLOCK until the work is finished. Compiling one program at a time — compile, ask, compile, ask,
  * link, ask — therefore runs the driver's compiler pool one program deep no matter how many cores
- * it has. Jaui builds SEVENTEEN programs before it can draw anything (six panel variants, text,
+ * it has. Jaui builds SIXTEEN programs before it can draw anything (five panel variants, text,
  * stroke, two SVG, blit, clip mask, progressive blur, the adaptive-shadow probe, and the blur
  * pass's down/up/copy), so that serialisation is the whole cold-boot shader cost, in a line.
  *
- * SEVENTEEN IS THE UNFLAGGED SET, and that is the number this class is sized for. A program only a
+ * SIXTEEN IS THE UNFLAGGED SET, and that is the number this class is sized for. A program only a
  * `?...` arm binds is issued into a batch of its own at the moment that arm arms -- after the URL
  * is parsed and before the first tick -- so the cold-boot batch never carries a compile the page
  * was never going to use. See `WebGL2Renderer.ArmFlaggedPrograms`.
