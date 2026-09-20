@@ -3,6 +3,7 @@ import { QuadGeometry } from './Geometry.Quad';
 import { Framebuffer } from './Framebuffer';
 import { BACKDROP_REGION_FULL, type BackdropRegion } from './Renderer';
 import type { PassTimers } from './Pass.Timers';
+import { JTrace } from '../Diagnostics/Jaui.Trace';
 
 /**
  * Dual Filter blur (Marius Bjørge, ARM, "Bandwidth-Efficient Rendering",
@@ -168,18 +169,26 @@ const K_MAX = 8;
  *  At the sizes this app actually produces — a 216x150pt glass card at DPR 2 resolves to a
  *  568x436 level 0, about 1.65 MB of chain; a full-canvas 2560x1600 modal is 27.3 MB —
  *  48 MB holds a canvas-sized chain plus a dozen cards, or twenty-nine cards alone. */
-const CHAIN_BUDGET_BYTES = 48 * 1024 * 1024;
-const MAX_CHAINS = 6;
+export const CHAIN_BUDGET_BYTES = 48 * 1024 * 1024;
+export const MAX_CHAINS = 6;
+
+/** Upper bound on the storage ONE chain holds: the down chain sums to 4/3 of level 0 and its
+ *  mip slots add another 1/3. Used only to bound residency, never to address memory. The
+ *  admission check and the chain it admits have to agree on this number, so it is one function
+ *  rather than the same expression written twice. */
+export const ChainBytes = (w: number, h: number): number => Math.ceil(w * h * 4 * 5 / 3);
 
 /** One resident pyramid: `Levels[0]` at some level-0 size, every level halving from it.
  *  Keyed by that size, because `Framebuffer.Resize` is a full `texImage2D` reallocation at
- *  any other one. */
+ *  any other one — and, when `ChainCount` is rotating the pool, by `Slot` as well. */
 interface LevelChain {
   Levels: Framebuffer[];
   W: number;
   H: number;
-  /** Upper bound on the storage the chain holds: the down chain sums to 4/3 of level 0 and
-   *  its mip slots add another 1/3. Used only to bound residency, never to address memory. */
+  /** Which of the `ChainCount` chains of this level-0 size this one is. Always 0 unless
+   *  `?blur-chains=N` is rotating the pool; see `_useChain`. */
+  Slot: number;
+  /** `ChainBytes(W, H)`, cached. */
   Bytes: number;
   /** `_tick` of the last Blur that selected it — the LRU key. */
   Used: number;
@@ -410,6 +419,17 @@ export class BlurPass {
   private _levels: Framebuffer[] = [];
   private _chains: LevelChain[] = [];
   private _tick: number = 0;
+  /** How many chains the pool keeps PER level-0 size. 1 is the shipped pool. See `_useChain`. */
+  private readonly _chainCount: number;
+  /** Effective count, which starts at `_chainCount` and drops to 1 the moment rotating would
+   *  cost an eviction. Separate from `_chainCount` so the census can say what was ASKED for
+   *  next to what actually ran. */
+  private _chainsLive: number;
+  /** Builds so far per level-0 size, keyed `WxH`. The round-robin phase; only written when
+   *  rotating. */
+  private _chainSeq = new Map<string, number>();
+  /** Why the rotation stopped, or null. Set once, traced once. */
+  private _chainRefusal: string | null = null;
   private _lastDepth: number = 0;
   /** Single FBO reused for the attach-mip-and-blit dance in
    *  GenerateOutputMipmap. Created lazily on first use. */
@@ -451,7 +471,31 @@ export class BlurPass {
    *  renderer -- the per-surface chain, the sharp-root chain and the shared backdrop's. */
   TimerTag: string = 'blur';
 
-  constructor(gl: WebGL2RenderingContext, batch?: ShaderBatch) {
+  /** What the pool holds per level-0 size, what it actually ran at, and why those differ.
+   *  Read by the renderer's trace line; the flag's whole claim is that this stays honest. */
+  get ChainCensus(): { Asked: number; Live: number; Resident: number; Sizes: string; Refused: string | null } {
+    const sizes = new Map<string, number>();
+    for (const c of this._chains) sizes.set(`${c.W}x${c.H}`, (sizes.get(`${c.W}x${c.H}`) ?? 0) + 1);
+    return {
+      Asked: this._chainCount,
+      Live: this._chainsLive,
+      Resident: this._chains.length,
+      Sizes: [...sizes].map(([k, n]) => `${k}#${n}`).join('+'),
+      Refused: this._chainRefusal,
+    };
+  }
+
+  /** `chains` is `?blur-chains=N` — how many chains the pool keeps per level-0 size, handed out
+   *  round-robin per build so consecutive builds of one size never share one. 1 (the default, and
+   *  every shipping path) is the pool exactly as it was. Out of range is a throw rather than a
+   *  clamp: a measurement flag that quietly measured something else is the failure mode the whole
+   *  instrument exists to avoid. */
+  constructor(gl: WebGL2RenderingContext, batch?: ShaderBatch, chains: number = 1) {
+    if (!Number.isInteger(chains) || chains < 1 || chains > MAX_CHAINS) {
+      throw new Error(`[Jaui] BlurPass chains must be an integer in 1..${MAX_CHAINS}, got ${chains}`);
+    }
+    this._chainCount = chains;
+    this._chainsLive = chains;
     this._gl = gl;
     const b = batch ?? new ShaderBatch(gl);
     this._down = b.Add(VERT, DOWN_FRAG);
@@ -845,7 +889,7 @@ export class BlurPass {
    *  every mip above the base. One `_levels` array therefore assumes every caller of one
    *  BlurPass asks for the same level-0 size, and that assumption broke the moment the
    *  border-only overlay got a margin of its own: a glass card's FILL pipeline resolves to
-   *  568x436 and its BORDER pipeline to 484x352, so a twenty-card grid alternated the two
+   *  568x436 and its BORDER pipeline to 480x348, so a twenty-card grid alternated the two
    *  sizes forty times a frame, three levels each — 120 whole-texture reallocations per
    *  frame, measured at 2.45x the GPU-process time on win32 (3533 ms against 1447 ms) with
    *  the renderer thread flat, which is where driver and submission work shows up and fill
@@ -857,23 +901,84 @@ export class BlurPass {
    *  never a candidate. The wrong fix is making the two margins equal again: the border-only
    *  margin is 24 px because a border-only fragment's only backdrop tap is the border zone's
    *  own inward `bUv`, and that saving is real. The chain has to tolerate more than one size.
+   *
+   *  KEYING ON THE SIZE IS ALSO WHY `?blur-chains=N` EXISTS. Twenty glass-grid cards share a
+   *  472 px pitch, so every fill build resolves to 568x436 and every rim build to 480x348: two
+   *  chains for forty builds a frame, each build overwriting the level textures the previous
+   *  card's draw has just sampled. Under N > 1 the pool keeps N chains per size and hands them
+   *  out ROUND-ROBIN per build, so build k of a size lands on slot k mod N and no two
+   *  consecutive builds of that size share a chain. Nothing else about a build changes — same
+   *  region, same sigma, same depth, same `k`, same passes, same `LastRegion` — and a chain's
+   *  contents are per-build (every level a consumer can reach is written by the build that
+   *  hands it over), so which chain a build lands on cannot change a texel.
    */
   private _useChain = (w: number, h: number): void => {
     const tick = ++this._tick;
-    for (let i = 0; i < this._chains.length; i++) {
-      const c = this._chains[i];
-      if (c.W === w && c.H === h) {
-        c.Used = tick;
-        this._levels = c.Levels;
-        return;
-      }
+    let slot = this._chainsLive === 1 ? 0 : this._nextSlot(w, h);
+    let chain = this._findChain(w, h, slot);
+    // Rotating asks for chains the pool never needed. If the next one cannot be resident
+    // ALONGSIDE the ones already rotating, stop rotating and say so: an evicting pool
+    // reallocates whole textures mid-frame, which is the thrash this function exists to
+    // prevent and which would be read as this flag's own cost.
+    if (chain === null && slot !== 0 && !this._chainFits(w, h)) {
+      this._refuseChains(`no-room-for-${w}x${h}-slot-${slot}`);
+      slot = 0;
+      chain = this._findChain(w, h, slot);
+    }
+    if (chain !== null) {
+      chain.Used = tick;
+      this._levels = chain.Levels;
+      return;
     }
     const levels: Framebuffer[] = [];
     for (let i = 0; i < MAX_LEVELS; i++) levels.push(new Framebuffer(this._gl, { highPrecision: true }));
-    const chain: LevelChain = { Levels: levels, W: w, H: h, Bytes: Math.ceil(w * h * 4 * 5 / 3), Used: tick };
-    this._chains.push(chain);
+    const fresh: LevelChain = { Levels: levels, W: w, H: h, Slot: slot, Bytes: ChainBytes(w, h), Used: tick };
+    this._chains.push(fresh);
     this._levels = levels;
-    this._evictChains(chain);
+    this._evictChains(fresh);
+  };
+
+  private _findChain = (w: number, h: number, slot: number): LevelChain | null => {
+    for (let i = 0; i < this._chains.length; i++) {
+      const c = this._chains[i];
+      if (c.W === w && c.H === h && c.Slot === slot) return c;
+    }
+    return null;
+  };
+
+  /** The round-robin phase for one level-0 size, advanced once per build. Cleared wholesale
+   *  rather than pruned if a scene ever produces many times more distinct sizes than the pool
+   *  could hold — restarting the phase costs a reading nothing, and an unbounded map on a
+   *  resizing canvas would outlive the flag. */
+  private _nextSlot = (w: number, h: number): number => {
+    if (this._chainSeq.size > MAX_CHAINS * 16) this._chainSeq.clear();
+    const key = `${w}x${h}`;
+    const seq = this._chainSeq.get(key) ?? 0;
+    this._chainSeq.set(key, seq + 1);
+    return seq % this._chainsLive;
+  };
+
+  /** Would one more chain of this size fit inside BOTH ceilings? Asked only of the extra
+   *  chains a rotation introduces; slot 0 is the shipped pool and still evicts as it always
+   *  did, because a pass with no chain at all cannot draw. */
+  private _chainFits = (w: number, h: number): boolean => {
+    if (this._chains.length + 1 > MAX_CHAINS) return false;
+    let total = ChainBytes(w, h);
+    for (const c of this._chains) total += c.Bytes;
+    return total <= CHAIN_BUDGET_BYTES;
+  };
+
+  /** Stop rotating, and name it on the trace. A reading taken under a refused N is a reading of
+   *  a DIFFERENT pool than the URL asked for, so this line is the instruction to discard that
+   *  cell — the alternative, evicting quietly, publishes reallocation thrash under this flag's
+   *  name. Once per pass: the first refusal is the one that explains the rest. */
+  private _refuseChains = (why: string): void => {
+    if (this._chainRefusal !== null) return;
+    this._chainRefusal = why;
+    const running = this._chainsLive;
+    this._chainsLive = 1;
+    JTrace(`jaui:blur-chains tag=${this.TimerTag} armed=${this._chainCount} running=${running}`
+      + ` effective=1 refused=${why} resident=${this._chains.length} max=${MAX_CHAINS}`);
   };
 
   /** Drop least-recently-used chains until residency is back inside its ceiling. Never drops
@@ -889,6 +994,11 @@ export class BlurPass {
         if (lru === null || c.Used < lru.Used) lru = c;
       }
       if (lru === null) return;
+      // The backstop for `_chainFits`: slot 0 can still evict, and under a rotation the chain
+      // it takes may be one a later build of another size was about to land on. Any eviction
+      // at all while rotating ends the rotation, for the same reason as above. A no-op when
+      // nothing is rotating, which is every shipping path.
+      if (this._chainsLive > 1) this._refuseChains(`evicted-${lru.W}x${lru.H}-slot-${lru.Slot}`);
       for (const fb of lru.Levels) fb.Dispose();
       total -= lru.Bytes;
       this._chains.splice(this._chains.indexOf(lru), 1);

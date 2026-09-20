@@ -26,7 +26,7 @@ import { SHADOW_EASE_SECONDS, type Renderer, type GpuTextureHandle, type BgPaint
 // forty builds actually resolve to. These three are the exact functions `BlurPass.Blur` uses to
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
 // copy of the rule would be a count that can silently disagree with the pass it is counting.
-import { BaseDownsampleFactor, PyramidDepth, ResolveRegionRect } from './BlurPass';
+import { BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, MAX_CHAINS } from './BlurPass';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
@@ -4856,6 +4856,41 @@ export class Canvas implements DirtyTracker {
     // one and typed both should read as the cheaper arm rather than silently as the other.
     if (params.has('blur-src-static') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagBlurSrc = 'static';
     if (params.has('blur-src-clear') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagBlurSrc = 'clear';
+    // `?blur-chains=N` - MEASUREMENT ONLY, PIXEL-IDENTICAL. The frame-time test of H4.
+    //
+    // `BlurPass._useChain` keys a level chain on its LEVEL-0 SIZE. Twenty glass-grid cards share a
+    // 472 px pitch, so every fill build resolves to 568x436 and every rim build to 480x348: TWO
+    // chains for forty builds a frame, each build overwriting the level textures the previous
+    // card's draw has just sampled. On a tile-based deferred GPU the preceding scene segment's
+    // fragment work and its tile store have to complete before the chain can be rewritten, which
+    // is a write-after-read hazard forty deep on two textures - and it explains every survivor the
+    // ledger has left: indifference to source content and source size, indifference to encoder
+    // ends, and the requirement for a bed long enough to make the hazard bite.
+    //
+    // Under N > 1 the pool keeps N chains per size and rotates them per build, so no two
+    // CONSECUTIVE builds of a size share a chain. Nothing else moves: same region, sigma, depth,
+    // `k`, passes, mip blits, `LastRegion`, and the same counters (SceneSwitches 40, EndsByKey
+    // { blur: 40 }, restarts 40, reads 60, builds 40). If any of those moves, the flag did more
+    // than choose a chain and the cell is void.
+    //
+    // No `pixels=WRONG`: a chain's contents are per-build, so which chain a build lands on cannot
+    // change a texel, and the two-arm `glassshot` diff has to read exactly 0. Bounded by the pool's
+    // own `MAX_CHAINS`, because a rotation wider than the pool would EVICT rather than rotate and
+    // publish reallocation thrash under this flag's name; the pass refuses the rest at runtime,
+    // naming itself on the trace, for the same reason.
+    const blurChains = params.get('blur-chains');
+    if (blurChains !== null) {
+      const n = Number(blurChains);
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : !Number.isInteger(n) || n < 1 ? 'n-must-be-a-whole-number-of-chains-at-least-1'
+        : n > MAX_CHAINS ? `n-above-the-pool-cap-${MAX_CHAINS}-and-a-wider-pool-evicts-instead-of-rotating`
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-build-no-pyramid-to-rotate'
+        : null;
+      if (why !== null) JTrace(`jaui:blur-chains armed=false reason=${why}`);
+      else (r as WebGL2Renderer).DiagBlurChains = n;
+    }
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
     if (params.has('no-glass-draw')) this._diagNoGlassDraw = true;
