@@ -675,6 +675,10 @@ export class WebGL2Renderer implements Renderer {
     this._timerActive = null;
     this._lastGpuMs = null;
     this._pass = null;
+    // `?tick-pace`'s fence belonged to the dead context as well, and a `clientWaitSync` on a stale
+    // WebGLSync is the one way this flag could stall the loop for a reason that is not the GPU.
+    // Dropped, not deleted: the object to delete it with is gone. The next frame arms a fresh one.
+    this._paceFence = null;
 
     // ── One compile batch for every program the engine can draw with ──
     // Thirteen programs stand between a cold tab and its first pixel. Compiled one at a time —
@@ -987,6 +991,13 @@ export class WebGL2Renderer implements Renderer {
   };
 
   EndFrame = (): void => {
+    this._endFrameTimers();
+    // AFTER every timer has closed, so the fence covers the whole frame including the present blit:
+    // it is the frame's last draw, and "has the GPU finished the previous frame" has to include it.
+    if (this.DiagTickPace) this._armPaceFence();
+  };
+
+  private _endFrameTimers = (): void => {
     const ext = this._timerExt;
     const q = this._timerActive;
     if (!ext || !q) { this._endPassFrame(); return; }
@@ -1468,6 +1479,58 @@ export class WebGL2Renderer implements Renderer {
    *  surface under this flag WILL render wrong (the 3D field needs depth) - it is an ablation, not a
    *  mode, and the trace mark below says which FBO was built so the reading cannot be misfiled. */
   DiagNoDepth = false;
+
+  /** `?tick-pace` (MEASUREMENT ONLY - PIXEL-IDENTICAL BY CONSTRUCTION). Arm the frame-completion
+   *  fence this renderer answers `PaceReady` from. Set by `Jaui._initDebugFromUrl` AFTER `Init` has
+   *  run in worker mode, which is fine and is why the fence is built per frame in `EndFrame` rather
+   *  than once in `Init` -- the `?no-depth` problem (a flag that lands after the thing it configures
+   *  was already built) cannot happen to it. See `Core/Tick.Pace.ts` for what the flag is for. */
+  DiagTickPace = false;
+  /** The previous frame's GPU-completion fence, or null when no frame is outstanding. */
+  private _paceFence: WebGLSync | null = null;
+  /** The arm says itself ONCE, and says whether the driver actually gave us a sync object. A flag
+   *  that silently answers "ready" every tick would publish the baseline under this flag's name. */
+  private _paceSaid = false;
+
+  /**
+   * `?tick-pace`'s gate: has the previous frame's GPU work completed?
+   *
+   * `clientWaitSync` with a timeout of 0 NEVER BLOCKS -- it asks and returns. `SYNC_FLUSH_COMMANDS_BIT`
+   * is what makes the question answerable rather than merely cheap: without it a fence whose commands
+   * are still sitting unsubmitted in the command buffer can never signal, and the gate would skip
+   * every render forever. The bit flushes once per sync and is a no-op afterwards, so this is one
+   * poll per tick and no more.
+   *
+   * `WAIT_FAILED` means the sync is not a sync any more (a context that went away between the arm
+   * and the poll). Drop it and answer ready: the alternative is a loop that never renders again,
+   * and the stall guard in `Tick.Pace` is the belt that catches the case this misses.
+   */
+  PaceReady = (): boolean => {
+    const fence = this._paceFence;
+    if (fence === null) return true;
+    const gl = this._gl;
+    const status = gl.clientWaitSync(fence, gl.SYNC_FLUSH_COMMANDS_BIT, 0);
+    if (status === gl.TIMEOUT_EXPIRED) return false;
+    gl.deleteSync(fence);
+    this._paceFence = null;
+    return true;
+  };
+
+  /** Drop the outstanding fence, if any, and place a new one after this frame's last draw. Built on
+   *  first use like the restart probe, for the same reason: `Init` does not know the flags. */
+  private _armPaceFence = (): void => {
+    const gl = this._gl;
+    if (this._paceFence !== null) { gl.deleteSync(this._paceFence); this._paceFence = null; }
+    const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    this._paceFence = fence;
+    if (!this._paceSaid) {
+      this._paceSaid = true;
+      // `fence=false` is the refusal: the gate degrades to "always ready", which is the unflagged
+      // engine, and a cell taken under it is void. Named here rather than at parse time because
+      // whether the driver hands over a sync object is not knowable until a frame has ended.
+      JTrace(`jaui:tick-pace fence=${fence !== null}`);
+    }
+  };
 
   /** `?snap-once` (MEASUREMENT ONLY - WRONG PIXELS). Serve every backdrop read in the frame from ONE
    *  full-canvas snapshot taken at the frame's first read, instead of from `_sceneFbo` itself.

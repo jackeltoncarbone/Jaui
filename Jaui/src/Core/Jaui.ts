@@ -30,6 +30,7 @@ import {
   BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, MAX_CHAINS, CHAIN_BUDGET_BYTES,
 } from './BlurPass';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
+import { TickPace, ParseTickPace, TickPaceText, PACE_STALL_TICKS, type PaceGate } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
 // `Renderer.Factory.ts` and handed in. Canvas has no opinion about
@@ -432,7 +433,13 @@ export class Canvas implements DirtyTracker {
   // the frame, which refuted it. `SceneSwitches` is what survived: encoder ENDS, a non-scene target
   // bound over a dirty scene, which a pyramid build does between every pair of card draws whether or
   // not the read was rerouted. See `SceneReadLedger` in `Core/Scene.Ledger.ts`.
-  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, SceneEndsByKey: {} as Record<string, number>, CardComposites: 0, CardFallbacks: 0 };
+  // `TicksRendered` / `TicksSkipped` / `TicksForced` are the odd three out here and deliberately so:
+  // every other field in this object is PER FRAME and is reset at the top of the tick, and these are
+  // CUMULATIVE since boot. A per-frame tick count is 0 or 1 and says nothing. The number `?tick-pace`
+  // is about is a ratio over a WINDOW -- renders per presented frame -- so the two ends of that
+  // window subtract these, exactly as they already do the scene ledger. They are mirrors of
+  // `_tickPace`'s own totals, kept here so the `[Jaui]` line and `jaui:render:end` read one object.
+  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, SceneEndsByKey: {} as Record<string, number>, CardComposites: 0, CardFallbacks: 0, TicksRendered: 0, TicksSkipped: 0, TicksForced: 0 };
   private _cacheDiag = { reached: 0, effH: 0, teleport: 0, opacity: 0, rot: 0, xform: 0, visual: 0, persp: 0, samples: 0, ok: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, CardComposites: 0, CardFallbacks: 0 };
   /** `?scene-restarts=N` / `?small-restarts=N` - the renderer, already narrowed, or null when
@@ -441,6 +448,19 @@ export class Canvas implements DirtyTracker {
    *  `instanceof`. Set by `_initDebugFromUrl` only after both flags have passed their gates, which
    *  is why a REFUSED flag leaves it null and the walk untouched. */
   private _restartRenderer: WebGL2Renderer | null = null;
+  /** `?tick-pace` — the gate between a tick that wants to render and the render. Always present; in
+   *  `null` mode (no flag) `Decide` is one comparison and every tick renders, which is what keeps
+   *  the RENDERED/SKIPPED columns readable on BOTH arms of a comparison. See `Core/Tick.Pace.ts`. */
+  private _tickPace = new TickPace(null);
+  /** The fence the gate polls, already narrowed, or null in every mode that does not poll one. */
+  private _paceGate: PaceGate | null = null;
+  /** A render the gate refused and the engine still owes. Read by the render-on-demand gate (so the
+   *  next tick wants the render again) and by the park predicate (so the loop cannot go to sleep
+   *  holding it). This is the whole reason a skipped tick loses no pixels: the render is deferred,
+   *  never dropped. */
+  private _paceOwed = false;
+  /** The stall guard says itself once, not once per forced frame. */
+  private _paceForcedSaid = false;
   /** Per-op CPU time (ms) inside the glass/pblur backdrop pipeline, summed
    *  per frame. A call that forces a CPU↔GPU sync shows its GPU cost here as
    *  inflated CPU time — so the dominant op points at the bottleneck. */
@@ -1252,6 +1272,29 @@ export class Canvas implements DirtyTracker {
     this._frameId = requestAnimationFrame(this._tick);
   };
 
+  /** rAF timestamp of the last `[Jaui.pace]` line, and the totals it printed. */
+  private _paceCensusAt = 0;
+  private _paceCensusMark = { Rendered: 0, Skipped: 0, Forced: 0 };
+
+  /** One line a second while `?tick-pace` is armed: the cumulative ledger and the last second's
+   *  delta. The delta is what a reader wants (the window's ratio) and the cumulative is what makes
+   *  two lines subtractable across a window that does not start on a second boundary. */
+  private _paceCensus = (time: number): void => {
+    if (this._paceCensusAt === 0) { this._paceCensusAt = time; return; }
+    const span = time - this._paceCensusAt;
+    if (span < 1000) return;
+    const c = this._tickPace.Census();
+    const m = this._paceCensusMark;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[Jaui.pace] ${c.Mode} rendered=${c.Rendered} skipped=${c.Skipped} forced=${c.Forced}`
+      + ` | last ${Math.round(span)}ms +${c.Rendered - m.Rendered} rendered`
+      + ` +${c.Skipped - m.Skipped} skipped +${c.Forced - m.Forced} forced`,
+    );
+    m.Rendered = c.Rendered; m.Skipped = c.Skipped; m.Forced = c.Forced;
+    this._paceCensusAt = time;
+  };
+
   private _tickInner = (time: number): boolean => {
     // ── Drain the pushed-size slot ──────────────────────────────────────────
     // `ResizeFromBridge` writes the slot and wakes; THIS is where a resize is applied while the
@@ -1424,7 +1467,31 @@ export class Canvas implements DirtyTracker {
       this._renderHold = 3; // render this frame + a 2-frame settle tail
       if (this._adaptiveShadowsDrawn) this._shadowSettleUntil = time + SHADOW_EASE_SECONDS * 3000;
     }
-    const shouldRender = this._renderHold > 0 || time < this._shadowSettleUntil;
+    // ── The pace gate ──────────────────────────────────────────────────────
+    // `wantsRender` is the gate above, unchanged, plus a render the pace refused on an earlier tick
+    // and therefore still owes. `?tick-pace` then decides whether THIS tick is the one that runs it.
+    //
+    // Everything above this line has already happened on a skipped tick: the resize drained, the
+    // springs stepped, layout solved, text transitioned, the caches were invalidated and the
+    // render-on-demand signals were consumed. A skip removes the DRAW and nothing else — so it
+    // cannot move a pixel, and the pixels it would have drawn are not lost, because `_paceOwed`
+    // carries the want forward and the park predicate refuses to sleep while it is set. Unflagged,
+    // `_paceOwed` is never set and `Decide` always says render, so this is the same loop it was.
+    const wantsRender = this._renderHold > 0 || time < this._shadowSettleUntil || this._paceOwed;
+    const decision = wantsRender ? this._tickPace.Decide(this._paceGate) : 'skip';
+    const shouldRender = wantsRender && decision !== 'skip';
+    if (wantsRender) {
+      this._paceOwed = !shouldRender;
+      this._counts.TicksRendered = this._tickPace.Rendered;
+      this._counts.TicksSkipped = this._tickPace.Skipped;
+      this._counts.TicksForced = this._tickPace.Forced;
+      if (decision === 'forced' && !this._paceForcedSaid) {
+        this._paceForcedSaid = true;
+        // Said once, loudly: the fence did not signal for eight consecutive ticks, so this render is
+        // the stall guard's and not the flag's. Any cell whose forced column is non-zero is void.
+        JTrace(`jaui:tick-pace forced=1 after=${PACE_STALL_TICKS}-skipped-ticks`);
+      }
+    }
     if (shouldRender) {
       if (this._renderHold > 0) this._renderHold--;
       if (ff) JTrace('jaui:render:start');
@@ -1456,7 +1523,12 @@ export class Canvas implements DirtyTracker {
           + ` panels=${c.Panels} glass=${c.Glass} text=${c.Text} images=${c.Image} pblur=${c.PBlur}`
           + ` sceneReads=${c.SceneReads} sceneRestarts=${c.SceneRestarts} sceneSwitches=${c.SceneSwitches}`
           + ` endsByKey=${_endsByKey(c.SceneEndsByKey)}`
-          + ` cards=${c.CardComposites} cardFallbacks=${c.CardFallbacks}`);
+          + ` cards=${c.CardComposites} cardFallbacks=${c.CardFallbacks}`
+          // Cumulative, so at the first frame this reads 1/0/0 whatever the mode. It is here because
+          // it is the earliest proof the columns are wired at all - a `?tick-pace` run whose
+          // `jaui:render:end` says `paceRendered=0` never reached the gate.
+          + ` pace=${TickPaceText(this._tickPace.Mode)} paceRendered=${c.TicksRendered}`
+          + ` paceSkipped=${c.TicksSkipped} paceForced=${c.TicksForced}`);
         JTrace(`jaui:glyphs:first n=${glyphs} ${JMs(this._textCache.RasterMs)}ms`);
         // Images never gate a frame — a decode that finishes asks for the next one. These say how
         // many were still out when the first frame painted, so that stays a reading, not a claim.
@@ -1468,6 +1540,15 @@ export class Canvas implements DirtyTracker {
     }
     // Fire every tick so frame-wait callbacks are never starved on idle frames.
     this._firePostFrame();
+
+    // `?tick-pace`'s ledger on the plain console, once a second, ONLY when the flag is armed.
+    // Deliberately not folded into the `[Jaui]` line below it: that line needs `?wkr-jaui-prof`,
+    // which also arms the per-pass GPU timers and makes every other frame a split frame — perturbing
+    // the exact quantity this flag was built to measure. The worker's console is captured by the
+    // perf harness (`instrument.mjs` wraps `console.*`; the page's CDP Log domain carries the same
+    // lines), so this puts renders-per-window in the report with no harness change and no split
+    // frame. Six lines in a 6 s window, each different, well inside the harness's 60-line cap.
+    if (this._tickPace.Mode !== null) this._paceCensus(time);
 
     if (hud) {
       const tEnd = performance.now();
@@ -1547,7 +1628,12 @@ export class Canvas implements DirtyTracker {
             // and an end on a 1 MB card are the same 1 in that column and ~1.4 ms apart on the clock.
             ` [${_endsByKey(this._counts.SceneEndsByKey)}]` +
             ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
-            ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}`
+            ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}` +
+            // `?tick-pace`, cumulative. `r` is renders, `s` refused renders, `f` the stall guard's.
+            // Read `r` against the window's PRESENTED frame count, not against `n` above and not
+            // against the harness's `ticks`: `n` is ticks the profiler saw and `ticks` is rAF
+            // callbacks, and this flag's entire purpose is to make those three different numbers.
+            ` | pace ${TickPaceText(this._tickPace.Mode)} r${this._counts.TicksRendered} s${this._counts.TicksSkipped} f${this._counts.TicksForced}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
           this._profSum.Render = this._profSum.Total = 0;
@@ -1592,10 +1678,16 @@ export class Canvas implements DirtyTracker {
     // `_needsRender` is read HERE and not reused from the top of the tick on purpose: `_render`
     // re-requests a frame for its own reasons (a background image still fading in, at :2456), and
     // parking on the value it held before the render would drop those frames on the floor.
+    //
+    // `_paceOwed` is read here for the same reason `_renderHold` is: it is a render this loop has
+    // decided to do and has not done. Parking on it would be the one way `?tick-pace` could lose a
+    // frame rather than defer one — the loop would sleep holding the render, and nothing would wake
+    // it, because the signal that asked for it was consumed on the tick that skipped.
     return (this.Root.Dirty & (DirtyFlag.Layout | DirtyFlag.Text)) === 0
       && this._dirtyNodes.size === 0
       && !this._animationManager.IsRunning
       && !this._needsRender
+      && !this._paceOwed
       && this._renderHold === 0
       && time >= this._shadowSettleUntil
       && this._pendingResize === null
@@ -5240,6 +5332,50 @@ export class Canvas implements DirtyTracker {
         : null;
       if (why !== null) JTrace(`jaui:blur-chains armed=false reason=${why}`);
       else (r as WebGL2Renderer).DiagBlurChains = n;
+    }
+    // `?tick-pace` / `?tick-pace=fence` / `?tick-pace=N` - MEASUREMENT ONLY, PIXEL-IDENTICAL BY
+    // CONSTRUCTION. Render at most once per presented frame. The whole argument, the measurement it
+    // comes from and what a skipped tick does is in `Core/Tick.Pace.ts`; what belongs here is the
+    // gate and its refusals.
+    //
+    // NOT PARSED IN `Worker.Boot` the way `?no-depth` is, and that is a reading rather than an
+    // oversight: `?no-depth` had to land ahead of `Init` because `Init` BUILDS the scene FBO it
+    // configures. Nothing this flag touches is built by `Init` - the fence is placed per frame in
+    // `EndFrame` and the gate is consulted per tick, both of which happen long after the Canvas (and
+    // so this parse) exists. `_platform.GetUrlSearch()` is the PAGE's search in worker mode, handed
+    // over on the init message, so the flag and its mark arrive on both this path and main-thread
+    // mode. The renderer says separately whether the driver actually gave it a fence.
+    if (params.has('tick-pace')) {
+      const parsed = ParseTickPace(params.get('tick-pace'));
+      const r = this._renderer;
+      const why =
+        'Why' in parsed ? parsed.Why
+        // Fence mode polls `PaceReady`, which is WebGL2's `clientWaitSync`. The ratio control needs
+        // no GL at all, so it is allowed on any backend.
+        : parsed.Mode.Kind === 'fence' && !(r instanceof WebGL2Renderer) ? 'fence-mode-needs-webgl2-clientwaitsync'
+        : null;
+      if (why !== null) {
+        JTrace(`jaui:tick-pace armed=false reason=${why}`);
+      } else if (!('Why' in parsed)) {
+        this._tickPace = new TickPace(parsed.Mode);
+        if (parsed.Mode.Kind === 'fence') {
+          const gl2 = r as WebGL2Renderer;
+          gl2.DiagTickPace = true;
+          this._paceGate = gl2;
+        }
+        JTrace(`jaui:tick-pace armed=${TickPaceText(parsed.Mode)}`);
+        // The cumulative ledger, out to a reader that must not reach into the engine - the same
+        // channel `__jauiPassProfile` and `__jauiSceneLedger` use, and for the same reason. The
+        // effect field this lane exists to publish is RENDERS per presented frame, and the harness's
+        // `ticks` column counts rAF CALLBACKS (`instrument.mjs` wraps `self.requestAnimationFrame`
+        // and increments on every one), not renders - so under this flag `ticks` and renders part
+        // company and the ratio is only readable if the engine says how many of its ticks drew.
+        // One evaluate at each end of the window, subtract, divide by the presented frame count.
+        const g = globalThis as unknown as {
+          __jauiTickPace?: () => { Mode: string; Rendered: number; Skipped: number; Forced: number };
+        };
+        g.__jauiTickPace = () => this._tickPace.Census();
+      }
     }
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
