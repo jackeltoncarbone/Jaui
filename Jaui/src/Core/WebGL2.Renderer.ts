@@ -11,7 +11,7 @@ import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Re
 import { ShaderBatch, ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
-import { BlurPass, PyramidDepth, type ChainLimits } from './BlurPass';
+import { BlurPass, PyramidDepth, ChainBytes, type ChainLimits, type AtlasBuildMember } from './BlurPass';
 import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
@@ -871,6 +871,12 @@ export class WebGL2Renderer implements Renderer {
         + ` max=${lim === null ? 'default' : lim.MaxChains}`
         + ` budget=${lim === null ? 'default' : Math.round(lim.BudgetBytes / (1024 * 1024)) + 'MB'}`);
     }
+    // `?pyramid-atlas` IS NOT MARKED HERE, and the absence is deliberate -- it is lane restarts2's
+    // lesson applied before it could cost a cell. On the WORKER path, which is the app's and the
+    // harness's, `Worker.Boot` constructs the renderer and awaits this method BEFORE it constructs
+    // the `Canvas` whose constructor parses the URL, so at this line `DiagPyramidAtlas` is still
+    // false however the URL read and a mark taken here would say `off` on every arm. The mark is
+    // emitted from `Core/Jaui.ts`, at the line that decides the flag.
     // No `pixels=WRONG` on this one, and the omission is the claim: the rotation is
     // pixel-identical by construction, so the two-arm `glassshot` diff must read exactly 0.
     if (this.DiagBlurChains !== null) JTrace(`jaui:blur-chains armed=${this.DiagBlurChains}`);
@@ -1961,6 +1967,20 @@ export class WebGL2Renderer implements Renderer {
    *  count test. */
   DiagBlurPhased = false;
 
+  /** `?pyramid-atlas` -- THE DEFAULT, and the one measurement mark in this file that is armed
+   *  unless a flag turns it OFF.
+   *
+   *  Set by `Core/Jaui.ts`, which owns the flag, the phased traversal and every refusal; this
+   *  renderer's part is to SAY which arm the binary ran, in `Init`, beside the other marks, and to
+   *  hand the pool the ceiling two atlases need. `?pyramid-atlas=off` restores the per-card,
+   *  per-draw composition in the same binary -- the engine before this lane, which is the "before"
+   *  every gate reads against.
+   *
+   *  `pixels=DIFFERENT`, and the difference is the one Jack approved: 34,830 px (0.85%) at max
+   *  12/255, confined to the edge bands facing earlier-drawn neighbours. Anything outside those
+   *  bands, or above 12, is a defect and not this flag. */
+  DiagPyramidAtlas = false;
+
   /** Per-pass residency ceilings for the three `BlurPass` instances, or `null` for the shipped
    *  `MAX_CHAINS` / `CHAIN_BUDGET_BYTES`. Only `?blur-phased` sets it, and only because twenty
    *  fill pyramids have to be alive at once. Handed in at construction and never mutated, so
@@ -2588,6 +2608,49 @@ export class WebGL2Renderer implements Renderer {
     this._lastProgram = null;
     return _wrap(result, pass.LastRegion);
   };
+
+  /** THE ATLAS BUILD: one `ComputeBlur` for a whole phase of surfaces.
+   *
+   *  Every member's pyramid, built from ONE scene state into one texture, one slot each -- so a
+   *  phase of twenty glass cards costs 4 encoder-opening binds instead of 80. It is the mechanism
+   *  behind the composition Jack approved on 2026-09-20 and it is a composition change by
+   *  construction: see `BlurPass.BlurAtlas`, which says why a texture layout cannot undo a
+   *  dependency in time.
+   *
+   *  The LEDGER is booked exactly as one build books it -- one read, one `blur` target bind -- and
+   *  that is the honest count rather than a convenience: the atlas reads the scene once and ends
+   *  the scene's encoder once, which is the whole claim. `EndsByKey.blur` goes 40 -> 2 on
+   *  `glass-grid` while `drawCalls` does not move, and the pair is the control invariant every
+   *  cell of this lever must quote.
+   *
+   *  The three source diagnostics ride across unchanged: `?no-blur` and `?blur-dummy` return what
+   *  the per-card path returns for each member so an arm under them is still one arm, and
+   *  `?blur-src-*` swaps the sampled texture and leaves everything else alone. */
+  ComputeBlurAtlas = (
+    input: GpuTextureHandle, width: number, height: number, radius: number,
+    members: readonly AtlasBuildMember[], atlasW: number, atlasH: number,
+  ): GpuTextureHandle[] => {
+    if (this.DiagNoBlur) return members.map(() => input);
+    if (this.DiagBlurDummy) {
+      const dummy = this._blurDummyTexture();
+      return members.map(() => dummy);
+    }
+    if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
+    this._reconcileBlurPool();
+    const pass = this._blur;
+    this._lastBlur = pass;
+    this._sceneLedger.NoteTargetBind('blur');
+    const src = this.DiagBlurSrc !== null ? this._blurSrcFor(_unwrap(input)) : _unwrap(input);
+    const built = pass.BlurAtlas(src, width, height, radius, members, atlasW, atlasH);
+    this._sceneLedger.NoteAtlas(members.length, ChainBytes(atlasW, atlasH));
+    // BlurPass bound its own programs; invalidate the cache exactly as `ComputeBlur` does.
+    this._lastProgram = null;
+    return built.Regions.map((r) => _wrap(built.Texture, r));
+  };
+
+  /** Surfaces the atlas plan refused, which built one at a time through `ComputeBlur` exactly as
+   *  they do today. Booked by the walk, because only the walk knows how many it handed over. */
+  NoteAtlasSolo = (n: number): void => { this._sceneLedger.NoteAtlasSolo(n); };
 
   GenerateBlurMipmap = (maxLod?: number): void => {
     if (this.DiagNoBlur) return;

@@ -144,6 +144,27 @@ export interface BackdropAtlasPlan {
 export interface AtlasLimits { MaxTexture: number; BudgetBytes: number }
 export const ATLAS_LIMITS_DEFAULT: AtlasLimits = { MaxTexture: 8192, BudgetBytes: CHAIN_BUDGET_BYTES };
 
+/** What a WIRED atlas runs under, and why it is not `CHAIN_BUDGET_BYTES`.
+ *
+ *  `glass-grid`'s twenty cards at dpr 2 pack into a fills atlas of 1704x3052 (33.06 MB of chain)
+ *  and a rims atlas of 1440x2436 (22.30 MB): 55.37 MB, against a shipped budget of 48 that admits
+ *  ONE of the two. So the atlas carries its own ceiling, exactly as `?blur-phased` carried one to
+ *  hold twenty chains at once -- and it REFUSES rather than evicts when a plan does not fit,
+ *  because an evicting pool reallocates whole textures mid-frame and that thrash would be read as
+ *  the atlas's own cost.
+ *
+ *  64 MB is the two atlases plus room for a handful of solo builds beside them, and not more: the
+ *  number is a residency ceiling that has to be crossable by a scene bigger than the one it was
+ *  sized for, so that the refusal fires and says so instead of the pool quietly thrashing.
+ *
+ *  THE PHONE. The same twenty cards at dpr 3 are 2.25x the texels: ~74 MB for the pair, past this
+ *  ceiling. `PlanBackdropAtlas` then SPLITS the run -- the greedy extend stops at the last member
+ *  that still fits and the rest form the next group -- so a phone gets two or three smaller
+ *  atlases per phase instead of one, keeps most of the encoder saving, and never evicts. If even a
+ *  pair does not fit, a member is solo and builds exactly as it does today. */
+export const ATLAS_BUDGET_BYTES = 64 * 1024 * 1024;
+export const ATLAS_LIMITS_WIRED: AtlasLimits = { MaxTexture: 8192, BudgetBytes: ATLAS_BUDGET_BYTES };
+
 /** Rect overlap in device px, half-open on both axes. */
 export const RectsOverlap = (a: BackdropRect, b: BackdropRect): boolean =>
   a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
@@ -223,6 +244,67 @@ export const PackAtlasSlots = (
   // every consumer reads. Exact: both terms are multiples of `phase`.
   for (const s of placed) s.YBottom = atlasH - s.YBottom - s.H;
   return { Slots: placed, AtlasW: atlasW, AtlasH: atlasH };
+};
+
+/** One surface the walk is offering to an atlas, in the terms `GlassBlurPlan` already carries --
+ *  so `Core/Jaui.ts` passes its plan straight in rather than copying six fields into a second
+ *  shape that can drift away from the first. */
+export interface AtlasCandidate {
+  Region: BackdropRect;
+  /** The frost sigma in device px. `k`, `depth` and the phase grid all come off it. */
+  Radius: number;
+  /** How deep a chain the CONSUMER can sample. */
+  MaxLod: number;
+  /** The node's own device-px AABB, y=0 at the TOP. */
+  Px: number; Py: number; Pw: number; Ph: number;
+  /** How far past that AABB the surface's own DRAW can tap the pyramid, in device px. */
+  TapReach: number;
+}
+
+/**
+ * MAY THIS SURFACE BE A SLOT? Four refusals, each of them something an atlas cannot represent,
+ * and a refusal is a SOLO build -- which is today's engine, so being conservative here costs
+ * nothing but the saving on that one surface.
+ *
+ * 1. `MaxLod > 0` opens a mip chain, and an atlas of mips would have to slot every mip level of
+ *    every member (`GenerateOutputMipmap` into sub-rects of the atlas's own mip i). Not designed.
+ *    On every scene the harness measures `MaxLod` is 0 -- the pyramid is built AT the panel's own
+ *    frost sigma, so `frostReq` is 0 and the whole LOD boost with it -- so this fires for a
+ *    `BorderFilter: Blur(n)` class and for nothing else today.
+ * 2. `k > 1` needs the sigma-adaptive pre-downsample's ping-pong slotted too. Same answer, and
+ *    `PyramidAtlas.Finding.md` section 6 names it as the third thing to check if a gate fails.
+ * 3. A FULL-canvas region is the shared backdrop's shape, not a member's: it resolves to the
+ *    identity map and there is nothing to relocate.
+ * 4. THE REGION MUST CONTAIN THE CONSUMER'S OWN TAPS, and this is the one the finding's section 6
+ *    did not name. A standalone pyramid is its own texture, so a tap that leaves the region is
+ *    answered by CLAMP_TO_EDGE replicating the border texel. A SLOT has no border: the same tap
+ *    reads whatever the packer put beside it. `Jiv.Panel.frag` is not this lane's to change and a
+ *    gutter would need replication PASSES -- the thing the atlas exists to remove -- so the region
+ *    has to contain every tap instead, and a member whose region does not is refused.
+ *
+ *    The reach is clipped to the canvas before the test, because a fragment outside the canvas is
+ *    never rasterized: a draw quad that runs off the left edge cannot tap from there, so a region
+ *    the canvas clamped at 0 is not short of anything. The test is against the RESOLVED rect --
+ *    the slot's actual extent, which is the requested region snapped OUT to the phase grid -- so
+ *    the few texels the snap adds count in the surface's favour, exactly as they do on the GPU.
+ */
+export const AtlasAdmitsMember = (
+  c: AtlasCandidate, width: number, height: number,
+): boolean => {
+  if (c.Radius <= 0) return false;
+  if (c.MaxLod > 0) return false;
+  if (BaseDownsampleFactor(c.Radius, width, height, c.Region) !== 1) return false;
+  const depth = PyramidDepth(c.Radius, 0);
+  const rect = ResolveRegionRect(c.Region, width, height, 1 << depth);
+  if (rect.Full) return false;
+  const reach = c.TapReach;
+  const left = Math.max(0, c.Px - reach);
+  const right = Math.min(width, c.Px + c.Pw + reach);
+  const top = Math.max(0, c.Py - reach);
+  const bottom = Math.min(height, c.Py + c.Ph + reach);
+  // `rect` counts y from the BOTTOM; `Py` counts from the top.
+  return rect.X <= left && rect.X + rect.W >= right
+    && rect.YBottom <= height - bottom && rect.YBottom + rect.H >= height - top;
 };
 
 /**

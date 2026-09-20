@@ -169,12 +169,21 @@ describe('?blur-first — ONE piece of arithmetic, not two copies of it', () => 
   });
 
   it('the pre-pass issues the two build calls and NOTHING else', () => {
+    // The two calls live in `_prepassIssue`, which `_blurFirstBuild` tail-calls. Lane
+    // pyramidatlas2 split them apart so the ATLAS arm can RECORD a build instead of issuing it --
+    // and this assertion follows the calls rather than the name, because what it protects is that
+    // a pre-pass build is the walk's two calls and nothing else, wherever they are written.
+    const issue = arrowBody(jaui, '_prepassIssue');
+    expect(issue).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region)');
+    expect(issue).toContain('r.GenerateBlurMipmap(plan.MaxLod)');
+    // And the decision in front of them is a decision and nothing more: record, or issue.
     const build = arrowBody(jaui, '_blurFirstBuild');
-    expect(build).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region)');
-    expect(build).toContain('r.GenerateBlurMipmap(plan.MaxLod)');
+    expect(build).toContain('return this._prepassIssue(into, node, plan, w, h);');
+    expect(build).not.toContain('ComputeBlur');
     // No snapshot (that is a scene READ, not a build, and it stays where the walk puts it), no
     // shadow probe, no draw, no buffer encode.
-    const prepass = [build, arrowBody(jaui, '_blurFirstNode'), arrowBody(jaui, '_blurFirstDescend'),
+    const prepass = [build, issue, arrowBody(jaui, '_blurFirstNode'),
+                     arrowBody(jaui, '_blurFirstDescend'),
                      arrowBody(jaui, '_blurFirstPrepass')].join('\n');
     for (const forbidden of ['SnapshotScreen', 'MeasureShadowBackdrop', 'DrawBatch',
                              'DrawProgressiveBlur', 'BeginCardComposite', '_panelBuffer',

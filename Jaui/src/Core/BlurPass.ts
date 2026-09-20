@@ -66,47 +66,80 @@ void main() {
 // The fix belongs here rather than in the ordering of `GenerateOutputMipmap`, because the level a
 // pyramid pass reads must be a property of the pass, not of its source's current sampler state.
 
+// ── THE TAP, AND WHY IT IS A MACRO ────────────────────────────────────────────────────────────
+//
+// Every pass in this file reads its source through `TAP(p)`. There are two definitions of it and
+// the choice is made at COMPILE time, once per program, never per fragment:
+//
+//   TAP_PLAIN  the source IS the pyramid, so a coordinate addresses it directly and the hardware's
+//              CLAMP_TO_EDGE handles anything that leaves it. Textually it expands to exactly the
+//              `textureLod(u_Tex, p, 0.0)` this file has always written — a macro, not a function,
+//              so the preprocessed source a driver compiles for the shipping path is character for
+//              character what it was, modulo parentheses that cannot move a float.
+//
+//   TAP_SLOT   the source is one SLOT of an ATLAS holding many members' levels. The coordinate
+//              arriving here is in the SLOT's own normalized space, identical bit for bit to the
+//              standalone pass's (see `BlurAtlas`: `u_SrcRect` is the identity and `u_HalfPixel`
+//              is `0.5 / slotLevelSize`, both exactly the standalone values), and this macro does
+//              two things to it and nothing else:
+//
+//                1. CLAMPS it to the slot's texel-centre range `[0.5/w, 1 - 0.5/w]`, which is what
+//                   GL ES 3.0 3.8.9 says CLAMP_TO_EDGE does to a coordinate. Same texel, same
+//                   bilinear weights — a slot in the middle of an atlas gets the border
+//                   replication a standalone level got from the hardware. Gutters would need
+//                   replication PASSES, and a pass is the thing the atlas exists to remove.
+//                2. Maps it into the atlas with one mad.
+//
+//              The residual risk, named because it is the first suspect if the 0-px gate fails:
+//              the clamped coordinate names the same texel as the hardware's but is a DIFFERENT
+//              float, because it is computed against the atlas's denominator rather than the
+//              slot's. See `BlurAtlas` and `Perf/PyramidAtlas.Finding.md` section 6.
+const TAP_PLAIN = '#define TAP(p) textureLod(u_Tex, (p), 0.0)';
+const TAP_SLOT = `uniform vec4 u_Slot;    // this slot inside the SOURCE atlas level: (originU, originV, sizeU, sizeV)
+uniform vec4 u_Clamp;   // the slot's texel-centre range in SLOT uv: (minU, minV, maxU, maxV)
+#define TAP(p) textureLod(u_Tex, u_Slot.xy + clamp((p), u_Clamp.xy, u_Clamp.zw) * u_Slot.zw, 0.0)`;
+
 // Downsample: 5-tap (center + 4 corners at half-pixel offsets, all weighted)
 // Reads the SOURCE half-pixel; halfpixel = (0.5/srcW, 0.5/srcH).
 // This is run when rendering into a destination half the source's size.
-const DOWN_FRAG = `#version 300 es
+const DOWN_FRAG = (SLOT_TAP: string): string => `#version 300 es
 precision highp float;
 in vec2 v_Uv;
 uniform sampler2D u_Tex;
 uniform vec2 u_HalfPixel;     // half-texel size of the SOURCE
 uniform float u_Offset;       // tap distance scale (typically 1.0)
 out vec4 fragColor;
-
+${SLOT_TAP}
 void main() {
     vec2 hp = u_HalfPixel * u_Offset;
-    vec3 sum = textureLod(u_Tex, v_Uv, 0.0).rgb * 4.0;
-    sum += textureLod(u_Tex, v_Uv - hp, 0.0).rgb;
-    sum += textureLod(u_Tex, v_Uv + hp, 0.0).rgb;
-    sum += textureLod(u_Tex, v_Uv + vec2(hp.x, -hp.y), 0.0).rgb;
-    sum += textureLod(u_Tex, v_Uv - vec2(hp.x, -hp.y), 0.0).rgb;
+    vec3 sum = TAP(v_Uv).rgb * 4.0;
+    sum += TAP(v_Uv - hp).rgb;
+    sum += TAP(v_Uv + hp).rgb;
+    sum += TAP(v_Uv + vec2(hp.x, -hp.y)).rgb;
+    sum += TAP(v_Uv - vec2(hp.x, -hp.y)).rgb;
     fragColor = vec4(sum / 8.0, 1.0);
 }
 `;
 
 // Upsample: 8-tap "tent" kernel
-const UP_FRAG = `#version 300 es
+const UP_FRAG = (SLOT_TAP: string): string => `#version 300 es
 precision highp float;
 in vec2 v_Uv;
 uniform sampler2D u_Tex;
 uniform vec2 u_HalfPixel;     // half-texel size of the SOURCE (smaller image)
 uniform float u_Offset;
 out vec4 fragColor;
-
+${SLOT_TAP}
 void main() {
     vec2 hp = u_HalfPixel * u_Offset;
-    vec3 sum  = textureLod(u_Tex, v_Uv + vec2(-hp.x * 2.0, 0.0), 0.0).rgb;
-    sum += textureLod(u_Tex, v_Uv + vec2(-hp.x,  hp.y), 0.0).rgb * 2.0;
-    sum += textureLod(u_Tex, v_Uv + vec2( 0.0,  hp.y * 2.0), 0.0).rgb;
-    sum += textureLod(u_Tex, v_Uv + vec2( hp.x,  hp.y), 0.0).rgb * 2.0;
-    sum += textureLod(u_Tex, v_Uv + vec2( hp.x * 2.0, 0.0), 0.0).rgb;
-    sum += textureLod(u_Tex, v_Uv + vec2( hp.x, -hp.y), 0.0).rgb * 2.0;
-    sum += textureLod(u_Tex, v_Uv + vec2( 0.0, -hp.y * 2.0), 0.0).rgb;
-    sum += textureLod(u_Tex, v_Uv + vec2(-hp.x, -hp.y), 0.0).rgb * 2.0;
+    vec3 sum  = TAP(v_Uv + vec2(-hp.x * 2.0, 0.0)).rgb;
+    sum += TAP(v_Uv + vec2(-hp.x,  hp.y)).rgb * 2.0;
+    sum += TAP(v_Uv + vec2( 0.0,  hp.y * 2.0)).rgb;
+    sum += TAP(v_Uv + vec2( hp.x,  hp.y)).rgb * 2.0;
+    sum += TAP(v_Uv + vec2( hp.x * 2.0, 0.0)).rgb;
+    sum += TAP(v_Uv + vec2( hp.x, -hp.y)).rgb * 2.0;
+    sum += TAP(v_Uv + vec2( 0.0, -hp.y * 2.0)).rgb;
+    sum += TAP(v_Uv + vec2(-hp.x, -hp.y)).rgb * 2.0;
     fragColor = vec4(sum / 12.0, 1.0);
 }
 `;
@@ -221,6 +254,21 @@ export interface RegionRect {
   /** True when the region is the whole input — the pyramid is canvas-sized and every source
    *  rect is the identity, so the passes are bit-for-bit what they always were. */
   Full: boolean;
+}
+
+/** One member of an ATLAS build: the rect its pyramid is built over, and where that rect's
+ *  level 0 sits inside the atlas.
+ *
+ *  `Rect` is what `ResolveRegionRect` returns for the member's own region -- the SAME function the
+ *  standalone build would have called, with the same phase -- so the atlas is a relocation of
+ *  exactly today's texels and not a second answer to which texels a member gets.
+ *
+ *  `Slot` is in atlas texels with `YBottom` from the BOTTOM, matching `RegionRect` and the axis
+ *  every pass draws in. `PackAtlasSlots` produces it; `BlurAtlas` refuses one that does not match
+ *  its rect or does not land on the phase grid. */
+export interface AtlasBuildMember {
+  Rect: RegionRect;
+  Slot: { X: number; YBottom: number; W: number; H: number };
 }
 
 /** A rect of the input in device px with y=0 at the TOP — the shape every backdrop consumer
@@ -429,6 +477,13 @@ export class BlurPass {
   private _gl: WebGL2RenderingContext;
   private _down: ShaderProgram;
   private _up: ShaderProgram;
+  /** The same two kernels compiled against `TAP_SLOT`: one slot of an ATLAS instead of a whole
+   *  pyramid. Compiled in the constructor's batch alongside the other three rather than lazily,
+   *  because a lazy compile would land on the first frame that has glass on it -- which is the
+   *  frame every boot measurement reads. Two more programs on the blur batch
+   *  (`jaui:shaders:issued n=` moves by two per BlurPass); nothing else about the batch changes. */
+  private _downSlot: ShaderProgram;
+  private _upSlot: ShaderProgram;
   private _copy: ShaderProgram;
   private _quad: QuadGeometry;
   /** The ACTIVE chain's levels. Rebound by `_useChain` at the top of every Blur and read by
@@ -479,6 +534,18 @@ export class BlurPass {
   private _upSrcLoc: WebGLUniformLocation | null = null;
   private _copyTexLoc: WebGLUniformLocation | null = null;
   private _copySrcLoc: WebGLUniformLocation | null = null;
+  private _dsTexLoc: WebGLUniformLocation | null = null;
+  private _dsHpLoc: WebGLUniformLocation | null = null;
+  private _dsOffLoc: WebGLUniformLocation | null = null;
+  private _dsSrcLoc: WebGLUniformLocation | null = null;
+  private _dsSlotLoc: WebGLUniformLocation | null = null;
+  private _dsClampLoc: WebGLUniformLocation | null = null;
+  private _usTexLoc: WebGLUniformLocation | null = null;
+  private _usHpLoc: WebGLUniformLocation | null = null;
+  private _usOffLoc: WebGLUniformLocation | null = null;
+  private _usSrcLoc: WebGLUniformLocation | null = null;
+  private _usSlotLoc: WebGLUniformLocation | null = null;
+  private _usClampLoc: WebGLUniformLocation | null = null;
 
   /**
    * `batch` joins the blur's three programs to a caller's compile batch so all of them reach the
@@ -552,8 +619,10 @@ export class BlurPass {
     this._chainsLive = chains;
     this._gl = gl;
     const b = batch ?? new ShaderBatch(gl);
-    this._down = b.Add(VERT, DOWN_FRAG);
-    this._up = b.Add(VERT, UP_FRAG);
+    this._down = b.Add(VERT, DOWN_FRAG(TAP_PLAIN));
+    this._up = b.Add(VERT, UP_FRAG(TAP_PLAIN));
+    this._downSlot = b.Add(VERT, DOWN_FRAG(TAP_SLOT));
+    this._upSlot = b.Add(VERT, UP_FRAG(TAP_SLOT));
     this._copy = b.Add(VERT, COPY_FRAG);
     this._quad = new QuadGeometry(gl);
 
@@ -580,6 +649,18 @@ export class BlurPass {
     this._upSrcLoc = gl.getUniformLocation(this._up.Program, 'u_SrcRect');
     this._copyTexLoc = gl.getUniformLocation(this._copy.Program, 'u_Tex');
     this._copySrcLoc = gl.getUniformLocation(this._copy.Program, 'u_SrcRect');
+    this._dsTexLoc = gl.getUniformLocation(this._downSlot.Program, 'u_Tex');
+    this._dsHpLoc = gl.getUniformLocation(this._downSlot.Program, 'u_HalfPixel');
+    this._dsOffLoc = gl.getUniformLocation(this._downSlot.Program, 'u_Offset');
+    this._dsSrcLoc = gl.getUniformLocation(this._downSlot.Program, 'u_SrcRect');
+    this._dsSlotLoc = gl.getUniformLocation(this._downSlot.Program, 'u_Slot');
+    this._dsClampLoc = gl.getUniformLocation(this._downSlot.Program, 'u_Clamp');
+    this._usTexLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Tex');
+    this._usHpLoc = gl.getUniformLocation(this._upSlot.Program, 'u_HalfPixel');
+    this._usOffLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Offset');
+    this._usSrcLoc = gl.getUniformLocation(this._upSlot.Program, 'u_SrcRect');
+    this._usSlotLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Slot');
+    this._usClampLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Clamp');
   };
 
   /**
@@ -786,6 +867,200 @@ export class BlurPass {
     this._lastRegion = this._region(rect, scaleX, scaleY);
 
     return this._levels[0].Texture;
+  };
+
+  /** ONE ATLAS INSTEAD OF N PYRAMIDS: every member's level `i` into one target, one bind per
+   *  LEVEL instead of one bind per level per member.
+   *
+   *  A pass is a destination bind and therefore, behind ANGLE, its own render command encoder with
+   *  its own fixed cost -- ~69 us on the M4, measured, for a pass shading under 0.25 Mpx
+   *  (`Perf/PyramidAtlas.Finding.md` section 2). Twenty JwiftGlass cards at k=1, depth=2, maxLod=0
+   *  are 80 encoders; as one atlas they are 4. The DRAWS do not move: 4 levels x 20 slot draws is
+   *  the same 80 draws as 20 builds x 4 passes, which is the control invariant every cell of this
+   *  lever must quote (`EndsByKey.blur` 40 -> 2 with `drawCalls` IDENTICAL).
+   *
+   *  WHAT IT COSTS, SAID FIRST. One encoder is one point in TIME, so every member is built from
+   *  the scene as of the FIRST of them. That is the composition Jack approved on 2026-09-20 -- a
+   *  card's backdrop no longer refracts its earlier-drawn neighbours' glass -- measured at 34,830
+   *  px (0.85% of the page) at max 12/255. A texture layout cannot undo a dependency in time, and
+   *  there is no arrangement of this that batches the passes and leaves the scene states apart.
+   *
+   *  THE ARITHMETIC IS THE STANDALONE BUILD'S, DELIBERATELY. Every uniform below is the value the
+   *  standalone pass would have used for that member:
+   *
+   *    - `u_SrcRect` on the first DOWN hop is the member's own resolved rect against the CANVAS,
+   *      exactly `Blur`'s `i === 1` call; on every later hop it is the identity, exactly `Blur`'s
+   *      `null`. So `v_Uv` interpolates the same `(j + 0.5) / slotLevelSize` it always did.
+   *    - `u_HalfPixel` is `0.5 / slotLevelSize` -- the SLOT's size, never the atlas's -- so the
+   *      kernel's taps are the same half-texel offsets in the same units.
+   *    - the destination is the slot's rect of the atlas level, set with `gl.viewport`, so the
+   *      rasterizer covers the same texels at the same pixel centres.
+   *
+   *  The ONE place the atlas's own dimensions enter is `TAP_SLOT`'s final mad, and the clamp
+   *  beside it. That is the whole of the pixel risk beyond the composition, and section 6 of the
+   *  finding names it: the clamped coordinate lands on the same texel as CLAMP_TO_EDGE's but is a
+   *  different float, because `(slotX + 0.5) / atlasW` and `0.5 / slotW` are computed against
+   *  different denominators. ~1.7e-4 of a texel against a GPU's ~1/256 subtexel quantisation, so
+   *  it SHOULD be exact and is not provable from the spec.
+   *
+   *  REFUSALS ARE THE CALLER'S. This method builds what it is handed and throws on a layout it
+   *  cannot build faithfully rather than quietly drawing a resample. `k > 1` (the pre-downsample
+   *  ping-pong is not slotted) and `maxLod > 0` (there is no mip atlas) are refused by
+   *  `PlanBackdropAtlas`'s caller, which builds those members alone; see `Core/Jaui.ts`.
+   *
+   *  Returns the atlas texture and one `BackdropRegion` per member, in member order. Each is the
+   *  member's own screen-UV map composed with its slot, so `Jiv.Panel.frag` is untouched: it still
+   *  reads `uv * u_BackdropXf.xy + u_BackdropXf.zw` and the two mads now land in the slot. */
+  BlurAtlas = (
+    input: WebGLTexture, width: number, height: number, radius: number,
+    members: readonly AtlasBuildMember[], atlasW: number, atlasH: number,
+  ): { Texture: WebGLTexture; Regions: BackdropRegion[] } => {
+    const gl = this._gl;
+    if (members.length === 0) throw new Error('[Jaui] BlurAtlas needs at least one member');
+    if (radius <= 0) throw new Error('[Jaui] BlurAtlas is the dual-filter path: radius must be > 0');
+    const depth = PyramidDepth(radius, 0);
+    const phase = 1 << depth;
+    // The phase grid is the whole texel argument: level i of a slot sits at `origin / 2^i` only if
+    // every origin and every extent is a multiple of `2^depth`. `PackAtlasSlots` guarantees it and
+    // this says so out loud, because the failure mode of a bypassed packer is a resample that
+    // looks like a blur.
+    if (atlasW % phase !== 0 || atlasH % phase !== 0) {
+      throw new Error(`[Jaui] BlurAtlas ${atlasW}x${atlasH} is off the ${phase}px phase grid`);
+    }
+    for (const m of members) {
+      const s = m.Slot;
+      if (s.W !== m.Rect.W || s.H !== m.Rect.H) {
+        throw new Error(`[Jaui] BlurAtlas slot ${s.W}x${s.H} does not hold its rect ${m.Rect.W}x${m.Rect.H}`);
+      }
+      if (s.X % phase !== 0 || s.YBottom % phase !== 0 || s.W % phase !== 0 || s.H % phase !== 0) {
+        throw new Error(`[Jaui] BlurAtlas slot ${s.X},${s.YBottom} ${s.W}x${s.H} is off the ${phase}px phase grid`);
+      }
+      if (s.X < 0 || s.YBottom < 0 || s.X + s.W > atlasW || s.YBottom + s.H > atlasH) {
+        throw new Error(`[Jaui] BlurAtlas slot ${s.X},${s.YBottom} ${s.W}x${s.H} leaves the ${atlasW}x${atlasH} atlas`);
+      }
+    }
+
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindVertexArray(this._quad.Vao);
+
+    this._useChain(atlasW, atlasH);
+    const lw: number[] = [atlasW], lh: number[] = [atlasH];
+    this._levels[0].Resize(atlasW, atlasH);
+    let w = atlasW, h = atlasH;
+    for (let i = 1; i <= depth; i++) {
+      w = Math.max(1, Math.floor(w / 2));
+      h = Math.max(1, Math.floor(h / 2));
+      this._levels[i].Resize(w, h);
+      lw.push(w); lh.push(h);
+    }
+    this._lastDepth = depth;
+    const baseSigma = 3 * Math.pow(2, depth);
+    const tapOffset = Math.max(0.7, Math.min(1.3, Math.max(1, radius) / baseSigma));
+
+    // -- DOWN hop 1: the only hop that reads the SCENE, so it takes the PLAIN kernel --
+    // Its source is the same canvas-sized texture the standalone build read, at the same
+    // `u_SrcRect`, with the hardware's own CLAMP_TO_EDGE at the same canvas border. Nothing about
+    // it is atlas-aware except where it draws.
+    const timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
+    this._bindTarget(this._levels[1], 'a1');
+    gl.useProgram(this._down.Program);
+    gl.uniform1i(this._downTexLoc, 0);
+    gl.uniform1f(this._downOffLoc, tapOffset);
+    gl.uniform2f(this._downHpLoc, 0.5 / width, 0.5 / height);
+    gl.bindTexture(gl.TEXTURE_2D, input);
+    for (const m of members) {
+      gl.viewport(m.Slot.X >> 1, m.Slot.YBottom >> 1, m.Slot.W >> 1, m.Slot.H >> 1);
+      this._setSrcRect(this._downSrcLoc, m.Rect, width, height);
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    }
+
+    // -- DOWN hops 2..depth: source is the atlas level below, so the slot kernel --
+    if (depth >= 2) {
+      gl.useProgram(this._downSlot.Program);
+      gl.uniform1i(this._dsTexLoc, 0);
+      gl.uniform1f(this._dsOffLoc, tapOffset);
+      this._setSrcRect(this._dsSrcLoc, null, 1, 1);
+      for (let i = 2; i <= depth; i++) {
+        this._bindTarget(this._levels[i], `a${i}`);
+        gl.bindTexture(gl.TEXTURE_2D, this._levels[i - 1].Texture);
+        for (const m of members) {
+          this._slotUniforms(this._dsSlotLoc, this._dsClampLoc, this._dsHpLoc, m.Slot, i - 1, lw[i - 1], lh[i - 1]);
+          gl.viewport(m.Slot.X >> i, m.Slot.YBottom >> i, m.Slot.W >> i, m.Slot.H >> i);
+          gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+        }
+      }
+    }
+    if (timedDown) this.Timers!.End();
+
+    // -- UP hops depth-1..0 --
+    const timedUp = this.Timers !== null && this.Timers.Begin('blur-up');
+    gl.useProgram(this._upSlot.Program);
+    gl.uniform1i(this._usTexLoc, 0);
+    gl.uniform1f(this._usOffLoc, tapOffset);
+    this._setSrcRect(this._usSrcLoc, null, 1, 1);
+    for (let i = depth - 1; i >= 0; i--) {
+      this._bindTarget(this._levels[i], `a${i}`);
+      gl.bindTexture(gl.TEXTURE_2D, this._levels[i + 1].Texture);
+      for (const m of members) {
+        this._slotUniforms(this._usSlotLoc, this._usClampLoc, this._usHpLoc, m.Slot, i + 1, lw[i + 1], lh[i + 1]);
+        gl.viewport(m.Slot.X >> i, m.Slot.YBottom >> i, m.Slot.W >> i, m.Slot.H >> i);
+        gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      }
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._target('default');
+    if (timedUp) this.Timers!.End();
+    // Every member is a `maxLod <= 0` consumer (the caller refuses the rest), which is
+    // `_generateOutputMipmap`'s first branch: make the texture complete at the base level and
+    // stop. There is no mip atlas and this lane did not design one.
+    this._levels[0].DisableMipmap();
+    // The atlas is not one member's region, and nothing may read `LastRegion` after this call and
+    // get a sensible answer for any of them. It is set to the atlas's own full extent so a reader
+    // that does gets the TEXTURE's shape rather than the last slot's, which would be a wrong map
+    // wearing a plausible one's shape.
+    this._lastRegion = { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: atlasW, TexelsY: atlasH };
+
+    const regions: BackdropRegion[] = [];
+    for (const m of members) {
+      // Compose the member's own screen-UV map with its slot. Standalone:
+      //   regionUv = screenUv * (width / rect.W) + (-rect.X / rect.W)
+      // Atlas:
+      //   atlasUv  = (slot.X + rect.W * regionUv) / atlasW
+      //            = screenUv * (width / atlasW) + (slot.X - rect.X) / atlasW
+      // -- one affine map, so `u_BackdropXf` still carries it and the shader is untouched.
+      regions.push({
+        ScaleX: width / atlasW,
+        ScaleY: height / atlasH,
+        OffsetX: (m.Slot.X - m.Rect.X) / atlasW,
+        OffsetY: (m.Slot.YBottom - m.Rect.YBottom) / atlasH,
+        TexelsX: atlasW,
+        TexelsY: atlasH,
+      });
+    }
+    return { Texture: this._levels[0].Texture, Regions: regions };
+  };
+
+  /** One slot's three uniforms at one SOURCE level: where it sits in the atlas level, its own
+   *  texel-centre range, and the half-texel the kernel taps by.
+   *
+   *  `u_HalfPixel` is `0.5 / slotLevelSize` and NOT `0.5 / atlasLevelSize`: the coordinate the
+   *  kernel works in is the slot's own, bit for bit the standalone pass's, and the atlas's
+   *  dimensions enter exactly once, in `TAP_SLOT`'s mad. */
+  private _slotUniforms = (
+    slotLoc: WebGLUniformLocation | null, clampLoc: WebGLUniformLocation | null,
+    hpLoc: WebGLUniformLocation | null,
+    slot: { X: number; YBottom: number; W: number; H: number },
+    level: number, levelW: number, levelH: number,
+  ): void => {
+    const gl = this._gl;
+    const sx = slot.X >> level, sy = slot.YBottom >> level;
+    const sw = slot.W >> level, sh = slot.H >> level;
+    gl.uniform2f(hpLoc, 0.5 / sw, 0.5 / sh);
+    gl.uniform4f(slotLoc, sx / levelW, sy / levelH, sw / levelW, sh / levelH);
+    gl.uniform4f(clampLoc, 0.5 / sw, 0.5 / sh, 1 - 0.5 / sw, 1 - 0.5 / sh);
   };
 
   /** Populate the output texture's mipmap chain with a proper Gaussian

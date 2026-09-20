@@ -28,7 +28,9 @@ import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, 
 // copy of the rule would be a count that can silently disagree with the pass it is counting.
 import {
   BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, MAX_CHAINS, CHAIN_BUDGET_BYTES,
+  type AtlasBuildMember,
 } from './BlurPass';
+import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 import { TickPace, ParseTickPace, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
@@ -166,6 +168,26 @@ interface GlassBlurPlan {
   InstFrostLod: number;
   /** The node's device-px AABB, and the margin the region added around it. */
   Px: number; Py: number; Pw: number; Ph: number; Margin: number;
+  /** HOW FAR PAST ITS OWN AABB THIS SURFACE'S DRAW CAN TAP THE PYRAMID, in device px.
+   *
+   *  It exists for the atlas and for nothing else. A standalone pyramid is its own texture, so a
+   *  tap that leaves the region is answered by CLAMP_TO_EDGE replicating the region's border
+   *  texel. A SLOT of an atlas has no border: the same tap reads whatever the packer put beside
+   *  it. `Jiv.Panel.frag` is not this lane's to change, so the region has to CONTAIN every tap
+   *  instead, and a member whose region does not is refused and built alone.
+   *
+   *  Two reaches, and the bound is their max rather than their sum, because they are reached from
+   *  different fragments. The DRAW QUAD is the node's box expanded by
+   *  `max(ShadowBlur + |ShadowOffset|, BorderWidth + BorderBlur)` (`Jiv.InstanceBuffer`), and
+   *  `sampleBackdrop` runs on every fragment of it including the shadow skirt -- where the
+   *  refraction hump has decayed to under 2e-4 and the displacement is nil. The REFRACTION and
+   *  chromatic-aberration displacement is reached from fragments at the shape's own edge, which
+   *  is inside the box. A border-only pass reads 0: its one tap is the border zone's, which
+   *  offsets INWARD along the normal.
+   *
+   *  Not clamped to the canvas here: the admission test does that, because a fragment outside the
+   *  canvas is never rasterized and a reach that leaves it is therefore not a reach at all. */
+  TapReach: number;
   /** Whether the adaptive-shadow probe will run for this surface (it deepens `MaxLod`). */
   AdaptiveShadow: boolean;
   /** `BackdropFrostBlur` floored at 1pt — what the margin and the radius are built from. */
@@ -414,6 +436,46 @@ export class Canvas implements DirtyTracker {
    *  discarded rather than reported. */
   private _phasedStrays = { Snaps: 0, Pblur: 0 };
   private _phasedLastLine: string = '';
+
+  // -- `?pyramid-atlas` -- THE DEFAULT COMPOSITION, AND THE ATLAS THAT PAYS FOR IT -------------
+  /** Every glass card's backdrop pyramid built from the scene BEFORE any card is drawn, and the
+   *  whole phase's builds issued as ONE atlas.
+   *
+   *  THE RULING. Jack approved this on 2026-09-20, with the two decision images: a card no longer
+   *  refracts its earlier-drawn neighbours' glass, which is 34,830 px (0.85% of the page) at max
+   *  12/255, mean 2, confined to the edge bands facing earlier-drawn neighbours. That measurement
+   *  is `?blur-phased`'s, on `?blur-phased`'s composition -- which is why this flag REUSES the
+   *  phased traversal wholesale instead of inventing a fourth ordering. The two arms then differ
+   *  in the atlas and in nothing else, so `?pyramid-atlas` against `?blur-phased` on one build is
+   *  a test of the ATLAS alone and the ruling's number is the only pixel change the default makes.
+   *
+   *  WHAT IT BUYS. A pyramid pass is a destination bind and therefore its own render command
+   *  encoder, ~69 us on the M4 (`Perf/PyramidAtlas.Finding.md` section 2). `glass-grid`'s forty
+   *  builds are 160 of them; two atlases are 8. 152 encoders is ~-10.5 ms per render at dpr 2.
+   *
+   *  WHAT IT COSTS. ~55 MB of GPU texture against a 2.64 MB rotating pool, which is why the pass
+   *  runs under `ATLAS_LIMITS_WIRED` rather than the shipped 48 MB chain budget, and why the
+   *  planner SPLITS a run it cannot fit instead of evicting mid-frame.
+   *
+   *  `?pyramid-atlas=off` restores the per-card, per-draw composition in the same binary. That is
+   *  the engine this lane inherited, and it is the "before" every gate reads against. */
+  private _pyramidAtlas: boolean = true;
+  /** `_blurPhased || _pyramidAtlas` -- does the WALK run in phases this frame?
+   *
+   *  One field rather than two tests at six sites, and read by every site that used to read
+   *  `_blurPhased`, because those sites are about the phased WALK (a pre-built handle is waiting;
+   *  a snapshot is now taken from a different scene state; the shadow probe already ran) and not
+   *  about which of the two arms asked for it. */
+  private _phasedWalk: boolean = false;
+  /** Set for the duration of a build phase when the atlas is on: the traversal RECORDS what it
+   *  would have built instead of building it, because an atlas has to see the whole phase before
+   *  it can lay out a single slot. Null on every other path, including `?blur-phased`'s. */
+  private _atlasCollect: { Into: Map<Jiv, GpuTextureHandle>; Node: Jiv; Plan: GlassBlurPlan }[] | null = null;
+  /** The frame's atlas census, for the gate line. `Solo` is the one to read first: a plan that
+   *  atlases nothing and solos everything is the unflagged engine wearing this flag's name. */
+  private _atlasStats = { Atlases: 0, Members: 0, Solo: 0, Refused: 0, Bytes: 0, Sizes: '' };
+  private _atlasLastLine: string = '';
+  private _atlasSizes = new Set<string>();
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -2123,18 +2185,18 @@ export class Canvas implements DirtyTracker {
           // it. Counted rather than moved or refused: `glass-grid` and `idle` never take one
           // (every glass class there authors frost), and an arm where this is non-zero is not
           // comparable and should be discarded.
-          if (sceneSnap !== null && this._blurPhased) this._phasedStrays.Snaps++;
+          if (sceneSnap !== null && this._phasedWalk) this._phasedStrays.Snaps++;
           // `?blur-first`: this surface's rim pyramid was built before the bed's first draw, so
           // the build is a lookup. Nothing else about the pass moves — the snapshot above still
           // runs where it ran, and the draw below is the baseline draw. A MISS builds here, which
           // is how a pre-pass that failed to reach this node reports itself instead of hiding.
-          const preRim = this._blurFirst || this._blurPhased ? this._blurFirstRim.get(node) : undefined;
+          const preRim = this._blurFirst || this._phasedWalk ? this._blurFirstRim.get(node) : undefined;
           let lastBackdrop: GpuTextureHandle | null;
           if (preRim !== undefined) {
             lastBackdrop = preRim;
             this._blurFirstStats.Used++;
           } else {
-            if (this._blurFirst || this._blurPhased) this._blurFirstStats.Missed++;
+            if (this._blurFirst || this._phasedWalk) this._blurFirstStats.Missed++;
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
             r.GenerateBlurMipmap(plan.MaxLod);
             r.RebindSceneTarget();
@@ -2635,7 +2697,7 @@ export class Canvas implements DirtyTracker {
           // See the rim site: a snapshot is a scene READ and stays in the walk, so under
           // `?blur-phased` it is an extra encoder end AND a different scene state than this
           // surface's own pyramid. 0 on `glass-grid` and `idle`; non-zero voids the arm.
-          if (sceneSnap !== null && this._blurPhased) this._phasedStrays.Snaps++;
+          if (sceneSnap !== null && this._phasedWalk) this._phasedStrays.Snaps++;
           // Pyramid is built AT this panel's frost sigma, so the base LOD is the panel's own
           // frostLod: the shader's main sample (lod = frostLod - u_BaseFrostLod) lands on LOD 0
           // (full res). Only the subtle glass rim/inner boost (≲ 2 LODs) climbs into the now
@@ -2645,12 +2707,12 @@ export class Canvas implements DirtyTracker {
           // `?blur-first`: this surface's fill pyramid was built before the bed's first draw, so
           // the build is a lookup and the scene target was never unbound here — which is why the
           // `RebindSceneTarget` below stays inside the branch that actually left it.
-          const preFill = this._blurFirst || this._blurPhased ? this._blurFirstFill.get(node) : undefined;
+          const preFill = this._blurFirst || this._phasedWalk ? this._blurFirstFill.get(node) : undefined;
           if (preFill !== undefined) {
             lastBackdrop = preFill;
             this._blurFirstStats.Used++;
           } else {
-            if (this._blurFirst || this._blurPhased) this._blurFirstStats.Missed++;
+            if (this._blurFirst || this._phasedWalk) this._blurFirstStats.Missed++;
             const _tBlur = performance.now();
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
             const _tMip = performance.now();
@@ -2672,7 +2734,7 @@ export class Canvas implements DirtyTracker {
         let shadowBackdrop: ShadowBackdrop | undefined;
         const _rs = node.RenderStyle;
         const _shadowScene = sceneSnap ?? r.SceneTexture;
-        const preShadow = this._blurPhased ? this._phasedShadow.get(node) : undefined;
+        const preShadow = this._phasedWalk ? this._phasedShadow.get(node) : undefined;
         if (preShadow !== undefined) {
           // `?blur-phased`: measured in phase 2, beside this surface's own build, where the probe's
           // `shadow-state` bind rides the end the build already paid. Here, in pass 3, the scene is
@@ -2985,7 +3047,11 @@ export class Canvas implements DirtyTracker {
     // after it — and no scene in the perf harness has one.
     if (this._blurFirst && !this._diagNoUi) this._blurFirstPrepass(w, h);
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
-    if (this._blurPhased && !this._diagNoUi) {
+    if (this._phasedWalk && !this._diagNoUi) {
+      // THE PHASED COMPOSITION, run for `?blur-phased` and for the DEFAULT `?pyramid-atlas` alike
+      // -- one traversal shape, so the two arms differ in the atlas and in nothing else and the
+      // atlas's pixels can be gated against the phased arm's on the same build.
+      //
       // `?blur-phased` (MEASUREMENT ONLY - DIFFERENT PIXELS). The same tree, five passes, THREE
       // scene encoders instead of one per build and one per draw. See `_blurPhased` for the shape
       // and for the pixel change it makes; the encoder arithmetic, on the ledger's own rules:
@@ -3008,6 +3074,9 @@ export class Canvas implements DirtyTracker {
       this._phasedShadow.clear();
       this._phasedStrays.Snaps = 0;
       this._phasedStrays.Pblur = 0;
+      const ast = this._atlasStats;
+      ast.Atlases = 0; ast.Members = 0; ast.Solo = 0; ast.Refused = 0; ast.Bytes = 0; ast.Sizes = '';
+      this._atlasSizes.clear();
       const pst = this._blurFirstStats;
       pst.Fill = 0; pst.Rim = 0; pst.Used = 0; pst.Missed = 0; pst.Dup = 0; pst.Coarse = 0;
       const phase = (pass: 1 | 2 | 3): void => {
@@ -3078,6 +3147,28 @@ export class Canvas implements DirtyTracker {
         + ` pblur=${this._phasedStrays.Pblur}`
         + ` pool=${pool} switches=${sw} pixels=DIFFERENT`;
       if (line !== this._phasedLastLine) { this._phasedLastLine = line; JTrace(line); }
+    }
+
+    // `?pyramid-atlas`'s gate, on the same terms as the two above: a SHAPE change, not a frame.
+    //
+    // `solo` and `refused` are what make this line worth printing. A plan that atlased nothing
+    // would read `atlases=0 members=0 solo=40` and pass every timing comparison by having done
+    // nothing -- the vacuous-success shape this ledger has been bitten by before -- so the counts
+    // are printed together and `members + solo` must equal `built`. `refused` is the subset of
+    // `solo` the ADMISSION test turned away (a mip consumer, a k > 1 surface, or a region that
+    // does not contain its own draw's taps) as against members a full atlas could not take.
+    if (this._pyramidAtlas && !this._diagNoUi) {
+      const st = this._blurFirstStats;
+      const a = this._atlasStats;
+      const sw = this._renderer instanceof WebGL2Renderer ? this._renderer.SceneSwitches : -1;
+      const line = `jaui:pyramid-atlas built=${st.Fill + st.Rim} fill=${st.Fill} rim=${st.Rim}`
+        + ` used=${st.Used} missed=${st.Missed}`
+        + ` atlases=${a.Atlases} members=${a.Members} solo=${a.Solo} refused=${a.Refused}`
+        + ` bytes=${Math.round(a.Bytes / (1024 * 1024) * 10) / 10}MB sizes=${a.Sizes === '' ? 'none' : a.Sizes}`
+        + ` shadows=${this._phasedShadow.size} snaps=${this._phasedStrays.Snaps}`
+        + ` pblur=${this._phasedStrays.Pblur}`
+        + ` switches=${sw} pixels=DIFFERENT`;
+      if (line !== this._atlasLastLine) { this._atlasLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -3638,6 +3729,15 @@ export class Canvas implements DirtyTracker {
     const refractMax = (thicknessDev + bulgeMax) * rs.Refraction;
     const caMax = rs.ChromaticAberration * 3.0;
     const margin = frostCssPx * d + refractMax + caMax + 8 * d;
+    // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
+    // second reading of them: a bound computed off a different rule is a bound that can drift
+    // away from the quad it is supposed to contain. `DiagNoShadow` zeroes the shadow there, so it
+    // zeroes it here.
+    const noShadow = JivInstanceBuffer.DiagNoShadow;
+    const shadowReach = noShadow ? 0 : (rs.ShadowBlur * avgScale * d
+      + Math.max(Math.abs(rs.ShadowOffsetX), Math.abs(rs.ShadowOffsetY)) * avgScale * d);
+    const borderReach = (rs.BorderWidth + rs.BorderBlur) * avgScale * d;
+    const tapReach = Math.max(shadowReach, borderReach, refractMax + caMax);
     const ab = this._nodeAabb(node, eff, effH);
     const px = ab.minX * d, py = ab.minY * d;
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
@@ -3668,7 +3768,7 @@ export class Canvas implements DirtyTracker {
       ),
       BaseFrostLod: baseFrostLod,
       InstFrostLod: instFrostLod,
-      Px: px, Py: py, Pw: pw, Ph: ph, Margin: margin,
+      Px: px, Py: py, Pw: pw, Ph: ph, Margin: margin, TapReach: tapReach,
       AdaptiveShadow: adaptiveShadow,
       FrostCssPx: frostCssPx,
     };
@@ -3704,6 +3804,11 @@ export class Canvas implements DirtyTracker {
       BaseFrostLod: baseFrostLod,
       InstFrostLod: instFrostLod,
       Px: px, Py: py, Pw: pw, Ph: ph, Margin: margin,
+      // A border-only pass makes exactly ONE backdrop tap and it offsets INWARD along the normal
+      // (`Jiv.Panel.frag`'s `bUv`, scaled by `solidness`), and the fill's refracted and CA taps
+      // are skipped wholesale on `borderOnly`. So a rim never reads outside its own box, let
+      // alone outside its region, and it is admissible to an atlas unconditionally.
+      TapReach: 0,
       AdaptiveShadow: false,
       FrostCssPx: frostCssPx,
     };
@@ -3787,13 +3892,99 @@ export class Canvas implements DirtyTracker {
   private _blurPhasedBuild = (site: 'fill' | 'rim', w: number, h: number): void => {
     this._phasedBuilt.length = 0;
     this._prepassSites = site;
+    // With the atlas on, the traversal RECORDS rather than builds: a slot layout cannot be
+    // computed one member at a time, and issuing the builds as it walked would be the per-card
+    // composition again. The traversal itself is byte for byte the one `?blur-phased` runs, which
+    // is what keeps ONE answer to "which surfaces build" across both arms.
+    if (this._pyramidAtlas) this._atlasCollect = [];
     const scope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
     this._blurFirstNode(this.Root, MAT_IDENTITY, EmptyClipStack, scope, null, null, w, h);
     this._blurFirstReplay(scope, w, h);
     this._prepassSites = 'both';
+    const collected = this._atlasCollect;
+    this._atlasCollect = null;
+    if (collected !== null) this._atlasPhase(collected, w, h);
     const st = this._blurFirstStats;
     st.Chains = this._blurFirstKeys.size;
     st.Keys = [...this._blurFirstKeys].join('+');
+  };
+
+  /** ONE BUILD PHASE AS ATLASES: the whole phase's plans in, every handle out.
+   *
+   *  The order is a plan, a build per atlas, and then the refused members built exactly as they
+   *  are built today. Nothing here decides the COMPOSITION -- the phase already hoisted every
+   *  build ahead of every draw -- so what this chooses is only how the passes are issued.
+   *
+   *  ONE ATLAS PER (RADIUS) CLASS, because `k`, `depth` and the phase grid all come off the
+   *  radius, and mixing two of them in one target would be a resample rather than a crop. Members
+   *  of a class need not be adjacent in the walk: under the hoisted composition every build sees
+   *  the SAME scene state, so build order inside a phase carries no information and
+   *  `IgnoreSeparation` is the whole of what the planner is asked. */
+  private _atlasPhase = (
+    collected: { Into: Map<Jiv, GpuTextureHandle>; Node: Jiv; Plan: GlassBlurPlan }[],
+    w: number, h: number,
+  ): void => {
+    const r = this._renderer;
+    const a = this._atlasStats;
+    // The atlas is a WebGL2 path: `ComputeBlurAtlas` lives on that renderer and nowhere else. The
+    // flag refuses to arm on any other backend, so this is the belt on that brace rather than a
+    // silent degradation -- and a solo build is today's engine, which is the only fallback this
+    // lane is willing to have.
+    if (!(r instanceof WebGL2Renderer)) {
+      for (const c of collected) this._prepassIssue(c.Into, c.Node, c.Plan, w, h);
+      a.Solo += collected.length;
+      return;
+    }
+    const solo: typeof collected = [];
+    const byRadius = new Map<number, typeof collected>();
+    for (const c of collected) {
+      // The admission rule is the PLANNER's, not a private copy here: a walk with its own idea
+      // of what an atlas can hold is a walk that can hand over a member the atlas cannot build.
+      if (!AtlasAdmitsMember(c.Plan, w, h)) { a.Refused++; solo.push(c); continue; }
+      const cls = byRadius.get(c.Plan.Radius);
+      if (cls === undefined) byRadius.set(c.Plan.Radius, [c]); else cls.push(c);
+    }
+    for (const [radius, cls] of byRadius) {
+      const plan = cls.length < 2 ? null : PlanBackdropAtlas(
+        cls.map((c) => ({ Region: c.Plan.Region, Paint: c.Plan.Region })), w, h, radius,
+        { IgnoreSeparation: true, Limits: ATLAS_LIMITS_WIRED, MaxLod: 0 },
+      );
+      // `K !== 1` is the pre-downsample ping-pong, which is NOT slotted and which this lane did
+      // not design. Refused loudly and wholesale rather than slotting only the pyramid, which
+      // would put the pre-passes' output in one place and the slot's level 0 in another.
+      if (plan === null || plan.K !== 1) { for (const c of cls) solo.push(c); continue; }
+      const taken = new Set<number>();
+      for (const g of plan.Groups) {
+        const build: AtlasBuildMember[] = [];
+        for (let i = 0; i < g.Members.length; i++) {
+          const c = cls[g.Members[i]];
+          taken.add(g.Members[i]);
+          build.push({ Rect: ResolveRegionRect(c.Plan.Region, w, h, plan.Phase), Slot: g.Slots[i] });
+        }
+        const handles = r.ComputeBlurAtlas(r.SceneTexture, w, h, radius, build, g.AtlasW, g.AtlasH);
+        for (let i = 0; i < g.Members.length; i++) {
+          this._atlasRecord(cls[g.Members[i]], handles[i]);
+        }
+        a.Atlases++;
+        a.Members += g.Members.length;
+        a.Bytes += g.Bytes;
+        this._atlasSizes.add(`${g.AtlasW}x${g.AtlasH}`);
+      }
+      for (let i = 0; i < cls.length; i++) if (!taken.has(i)) solo.push(cls[i]);
+    }
+    for (const c of solo) this._prepassIssue(c.Into, c.Node, c.Plan, w, h);
+    a.Solo += solo.length;
+    a.Sizes = [...this._atlasSizes].join('+');
+    r.NoteAtlasSolo(solo.length);
+  };
+
+  /** Hand one atlas slot's handle to the walk, on the same terms `_prepassIssue` hands over a
+   *  solo build's: the map the site reads, and the probe list the shadow pass runs over. */
+  private _atlasRecord = (
+    c: { Into: Map<Jiv, GpuTextureHandle>; Node: Jiv; Plan: GlassBlurPlan }, handle: GpuTextureHandle,
+  ): void => {
+    c.Into.set(c.Node, handle);
+    this._phasedBuilt.push({ Node: c.Node, Plan: c.Plan, Handle: handle });
   };
 
   /** The adaptive-shadow probes for the fills just built, in build order.
@@ -3889,7 +4080,7 @@ export class Canvas implements DirtyTracker {
     // Counted on the FILL phase only: `?blur-phased` runs this traversal twice a frame, once per
     // site, and a surface counted in both would report double the number of surfaces the flag
     // could not move.
-    if (isPblur && this._blurPhased && this._prepassSites === 'fill') this._phasedStrays.Pblur++;
+    if (isPblur && this._phasedWalk && this._prepassSites === 'fill') this._phasedStrays.Pblur++;
     if (!isPblur && this._prepassSites !== 'rim' && this._glassFillTakesPyramid(node)
         && this._blurFirstBuild(this._blurFirstFill, node, this._glassFillBlurPlan(node, eff, effH, w, h), w, h)) {
       this._blurFirstStats.Fill++;
@@ -3946,11 +4137,31 @@ export class Canvas implements DirtyTracker {
   private _blurFirstBuild = (
     into: Map<Jiv, GpuTextureHandle>, node: Jiv, plan: GlassBlurPlan, w: number, h: number,
   ): boolean => {
-    const r = this._renderer;
     const st = this._blurFirstStats;
     // One instance per node per site. A second build for the same key would overwrite the handle
     // and leave the first consumer reading someone else's map, so it is refused and counted.
     if (into.has(node)) { st.Dup++; return false; }
+    // `?pyramid-atlas`: RECORD it. The build happens once the whole phase is known, because a
+    // slot layout is a property of the phase and not of a member. It still counts here, and the
+    // walk still collects its handle from `into`, so the gate's `built`/`used`/`missed` mean
+    // exactly what they mean on the per-card path.
+    const collect = this._atlasCollect;
+    if (collect !== null) {
+      if (collect.some((c) => c.Into === into && c.Node === node)) { st.Dup++; return false; }
+      collect.push({ Into: into, Node: node, Plan: plan });
+      return true;
+    }
+    return this._prepassIssue(into, node, plan, w, h);
+  };
+
+  /** Issue ONE per-surface build: the walk's two calls, and the pool bookkeeping. This is the
+   *  path `?blur-first`, `?blur-phased` and every atlas REFUSAL take, and it is the engine as it
+   *  ships -- which is why a refusal is safe rather than a degradation. */
+  private _prepassIssue = (
+    into: Map<Jiv, GpuTextureHandle>, node: Jiv, plan: GlassBlurPlan, w: number, h: number,
+  ): boolean => {
+    const r = this._renderer;
+    const st = this._blurFirstStats;
     const t0 = performance.now();
     const handle = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region);
     const t1 = performance.now();
@@ -3961,7 +4172,7 @@ export class Canvas implements DirtyTracker {
     // `?blur-phased` runs the adaptive-shadow probes over this list after the phase, so the probe
     // rides the end the build already paid. Recorded here rather than re-derived, because the
     // probe's rect and detail LOD come out of the SAME plan this build was issued from.
-    if (this._blurPhased) this._phasedBuilt.push({ Node: node, Plan: plan, Handle: handle });
+    if (this._phasedWalk) this._phasedBuilt.push({ Node: node, Plan: plan, Handle: handle });
     // The pool's own chain key, from the pool's own functions. `_useChain` keys on the resolved
     // level-0 size, so this is the number that says how many sets of level textures forty builds
     // resolve to — and therefore how many of them can be held at once.
@@ -5726,6 +5937,66 @@ export class Canvas implements DirtyTracker {
       // flags are off, instead of an `instanceof` per pyramid build.
       this._restartRenderer = r as WebGL2Renderer;
     }
+    // `?pyramid-atlas` -- THE DEFAULT. Parsed before `?blur-phased` so that flag can refuse a
+    // combined arm by name: both run the phased composition, and an arm running the atlas AND the
+    // measurement flag would be reading the atlas under the measurement flag's pool.
+    //
+    // The VALUE is `off` and nothing else. A flag whose value was ignored would let
+    // `?pyramid-atlas=0`, `=false`, `=no` all arm the default while reading as if they had turned
+    // it off, which is the failure mode a measurement instrument exists to avoid.
+    if (params.has('pyramid-atlas')) {
+      const raw = (params.get('pyramid-atlas') ?? '').trim();
+      if (raw !== '' && raw !== 'off' && raw !== 'on') {
+        throw new Error(`[Jaui] ?pyramid-atlas takes 'on' or 'off', got '${raw}'`);
+      }
+      if (raw === 'off') this._pyramidAtlas = false;
+    }
+    // Everything the atlas cannot run beside, named one at a time and refused on the trace rather
+    // than silently disarmed. Each of these owns the same machinery from the other end: the two
+    // measurement flags move builds themselves, the card composite builds from a card target, the
+    // shared backdrop is one canvas-sized pyramid rather than per-surface builds, and the layer
+    // cache skips subtrees the phased walk would paint.
+    if (this._pyramidAtlas) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-build-nothing-to-atlas'
+        : this._blurFirst ? 'blur-first-already-moved-every-build-ahead-of-the-bed'
+        : params.has('blur-phased') ? 'blur-phased-is-the-gate-arm-and-runs-the-builds-per-card'
+        : r.CardCompositeEnabled ? 'card-composite-builds-from-the-card-target'
+        : this._sharedBackdrop ? 'shared-backdrop-builds-one-pyramid-lazily'
+        : this._layerCacheEnabled ? 'layer-cache-skips-subtrees-the-phased-walk-would-paint'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-need-a-per-card-build-to-insert-after'
+        : null;
+      if (why !== null) {
+        this._pyramidAtlas = false;
+        JTrace(`jaui:pyramid-atlas armed=false reason=${why}`);
+      } else {
+        const gl2 = r as WebGL2Renderer;
+        gl2.DiagPyramidAtlas = true;
+        // TWO ATLASES HAVE TO BE RESIDENT AT ONCE and they are 55.37 MB on `glass-grid` at dpr 2,
+        // past the shipped 48 MB chain budget which admits exactly one of them. So the pass runs
+        // under the atlas's own ceiling -- `ATLAS_BUDGET_BYTES` -- and the planner refuses (splits
+        // the run) rather than letting the pool evict, because an evicting pool reallocates whole
+        // textures mid-frame and that thrash would be read as the atlas's own cost.
+        //
+        // No chain ROTATION: an atlas is one chain per phase, keyed by its own size, and the
+        // twenty-way rotation `?blur-phased` needs exists only because twenty same-sized per-card
+        // chains would otherwise be one. `MaxChains` is 8 for the two atlases plus the solo builds
+        // a refusal can put beside them.
+        gl2.DiagChainLimits = { MaxChains: 8, BudgetBytes: ATLAS_BUDGET_BYTES };
+      }
+    }
+    // THE MARK, on both arms, from the line that decides. It does not live in the renderer's
+    // `Init` beside the other measurement marks for the reason lane restarts2 wrote down: in
+    // worker mode `Init` is awaited BEFORE the URL is parsed at all, so a mark taken there would
+    // print `off` on every arm however the URL read. A reading taken without this line is a
+    // reading of a build that predates the lever.
+    JTrace(`jaui:pyramid-atlas armed=${this._pyramidAtlas ? 'on' : 'off'}`
+      + ` budget=${Math.round(ATLAS_BUDGET_BYTES / (1024 * 1024))}MB`
+      + (this._pyramidAtlas ? ' pixels=DIFFERENT' : ''));
+    this._phasedWalk = this._pyramidAtlas;
     // `?blur-phased` -- MEASUREMENT ONLY, DIFFERENT PIXELS. See `_blurPhased`. Parsed LAST, after
     // `?blur-first`, because it has to see every flag it interrogates AND because the two are
     // mutually exclusive: both move pyramid builds, and an arm running both would be measuring
@@ -5745,6 +6016,7 @@ export class Canvas implements DirtyTracker {
         JTrace(`jaui:blur-phased armed=false reason=${why}`);
       } else {
         this._blurPhased = true;
+        this._phasedWalk = true;
         const gl2 = r as WebGL2Renderer;
         gl2.DiagBlurPhased = true;
         // THE POOL, WHICH IS THE ONE THING THIS FLAG CANNOT LEAVE ALONE.
