@@ -181,6 +181,18 @@ export interface OcclusionCensus {
   /** Empty unless a flag refused the lever outright, in which case it names which. */
   Refused: string;
 }
+
+/** `?emptypanels`, per rendered frame. Two numbers and no pre-pass: the decision is per instance,
+ *  taken at the emission site from style the walk has already resolved. */
+export interface EmptyPanelCensus {
+  Armed: boolean;
+  /** Panel instances withheld this frame because they would have shaded a quad to alpha exactly 0. */
+  Panels: number;
+  /** Device pixels of those quads, clipped to the drawing buffer. THE effect field. */
+  Px: number;
+  /** Empty unless a flag refused the lever outright, in which case it names which. */
+  Refused: string;
+}
 import { DirtyFlag } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
@@ -609,6 +621,16 @@ export class Canvas implements DirtyTracker {
   };
   /** The last `jaui:occlusion` gate line, printed on a SHAPE change rather than per frame. */
   private _occlusionLastLine = '';
+  /** `?emptypanels` -- A PANEL THAT PAINTS NOTHING IS NOT PUSHED. Default ON.
+   *
+   *  A fully transparent background with no painted border and no shadow shades its whole quad to
+   *  `result.a` exactly 0, and source-over at source alpha 0 leaves the destination bit-identical
+   *  on every channel. So the instance is withheld. `?emptypanels=off` restores the previous
+   *  engine's emission byte for byte in the same binary. `_isEmptyPanel` carries the rule. */
+  private _emptyPanelCull: boolean = true;
+  private _emptyPanelStats = { Panels: 0, Px: 0, Refused: '' };
+  /** The last `jaui:emptypanels` gate line, printed on a SHAPE change rather than per frame. */
+  private _emptyPanelLastLine = '';
   /** `?atlas-instanced` -- ONE INSTANCED DRAW PER ATLAS LEVEL, and the question it asks.
    *
    *  The atlas collapsed 160 encoder-opening binds to 4 and 160 render passes to 8 and recovered
@@ -2021,7 +2043,14 @@ export class Canvas implements DirtyTracker {
             ` | occluded=${this._occlusionStats.Skipped + this._occlusionStats.Carved}` +
             ` occludedPx=${this._occlusionStats.Px}` +
             ` prepassMs=${this._occlusionStats.Ms.toFixed(2)}` +
-            ` armed=${this._occlusion ? 1 : 0}`
+            ` armed=${this._occlusion ? 1 : 0}` +
+            // `?emptypanels`, per frame and exact. `emptyPx` is the quad this frame did not shade
+            // for ink that was provably absent -- a different quantity from `occludedPx` beside
+            // it, which is ink that WAS painted and then covered. No milliseconds column: this
+            // lever costs a few comparisons at a site the walk was already standing on.
+            ` | empty=${this._emptyPanelStats.Panels}` +
+            ` emptyPx=${Math.round(this._emptyPanelStats.Px)}` +
+            ` armed=${this._emptyPanelCull ? 1 : 0}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
           this._profSum.Render = this._profSum.Total = 0;
@@ -3098,6 +3127,30 @@ export class Canvas implements DirtyTracker {
             this._emitCarvedFill(node, eff, occ.Pieces, clipMeta.Offset, clipMeta.Count, ownBorderMode);
           }
         } else if (!this._diagNoPanels) {
+        // `?emptypanels`: a panel with a fully transparent background, no painted border and no
+        // shadow shades every fragment of its quad to `result.a` exactly 0, and the blend leaves
+        // the destination bit-identical. The instance is withheld and NOTHING ELSE is: layout, hit
+        // testing, this node's CLIP contribution (the clip stack is encoded above, into a separate
+        // buffer, and travels with its CHILDREN's instances), its children, its text, its SVG, the
+        // shared-backdrop dirty tracking and the scene-footprint note all run exactly as before.
+        // The walk's order does not move -- a withheld instance takes an instanced draw's count
+        // from n to n-1 and never reorders the n-1 that remain.
+        //
+        // `ownBorderMode` cannot be 'Suppress' here: that mode is gated on `_hasPaintedBorder`,
+        // which needs a non-zero BorderWidth, which this rule refuses.
+        //
+        // Per node this is a handful of comparisons on style the walk has already resolved -- no
+        // pre-pass, no second traversal, no allocation, and the flag's own boolean short-circuits
+        // it before any of them on the `off` arm.
+        const empty = this._emptyPanelCull && this._isEmptyPanel(node);
+        if (empty) {
+          this._emptyPanelStats.Panels++;
+          this._emptyPanelStats.Px += this._emptyPanelQuadPx(node, eff, effH, flushW, flushH);
+          // A gradient fill would have taken the single-instance path below, and that path opens
+          // with `flushPanels()`. Keep that batch BOUNDARY and drop only the draw: this lever is
+          // allowed to remove an instance, not to merge two batches that were separate.
+          if (node.RenderStyle.Background.Kind !== 'Color') flushPanels();
+        } else {
         const flatBgPaint = this._computeBgPaint(node);
         if (flatBgPaint !== undefined) {
           flushPanels();
@@ -3118,6 +3171,7 @@ export class Canvas implements DirtyTracker {
           // fused panel AND got the overlay — the rim composited twice. Border mode is
           // per-instance data, so it costs the batch nothing.
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
+        }
         }
         }
       }
@@ -3318,6 +3372,12 @@ export class Canvas implements DirtyTracker {
     // for nothing, decided here because a coverer is later in paint order than what it covers and
     // the walk cannot know it at the moment it would push P. Inert and ~free when the flag is off.
     this._occlusionPrepass(w, h);
+    // `?emptypanels` (DEFAULT ON, SAME PIXELS). Reset beside the occlusion pre-pass and not in
+    // one, because this lever HAS no pre-pass: a panel that paints nothing is a property of that
+    // panel alone, with no dependency on any other node, so the decision is taken at the emission
+    // site from style the walk has already resolved.
+    this._emptyPanelStats.Panels = 0;
+    this._emptyPanelStats.Px = 0;
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
     if (this._phasedWalk && !this._diagNoUi) {
       // THE PHASED COMPOSITION, run for `?blur-phased` and for the DEFAULT `?pyramid-atlas` alike
@@ -3515,6 +3575,16 @@ export class Canvas implements DirtyTracker {
         + ` candidates=${st.Candidates} coverers=${st.Coverers}/${st.CoverersSeen}`
         + ` missed=${st.Missed} reads=${st.Reads} nodes=${st.Nodes}`;
       if (line !== this._occlusionLastLine) { this._occlusionLastLine = line; JTrace(line); }
+    }
+
+    // `?emptypanels`'s gate, on the same terms: a SHAPE change, not a frame. `px` is quantised to
+    // a tenth of a megapixel for exactly the reason the occlusion line's is -- a bed that slides a
+    // fraction of a pixel a frame moves the exact count and a line keyed on it would print every
+    // frame. The exact number is on the `[Jaui]` census and on `__jauiEmptyPanels()`.
+    if (this._emptyPanelCull && !this._diagNoUi) {
+      const line = `jaui:emptypanels panels=${this._emptyPanelStats.Panels}`
+        + ` px=${(this._emptyPanelStats.Px / 1e6).toFixed(1)}M`;
+      if (line !== this._emptyPanelLastLine) { this._emptyPanelLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -3817,6 +3887,121 @@ export class Canvas implements DirtyTracker {
   private _hasPaintedBorder = (node: Jiv): boolean => {
     const s = node.RenderStyle;
     return s.BorderWidth > 0 && s.BorderColor.A > 0.001;
+  };
+
+  /** `?emptypanels`: would this node's panel instance shade its whole quad to `result.a` EXACTLY 0?
+   *
+   *  Only ever asked of a node the walk has already routed to the NON-GLASS panel branch, so
+   *  `borderOnly` is 0, `materialType` is the compile-time 0.0 of MATERIAL_NONE / MATERIAL_FLAT /
+   *  BORDERLESS, and `u_ShadowBackdrop.x` is -1 (the flat paths pass no shadow backdrop). Under
+   *  those, `Jiv.Panel.frag` reduces to, term for term:
+   *
+   *    fillSrc   = v_Tint (u_BgMode 0), or `sampleBgGradient`'s early `vec4(0.0)` at a < 1e-4
+   *    fillA     = fillAlpha * fillSrc.a                    -> x * 0     = 0, for finite fillAlpha
+   *    shadowAlpha = 0.0                                    -> the `v_ShadowColor.a > 1e-4` guard
+   *                                                            is not taken; and even if it were,
+   *                                                            `AdaptiveShadowAlpha` MULTIPLIES the
+   *                                                            authored alpha, so 0 stays 0
+   *    outA      = 0 + 0 * (1 - 0)                          = 0
+   *    outRGB    = vec3(0.0)                                -> `outA > 1e-5` is false
+   *    borderCoverage = variedBorderWidth / drawnBorderWidth = 0 / 1 = 0 at BorderWidth 0 exactly,
+   *                                                            WHATEVER BorderBlur is: BorderBlur
+   *                                                            is `aa` inside the two smoothsteps
+   *                                                            and never a factor of the coverage.
+   *                                                            So a zero-width border with a
+   *                                                            non-zero blur CANNOT paint, and
+   *                                                            `result.a = a*(1-0) + 0` is exact.
+   *    result.a *= opacity * clipAlpha                      -> 0 * anything = 0 (which is why
+   *                                                            EffectiveOpacity is not a clause)
+   *
+   *  The foreground grade and both dithers that follow write `result.rgb` only; they cannot lift
+   *  an alpha of 0. And `EnableBlend` / `BeginScenePass` set FUNC_ADD with
+   *  `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` for RGB and `(ONE, ONE_MINUS_SRC_ALPHA)` for alpha, so
+   *  `dst.rgb = src.rgb*0 + dst.rgb*1` and `dst.a = 0*1 + dst.a*(1-0)` -- the destination is
+   *  bit-identical on every channel of every format, whatever the fragment's rgb came out as.
+   *
+   *  Every clause below is EXACT rather than an epsilon, because a 0.0005 that survived would
+   *  multiply the destination by 0.9995 and that is not the same picture. */
+  private _isEmptyPanel = (node: Jiv): boolean => {
+    const s = node.RenderStyle;
+    // A border of any width has coverage, and a border of any alpha inks it. Both exactly zero is
+    // the only pair that composites `x * 1 + c * 0`. `_hasPaintedBorder` is the weaker predicate
+    // (it tolerates 0.001 of alpha) so it is not the one to route on here.
+    if (s.BorderWidth !== 0 || s.BorderColor.A !== 0) return false;
+    // The shadow paints UNDER and AROUND the fill, and it is a separate SDF.
+    if (s.ShadowColor.A !== 0 && !JivInstanceBuffer.DiagNoShadow) return false;
+    // Glass and progressive blur are other branches of the walk entirely; a node can only reach
+    // this one as LiquidGlass when its Refraction is 0, and that instance still takes the glass
+    // rim's own reasoning. Refuse the material outright rather than reason about which of its legs
+    // the compile-time variant folded away.
+    if (s.Material !== 'None') return false;
+    // THE CLAUSE THAT IS NOT OBVIOUS. `hasBackdropFilter` makes the fragment take
+    // `fillA = fillAlpha` -- NOT `fillAlpha * fillSrc.a` -- so a transparent background over a
+    // filtered backdrop paints at full alpha. `_hasBackdropFilter` is the same five numbers the
+    // shader tests (brightness, saturation, contrast, frost LOD, body Tint), which is also why a
+    // withheld instance can never flip a batch's MATERIAL_FLAT routing: an instance this admits
+    // was never the one holding that routing back.
+    if (_hasBackdropFilter(node)) return false;
+    // Nothing that reads the destination. Today every panel draws under one source-over blend and
+    // `BlendMode` reaches no draw call at all, so this clause is inert -- kept because the moment
+    // it is wired up, a Difference or an Exclusion at source alpha 0 is no longer provably a no-op
+    // and this rule would be silently wrong.
+    if (s.BlendMode !== 'Normal') return false;
+    const bg = s.Background;
+    // An image's alpha lives in the texture and the CPU cannot read it.
+    if (bg.Kind === 'Image') return false;
+    if (bg.Kind === 'Color') return bg.Color.A === 0;
+    // A gradient every one of whose STOPS is fully transparent: `sampleBgGradient` clamps the
+    // interpolated alpha and returns `vec4(0.0)` outright below 1e-4, so the fill source is the
+    // exact zero vector on every knot and every span between them. A gradient with NO stops would
+    // also return `vec4(0.0)` (the `u_BgGradStopCount <= 0` line), but its curve fit is not this
+    // lane's to reason about, so it is refused rather than admitted for free.
+    return bg.Stops.length > 0 && bg.Stops.every((p) => p.Color.A === 0);
+  };
+
+  /** Device pixels the withheld quad would have shaded, clipped to the drawing buffer.
+   *
+   *  `Jiv.InstanceBuffer.Push`'s `a_Rect`, term for term, so the number is the quad the walk did
+   *  not submit rather than the node's box: an empty panel still carries the default
+   *  `BorderBlur: 0.5`, which at dpr 2 is a 1 device px margin on every side. Border width is 0 by
+   *  the rule; the shadow MARGIN is not, because a shadow at alpha 0 can still carry a blur and an
+   *  offset, and that margin is real quad. The clip stack is deliberately NOT intersected: a clip
+   *  is evaluated in the fragment, so a clipped-away fragment still ran. The viewport is, because
+   *  that one is hardware. */
+  private _emptyPanelQuadPx = (
+    node: Jiv, eff: Mat2x3, effH: Mat3x3 | null, w: number, h: number,
+  ): number => {
+    const s = node.RenderStyle;
+    const d = this._dpr;
+    const avgScale = (matScaleX(eff) + matScaleY(eff)) * 0.5;
+    const ns = JivInstanceBuffer.DiagNoShadow;
+    const shadowBlur = ns ? 0 : s.ShadowBlur * avgScale * d;
+    const shadowOffX = ns ? 0 : s.ShadowOffsetX * avgScale * d;
+    const shadowOffY = ns ? 0 : s.ShadowOffsetY * avgScale * d;
+    const borderMargin = s.BorderWidth * avgScale * d + s.BorderBlur * avgScale * d;
+    const marginX = Math.max(shadowBlur + Math.abs(shadowOffX), borderMargin);
+    const marginY = Math.max(shadowBlur + Math.abs(shadowOffY), borderMargin);
+    let x0: number, y0: number, x1: number, y1: number;
+    if (effH !== null) {
+      // Projective: `a_Rect` is the NATURAL box and the vertex projects its corners, so the
+      // rasterized extent is the projected AABB. `_nodeAabb` runs the same homography.
+      const ab = this._nodeAabb(node, eff, effH);
+      x0 = ab.minX * d - marginX; y0 = ab.minY * d - marginY;
+      x1 = ab.maxX * d + marginX; y1 = ab.maxY * d + marginY;
+    } else {
+      const halfW = matScaleX(eff) * node.Width * d * 0.5;
+      const halfH = matScaleY(eff) * node.Height * d * 0.5;
+      const aCos = Math.abs(matCos(eff)), aSin = Math.abs(matSin(eff));
+      const rotHalfX = aCos * (halfW + marginX) + aSin * (halfH + marginY);
+      const rotHalfY = aSin * (halfW + marginX) + aCos * (halfH + marginY);
+      const cxDev = matApplyX(eff, node.X + node.Width * 0.5, node.Y + node.Height * 0.5) * d;
+      const cyDev = matApplyY(eff, node.X + node.Width * 0.5, node.Y + node.Height * 0.5) * d;
+      x0 = cxDev - rotHalfX; y0 = cyDev - rotHalfY;
+      x1 = cxDev + rotHalfX; y1 = cyDev + rotHalfY;
+    }
+    const cw = Math.min(x1, w) - Math.max(x0, 0);
+    const ch = Math.min(y1, h) - Math.max(y0, 0);
+    return cw > 0 && ch > 0 ? cw * ch : 0;
   };
 
   /** True when this node's rim STROKE — its box plus the reach the stroke has past it —
@@ -6835,6 +7020,37 @@ export class Canvas implements DirtyTracker {
     {
       const g = globalThis as unknown as { __jauiOcclusion?: () => OcclusionCensus };
       g.__jauiOcclusion = () => ({ Armed: this._occlusion, ...this._occlusionStats });
+    }
+    // `?emptypanels` -- A PANEL THAT PAINTS NOTHING IS NOT PUSHED. Default ON.
+    //
+    // `?emptypanels=off` is the previous engine in the same binary: the predicate is not asked and
+    // no instance is withheld. On/off by name only, as every flag in this block is.
+    if (params.has('emptypanels')) {
+      const raw = (params.get('emptypanels') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?emptypanels takes 'on' or 'off', got '${raw}'`);
+      }
+      this._emptyPanelCull = raw !== 'off';
+    }
+    // ONE refusal, and it is not a correctness one: `?no-panels` and `?no-ui` already remove the
+    // draws this reasons about, so an arm that kept the counters would report a saving nobody
+    // paid for. Every other flag in this file is INDIFFERENT to this lever and deliberately not
+    // refused: the decision is per instance with no cross-node dependency, so nothing that
+    // reorders the walk (`?blur-phased`, `?pyramid-atlas`, `?blur-first`), caches a subtree
+    // (`?layer-cache`) or retargets a draw (the card composite) can change the answer -- a panel
+    // that paints nothing paints nothing in whatever order, into whatever target, from whatever
+    // cache. Those passes count instances only to BATCH them, never to decide anything.
+    if (this._emptyPanelCull && (this._diagNoPanels || this._diagNoUi)) {
+      this._emptyPanelCull = false;
+      this._emptyPanelStats.Refused = 'a-no-star-diagnostic-already-removes-the-draws-this-reasons-about';
+    }
+    JTrace(`jaui:emptypanels armed=${this._emptyPanelCull ? 'on' : 'off'}`
+      + ` default=${!params.has('emptypanels')}`
+      + ' pixels=SAME'
+      + (this._emptyPanelStats.Refused !== '' ? ` reason=${this._emptyPanelStats.Refused}` : ''));
+    {
+      const g = globalThis as unknown as { __jauiEmptyPanels?: () => EmptyPanelCensus };
+      g.__jauiEmptyPanels = () => ({ Armed: this._emptyPanelCull, ...this._emptyPanelStats });
     }
     // ── THE PROGRAMS THE ARMS ABOVE NEED, COMPILED HERE ──────────────────────────────────────
     // LAST in this method, after every flag has been read and every refusal taken, because what a
