@@ -35,9 +35,10 @@ import {
   BORDER_DIRECT_L2_WINDOW, BORDER_DIRECT_PHASE, type BorderDirectArm,
 } from './Border.Direct';
 import {
-  PlanOcclusion, CoveredPixels, RasterPixels, IntersectPixelRect, PixelRectEmpty, PixelRectArea,
-  CarvePieceTransform, PILL_GUARD_FRACTION, DEFAULT_OCCLUSION_LIMITS,
-  type PixelRect, type OcclusionFill, type OcclusionVerdict,
+  PlanOcclusion, CoveredPixels, CoveredRegion, IntersectRegions, RasterPixels, IntersectPixelRect,
+  PixelRectEmpty, PixelRectArea, CarvePieceTransform, PILL_GUARD_FRACTION,
+  DEFAULT_OCCLUSION_LIMITS, NewOcclusionNotes, OcclusionNotesLine,
+  type PixelRect, type OcclusionFill, type OcclusionVerdict, type OcclusionNotes,
 } from './Occlusion';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited, type TickPaceMode } from './Tick.Pace';
@@ -144,6 +145,9 @@ interface OcclusionScan {
   Nodes: Jiv[];
   Reads: number[];
   Canvas: PixelRect;
+  /** `Canvas` as a one-rect region, allocated once rather than per node: every coverer intersects
+   *  its region against it and the pre-pass runs over the whole tree on every rendered frame. */
+  CanvasRegion: PixelRect[];
   MinAreaPx: number;
 }
 
@@ -151,6 +155,9 @@ interface OcclusionScan {
  *  win is in full-bleed surfaces, and the pair test is quadratic in the admitted count -- a page of
  *  chips must not pay for a lever that could never fire on one. */
 const OCCLUSION_MIN_AREA_FRACTION = 1 / 16;
+
+/** The one cover list every non-coverer shares, so a fill that cannot cover allocates nothing. */
+const EMPTY_COVER: readonly PixelRect[] = [];
 
 /** What `__jauiOcclusion()` publishes. The census a reader outside the engine has no other way to
  *  ask for: what the pre-pass admitted, what it withheld, and -- the one that has to hold -- how
@@ -178,6 +185,15 @@ export interface OcclusionCensus {
   Missed: number;
   /** The pre-pass's own wall time, so the lever can be shown to cost less than it saves. */
   Ms: number;
+  /** WHY the candidates that got no verdict got none -- one counter per `continue` in the pair
+   *  test. A refusal nobody can name is a refusal nobody can measure, and the first fold's census
+   *  reported `Refused ""` on every frame of a plan that withheld nothing. */
+  Notes: OcclusionNotes;
+  /** THE DEAD-PRE-PASS ALARM. 1 on a frame where the pre-pass admitted two or more candidates and
+   *  at least one coverer and then withheld NOTHING -- the exact shape a pixel gate cannot tell
+   *  apart from a no-op, because a no-op also reads 0 px. It is on the gate line so no fold can
+   *  pass this lever silently again. */
+  Vacuous: number;
   /** Empty unless a flag refused the lever outright, in which case it names which. */
   Refused: string;
 }
@@ -658,7 +674,7 @@ export class Canvas implements DirtyTracker {
   private _occlusionScan: OcclusionScan | null = null;
   private _occlusionStats = {
     Candidates: 0, Coverers: 0, Reads: 0, Nodes: 0, Skipped: 0, Carved: 0, Pieces: 0,
-    Px: 0, CoverersSeen: 0, Missed: 0, Ms: 0, Refused: '',
+    Px: 0, CoverersSeen: 0, Missed: 0, Ms: 0, Notes: NewOcclusionNotes(), Vacuous: 0, Refused: '',
   };
   /** The last `jaui:occlusion` gate line, printed on a SHAPE change rather than per frame. */
   private _occlusionLastLine = '';
@@ -2118,6 +2134,7 @@ export class Canvas implements DirtyTracker {
             // beside it is what the decision cost, so the lever can be shown to save more than it
             // spends rather than assumed to.
             ` | occluded=${this._occlusionStats.Skipped + this._occlusionStats.Carved}` +
+            ` occludedVacuous=${this._occlusionStats.Vacuous}` +
             ` occludedPx=${this._occlusionStats.Px}` +
             ` prepassMs=${this._occlusionStats.Ms.toFixed(2)}` +
             ` armed=${this._occlusion ? 1 : 0}` +
@@ -3706,6 +3723,7 @@ export class Canvas implements DirtyTracker {
     // opaque bands is the page fill minus the rows its bands feather across.
     if (this._occlusion && !this._diagNoUi) {
       const st = this._occlusionStats;
+      const notes = OcclusionNotesLine(st.Notes);
       // `px` is quantised to a tenth of a megapixel HERE and nowhere else. A bed that slides moves
       // its seams a fraction of a pixel a frame, so the exact count breathes and a line keyed on
       // it would print every frame instead of on a change of shape. The exact number is on the
@@ -3713,7 +3731,14 @@ export class Canvas implements DirtyTracker {
       const line = `jaui:occlusion panels=${st.Skipped + st.Carved} px=${(st.Px / 1e6).toFixed(1)}M`
         + ` skipped=${st.Skipped} carved=${st.Carved} pieces=${st.Pieces}`
         + ` candidates=${st.Candidates} coverers=${st.Coverers}/${st.CoverersSeen}`
-        + ` missed=${st.Missed} reads=${st.Reads} nodes=${st.Nodes}`;
+        + ` missed=${st.Missed} reads=${st.Reads} nodes=${st.Nodes}`
+        // `vacuous=1` says the pre-pass had something to rule on and withheld nothing, and the
+        // notes say which clause did it. Both are printed on EVERY line, zeros included, for the
+        // reason the restart probes print `skipped*=0`: a 0-px pixel gate reads the same on a
+        // lever that fired perfectly and on one that never fired at all, and this lane exists
+        // because a whole measurement phase could not tell those apart.
+        + ` vacuous=${st.Vacuous}`
+        + (notes !== '' ? ' ' + notes : '');
       if (line !== this._occlusionLastLine) { this._occlusionLastLine = line; JTrace(line); }
     }
     // `?border-source=fill`'s gate, on the same terms as the four above: a SHAPE change, not a
@@ -4851,10 +4876,19 @@ export class Canvas implements DirtyTracker {
     // guard sits at half, so the leg is unreachable rather than approximated.
     const squareEnough = Math.max(radius, authored) <= PILL_GUARD_FRACTION * halfMin;
 
-    let cover: PixelRect = { X0: 0, Y0: 0, X1: 0, Y1: 0 };
+    let cover: readonly PixelRect[] = EMPTY_COVER;
     let covers = opaque && squareEnough;
     if (covers) {
-      cover = IntersectPixelRect(CoveredPixels(r.X0, r.Y0, r.X1, r.Y1, radius), scan.Canvas);
+      // TWO CHAINS, and the second is the fallback for the first. `region` is the honest set — a
+      // rounded rect's face minus its four CORNER blocks (`CoveredRegion`), which is what the App's
+      // own 183-device-px screen clip made the difference between a live lever and dead code.
+      // `plain` is the one all-sides-inset rect the first fold used, kept because it is a SUBSET of
+      // the region and therefore always a legal answer: if the region's rect count runs past
+      // `MAX_COVER_RECTS` (3^depth on a deep stack of rounded clips) the coverer falls back to it
+      // rather than being refused, and one clip per node's stack is one extra rect intersect.
+      let region: PixelRect[] | null =
+        IntersectRegions(CoveredRegion(r.X0, r.Y0, r.X1, r.Y1, radius), scan.CanvasRegion);
+      let plain = IntersectPixelRect(CoveredPixels(r.X0, r.Y0, r.X1, r.Y1, radius), scan.Canvas);
       // A clip only ever SHRINKS what a coverer writes at alpha 1, and a clip whose own shape this
       // arithmetic cannot bound (rotated, or round enough to be a capsule) makes the coverer
       // unusable rather than merely smaller.
@@ -4864,9 +4898,13 @@ export class Canvas implements DirtyTracker {
         const cr = Math.max(c.RTL, c.RTR, c.RBR, c.RBL) * d;
         if (cr > PILL_GUARD_FRACTION * Math.min(cw, ch) * 0.5) { covers = false; break; }
         const cx0 = c.X * d, cy0 = c.Y * d;
-        cover = IntersectPixelRect(cover, CoveredPixels(cx0, cy0, cx0 + cw, cy0 + ch, cr));
+        if (region !== null) region = IntersectRegions(region, CoveredRegion(cx0, cy0, cx0 + cw, cy0 + ch, cr));
+        plain = IntersectPixelRect(plain, CoveredPixels(cx0, cy0, cx0 + cw, cy0 + ch, cr));
       }
-      if (covers && PixelRectEmpty(cover)) covers = false;
+      if (covers) {
+        cover = region ?? (PixelRectEmpty(plain) ? EMPTY_COVER : [plain]);
+        if (cover.length === 0) covers = false;
+      }
     }
     // A fill is withheld only when it is itself opaque and reads nothing: the pixel argument would
     // survive a translucent P (it is overwritten either way), but a translucent fill is not what
@@ -4904,12 +4942,14 @@ export class Canvas implements DirtyTracker {
     this._occlusionCoverers.clear();
     st.Candidates = 0; st.Coverers = 0; st.Reads = 0; st.Nodes = 0;
     st.Skipped = 0; st.Carved = 0; st.Pieces = 0; st.Px = 0;
-    st.CoverersSeen = 0; st.Missed = 0; st.Ms = 0;
+    st.CoverersSeen = 0; st.Missed = 0; st.Ms = 0; st.Vacuous = 0;
+    st.Notes = NewOcclusionNotes();
     if (!this._occlusion || this._diagNoUi) return;
     const t0 = performance.now();
     const scan: OcclusionScan = {
       Order: 0, Fills: [], Nodes: [], Reads: [],
       Canvas: { X0: 0, Y0: 0, X1: w, Y1: h },
+      CanvasRegion: [{ X0: 0, Y0: 0, X1: w, Y1: h }],
       MinAreaPx: w * h * OCCLUSION_MIN_AREA_FRACTION,
     };
     this._occlusionScan = scan;
@@ -4920,7 +4960,8 @@ export class Canvas implements DirtyTracker {
     st.Nodes = scan.Order;
     st.Reads = scan.Reads.length;
     st.Candidates = scan.Fills.length;
-    const plan = PlanOcclusion(scan.Fills, scan.Reads, { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: scan.MinAreaPx });
+    const plan = PlanOcclusion(
+      scan.Fills, scan.Reads, { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: scan.MinAreaPx }, st.Notes);
     // A node the traversal reached TWICE (a teleport replayed into a layered scope) has two paint
     // points and one entry in a map keyed by the node, so its verdict is dropped rather than
     // applied to whichever of the two the walk hits first.
@@ -4939,6 +4980,11 @@ export class Canvas implements DirtyTracker {
       else { st.Carved++; st.Pieces += v.Pieces.length; }
     }
     st.Missed = this._occlusionPlan.size;
+    // THE DEAD-PRE-PASS ALARM. Two candidates and a coverer is a frame where this lever had
+    // something to rule on; nothing withheld on such a frame is the shape a 0-px pixel gate cannot
+    // tell from a no-op, and it is exactly what both machines read for a whole phase while the fold
+    // was quoted as a measurement. `st.Notes` says WHICH clause refused; this says THAT one did.
+    st.Vacuous = st.Candidates >= 2 && st.Coverers >= 1 && st.Pieces === 0 && st.Skipped === 0 ? 1 : 0;
     st.Ms = performance.now() - t0;
   };
 

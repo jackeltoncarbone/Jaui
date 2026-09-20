@@ -22,6 +22,10 @@ export const readJwiftGlass = (): string =>
   read(join(REPO, 'ShowStudio.Libraries', 'Jwift', 'Jwift.Angular', 'src', 'Glass', 'Jwift.Glass.jss'));
 export const readPerfJss = (): string =>
   read(join(REPO, 'ShowStudio.App', 'src', 'Dev', 'Perf', 'Perf.jss'));
+/** The app shell's own sheet. `Screen` is the rounded, clipping node every page in the app sits
+ *  inside, so its radius is in every node's clip stack — see `Occlusion.GlassGrid.test.ts`. */
+export const readAppJss = (): string =>
+  read(join(REPO, 'ShowStudio.App', 'src', 'App.jss'));
 
 /** The body of a top-level `Name = (args) => { ... }` class field, brace-matched. */
 export const arrowBody = (source: string, name: string): string => {

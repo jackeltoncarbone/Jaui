@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CoveredPixels, RasterPixels, IntersectPixelRect, PixelRectArea, PixelRectEmpty,
+  CoveredPixels, CoveredRegion, IntersectRegions, MAX_COVER_RECTS,
+  RasterPixels, IntersectPixelRect, PixelRectArea, PixelRectEmpty,
   SubtractPixelRects, MergePixelRects, PlanOcclusion, CarvePieceTransform,
   DEFAULT_OCCLUSION_LIMITS, OCCLUSION_AA_INSET, PILL_GUARD_FRACTION,
   type PixelRect, type OcclusionFill,
@@ -154,9 +155,9 @@ describe("Occlusion — glass-grid's bed, the number this lever exists for", () 
 
   it('carves the page fill to three rows: 4,088,320 device px withheld of 4,096,000', () => {
     const fills: OcclusionFill[] = [
-      { Order: 0, Raster: PageFill, Cover: PageFill, Covers: true, Skippable: true, Carvable: true },
+      { Order: 0, Raster: PageFill, Cover: [PageFill], Covers: true, Skippable: true, Carvable: true },
       ...Bands().map((b, i) => ({
-        Order: i + 2, Raster: b, Cover: b, Covers: true, Skippable: false, Carvable: false,
+        Order: i + 2, Raster: b, Cover: [b], Covers: true, Skippable: false, Carvable: false,
       })),
     ];
     const plan = PlanOcclusion(fills, [20], { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: CANVAS_W * CANVAS_H / 16 });
@@ -169,9 +170,9 @@ describe("Occlusion — glass-grid's bed, the number this lever exists for", () 
 
   it('withholds NOTHING when a glass card reads the scene before the bands land', () => {
     const fills: OcclusionFill[] = [
-      { Order: 0, Raster: PageFill, Cover: PageFill, Covers: true, Skippable: true, Carvable: true },
+      { Order: 0, Raster: PageFill, Cover: [PageFill], Covers: true, Skippable: true, Carvable: true },
       ...Bands().map((b, i) => ({
-        Order: i + 2, Raster: b, Cover: b, Covers: true, Skippable: false, Carvable: false,
+        Order: i + 2, Raster: b, Cover: [b], Covers: true, Skippable: false, Carvable: false,
       })),
     ];
     // A read at order 1 — before every band — is the clause that makes this safe on a page whose
@@ -184,7 +185,7 @@ describe("Occlusion — glass-grid's bed, the number this lever exists for", () 
 describe('Occlusion — the plan', () => {
   const Full: PixelRect = { X0: 0, Y0: 0, X1: 1000, Y1: 1000 };
   const Fill = (o: number, p: Partial<OcclusionFill> = {}): OcclusionFill => ({
-    Order: o, Raster: Full, Cover: Full, Covers: true, Skippable: true, Carvable: false, ...p,
+    Order: o, Raster: Full, Cover: [Full], Covers: true, Skippable: true, Carvable: false, ...p,
   });
 
   it('SKIPS a fill one later coverer takes whole', () => {
@@ -204,14 +205,14 @@ describe('Occlusion — the plan', () => {
 
   it('refuses a carve on a fill that is not a flat colour, however small the residual', () => {
     const p: OcclusionFill = Fill(0, { Carvable: false });
-    const c: OcclusionFill = Fill(1, { Cover: { X0: 0, Y0: 1, X1: 1000, Y1: 1000 } });
+    const c: OcclusionFill = Fill(1, { Cover: [{ X0: 0, Y0: 1, X1: 1000, Y1: 1000 }] });
     const plan = PlanOcclusion([p, c], [], { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: 0 });
     expect(plan.size).toBe(0);
   });
 
   it('refuses a carve whose residual is a big share of the panel — the instances would not pay', () => {
     const p = Fill(0, { Carvable: true });
-    const c = Fill(1, { Cover: { X0: 0, Y0: 0, X1: 1000, Y1: 500 } });
+    const c = Fill(1, { Cover: [{ X0: 0, Y0: 0, X1: 1000, Y1: 500 }] });
     const plan = PlanOcclusion([p, c], [], { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: 0 });
     expect(plan.size).toBe(0);
   });
@@ -219,7 +220,7 @@ describe('Occlusion — the plan', () => {
   it('only admits fills above the minimum area, at BOTH ends', () => {
     const small: PixelRect = { X0: 0, Y0: 0, X1: 10, Y1: 10 };
     const plan = PlanOcclusion(
-      [Fill(0, { Raster: small, Cover: small }), Fill(1, { Raster: small, Cover: small })],
+      [Fill(0, { Raster: small, Cover: [small] }), Fill(1, { Raster: small, Cover: [small] })],
       [], { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: 1000 },
     );
     expect(plan.size).toBe(0);
@@ -227,7 +228,7 @@ describe('Occlusion — the plan', () => {
 
   it('counts only the pixels it really withheld', () => {
     const p = Fill(0, { Carvable: true });
-    const c = Fill(1, { Cover: { X0: 0, Y0: 0, X1: 1000, Y1: 900 } });
+    const c = Fill(1, { Cover: [{ X0: 0, Y0: 0, X1: 1000, Y1: 900 }] });
     const plan = PlanOcclusion([p, c], [], { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: 0 });
     expect(plan.get(0)).toEqual({
       Kind: 'Carve', Px: 900_000,
@@ -250,8 +251,8 @@ describe('Occlusion — the plan', () => {
 
   it('stops counting coverers at the first scene read after the fill', () => {
     const p = Fill(0);
-    const half = Fill(1, { Cover: { X0: 0, Y0: 0, X1: 1000, Y1: 500 } });
-    const rest = Fill(3, { Cover: { X0: 0, Y0: 500, X1: 1000, Y1: 1000 } });
+    const half = Fill(1, { Cover: [{ X0: 0, Y0: 0, X1: 1000, Y1: 500 }] });
+    const rest = Fill(3, { Cover: [{ X0: 0, Y0: 500, X1: 1000, Y1: 1000 }] });
     expect(PlanOcclusion([p, half, rest], [], { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: 0 }).size).toBe(1);
     expect(PlanOcclusion([p, half, rest], [2], { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: 0 }).size).toBe(0);
   });
@@ -285,6 +286,44 @@ describe('Occlusion — the carve transform', () => {
     const halfW = m[0] * 640 * 2 / 2;
     expect(cx - halfW).toBeCloseTo(100, 9);
     expect(cx + halfW).toBeCloseTo(300, 9);
+  });
+});
+
+describe('Occlusion — the region, and the cap that keeps it bounded', () => {
+  it('a rounded rect is its face minus four CORNER blocks, not its face inset by the radius', () => {
+    const region = CoveredRegion(0, 0, 200, 100, 20);
+    let area = 0;
+    for (const r of region) area += PixelRectArea(r);
+    expect(area).toBe(200 * 100 - 4 * 20 * 20);
+    expect(PixelRectArea(CoveredPixels(0, 0, 200, 100, 20))).toBe(160 * 60);
+  });
+
+  it('intersects two regions exactly, and the rects stay disjoint', () => {
+    const a = CoveredRegion(0, 0, 200, 100, 20);
+    const b = [{ X0: 50, Y0: 0, X1: 150, Y1: 100 }];
+    const hit = IntersectRegions(a, b)!;
+    let area = 0;
+    for (const r of hit) area += PixelRectArea(r);
+    expect(area).toBe(100 * 100);
+  });
+
+  it('REFUSES rather than approximates when the rect count would pass the cap', () => {
+    // Every rect of `a` crosses every rect of `b`: the product is the count, and past
+    // MAX_COVER_RECTS the caller falls back to the all-sides-inset rect, which is a SUBSET.
+    const a: PixelRect[] = [];
+    const b: PixelRect[] = [];
+    for (let i = 0; i < 3; i++) a.push({ X0: i * 10, Y0: 0, X1: i * 10 + 5, Y1: 100 });
+    for (let j = 0; j < 4; j++) b.push({ X0: 0, Y0: j * 10, X1: 100, Y1: j * 10 + 5 });
+    expect(IntersectRegions(a, b)).toBeNull();
+    expect(MAX_COVER_RECTS).toBe(8);
+  });
+
+  it('the fallback is always legal: the inset rect is inside the region', () => {
+    const region = CoveredRegion(7, 11, 407, 311, 41);
+    const inset = CoveredPixels(7, 11, 407, 311, 41);
+    let covered = 0;
+    for (const r of region) covered += PixelRectArea(IntersectPixelRect(r, inset));
+    expect(covered).toBe(PixelRectArea(inset));
   });
 });
 

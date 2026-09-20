@@ -109,6 +109,87 @@ export const CoveredPixels = (
 };
 
 /**
+ * THE SAME SET, WITHOUT THROWING THE EDGES AWAY — a rounded rect's alpha-1 pixels as up to three
+ * disjoint rows of rects, rather than as the one rect `CoveredPixels` insets by `radius` on every
+ * side.
+ *
+ * ── WHY THIS EXISTS, and it is the whole of lane occlusion2 ───────────────────────────────────
+ *
+ * A rounded rect is NOT missing a `radius`-wide frame. It is missing four `radius x radius`
+ * CORNER blocks, and `CoveredPixels`'s all-sides inset pays for all four of them on every edge.
+ * At a small radius that is the "conservative by up to 0.7r a side" the first lane named and
+ * priced. At the App's own screen clip — `Screen { BorderRadius: @JwiftScreenRadius }`, which is
+ * 183 DEVICE px of drawn radius at dpr 2 — it discards a 183 px frame of a 2560 x 1600 canvas:
+ * 1.72 Mpx of cover that is genuinely alpha 1, on EVERY coverer in the app, because that clip is
+ * in every node's stack. That is what made the carve emit zero pieces on both machines.
+ *
+ * ── WHY THE TWO WING ROWS ARE ALPHA 1, WHICH THE FLAT BRANCH DOES NOT SAY ─────────────────────
+ *
+ * `ShapeSDF_inner`'s flat branch only runs on the CENTRE block (`|p| <= halfSize - rAxis` on both
+ * axes), so the mid row is the one `CoveredPixels`'s own derivation already covers. The top and
+ * bottom rows take the superellipse branch, and it degenerates there. With `|p.x| <= halfW - r`
+ * the x leg is clamped to the shader's own `1e-5` floor, so with `uvy = q.y / r`:
+ *
+ *     L        = (1e-5^n + uvy^n)^(1/n)                  -> uvy
+ *     gradLen  = L^(1-n) * sqrt(gx^2 + gy^2)             -> uvy^(1-n) * uvy^(n-1)/r  =  1/r
+ *     dist     = (L - 1) / gradLen                       -> (uvy - 1) * r  =  |p.y| - halfH
+ *
+ * — the distance to the nearest HORIZONTAL edge, with the radius and the exponent both cancelling.
+ * So a pixel centre at least 0.5 inside the top or bottom edge and clear of both corner blocks
+ * has `dist <= -0.5` and alpha exactly 1, for every exponent the corner field can pick. The
+ * residual `1e-5` terms only push `L` UP, and `Occlusion.Wired.test.ts` sweeps the claim against
+ * the CPU port of `ShapeSDF_inner` at exponents 2/3/4/5/8 rather than resting on the limit.
+ *
+ * `radius` is the LARGEST of the four drawn radii, so cutting that block from all four corners is
+ * conservative whichever corner carries which radius — `PickRectRadius` selects per quadrant and
+ * the derivation above does not depend on which it picked.
+ *
+ * The three rects are disjoint and their union is exactly `CoveredPixels(..., 0.5)` minus the four
+ * corner blocks. At `radius <= 0.5` the wings are empty and the mid row IS `CoveredPixels`, so
+ * this is the identical set for every square coverer — the only nodes it changes are rounded ones.
+ */
+export const CoveredRegion = (
+  x0: number, y0: number, x1: number, y1: number, radius: number,
+): PixelRect[] => {
+  const face = CoveredPixels(x0, y0, x1, y1, OCCLUSION_AA_INSET);
+  const core = CoveredPixels(x0, y0, x1, y1, radius);
+  // A rect shorter than twice its radius has corner blocks that would OVERLAP, and then the three
+  // rows are not a partition of anything. The pill guard already refuses `radius > 0.5 * minHalf`,
+  // so this cannot fire on an admitted coverer; it is here because the arithmetic below is only
+  // sound when it holds.
+  if (PixelRectEmpty(core) || PixelRectEmpty(face)) return [];
+  const out: PixelRect[] = [{ X0: face.X0, Y0: core.Y0, X1: face.X1, Y1: core.Y1 }];
+  if (core.Y0 > face.Y0) out.push({ X0: core.X0, Y0: face.Y0, X1: core.X1, Y1: core.Y0 });
+  if (face.Y1 > core.Y1) out.push({ X0: core.X0, Y0: core.Y1, X1: core.X1, Y1: face.Y1 });
+  return out.filter((r) => !PixelRectEmpty(r));
+};
+
+/** Most rects a coverer's region may carry. A clip stack intersects region against region, so the
+ *  count is 3^(depth+1) in the worst case and has to be bounded; past this the caller falls back
+ *  to the single all-sides-inset rect, which is a SUBSET of the region and therefore always safe. */
+export const MAX_COVER_RECTS = 8;
+
+/** `a ∩ b`, both unions of disjoint rects. `null` when the result would pass `MAX_COVER_RECTS`. */
+export const IntersectRegions = (a: readonly PixelRect[], b: readonly PixelRect[]): PixelRect[] | null => {
+  const out: PixelRect[] = [];
+  for (const p of a) {
+    for (const q of b) {
+      const hit = IntersectPixelRect(p, q);
+      if (PixelRectEmpty(hit)) continue;
+      if (out.length === MAX_COVER_RECTS) return null;
+      out.push(hit);
+    }
+  }
+  return out;
+};
+
+export const RegionArea = (region: readonly PixelRect[]): number => {
+  let a = 0;
+  for (const r of region) a += PixelRectArea(r);
+  return a;
+};
+
+/**
  * Every pixel a quad at this rect can rasterise — the bound on where a fill could have put ink.
  *
  * A pixel is shaded when its centre falls inside the quad, so `ceil(x0 - 0.5)` would be tight;
@@ -205,9 +286,10 @@ export interface OcclusionFill {
   Order: number;
   /** Pixels this fill can put ink in. Canvas-clamped by the caller. */
   Raster: PixelRect;
-  /** Pixels this fill writes at alpha exactly 1, already intersected with its clip. Empty unless
-   *  `Covers`. */
-  Cover: PixelRect;
+  /** Pixels this fill writes at alpha exactly 1, already intersected with its clip — a union of
+   *  disjoint rects, because a rounded rect is its face minus four CORNER blocks and flattening
+   *  that to one rect is what killed the lever (`CoveredRegion`). Empty unless `Covers`. */
+  Cover: readonly PixelRect[];
   /** Opaque, unrotated, unfiltered, no border, no shadow — may stand as a coverer. */
   Covers: boolean;
   /** Withholding this fill is invisible if something covers it — see `OcclusionFillAdmits`. */
@@ -226,7 +308,12 @@ export interface OcclusionLimits {
   MinAreaPx: number;
   /** Hard cap on the candidate list, so the pair test is bounded however big the tree is. */
   MaxCandidates: number;
-  /** Most pieces a carve may emit. Each is one extra panel INSTANCE (not one extra draw). */
+  /** Most pieces a carve may emit. Each is one extra panel INSTANCE (not one extra draw): they all
+   *  land in the same instanced Color batch, so the cost of a piece is an instance's 60 floats and
+   *  its own pixels — and the PIXELS are bounded by `MaxResidualFraction`, which is the guard that
+   *  actually prices this. The cap is here to bound `SubtractPixelRects`'s intermediate list, not
+   *  to price the carve; at 8 it refused every real page, because a rounded clip's four corners
+   *  open two side columns per seam and the intermediate list runs ahead of the merged one. */
   MaxPieces: number;
   /** A carve must leave at most this share of the panel behind, or it is not worth the instances. */
   MaxResidualFraction: number;
@@ -235,9 +322,42 @@ export interface OcclusionLimits {
 export const DEFAULT_OCCLUSION_LIMITS: OcclusionLimits = {
   MinAreaPx: 0,
   MaxCandidates: 64,
-  MaxPieces: 8,
+  MaxPieces: 24,
   MaxResidualFraction: 0.25,
 };
+
+/**
+ * Why each candidate that got no verdict got none. Every `continue` in the pair test increments
+ * exactly one of these.
+ *
+ * THIS IS THE LANE'S OWN LESSON, made structural. The first fold's census reported `Refused ""`
+ * on every frame while the plan withheld nothing, and two machines read that as "no admission
+ * clause fired" — when in fact `SubtractPixelRects` was returning `null` on the piece cap and the
+ * pair test was dropping the candidate without a word. A refusal nobody can name is a refusal
+ * nobody can measure.
+ */
+export interface OcclusionNotes {
+  /** Skippable, but no later coverer touched it at all. */
+  NoCover: number;
+  /** The subtraction's intermediate list passed `MaxPieces`. */
+  Capped: number;
+  /** Uncovered, and not a flat square Color fill, so it cannot be carved. */
+  NotCarvable: number;
+  /** Carvable, but the residual is over `MaxResidualFraction` — not worth the instances. */
+  TooMuchLeft: number;
+  /** Carvable and cheap, but the saving is under `MinAreaPx`. */
+  TooSmall: number;
+}
+
+export const NewOcclusionNotes = (): OcclusionNotes =>
+  ({ NoCover: 0, Capped: 0, NotCarvable: 0, TooMuchLeft: 0, TooSmall: 0 });
+
+/** The notes, as a gate-line fragment. Empty when nothing was refused. */
+export const OcclusionNotesLine = (n: OcclusionNotes): string =>
+  (Object.entries(n) as [string, number][])
+    .filter(([, v]) => v !== 0)
+    .map(([k, v]) => `${k.toLowerCase()}=${v}`)
+    .join(' ');
 
 /**
  * THE PAIR TEST. For each skippable fill, subtract the covers of every LATER coverer that is still
@@ -264,6 +384,7 @@ export const PlanOcclusion = (
   fills: readonly OcclusionFill[],
   sceneReads: readonly number[],
   limits: OcclusionLimits = DEFAULT_OCCLUSION_LIMITS,
+  notes: OcclusionNotes = NewOcclusionNotes(),
 ): Map<number, OcclusionVerdict> => {
   const out = new Map<number, OcclusionVerdict>();
   const covers: PixelRect[] = [];
@@ -279,19 +400,21 @@ export const PlanOcclusion = (
       const c = fills[j];
       if (c.Order >= limit) break;
       if (!c.Covers) continue;
-      const hit = IntersectPixelRect(c.Cover, p.Raster);
-      if (!PixelRectEmpty(hit)) covers.push(hit);
+      for (const part of c.Cover) {
+        const hit = IntersectPixelRect(part, p.Raster);
+        if (!PixelRectEmpty(hit)) covers.push(hit);
+      }
     }
-    if (covers.length === 0) continue;
+    if (covers.length === 0) { notes.NoCover++; continue; }
     const residual = SubtractPixelRects(p.Raster, covers, limits.MaxPieces);
-    if (residual === null) continue;
+    if (residual === null) { notes.Capped++; continue; }
     if (residual.length === 0) { out.set(p.Order, { Kind: 'Skip', Px: area }); continue; }
-    if (!p.Carvable) continue;
+    if (!p.Carvable) { notes.NotCarvable++; continue; }
     let left = 0;
     for (const r of residual) left += PixelRectArea(r);
-    if (left > area * limits.MaxResidualFraction) continue;
+    if (left > area * limits.MaxResidualFraction) { notes.TooMuchLeft++; continue; }
     const saved = area - left;
-    if (saved < limits.MinAreaPx) continue;
+    if (saved < limits.MinAreaPx) { notes.TooSmall++; continue; }
     out.set(p.Order, { Kind: 'Carve', Px: saved, Pieces: residual });
   }
   return out;

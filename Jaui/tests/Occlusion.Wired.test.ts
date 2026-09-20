@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../src/Jiv/Jiv.InstanceBuffer';
 import { Jiv } from '../src/Jiv/Jiv';
 import {
-  CarvePieceTransform, CoveredPixels, RasterPixels, PixelRectEmpty,
+  CarvePieceTransform, CoveredPixels, CoveredRegion, RasterPixels, PixelRectEmpty, PixelRectArea,
 } from '../src/Core/Occlusion';
 import { MAT_IDENTITY, type Mat2x3 } from '../src/Transform/Mat2x3';
 
@@ -90,6 +90,104 @@ describe("Occlusion — the inset is the shader's, not a tolerance", () => {
   it('the row just outside a square panel is NOT alpha 1 — the claim is not vacuous', () => {
     const cover = CoveredPixels(0, 0, 120, 80, 0);
     expect(FillAlpha(ShapeSdfInner(0.5 - 60, cover.Y1 + 0.5 - 40, 60, 40, 0, 4))).toBeLessThan(1);
+  });
+});
+
+/**
+ * THE WINGS — the claim lane occlusion2 rests on, against the same CPU port.
+ *
+ * `CoveredPixels` insets a rounded rect by its RADIUS on every side, which is the flat branch's
+ * own guarantee and nothing more. `CoveredRegion` also claims the two WING rows — the full-width
+ * strip along the top edge and along the bottom, clear of the four corner blocks — where the flat
+ * branch does NOT run and the superellipse branch degenerates to the distance to the nearest
+ * horizontal edge (the derivation is in `Core/Occlusion.ts`). Every pixel of every claimed rect is
+ * swept here, at every exponent the corner field can pick, rather than resting on that limit.
+ *
+ * This is not a small correction. `Screen { BorderRadius: @JwiftScreenRadius }` draws a 183 device
+ * px corner at dpr 2, and that clip is in EVERY node's stack in the app: the all-sides inset threw
+ * away a 183 px frame of a 2560 x 1600 canvas on every coverer, which is what made the carve emit
+ * zero pieces on both machines.
+ */
+describe('Occlusion — the wing rows a rounded rect really does write at alpha 1', () => {
+  /** Every pixel centre the region claims, at the field's own value. `fieldRadius` is what
+   *  `PickRectRadius` would hand the SDF in that quadrant, which need not be the max the region
+   *  was built from. */
+  const SweepRegion = (
+    x0: number, y0: number, w: number, h: number, radius: number, n: number, fieldRadius = radius,
+  ): number => {
+    const region = CoveredRegion(x0, y0, x0 + w, y0 + h, radius);
+    const cx = x0 + w / 2, cy = y0 + h / 2;
+    let claimed = 0;
+    for (const rect of region) {
+      for (let j = rect.Y0; j < rect.Y1; j++) {
+        for (let i = rect.X0; i < rect.X1; i++) {
+          expect(FillAlpha(ShapeSdfInner(i + 0.5 - cx, j + 0.5 - cy, w / 2, h / 2, fieldRadius, n))).toBe(1);
+          claimed++;
+        }
+      }
+    }
+    return claimed;
+  };
+
+  it('every claimed pixel is alpha EXACTLY 1, at every superellipse exponent', () => {
+    for (const n of [2, 3, 4, 5, 8]) expect(SweepRegion(0, 0, 200, 140, 24, n)).toBeGreaterThan(0);
+  });
+
+  it('...at a fractional origin, which is where a seam actually lands', () => {
+    SweepRegion(-400 + 433 + 1 / 3, 0.25, 360, 220, 31, 4);
+  });
+
+  it('...and at a radius right at the pill guard, where the wings are widest', () => {
+    SweepRegion(0, 0, 160, 160, 40, 4);
+  });
+
+  it('...with the field on a SMALLER radius than the region was built from', () => {
+    // `radius` is the MAX of the four drawn radii and the corner blocks are cut at that size, so a
+    // quadrant whose own radius is smaller is strictly further inside. Both legs swept.
+    SweepRegion(0, 0, 200, 140, 24, 4, 6);
+    SweepRegion(0, 0, 200, 140, 24, 4, 0);
+  });
+
+  it('the wings are the whole point: the region claims far more than the inset rect does', () => {
+    const region = CoveredRegion(0, 0, 2560, 1600, 183);
+    const inset = CoveredPixels(0, 0, 2560, 1600, 183);
+    let area = 0;
+    for (const r of region) area += PixelRectArea(r);
+    // 2560 x 1600 minus four 183 x 183 corner blocks, against the 2194 x 1234 the inset leaves.
+    expect(area).toBe(4_096_000 - 4 * 183 * 183);
+    expect(PixelRectArea(inset)).toBe(2194 * 1234);
+    expect(area - PixelRectArea(inset)).toBe(1_254_648);
+  });
+
+  it('the region is DISJOINT and is a superset of the inset rect', () => {
+    const region = CoveredRegion(10, 20, 410, 320, 37);
+    for (let i = 0; i < region.length; i++) {
+      for (let j = i + 1; j < region.length; j++) {
+        const a = region[i], b = region[j];
+        const hit = { X0: Math.max(a.X0, b.X0), Y0: Math.max(a.Y0, b.Y0), X1: Math.min(a.X1, b.X1), Y1: Math.min(a.Y1, b.Y1) };
+        expect(PixelRectEmpty(hit)).toBe(true);
+      }
+    }
+    const inset = CoveredPixels(10, 20, 410, 320, 37);
+    expect(region.some((r) => r.X0 <= inset.X0 && r.Y0 <= inset.Y0 && r.X1 >= inset.X1 && r.Y1 >= inset.Y1)).toBe(true);
+  });
+
+  it('a corner block is NOT claimed, and is NOT alpha 1 — the claim is not vacuous', () => {
+    const w = 200, h = 140, radius = 24;
+    const region = CoveredRegion(0, 0, w, h, radius);
+    // The pixel just inside the top-left corner of the face, which the corner block excludes.
+    const px = 0, py = 0;
+    expect(region.some((r) => px >= r.X0 && px < r.X1 && py >= r.Y0 && py < r.Y1)).toBe(false);
+    expect(FillAlpha(ShapeSdfInner(px + 0.5 - w / 2, py + 0.5 - h / 2, w / 2, h / 2, radius, 4))).toBeLessThan(1);
+  });
+
+  it('a square rect gets the IDENTICAL set it always got — one rect, no wings', () => {
+    expect(CoveredRegion(0, 0, 120, 80, 0)).toEqual([CoveredPixels(0, 0, 120, 80, 0)]);
+    expect(CoveredRegion(0, 0, 120, 80, 0.5)).toEqual([CoveredPixels(0, 0, 120, 80, 0.5)]);
+  });
+
+  it('claims nothing from a rect thinner than its own radius, where the blocks would overlap', () => {
+    expect(CoveredRegion(0, 0, 100, 12, 30)).toEqual([]);
   });
 });
 
