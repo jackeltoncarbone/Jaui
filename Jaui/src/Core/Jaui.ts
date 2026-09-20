@@ -130,7 +130,7 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
-import { WebGL2Renderer } from './WebGL2.Renderer';
+import { WebGL2Renderer, PANEL_PROGRAM_COUNT } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
@@ -5415,6 +5415,30 @@ export class Canvas implements DirtyTracker {
         const g = globalThis as unknown as { __jauiTickPace?: () => PaceCensus };
         g.__jauiTickPace = () => this._tickPace.Census();
       }
+    }
+    // `?flat-program=off` — PIXEL-IDENTICAL BY CONSTRUCTION, and DEFAULT ON.
+    //
+    // The specialised fragment program for non-glass fills (`MATERIAL_FLAT`, see
+    // `WebGL2Renderer._panelShaderFlat`) is compiled in BOTH arms; this flag only decides whether
+    // a flat batch is routed to it. That is deliberate: the arms then differ by a program bind and
+    // nothing else, so an interleaved two-arm run is not also measuring a different boot.
+    //
+    // The mark prints on every page, armed or not, because a reader has to be able to tell the ON
+    // arm from a build that has not got the lane. `programs=` is the count of panel variants the
+    // binary compiles, read from the renderer's own exported constant rather than written out
+    // here, so the line cannot claim a program the boot does not build.
+    {
+      const flatProgram = params.get('flat-program');
+      const r = this._renderer;
+      const webgl2 = r instanceof WebGL2Renderer;
+      // A value that is neither `on` nor `off` does NOT quietly pick one: the default stands and
+      // the mark names the value it refused, so an operator who typed `=of` reads that the arm
+      // they thought they selected is not the arm that ran.
+      const bad = flatProgram !== null && flatProgram !== '' && flatProgram !== 'on' && flatProgram !== 'off';
+      const armed = webgl2 && (bad || flatProgram !== 'off');
+      if (webgl2) (r as WebGL2Renderer).DiagFlatProgram = armed;
+      const why = !webgl2 ? ' reason=webgl2-only' : bad ? ` reason=only-on-and-off-are-values-got-${flatProgram}` : '';
+      JTrace(`jaui:flat-program armed=${armed ? 'on' : 'off'} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}${why}`);
     }
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }

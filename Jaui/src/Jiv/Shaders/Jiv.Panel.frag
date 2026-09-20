@@ -25,6 +25,21 @@ flat in vec4 v_Outline;        // packed rim amounts, packed Fresnel grade, clip
                                //  no 17th vertex attribute to be had: WebGL2 caps at 16.)
 flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lodOffset
 
+// ── MATERIAL_FLAT: the backdrop's whole apparatus is excluded, not branched over ──
+//
+// A uniform branch on a GPU skips the WORK and not the TAX. A program's register footprint and
+// instruction size are set by its HEAVIEST path, and that footprint bounds occupancy for every
+// pixel the program touches — including the flat ones. MATERIAL_NONE already constant-folds
+// `materialType`, but it keeps the two backdrop samplers and the runtime `hasBackdropFilter`
+// branch, so a plain gradient band was still shaded by a program that can sample a mipmapped
+// pyramid. MATERIAL_FLAT removes that path at COMPILE time: no u_Backdrop, no u_Scene, no
+// textureLod, no triDither.
+//
+// Every guard in this file is a `#if` around a whole statement or declaration. Not one line of
+// the flat path's arithmetic is moved, duplicated or rewritten — the flat program is a strict
+// DELETION from the same source, which is what makes its output bit-identical by construction
+// and what `tests/Flat.Program.test.ts` asserts (flat ⊂ none, as a subsequence).
+#if !defined(MATERIAL_FLAT)
 // Dual-filter blurred backdrop pyramid (base sigma = u_BaseFrostLod equivalent).
 // Mipmapped — each integer LOD above the base ≈ doubles the effective sigma.
 // Per-Jiv FrostBlur is mapped to a mipmap LOD offset (`frostLod - u_BaseFrostLod`)
@@ -44,6 +59,7 @@ uniform vec4 u_BackdropXf;
 // so screen UV addresses it directly and u_BackdropXf does not apply to it.
 uniform sampler2D u_Scene;
 uniform float u_BaseFrostLod;
+#endif
 uniform vec2 u_Resolution;
 
 // Clip-stack texture — RGBA32F row where each clip occupies 3 texels:
@@ -51,12 +67,14 @@ uniform vec2 u_Resolution;
 // texel[3i+1] = (rTL, rTR, rBR, rBL)      device pixels
 // texel[3i+2] = (smoothness, _, _, _)     unitless (0 = pure circle corners)
 uniform sampler2D u_ClipTex;
+#if !defined(MATERIAL_FLAT)
 // Specular tilt — added to lightDir ONLY for specular computations (bevel
 // catchlight and rim-spec highlight), not for ambient/edge-light/border
 // directionality. Canvas-wide, set by pointer or gyro each frame. This
 // reproduces Apple's gyro-driven catchlight without sliding the virtual
 // "sun" for the rest of the material.
 uniform vec2 u_SpecularTilt;
+#endif
 
 // ── Background fill mode ────────────────────────────────────────────────
 // Per-draw uniforms that select what kind of fill paints inside this
@@ -88,14 +106,19 @@ uniform float     u_BgGradPos[MAX_BG_GRAD_STOPS];
 
 out vec4 fragColor;
 
+#if !defined(MATERIAL_FLAT)
 // Triangular-PDF dither — breaks 8-bit banding on smooth blurred backdrops.
 // Two hashed uniforms summed give a triangular distribution; amplitude is
 // ±1 LSB at 8-bit (invisible as noise, dissolves frost/glass banding).
+// THE GLASS DITHER, and the only one MATERIAL_FLAT drops. The GRADIENT dither
+// (`gradientNoise`, just below) is a different function on a different path and
+// stays byte for byte — a flat gradient band still dithers exactly as it does today.
 float triDither(vec2 p) {
     float a = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
     float b = fract(sin(dot(p + 17.0, vec2(39.3468, 11.135))) * 24634.6345);
     return (a + b - 1.0) / 255.0;
 }
+#endif
 
 // Interleaved gradient noise at a screen pixel, in [0, 1): a fixed blue-ish pattern tied to the
 // framebuffer pixel, so a gradient's dither never crawls while the page scrolls or springs.
@@ -655,6 +678,7 @@ vec3 applyGrading(vec3 color, float brightness, float saturation, float contrast
     return color * brightness;
 }
 
+#if !defined(MATERIAL_FLAT)
 // The glass body's neutral pigment, after the grade: negative pulls toward black, positive toward
 // white, by |tint|. A mix toward black keeps the hue exactly; there is no grey anywhere on the path.
 vec3 applyTint(vec3 color, float tint) {
@@ -686,6 +710,7 @@ vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
     if (frostLod < 0.01 && extraLod < 0.01) return texture(u_Scene, uv).rgb;
     return textureLod(u_Backdrop, backdropUv, lod).rgb;
 }
+#endif
 
 // ────────────────────────────────────────────────────────────────────────────
 //  Clip stack — CSS-style overflow clipping, rounded-rect per ancestor.
@@ -789,7 +814,7 @@ void main() {
     // instance attribute when neither variant is defined (e.g. test builds).
     #if defined(MATERIAL_GLASS)
     const float materialType = 1.0;
-    #elif defined(MATERIAL_NONE)
+    #elif defined(MATERIAL_NONE) || defined(MATERIAL_FLAT)
     const float materialType = 0.0;
     #else
     // v_StyleParams.w now carries the foreground Brightness multiplier (applied
@@ -893,11 +918,20 @@ void main() {
     // Backdrop filter is universal — any jiv with non-default brightness/saturation/
     // contrast/frostLod samples the backdrop, regardless of material. Glass layers
     // refraction + CA + bezel on top; flat panels get a clean filtered sample.
+    // MATERIAL_FLAT is routed ONLY at batches whose every instance makes this predicate false
+    // (`WebGL2Renderer._batchTakesFlatProgram` evaluates the SAME five numbers off the same packed
+    // instance floats, with the same epsilons, against the same u_BaseFrostLod). Pinning it to a
+    // compile-time `false` therefore changes no fragment's answer; it changes only whether the
+    // program has to be able to ask.
+    #if defined(MATERIAL_FLAT)
+    const bool hasBackdropFilter = false;
+    #else
     bool hasBackdropFilter = abs(brightness - 1.0) > 0.001
         || abs(saturation - 1.0) > 0.001
         || abs(contrast - 1.0) > 0.001
         || frostLod > u_BaseFrostLod + 0.001
         || abs(bodyTint) > 0.001;
+    #endif
 
     // Continuous glass intensity. Drives every rim/inner effect that would
     // otherwise pop on/off when Thickness flips between 0 and >0 (since the
@@ -907,6 +941,7 @@ void main() {
     // effect fades smoothly with its physical driver, no discontinuity.
     float glassiness = smoothstep(0.0, 1.0, thickness);
 
+#if !defined(MATERIAL_FLAT)
     if (materialType == 1.0) {
         // Edge refraction: rotate the outward normal ~10° along the tangent,
         // then negate to sample INWARD (Show Studio's `-refract * edgeIntensity`).
@@ -1028,6 +1063,7 @@ void main() {
         vec3 s = sampleBackdrop(baseUv, 0.0, frostLod);
         backdrop = applyTint(applyGrading(s, brightness, saturation, contrast), bodyTint);
     }
+#endif
 
     // ── Beer-Lambert tint (multiplicative absorption) ──
     // Tint.a scales absorption strength; path length grows toward center.
@@ -1105,6 +1141,7 @@ void main() {
     // border-only pass is entitled to paint. `FresnelStrength` is the BODY's fresnel
     // and a border-only pass has no body — same reason the hemispherical ambient below
     // is multiplied by `fillAlpha`.
+#if !defined(MATERIAL_FLAT)
     if (materialType == 1.0 && borderOnly == 0.0 && fillAlpha > 0.0 && dist > -max(bezelWidth * 0.75, 6.0)) {
         // Wide rim band — at LEAST 6 px so the glow is actually visible,
         // scaled up with bezelWidth (the optical "thickness" of the glass).
@@ -1143,6 +1180,7 @@ void main() {
         // BorderColor.a (that's the ink-line, separate concern).
         edgeLightAlpha = falloff * directional * fresnelStrength * fillAlpha;
     }
+#endif
 
     // ── Shadow ──
     // SOFT drop shadow — fades symmetrically across the silhouette edge so the
@@ -1222,6 +1260,12 @@ void main() {
     //      tinted with backdrop vibrancy, fading on the unlit side. This is
     //      what makes the outline read as a real bevel catching light, not a
     //      flat CSS border. For non-glass it falls back to a uniform stroke.
+    //
+    // The `#if` closes on a DANGLING `else`, so MATERIAL_FLAT drops the glass arm and the
+    // non-glass stroke below stands alone as a bare compound statement — same scope, same
+    // statements, same order. The alternative (a second copy of the stroke under
+    // `#if defined(MATERIAL_FLAT)`) is the hand-written second shader the lane exists to avoid.
+#if !defined(MATERIAL_FLAT)
     if (materialType == 1.0) {
         // ── Hemispherical edge light (rim ambient — top vs bottom bias) ──
         // Apple uses a virtual "sky above, ground below" environment so the
@@ -1432,7 +1476,9 @@ void main() {
             result.rgb = mix(result.rgb, borderRgb, borderBase);
             result.a = max(result.a, borderBase * borderZoneAlpha);
         }
-    } else {
+    } else
+#endif
+    {
         float borderOuter = smoothstep(-aa, aa, dist);
         // The inner edge eases over BorderFade (scaled with the width) past the stroke; with no fade it
         // feathers by the same aa as the outer edge.
@@ -1464,9 +1510,15 @@ void main() {
     // Dither backdrop-sampling panels to break RGBA8 banding in frosted /
     // glass regions. Sub-LSB amplitude; skipped where no backdrop is read
     // so sharp solid/text panels stay bit-exact.
+    // Dangling `else` again: MATERIAL_FLAT drops the glass dither and the gradient dither below
+    // becomes a plain `if (u_BgMode >= 2)`. Byte for byte the same expression on the same path —
+    // a flat gradient band dithers exactly as it does today.
+#if !defined(MATERIAL_FLAT)
     if (materialType == 1.0 || hasBackdropFilter) {
         result.rgb += triDither(v_PixelPos);
-    } else if (u_BgMode >= 2) {
+    } else
+#endif
+    if (u_BgMode >= 2) {
         // Gradient fills: ±half an 8-bit step on screen. Blending scales rgb by alpha, so divide it back
         // out (down to a floor) and a thin wash dithers as much as an opaque one.
         float gradDither = (gradientNoise(floor(gl_FragCoord.xy)) - 0.5) / 255.0;

@@ -194,7 +194,24 @@ interface _CardTarget {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
+/** Panel program variants compiled from the ONE `Jiv.Panel.frag`: glass, non-glass, flat.
+ *  Exported so `?flat-program`'s init mark cannot claim a count the boot does not build;
+ *  `tests/Flat.Program.test.ts` asserts `_compilePanelShader` issues exactly this many. */
+export const PANEL_PROGRAM_COUNT = 3;
+
 const PANEL_FLOATS_PER_INSTANCE = 60;
+// Offsets INTO one packed panel instance of the five numbers the fragment's `hasBackdropFilter`
+// reads: BackdropBrightness / Saturation / Contrast, the frost LOD, and the body Tint. Written by
+// `Jiv.InstanceBuffer.Push` — `tests/Flat.Program.test.ts` reads that file and asserts each of
+// these five still carries what it is named after, so a layout change fails a test instead of
+// quietly routing a filtered panel through a program that cannot sample a backdrop.
+const PANEL_OFF_BACKDROP_BRIGHTNESS = 32;
+const PANEL_OFF_BACKDROP_SATURATION = 33;
+const PANEL_OFF_BACKDROP_CONTRAST = 34;
+const PANEL_OFF_FROST_LOD = 35;
+const PANEL_OFF_BODY_TINT = 41;
+/** The fragment's own epsilon, `Jiv.Panel.frag`'s `hasBackdropFilter`. One number, both sides. */
+const PANEL_BACKDROP_FILTER_EPSILON = 0.001;
 const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
 const PANEL_ATTR_COUNT = 15; // locations 1..15 — clip_meta is packed into a_Outline.zw
 const BYTES_PER_VEC4 = 16;
@@ -358,18 +375,32 @@ export class WebGL2Renderer implements Renderer {
   private _sharedBlur: BlurPass | null = null;
 
   // Panel shader
-  // Two compiled variants of the panel shader. `MATERIAL_GLASS` constant-
-  // folds in the glass program → DCE strips the `else` branches for ~60%
-  // of non-glass fragments on Home, the `MATERIAL_NONE` variant strips
-  // the glass branches for the batched non-glass panel draws. Uniform
-  // layout is identical, so a single `_panelUniformLocs` dict works when
-  // populated with locations from whichever program is currently bound.
+  // Three compiled variants of the panel shader, all from the ONE `Jiv.Panel.frag`.
+  // `MATERIAL_GLASS` constant-folds in the glass program → DCE strips the `else`
+  // branches for ~60% of non-glass fragments on Home; `MATERIAL_NONE` strips the
+  // glass branches for a flat panel that still filters its backdrop; `MATERIAL_FLAT`
+  // strips the backdrop apparatus itself for a panel that reads no backdrop at all.
+  // Uniform NAMES are identical across the three (the flat program simply declares
+  // fewer of them), so one `_PanelLocs` shape works for each, populated per program.
   private _panelShaderGlass!: ShaderProgram;
   private _panelShaderNone!: ShaderProgram;
+  // The specialised program for non-glass fills. MATERIAL_NONE only constant-folds `materialType`;
+  // it still declares `u_Backdrop` and `u_Scene` and still branches on `hasBackdropFilter` at
+  // runtime, so a plain gradient band was shaded by a program that CAN sample a mipmapped pyramid,
+  // and on a GPU that costs whether or not the branch is taken (register footprint and instruction
+  // size are set by the heaviest path, and they bound occupancy for every pixel the program
+  // touches). MATERIAL_FLAT strips that path at compile time from the SAME source — two samplers
+  // gone, `sampleBackdrop` gone, the glass dither gone, 698 -> 529 lines of GLSL.
+  private _panelShaderFlat!: ShaderProgram;
   // Uniform location bundles per variant — each program has its own
   // location IDs even when the uniform names match.
   private _panelLocsGlass!: _PanelLocs;
   private _panelLocsNone!: _PanelLocs;
+  private _panelLocsFlat!: _PanelLocs;
+  /** `?flat-program=off` sends every panel back through the full program. Default ON: the flat
+   *  program is pixel-identical by construction, so the only reason to hold the old routing is to
+   *  measure the two arms against each other in ONE binary. Set by `Jaui._initDebugFromUrl`. */
+  DiagFlatProgram = true;
   // Retained-mode capture view-offset (device px). (0,0) for the normal pass;
   // compositeOrCapture sets it to the subtree AABB origin so panel/text draws
   // project into the capture FBO while v_PixelPos stays screen-space (clips
@@ -1195,14 +1226,24 @@ export class WebGL2Renderer implements Renderer {
       gl.DYNAMIC_DRAW);
 
     // Pick the shader variant. Glass panels constant-fold materialType=1.
-    // Flat panels — batched OR drawn standalone with a backdrop filter
-    // (BackdropBrightness/Saturation/Contrast/FrostBlur) — both use the
+    // A flat panel drawn standalone WITH a backdrop filter
+    // (BackdropBrightness/Saturation/Contrast/FrostBlur/Tint) uses the
     // MATERIAL_NONE variant. Its shader still includes the `hasBackdropFilter`
     // branch, which samples the bound pyramid when any filter is active and
     // falls through to plain tint-fill otherwise.
+    //
+    // And a non-glass batch that reads NO backdrop takes the specialised flat program. `backdrop`
+    // null is not on its own sufficient — a batch could still carry an instance whose grading asks
+    // the shader to sample, and with no pyramid bound that instance reads the dummy texture, which
+    // is today's behaviour and has to stay today's behaviour. So the batch is classified on the
+    // same five numbers the fragment would have read; see `_batchTakesFlatProgram`.
     const isGlass = useGlassShader;
-    const program = isGlass ? this._panelShaderGlass : this._panelShaderNone;
-    const locs    = isGlass ? this._panelLocsGlass   : this._panelLocsNone;
+    const isFlat = !isGlass
+      && this.DiagFlatProgram
+      && backdrop === null
+      && this._batchTakesFlatProgram(baseFrostLod);
+    const program = isGlass ? this._panelShaderGlass : isFlat ? this._panelShaderFlat : this._panelShaderNone;
+    const locs    = isGlass ? this._panelLocsGlass   : isFlat ? this._panelLocsFlat   : this._panelLocsNone;
 
     this._useProgram(program.Program);
     gl.uniform2f(locs.resolution, canvasWidth, canvasHeight);
@@ -1254,6 +1295,43 @@ export class WebGL2Renderer implements Renderer {
     this._noteSceneDraw();
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
     if (timed) this._pass!.End();
+  };
+
+  /**
+   * Can every instance in the pending batch be shaded by the flat program?
+   *
+   * The flat program pins `hasBackdropFilter` to a compile-time `false`. That is only sound where
+   * the full program would have computed `false` for every fragment of the batch — so this asks
+   * the fragment's OWN question, off the same packed floats the fragment's varyings are fed from,
+   * with the same epsilon and the same `u_BaseFrostLod`:
+   *
+   *     abs(brightness - 1) > e || abs(saturation - 1) > e || abs(contrast - 1) > e
+   *       || frostLod > baseFrostLod + e || abs(bodyTint) > e
+   *
+   * One instance answering yes sends the whole batch back to MATERIAL_NONE. That is stricter than
+   * the walk's own routing — `Jaui.ts` already sends every `_hasBackdropFilter` node down the
+   * pyramid path, and `JivInstanceBuffer` already neutralises the filter on a 'BorderOnly' overlay
+   * quad — but this lane's gate is bit-identity, and "the walk would never" is not a thing a
+   * fragment can be held to. Under `?no-glass`, where the walk's routing IS bypassed, it is what
+   * keeps the two arms identical.
+   *
+   * Only reached once the cheap gates (armed, non-glass, no bound backdrop) have passed, so the
+   * scan is five reads per instance on batches that are about to take the flat path and nothing at
+   * all on the rest.
+   */
+  private _batchTakesFlatProgram = (baseFrostLod: number): boolean => {
+    const d = this._panelInstanceData;
+    const e = PANEL_BACKDROP_FILTER_EPSILON;
+    const frostCeiling = baseFrostLod + e;
+    for (let i = 0; i < this._panelInstanceCount; i++) {
+      const b = i * PANEL_FLOATS_PER_INSTANCE;
+      if (Math.abs(d[b + PANEL_OFF_BACKDROP_BRIGHTNESS] - 1) > e) return false;
+      if (Math.abs(d[b + PANEL_OFF_BACKDROP_SATURATION] - 1) > e) return false;
+      if (Math.abs(d[b + PANEL_OFF_BACKDROP_CONTRAST] - 1) > e) return false;
+      if (d[b + PANEL_OFF_FROST_LOD] > frostCeiling) return false;
+      if (Math.abs(d[b + PANEL_OFF_BODY_TINT]) > e) return false;
+    }
+    return true;
   };
 
   private _bindBgPaint = (locs: _PanelLocs, bgPaint: BgPaint | undefined): void => {
@@ -3359,13 +3437,31 @@ export class WebGL2Renderer implements Renderer {
     // glass panels (~60% of screen pixels on Home) now run a shader with
     // no backdrop sampling, no refraction, no rim, no specular — just
     // fill + shadow + border.
+    //
+    // A THIRD variant, MATERIAL_FLAT, goes further: it removes the backdrop apparatus itself —
+    // the two samplers, `sampleBackdrop`, the glass dither — rather than branching past it. Issued
+    // unconditionally, in both arms of `?flat-program`, so the flag changes ROUTING and nothing
+    // else and the two arms are the same binary with the same boot cost. The batch is issued in
+    // one go and collected once (see `ShaderBatch`), so a fourteenth program costs about what the
+    // slowest of the thirteen already cost: the compiler pool was not full at thirteen.
+    //
+    // ONE vertex program for all three. The flat fragment needs no varying the others do not
+    // produce, so a cut-down vertex shader would change nothing a pixel gate can see while
+    // doubling what can drift — and the adaptive-shadow texel fetch is PER VERTEX (four per
+    // instance), not the per-pixel tax this lane is about.
     this._panelShaderGlass = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_GLASS: true });
     this._panelShaderNone  = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_NONE:  true });
+    this._panelShaderFlat  = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT:  true });
   };
 
   private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
     this._panelLocsGlass = _extractPanelLocs(gl, this._panelShaderGlass.Program);
     this._panelLocsNone  = _extractPanelLocs(gl, this._panelShaderNone.Program);
+    // Most of these come back null on the flat program — the uniforms are not in it. That is the
+    // point, and it needs no special case: `gl.uniform*` with a null location is specified to be
+    // silently ignored, so `PanelDrawBatch` sets the same uniforms for every variant and only the
+    // ones the bound program actually declares land.
+    this._panelLocsFlat  = _extractPanelLocs(gl, this._panelShaderFlat.Program);
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jaui] Failed to create panel instance buffer');
