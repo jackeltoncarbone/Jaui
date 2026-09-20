@@ -2832,12 +2832,19 @@ export class Canvas implements DirtyTracker {
       // HERE rather than after the present because the present ends the frame's last encoder and
       // this line is about the ones the WALK ended.
       const sw = this._renderer instanceof WebGL2Renderer ? this._renderer.SceneSwitches : -1;
+      // The pool, on the gate line rather than only on the `?trace`-gated census. Twenty fill
+      // pyramids have to be ALIVE when their cards draw in pass 2, so this flag's pixels depend on
+      // the rotation the way nothing before it did: at `1/1/1` nineteen fills were overwritten
+      // before they were sampled and every card drew the last build's pyramid through its own
+      // region map -- which is exactly the arm `Perf/BlurPhased.Finding.md` marked WRONG. Must
+      // read `20/20/40`; anything else is an instruction to discard the cell.
+      const pool = this._renderer instanceof WebGL2Renderer ? this._renderer.BlurPoolCensus : 'none';
       const line = `jaui:blur-phased built=${st.Fill + st.Rim} fill=${st.Fill} rim=${st.Rim}`
         + ` used=${st.Used} missed=${st.Missed} dup=${st.Dup}`
         + ` chains=${st.Chains} sizes=${st.Keys} coarse=${st.Coarse}`
         + ` shadows=${this._phasedShadow.size} snaps=${this._phasedStrays.Snaps}`
         + ` pblur=${this._phasedStrays.Pblur}`
-        + ` switches=${sw} pixels=DIFFERENT`;
+        + ` pool=${pool} switches=${sw} pixels=DIFFERENT`;
       if (line !== this._phasedLastLine) { this._phasedLastLine = line; JTrace(line); }
     }
 
