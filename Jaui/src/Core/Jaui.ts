@@ -2022,11 +2022,13 @@ export class Canvas implements DirtyTracker {
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
             r.GenerateBlurMipmap(plan.MaxLod);
             r.RebindSceneTarget();
-            // `?scene-restarts` / `?small-restarts`: one insertion point per pyramid BUILD, taken
-            // HERE and not after the draw below. The build has just bound and drawn into the blur
-            // FBOs, so the scene's encoder has provably ended and nothing has been drawn into the
-            // scene since -- which is the instant `?small-restarts` needs for its claim to add a
-            // trivial encoder and NO scene restart. Nothing before or after it moves.
+            // `?scene-restarts` / `?small-restarts`: the RIM build's insertion point, taken HERE
+            // and not after the draw below. The build has just bound and drawn into the blur FBOs,
+            // so the scene's encoder has provably ended and nothing has been drawn into the scene
+            // since -- which is the instant `?small-restarts` needs for its claim to add a trivial
+            // encoder and NO scene restart. It stays on this line where the FILL build's moved
+            // past the adaptive-shadow measure, because nothing READS the scene between here and
+            // the rim draw: the scene arm's opening draw has nothing free to make expensive.
             if (this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();
           }
 
@@ -2464,6 +2466,10 @@ export class Canvas implements DirtyTracker {
         // DID author frost never reaches that fallback at all, so it takes no
         // snapshot — see the else branch.
         let sceneSnap: GpuTextureHandle | null;
+        // `?scene-restarts` / `?small-restarts`: whether THIS surface built a fill pyramid on this
+        // line rather than taking a pre-built one. The insertion point below needs to know, and
+        // the build sits inside a branch whose locals do not survive it.
+        let fillBuilt = false;
         if (this._sharedBackdrop) {
           // ── Shared backdrop (fire once, sample many) ──
           // Build ONE sharp-root pyramid per frame and let every glass surface
@@ -2536,10 +2542,10 @@ export class Canvas implements DirtyTracker {
             r.GenerateBlurMipmap(plan.MaxLod);
             this._opMs.Mip += performance.now() - _tMip;
             r.RebindSceneTarget();
-            // The second of the two insertion points, and the same instant as the rim path's: a
-            // build has just handed the scene target back. Twenty cards x (fill + rim) is the forty
-            // builds a glass-grid frame makes, so `=40` is one restart per build and `=80` is two.
-            if (this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();
+            // `?scene-restarts` / `?small-restarts`: this build's insertion point is taken BELOW,
+            // after the adaptive-shadow measure, and this flag is how it knows a build happened
+            // here. See the call site for why it is not taken on this line.
+            fillBuilt = true;
           }
         }
 
@@ -2567,6 +2573,24 @@ export class Canvas implements DirtyTracker {
             this._adaptiveShadowsDrawn = true;
           }
         }
+
+        // `?scene-restarts` / `?small-restarts`: THE FILL BUILD'S INSERTION POINT, and it is here
+        // rather than on the `RebindSceneTarget()` above because of what stands between the two.
+        //
+        // The instant is the same one in every respect that matters: a build has handed the scene
+        // target back, the scene's encoder has ended, and NOTHING has been drawn into the scene
+        // since -- the adaptive-shadow probe draws into its own 1x1 state target, not the scene.
+        // What changes is what comes NEXT. Taken above, the scene arm's opening draw leaves the
+        // scene dirty at `MeasureShadowBackdrop`, whose 1x1 bind rides the build's end for free at
+        // baseline: every point then bought a SECOND encoder end (`shadow-state`) and turned the
+        // probe's read into a SECOND restart. That is exactly the M4's `switches=100 restarts=60
+        // endsByKey=...,shadow-state:20` against a spec of 80 / 40 / no new key. Taken here, the
+        // shadow measure has already read and already bound, the added end is the only change, and
+        // the counters come out 40+N / 40 / 60 with `shadow-state` absent as at baseline.
+        //
+        // The rim build's point stays on its own `RebindSceneTarget()`, because nothing reads the
+        // scene between it and the rim draw.
+        if (fillBuilt && this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();
 
         r.EnableBlend();
         this._panelBuffer.Begin();
@@ -2981,10 +3005,11 @@ export class Canvas implements DirtyTracker {
     // tile-based mobile renderers (scene never leaves tile memory).
     // Headless: there is no swap chain — the scene stays in `_sceneFbo` for the caller to sample
     // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
-    // `?scene-restarts` / `?small-restarts`: pay whatever the frame still owes, so the count is
-    // exactly N on every frame and not only on a frame with the expected number of builds. Zero on
-    // a steady scene from frame two onwards; on frame one, when the point count is not yet known,
-    // this is the whole balance. Ahead of the present, which is where the scene is still bound.
+    // `?scene-restarts` / `?small-restarts`: close the frame. It EMITS NOTHING here -- it rolls the
+    // spread's denominator, reports the frame's shortfall on the gate and counts the frame for the
+    // census. It used to pay the balance on this line, where the walk has been drawing into the
+    // scene all frame, so the balance probe ENDED a live encoder and booked `restart-probe:1` at an
+    // instant that is not an insertion point. See `WebGL2Renderer.DiagRestartFrameEnd`.
     if (this._restartRenderer !== null) this._restartRenderer.DiagRestartFrameEnd();
     if (!this._headless) {
       r.PresentScene();
@@ -5449,6 +5474,13 @@ export class Canvas implements DirtyTracker {
         : raw.trim() === '' || !Number.isInteger(n) || n < 1 ? 'n-must-be-a-whole-number-of-restarts-at-least-1'
         : r.CardCompositeEnabled ? 'card-composite-draws-into-a-card-target-and-a-probe-draw-would-dirty-it'
         : this._blurFirst ? 'blur-first-moves-every-build-off-the-insertion-point'
+        // `?blur-phased` is parsed BELOW this block, so its field cannot be read here -- the URL
+        // can. Same defect as `?blur-first` and for the same reason: it pre-builds the pyramids in
+        // an earlier phase, so the insertion point is no longer the instant after a build handed
+        // the scene back, and the scene arm has no level 0 of this build's to end on. The two were
+        // left un-refused at the blurphased fold and a combined cell was forbidden by hand; this
+        // is that ban in code.
+        : params.has('blur-phased') ? 'blur-phased-moves-every-build-off-the-insertion-point'
         : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-leave-the-scene-encoder-live-at-the-insertion-point'
         : null;
       if (why !== null) { JTrace(`jaui:${flag} armed=false reason=${why}`); continue; }

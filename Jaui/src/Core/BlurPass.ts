@@ -494,6 +494,22 @@ export class BlurPass {
    *  renderer -- the per-surface chain, the sharp-root chain and the shared backdrop's. */
   TimerTag: string = 'blur';
 
+  /** `?scene-restarts=N` ONLY: the active chain's level-0 framebuffer, or `null` before any build.
+   *
+   *  It is the target the pyramid's LAST upsample hop draws into (`Blur`'s `i = 0` iteration, and
+   *  the sharp-root branch's single copy), so it is the target a build ENDS the scene on -- which
+   *  is the whole reason the flag wants it. `?scene-restarts`'s probe binds it and draws one
+   *  transparent pixel so that its extra encoder end is a REAL build's end rather than a detour
+   *  through a 1x1 target, after the second lane's +8.5 ms could not be reconciled with
+   *  `?blur-phased` removing 38 real ends for +0.28 (Perf/README.md, "H4 REFUTED ON A LIVE FLAG").
+   *
+   *  A GETTER AND NOTHING ELSE: no arithmetic, no bind, no resize, no state of its own. The caller
+   *  binds with `Framebuffer.Bind()` and must NOT invalidate -- `_bindTarget` invalidates because
+   *  it is about to overwrite the level, and the probe is not. */
+  get DiagLevel0(): Framebuffer | null {
+    return this._levels.length > 0 ? this._levels[0] : null;
+  }
+
   /** What the pool holds per level-0 size, what it actually ran at, and why those differ.
    *  Read by the renderer's trace line; the flag's whole claim is that this stays honest. */
   get ChainCensus(): {

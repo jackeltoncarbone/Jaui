@@ -152,14 +152,15 @@ describe('the renderer feeds the ledger at every scene read', () => {
     // (1) The adaptive-shadow probe, into `_shadowStateFbo`.
     const shadow = arrowBody(renderer, 'MeasureShadowBackdrop');
     expect(shadow).toContain('_shadowStateFbo');
-    // (2) `?scene-restarts` / `?small-restarts`'s restart probe, into `_restartProbeFbos`. It MUST
-    //     NOT note a write: it is the draw that ENDS the scene's encoder by landing somewhere else,
-    //     and booking it as a scene write would price a restart the frame did not take. Its two
-    //     scene-side draws, which do land in the scene, are noted -- so this method contributes
-    //     exactly one unnoted site and not three.
+    // (2) `?scene-restarts` / `?small-restarts`'s restart probe. It MUST NOT note a write: it is
+    //     the draw that ENDS the scene's encoder by landing somewhere else -- the blur pass's own
+    //     level 0 on the scene arm, a 1x1 target on the small one -- and booking it as a scene
+    //     write would price a restart the frame did not take. Its ONE scene-side draw, which does
+    //     land in the scene, is noted, so this method contributes exactly one unnoted site.
     const restart = arrowBody(renderer, '_restartProbe');
     expect(restart).toContain('_restartProbeFbos[slot]');
-    expect(restart.match(/_noteSceneDraw\(\);/g)).toHaveLength(2);
+    expect(restart).toContain('level0.Bind();');
+    expect(restart.match(/_noteSceneDraw\(\);/g)).toHaveLength(1);
     for (const d of unnoted) expect(shadow.includes(d.Line) || restart.includes(d.Line)).toBe(true);
   });
 
