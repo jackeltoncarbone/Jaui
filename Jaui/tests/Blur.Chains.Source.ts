@@ -34,6 +34,22 @@ interface FakeProgram {
   Uniforms: Map<string, string>;
 }
 
+/** A buffer, and whatever was last uploaded into it. The instanced atlas path puts everything a
+ *  slot draw used to set as uniforms in here, so a fake that dropped the upload would be blind to
+ *  the very numbers that decide whether the two arms agree. */
+interface FakeBuffer {
+  Id: number;
+  Data: Float32Array | null;
+}
+
+/** One instanced draw: how many instances, and the per-instance records it drew them from. */
+export interface FakeInstancedDraw {
+  Count: number;
+  /** `INST_FLOATS`-wide records, one per instance, decoded from the bound buffer at the offset
+   *  attribute 1 was pointed at. */
+  Records: number[][];
+}
+
 /** One recorded write: where it landed, how big it was, and what value it left. */
 export interface FakeWrite {
   Kind: 'draw' | 'blit';
@@ -93,6 +109,7 @@ export class FakeGl {
   readonly ARRAY_BUFFER = E();
   readonly ELEMENT_ARRAY_BUFFER = E();
   readonly STATIC_DRAW = E();
+  readonly DYNAMIC_DRAW = E();
   readonly FLOAT = E();
   readonly VERTEX_SHADER = E();
   readonly FRAGMENT_SHADER = E();
@@ -106,6 +123,8 @@ export class FakeGl {
   Writes: FakeWrite[] = [];
   /** Every entry point called since the last `Reset`, by name. */
   Calls: string[] = [];
+  /** Every instanced draw since the last `Reset`, with the records it read. */
+  InstancedDraws: FakeInstancedDraw[] = [];
 
   private _nextId = 1;
   private _textures = new Map<number, FakeTexture>();
@@ -115,8 +134,11 @@ export class FakeGl {
   private _program: FakeProgram | null = null;
   private _shaderSrc = new Map<object, string>();
   private _locNames = new Map<object, string>();
+  private _arrayBuf: FakeBuffer | null = null;
+  private _instStride = 0;
+  private _instOffset = 0;
 
-  Reset = (): void => { this.Writes = []; this.Calls = []; };
+  Reset = (): void => { this.Writes = []; this.Calls = []; this.InstancedDraws = []; };
 
   /** The symbolic contents of a texture level — what a consumer would sample. */
   ValueOf = (tex: object, level = 0): string => {
@@ -221,13 +243,28 @@ export class FakeGl {
     this._uniform(loc, `${a},${b},${c},${d}`);
 
   // ── Geometry and state ──
-  createBuffer = (): object => ({ Id: this._nextId++ });
-  bindBuffer = (): void => { /* no-op */ };
-  bufferData = (): void => { /* no-op */ };
+  createBuffer = (): FakeBuffer => ({ Id: this._nextId++, Data: null });
+  bindBuffer = (target: number, b: FakeBuffer | null): void => {
+    if (target === this.ARRAY_BUFFER) this._arrayBuf = b;
+  };
+  bufferData = (target: number, data: unknown): void => {
+    if (target !== this.ARRAY_BUFFER || this._arrayBuf === null) return;
+    this._arrayBuf.Data = data instanceof Float32Array ? new Float32Array(data) : null;
+  };
   createVertexArray = (): object => ({ Id: this._nextId++ });
   bindVertexArray = (): void => { /* no-op */ };
   enableVertexAttribArray = (): void => { /* no-op */ };
-  vertexAttribPointer = (): void => { /* no-op */ };
+  /** Only attribute 1's byte offset is kept, and that is enough: every per-instance attribute in
+   *  `BlurPass` is pointed at the same hop's slice of the same buffer with the same stride, so
+   *  attribute 1's offset names the hop. */
+  vertexAttribPointer = (
+    index: number, _size: number, _type: number, _norm: boolean, stride?: number, offset?: number,
+  ): void => {
+    if (index !== 1) return;
+    this._instStride = stride ?? 0;
+    this._instOffset = offset ?? 0;
+  };
+  vertexAttribDivisor = (): void => { this._call('vertexAttribDivisor'); };
   disable = (): void => { /* no-op */ };
   enable = (): void => { /* no-op */ };
   activeTexture = (): void => { /* one unit is the only one BlurPass uses */ };
@@ -247,6 +284,34 @@ export class FakeGl {
     const src = this.ValueOf(this._boundTex, 0);
     level.Value = Hash(`${this._program.Tag}|${uniforms}|${src}|${level.W}x${level.H}`);
     this.Writes.push({ Kind: 'draw', Tex: dst.Tex.Id, Level: dst.Level, W: level.W, H: level.H, Value: level.Value });
+  };
+
+  /** One instanced draw is the fake's one draw with the instance records folded into the value it
+   *  writes. It has to be: the per-instance attributes are the uniforms the per-slot arm set, so a
+   *  write that ignored them would report two builds identical whatever the buffer held. */
+  drawElementsInstanced = (
+    _mode: number, _count: number, _type: number, _offset: number, primCount: number,
+  ): void => {
+    this._call('drawElementsInstanced');
+    const dst = this._draw?.Attachment;
+    if (!dst) throw new Error('drawElementsInstanced with no colour attachment');
+    if (!this._program) throw new Error('drawElementsInstanced with no program');
+    if (!this._boundTex) throw new Error('drawElementsInstanced with no source texture');
+    if (!this._arrayBuf?.Data) throw new Error('drawElementsInstanced with no instance data');
+    const level = dst.Tex.Levels.get(dst.Level);
+    if (!level) throw new Error('drawElementsInstanced into an unallocated level');
+    const wide = this._instStride / 4;
+    const base = this._instOffset / 4;
+    const records: number[][] = [];
+    for (let i = 0; i < primCount; i++) {
+      records.push([...this._arrayBuf.Data.subarray(base + i * wide, base + (i + 1) * wide)]);
+    }
+    const uniforms = [...this._program.Uniforms].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([k, v]) => `${k}=${v}`).join(',');
+    const src = this.ValueOf(this._boundTex, 0);
+    level.Value = Hash(`${this._program.Tag}|${uniforms}|${records.join(';')}|${src}|${level.W}x${level.H}`);
+    this.Writes.push({ Kind: 'draw', Tex: dst.Tex.Id, Level: dst.Level, W: level.W, H: level.H, Value: level.Value });
+    this.InstancedDraws.push({ Count: primCount, Records: records });
   };
 
   blitFramebuffer = (

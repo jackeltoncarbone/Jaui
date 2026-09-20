@@ -79,6 +79,19 @@ export class SceneReadLedger {
   AtlasMembers = 0;
   AtlasSolo = 0;
   AtlasBytes = 0;
+  /** DRAWS the atlas builds issued this frame, and the reason it is a column of its own: the
+   *  harness's `drawCalls` counts SCENE draws and does not see a pyramid pass at all. It read
+   *  153 / 153 / 154 across `?pyramid-atlas` off / fills / all -- three arms that differ by 160
+   *  pyramid draws and by 1.69 ms -- and 74.00 for both `?blur-dummy` and `?no-blur`, which
+   *  differ by every build in the frame. So a cell about DRAWS has to read the engine's own count
+   *  or it is reading a column its lever cannot move.
+   *
+   *  `?atlas-instanced` (the default) issues ONE instanced draw per atlas level: 8 on
+   *  `glass-grid` under `all` and 4 under `fills`, against 160 and 80 with `=off`. It counts the
+   *  ATLAS's draws only -- a member the plan refused builds through `ComputeBlur` and its four
+   *  passes are not in here, and neither are the twenty per-card rim builds the `fills` arm runs
+   *  in the walk. */
+  AtlasDraws = 0;
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -103,6 +116,7 @@ export class SceneReadLedger {
     this.AtlasMembers = 0;
     this.AtlasSolo = 0;
     this.AtlasBytes = 0;
+    this.AtlasDraws = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -154,5 +168,8 @@ export class SceneReadLedger {
 
   /** `n` surfaces the atlas plan could not take, and which built exactly as they do today. */
   NoteAtlasSolo = (n: number): void => { this.AtlasSolo += n; };
+
+  /** `n` draws one atlas build issued -- `2 x depth` instanced, or `2 x depth x members`. */
+  NoteAtlasDraws = (n: number): void => { this.AtlasDraws += n; };
 }
 

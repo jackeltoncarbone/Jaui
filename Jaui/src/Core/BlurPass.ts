@@ -44,6 +44,64 @@ void main() {
 }
 `;
 
+// ── THE INSTANCED ATLAS QUAD, AND WHY IT RASTERIZES THE SAME PIXELS ────────────────────────────
+//
+// `BlurAtlas` draws one member per slot: `gl.viewport(slot)` and a unit quad over that viewport,
+// twenty times per level. The quad is the same quad, the program is the same program and only
+// three uniforms and the viewport move between them -- so the twenty draws are ONE draw with a
+// per-instance record, which is what this vertex shader is. Everything that was a uniform the
+// fragment shader reads (`u_Slot`, `u_Clamp`, `u_HalfPixel`) and everything the vertex shader read
+// (`u_SrcRect`) becomes a per-instance attribute carrying THE SAME FLOAT -- a `gl.uniform4f`
+// argument and a `Float32Array` element are both the JS double rounded to fp32 by the same rule,
+// so the value that arrives is bit for bit the value that arrived.
+//
+// THE VIEWPORT IS GONE AND NOTHING REPLACES IT. The destination viewport stays at the whole atlas
+// level (`_bindTarget` already set it), and each instance's quad is placed in the level's own
+// pixel space by `a_Dst`:
+//
+//     window_x = (a_Dst.x + a_Position.x * a_Dst.z) / levelW * 2 - 1   -> viewport(0,0,levelW,..)
+//              = a_Dst.x + a_Position.x * a_Dst.z                        (the same window coord
+//     window_x = a_Position.x * slotW + slotX                             the per-slot viewport
+//                                                                         transform produced)
+//
+// so the two land on the SAME window-space rectangle, with integer corners in both cases
+// (`PackAtlasSlots` puts every slot origin and extent on the `2^depth` phase grid, so every level's
+// slot rect is integral). The rasterizer snaps vertex positions to a fixed-point subpixel grid
+// (1/16 or 1/256 of a pixel) before it computes coverage OR barycentrics, and an integer pixel
+// boundary is exactly on that grid; the instanced path's float round trip through the divide is
+// ~3e-4 px at the largest atlas this engine builds, which is ~0.07 of a 1/256 subpixel and cannot
+// move a snapped value that starts on a grid point. Same snapped vertices -> same covered
+// fragments -> same interpolated `v_Uv` at every one of them. No fragment outside a slot is ever
+// generated (the quad covers the slot and nothing else), which is the whole of what the per-slot
+// viewport was doing: a viewport TRANSFORMS, it does not clip, and clipping to it was never what
+// kept one member out of another's texels.
+//
+// `flat` varyings, declared `highp` in BOTH stages rather than left to the default: `flat` takes
+// the provoking vertex's value verbatim with no interpolation arithmetic, so `v_Slot` in the
+// fragment shader holds the same float `u_Slot` held, and an explicit precision means the two
+// stages cannot disagree about which float that is.
+const VERT_INST = `#version 300 es
+precision highp float;
+layout(location = 0) in vec2 a_Position;
+layout(location = 1) in vec4 a_Dst;        // this slot's rect in DESTINATION level pixels
+layout(location = 2) in vec4 a_Src;        // what u_SrcRect carried, per member
+layout(location = 3) in vec4 a_Slot;       // what u_Slot carried
+layout(location = 4) in vec4 a_Clamp;      // what u_Clamp carried
+layout(location = 5) in vec2 a_HalfPixel;  // what u_HalfPixel carried
+uniform vec2 u_DstSize;                    // the destination LEVEL's size in pixels
+out vec2 v_Uv;
+flat out highp vec4 v_Slot;
+flat out highp vec4 v_Clamp;
+flat out highp vec2 v_HalfPixel;
+void main() {
+    v_Uv = a_Src.xy + a_Position * a_Src.zw;
+    v_Slot = a_Slot;
+    v_Clamp = a_Clamp;
+    v_HalfPixel = a_HalfPixel;
+    gl_Position = vec4((a_Dst.xy + a_Position * a_Dst.zw) / u_DstSize * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+
 // EVERY PASS IN THIS FILE READS ITS SOURCE'S BASE LEVEL, and says so with `textureLod(..., 0.0)`
 // instead of leaving it to the derivative and to whatever filter state the source happens to be in.
 //
@@ -99,14 +157,30 @@ const TAP_SLOT = `uniform vec4 u_Slot;    // this slot inside the SOURCE atlas l
 uniform vec4 u_Clamp;   // the slot's texel-centre range in SLOT uv: (minU, minV, maxU, maxV)
 #define TAP(p) textureLod(u_Tex, u_Slot.xy + clamp((p), u_Clamp.xy, u_Clamp.zw) * u_Slot.zw, 0.0)`;
 
+//   TAP_SLOT_INST  `TAP_SLOT` with its two uniforms arriving as FLAT varyings instead, because one
+//                  instanced draw carries twenty slots and a uniform cannot vary inside a draw.
+//                  Same expression, same operands, same order: a flat varying is the provoking
+//                  vertex's value copied, so `v_Slot` holds the float `u_Slot` held.
+const TAP_SLOT_INST = `flat in highp vec4 v_Slot;    // this slot inside the SOURCE atlas level
+flat in highp vec4 v_Clamp;   // the slot's texel-centre range in SLOT uv
+#define TAP(p) textureLod(u_Tex, v_Slot.xy + clamp((p), v_Clamp.xy, v_Clamp.zw) * v_Slot.zw, 0.0)`;
+
+// The half-texel the kernel taps by. A uniform on every per-slot path, and a flat varying on the
+// instanced one for the same reason the tap's operands are -- `#define`d back to the name the
+// kernel body uses, so the body below is character for character the body it always was.
+const HP_DOWN = 'uniform vec2 u_HalfPixel;     // half-texel size of the SOURCE';
+const HP_UP = 'uniform vec2 u_HalfPixel;     // half-texel size of the SOURCE (smaller image)';
+const HP_INST = `flat in highp vec2 v_HalfPixel;
+#define u_HalfPixel v_HalfPixel`;
+
 // Downsample: 5-tap (center + 4 corners at half-pixel offsets, all weighted)
 // Reads the SOURCE half-pixel; halfpixel = (0.5/srcW, 0.5/srcH).
 // This is run when rendering into a destination half the source's size.
-const DOWN_FRAG = (SLOT_TAP: string): string => `#version 300 es
+const DOWN_FRAG = (SLOT_TAP: string, HP: string = HP_DOWN): string => `#version 300 es
 precision highp float;
 in vec2 v_Uv;
 uniform sampler2D u_Tex;
-uniform vec2 u_HalfPixel;     // half-texel size of the SOURCE
+${HP}
 uniform float u_Offset;       // tap distance scale (typically 1.0)
 out vec4 fragColor;
 ${SLOT_TAP}
@@ -122,11 +196,11 @@ void main() {
 `;
 
 // Upsample: 8-tap "tent" kernel
-const UP_FRAG = (SLOT_TAP: string): string => `#version 300 es
+const UP_FRAG = (SLOT_TAP: string, HP: string = HP_UP): string => `#version 300 es
 precision highp float;
 in vec2 v_Uv;
 uniform sampler2D u_Tex;
-uniform vec2 u_HalfPixel;     // half-texel size of the SOURCE (smaller image)
+${HP}
 uniform float u_Offset;
 out vec4 fragColor;
 ${SLOT_TAP}
@@ -270,6 +344,23 @@ export interface AtlasBuildMember {
   Rect: RegionRect;
   Slot: { X: number; YBottom: number; W: number; H: number };
 }
+
+/** ONE INSTANCE RECORD: everything a slot draw carried as uniforms plus where it draws, laid out
+ *  once per (hop, member) in one buffer and uploaded once per atlas build.
+ *
+ *  Floats, in the order the attributes read them:
+ *
+ *      0..3    a_Dst        the slot's rect at the DESTINATION level, in that level's pixels
+ *      4..7    a_Src        what `u_SrcRect` carried for this member at this hop
+ *      8..11   a_Slot       what `u_Slot` carried
+ *      12..15  a_Clamp      what `u_Clamp` carried
+ *      16..17  a_HalfPixel  what `u_HalfPixel` carried
+ *      18..19  padding, so the stride is a multiple of 16 bytes
+ *
+ *  Twenty members over four hops is 6.4 KB. It is not counted in the atlas's `bytes` census, which
+ *  is level-chain storage and is what the residency ceiling is about. */
+const INST_FLOATS = 20;
+const INST_STRIDE = INST_FLOATS * 4;
 
 /** A rect of the input in device px with y=0 at the TOP — the shape every backdrop consumer
  *  already speaks, and the shape the union planner takes its members in. */
@@ -484,8 +575,36 @@ export class BlurPass {
    *  (`jaui:shaders:issued n=` moves by two per BlurPass); nothing else about the batch changes. */
   private _downSlot: ShaderProgram;
   private _upSlot: ShaderProgram;
+  /** The same three atlas kernels again, against `VERT_INST`: one draw per LEVEL with a
+   *  per-instance record instead of one draw per slot with three uniforms and a viewport. Same
+   *  taps, same operands, same destination pixels -- see `VERT_INST` for why the rasterized set is
+   *  the viewport-clipped set. Compiled in the constructor's batch for the reason the slot kernels
+   *  are: a lazy compile lands on the first frame that has glass on it. */
+  private _downInst: ShaderProgram;
+  private _downSlotInst: ShaderProgram;
+  private _upSlotInst: ShaderProgram;
   private _copy: ShaderProgram;
   private _quad: QuadGeometry;
+  /** The instanced path's own VAO, its own copy of the unit quad, and the instance buffer. Its own
+   *  copy because `QuadGeometry` is shared by every draw site in the engine and attributes 1..5 at
+   *  divisor 1 are this path's business alone; the duplicate is 44 bytes. Built lazily on the first
+   *  instanced atlas build -- the same frame the atlas's own 55 MB of level chain lands on, so it
+   *  is not a boot cost and not a cost this arm can be accused of hiding. */
+  private _instVao: WebGLVertexArrayObject | null = null;
+  private _instBuf: WebGLBuffer | null = null;
+  /** Scratch for one build's whole instance array, grown and reused. */
+  private _instData: Float32Array = new Float32Array(0);
+  /** ONE INSTANCED DRAW PER ATLAS LEVEL instead of one per slot. The lever this flag exists to
+   *  test; `?atlas-instanced=off` restores the twenty-draws-per-level path in the same binary.
+   *  Set per build by the renderer off `DiagAtlasInstanced`. */
+  AtlasInstanced = true;
+  /** Draws the LAST `BlurAtlas` call issued -- `2 x depth` instanced, or `2 x depth x members`
+   *  slot draws. THE EFFECT FIELD FOR THIS LANE, and it has to come from the engine: the harness's
+   *  `drawCalls` counts scene draws and read 153 / 153 / 154 across the three atlas arms while
+   *  those arms differ by 160 pyramid draws, so a cell about draws that quoted it would be reading
+   *  a column the change cannot move. Booked into the ledger by `ComputeBlurAtlas`. */
+  private _atlasDraws = 0;
+  get AtlasDraws(): number { return this._atlasDraws; }
   /** The ACTIVE chain's levels. Rebound by `_useChain` at the top of every Blur and read by
    *  `GenerateOutputMipmap`, which always runs against the chain the last Blur selected. */
   private _levels: Framebuffer[] = [];
@@ -546,6 +665,15 @@ export class BlurPass {
   private _usSrcLoc: WebGLUniformLocation | null = null;
   private _usSlotLoc: WebGLUniformLocation | null = null;
   private _usClampLoc: WebGLUniformLocation | null = null;
+  private _diTexLoc: WebGLUniformLocation | null = null;
+  private _diOffLoc: WebGLUniformLocation | null = null;
+  private _diDstLoc: WebGLUniformLocation | null = null;
+  private _dsiTexLoc: WebGLUniformLocation | null = null;
+  private _dsiOffLoc: WebGLUniformLocation | null = null;
+  private _dsiDstLoc: WebGLUniformLocation | null = null;
+  private _usiTexLoc: WebGLUniformLocation | null = null;
+  private _usiOffLoc: WebGLUniformLocation | null = null;
+  private _usiDstLoc: WebGLUniformLocation | null = null;
 
   /**
    * `batch` joins the blur's three programs to a caller's compile batch so all of them reach the
@@ -623,6 +751,9 @@ export class BlurPass {
     this._up = b.Add(VERT, UP_FRAG(TAP_PLAIN));
     this._downSlot = b.Add(VERT, DOWN_FRAG(TAP_SLOT));
     this._upSlot = b.Add(VERT, UP_FRAG(TAP_SLOT));
+    this._downInst = b.Add(VERT_INST, DOWN_FRAG(TAP_PLAIN, HP_INST));
+    this._downSlotInst = b.Add(VERT_INST, DOWN_FRAG(TAP_SLOT_INST, HP_INST));
+    this._upSlotInst = b.Add(VERT_INST, UP_FRAG(TAP_SLOT_INST, HP_INST));
     this._copy = b.Add(VERT, COPY_FRAG);
     this._quad = new QuadGeometry(gl);
 
@@ -661,6 +792,17 @@ export class BlurPass {
     this._usSrcLoc = gl.getUniformLocation(this._upSlot.Program, 'u_SrcRect');
     this._usSlotLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Slot');
     this._usClampLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Clamp');
+    // The instanced kernels keep exactly three uniforms: the sampler, the tap scale, and the
+    // destination level's size. Everything else a slot needs is in its instance record.
+    this._diTexLoc = gl.getUniformLocation(this._downInst.Program, 'u_Tex');
+    this._diOffLoc = gl.getUniformLocation(this._downInst.Program, 'u_Offset');
+    this._diDstLoc = gl.getUniformLocation(this._downInst.Program, 'u_DstSize');
+    this._dsiTexLoc = gl.getUniformLocation(this._downSlotInst.Program, 'u_Tex');
+    this._dsiOffLoc = gl.getUniformLocation(this._downSlotInst.Program, 'u_Offset');
+    this._dsiDstLoc = gl.getUniformLocation(this._downSlotInst.Program, 'u_DstSize');
+    this._usiTexLoc = gl.getUniformLocation(this._upSlotInst.Program, 'u_Tex');
+    this._usiOffLoc = gl.getUniformLocation(this._upSlotInst.Program, 'u_Offset');
+    this._usiDstLoc = gl.getUniformLocation(this._upSlotInst.Program, 'u_DstSize');
   };
 
   /**
@@ -943,7 +1085,6 @@ export class BlurPass {
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindVertexArray(this._quad.Vao);
 
     this._useChain(atlasW, atlasH);
     const lw: number[] = [atlasW], lh: number[] = [atlasH];
@@ -959,60 +1100,14 @@ export class BlurPass {
     const baseSigma = 3 * Math.pow(2, depth);
     const tapOffset = Math.max(0.7, Math.min(1.3, Math.max(1, radius) / baseSigma));
 
-    // -- DOWN hop 1: the only hop that reads the SCENE, so it takes the PLAIN kernel --
-    // Its source is the same canvas-sized texture the standalone build read, at the same
-    // `u_SrcRect`, with the hardware's own CLAMP_TO_EDGE at the same canvas border. Nothing about
-    // it is atlas-aware except where it draws.
-    const timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
-    this._bindTarget(this._levels[1], 'a1');
-    gl.useProgram(this._down.Program);
-    gl.uniform1i(this._downTexLoc, 0);
-    gl.uniform1f(this._downOffLoc, tapOffset);
-    gl.uniform2f(this._downHpLoc, 0.5 / width, 0.5 / height);
-    gl.bindTexture(gl.TEXTURE_2D, input);
-    for (const m of members) {
-      gl.viewport(m.Slot.X >> 1, m.Slot.YBottom >> 1, m.Slot.W >> 1, m.Slot.H >> 1);
-      this._setSrcRect(this._downSrcLoc, m.Rect, width, height);
-      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-    }
-
-    // -- DOWN hops 2..depth: source is the atlas level below, so the slot kernel --
-    if (depth >= 2) {
-      gl.useProgram(this._downSlot.Program);
-      gl.uniform1i(this._dsTexLoc, 0);
-      gl.uniform1f(this._dsOffLoc, tapOffset);
-      this._setSrcRect(this._dsSrcLoc, null, 1, 1);
-      for (let i = 2; i <= depth; i++) {
-        this._bindTarget(this._levels[i], `a${i}`);
-        gl.bindTexture(gl.TEXTURE_2D, this._levels[i - 1].Texture);
-        for (const m of members) {
-          this._slotUniforms(this._dsSlotLoc, this._dsClampLoc, this._dsHpLoc, m.Slot, i - 1, lw[i - 1], lh[i - 1]);
-          gl.viewport(m.Slot.X >> i, m.Slot.YBottom >> i, m.Slot.W >> i, m.Slot.H >> i);
-          gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-        }
-      }
-    }
-    if (timedDown) this.Timers!.End();
-
-    // -- UP hops depth-1..0 --
-    const timedUp = this.Timers !== null && this.Timers.Begin('blur-up');
-    gl.useProgram(this._upSlot.Program);
-    gl.uniform1i(this._usTexLoc, 0);
-    gl.uniform1f(this._usOffLoc, tapOffset);
-    this._setSrcRect(this._usSrcLoc, null, 1, 1);
-    for (let i = depth - 1; i >= 0; i--) {
-      this._bindTarget(this._levels[i], `a${i}`);
-      gl.bindTexture(gl.TEXTURE_2D, this._levels[i + 1].Texture);
-      for (const m of members) {
-        this._slotUniforms(this._usSlotLoc, this._usClampLoc, this._usHpLoc, m.Slot, i + 1, lw[i + 1], lh[i + 1]);
-        gl.viewport(m.Slot.X >> i, m.Slot.YBottom >> i, m.Slot.W >> i, m.Slot.H >> i);
-        gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-      }
-    }
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    this._target('default');
-    if (timedUp) this.Timers!.End();
+    // THE ONE THING THAT MOVES BETWEEN THE TWO ARMS: how the same hops are ISSUED. Both walk the
+    // same 2 x depth hops into the same targets with the same kernels; one issues a draw per slot
+    // with three uniforms and a viewport, the other issues one instanced draw per level. The
+    // counters, the targets and the timer brackets are identical, and `AtlasDraws` is the column
+    // that is not.
+    this._atlasDraws = 0;
+    if (this.AtlasInstanced) this._atlasInstanced(input, width, height, members, lw, lh, depth, tapOffset);
+    else this._atlasPerSlot(input, width, height, members, lw, lh, depth, tapOffset);
     // Every member is a `maxLod <= 0` consumer (the caller refuses the rest), which is
     // `_generateOutputMipmap`'s first branch: make the texture complete at the base level and
     // stop. There is no mip atlas and this lane did not design one.
@@ -1041,6 +1136,261 @@ export class BlurPass {
       });
     }
     return { Texture: this._levels[0].Texture, Regions: regions };
+  };
+
+  /** THE PER-SLOT ARM (`?atlas-instanced=off`): one `gl.viewport` + one `drawElements` per member
+   *  per level, which is the atlas exactly as lane pyramidatlas2 shipped it. Kept whole and in one
+   *  place so the flag is a choice between two complete paths rather than a branch inside one. */
+  private _atlasPerSlot = (
+    input: WebGLTexture, width: number, height: number,
+    members: readonly AtlasBuildMember[], lw: number[], lh: number[],
+    depth: number, tapOffset: number,
+  ): void => {
+    const gl = this._gl;
+    gl.bindVertexArray(this._quad.Vao);
+
+    // -- DOWN hop 1: the only hop that reads the SCENE, so it takes the PLAIN kernel --
+    // Its source is the same canvas-sized texture the standalone build read, at the same
+    // `u_SrcRect`, with the hardware's own CLAMP_TO_EDGE at the same canvas border. Nothing about
+    // it is atlas-aware except where it draws.
+    const timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
+    this._bindTarget(this._levels[1], 'a1');
+    gl.useProgram(this._down.Program);
+    gl.uniform1i(this._downTexLoc, 0);
+    gl.uniform1f(this._downOffLoc, tapOffset);
+    gl.uniform2f(this._downHpLoc, 0.5 / width, 0.5 / height);
+    gl.bindTexture(gl.TEXTURE_2D, input);
+    for (const m of members) {
+      gl.viewport(m.Slot.X >> 1, m.Slot.YBottom >> 1, m.Slot.W >> 1, m.Slot.H >> 1);
+      this._setSrcRect(this._downSrcLoc, m.Rect, width, height);
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      this._atlasDraws++;
+    }
+
+    // -- DOWN hops 2..depth: source is the atlas level below, so the slot kernel --
+    if (depth >= 2) {
+      gl.useProgram(this._downSlot.Program);
+      gl.uniform1i(this._dsTexLoc, 0);
+      gl.uniform1f(this._dsOffLoc, tapOffset);
+      this._setSrcRect(this._dsSrcLoc, null, 1, 1);
+      for (let i = 2; i <= depth; i++) {
+        this._bindTarget(this._levels[i], `a${i}`);
+        gl.bindTexture(gl.TEXTURE_2D, this._levels[i - 1].Texture);
+        for (const m of members) {
+          this._slotUniforms(this._dsSlotLoc, this._dsClampLoc, this._dsHpLoc, m.Slot, i - 1, lw[i - 1], lh[i - 1]);
+          gl.viewport(m.Slot.X >> i, m.Slot.YBottom >> i, m.Slot.W >> i, m.Slot.H >> i);
+          gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+          this._atlasDraws++;
+        }
+      }
+    }
+    if (timedDown) this.Timers!.End();
+
+    // -- UP hops depth-1..0 --
+    const timedUp = this.Timers !== null && this.Timers.Begin('blur-up');
+    gl.useProgram(this._upSlot.Program);
+    gl.uniform1i(this._usTexLoc, 0);
+    gl.uniform1f(this._usOffLoc, tapOffset);
+    this._setSrcRect(this._usSrcLoc, null, 1, 1);
+    for (let i = depth - 1; i >= 0; i--) {
+      this._bindTarget(this._levels[i], `a${i}`);
+      gl.bindTexture(gl.TEXTURE_2D, this._levels[i + 1].Texture);
+      for (const m of members) {
+        this._slotUniforms(this._usSlotLoc, this._usClampLoc, this._usHpLoc, m.Slot, i + 1, lw[i + 1], lh[i + 1]);
+        gl.viewport(m.Slot.X >> i, m.Slot.YBottom >> i, m.Slot.W >> i, m.Slot.H >> i);
+        gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+        this._atlasDraws++;
+      }
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._target('default');
+    if (timedUp) this.Timers!.End();
+  };
+
+  /** THE INSTANCED ARM: ONE `drawElementsInstanced` per atlas level.
+   *
+   *  Four levels of twenty members is 4 draws instead of 80, 4 viewport calls instead of 80 and
+   *  4 uniform sets instead of 240 -- with the same kernels reading the same numbers at the same
+   *  destination pixels. `VERT_INST` carries the geometric argument; this method's own claim is
+   *  the arithmetic one, and it is short: every float that was a uniform argument is now a
+   *  `Float32Array` element, and `gl.uniform4f(loc, a, b, c, d)` and `array[i] = a` round the same
+   *  JS double to the same fp32 by the same rule. Nothing is recomputed in a different order and
+   *  nothing is computed in the shader that was computed on the CPU.
+   *
+   *  ONE UPLOAD PER BUILD, not one per hop. The whole build's records go up in a single
+   *  `bufferData` (which orphans the previous storage, so no hop waits on a draw that is still
+   *  reading the buffer) and each hop re-points its five attributes at its own slice. Eight
+   *  `vertexAttribPointer` calls a level against the 60 uniform calls and 20 viewports they
+   *  replace. */
+  private _atlasInstanced = (
+    input: WebGLTexture, width: number, height: number,
+    members: readonly AtlasBuildMember[], lw: number[], lh: number[],
+    depth: number, tapOffset: number,
+  ): void => {
+    const gl = this._gl;
+    const n = members.length;
+    this._ensureInstanceVao();
+    gl.bindVertexArray(this._instVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._instBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, this._instanceRecords(width, height, members, lw, lh, depth), gl.DYNAMIC_DRAW);
+
+    // -- DOWN hop 1: the SCENE, through the plain tap, exactly as the per-slot arm reads it --
+    const timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
+    const l1 = this._levels[1];
+    this._bindTarget(l1, 'a1');
+    gl.useProgram(this._downInst.Program);
+    gl.uniform1i(this._diTexLoc, 0);
+    gl.uniform1f(this._diOffLoc, tapOffset);
+    gl.uniform2f(this._diDstLoc, l1.Width, l1.Height);
+    gl.bindTexture(gl.TEXTURE_2D, input);
+    this._pointInstances(0, n);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, n);
+    this._atlasDraws++;
+
+    // -- DOWN hops 2..depth --
+    if (depth >= 2) {
+      gl.useProgram(this._downSlotInst.Program);
+      gl.uniform1i(this._dsiTexLoc, 0);
+      gl.uniform1f(this._dsiOffLoc, tapOffset);
+      for (let i = 2; i <= depth; i++) {
+        const dst = this._levels[i];
+        this._bindTarget(dst, `a${i}`);
+        gl.uniform2f(this._dsiDstLoc, dst.Width, dst.Height);
+        gl.bindTexture(gl.TEXTURE_2D, this._levels[i - 1].Texture);
+        this._pointInstances(i - 1, n);
+        gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, n);
+        this._atlasDraws++;
+      }
+    }
+    if (timedDown) this.Timers!.End();
+
+    // -- UP hops depth-1..0 --
+    const timedUp = this.Timers !== null && this.Timers.Begin('blur-up');
+    gl.useProgram(this._upSlotInst.Program);
+    gl.uniform1i(this._usiTexLoc, 0);
+    gl.uniform1f(this._usiOffLoc, tapOffset);
+    for (let i = depth - 1; i >= 0; i--) {
+      const dst = this._levels[i];
+      this._bindTarget(dst, `a${i}`);
+      gl.uniform2f(this._usiDstLoc, dst.Width, dst.Height);
+      gl.bindTexture(gl.TEXTURE_2D, this._levels[i + 1].Texture);
+      this._pointInstances(2 * depth - 1 - i, n);
+      gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, n);
+      this._atlasDraws++;
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._target('default');
+    if (timedUp) this.Timers!.End();
+  };
+
+  /** Every hop's every member, in hop order, into one Float32Array.
+   *
+   *  HOP ORDER IS THE ISSUE ORDER, so hop `h` of a build of depth `d` is:
+   *
+   *      h = 0            DOWN into level 1, reading the SCENE        (plain tap, per-member rect)
+   *      h = 1 .. d-1     DOWN into level h+1, reading level h        (slot tap)
+   *      h = d .. 2d-1    UP   into level 2d-1-h, reading the level above it
+   *
+   *  Each record is the uniforms the per-slot arm would have set for that (hop, member), computed
+   *  by the SAME expressions -- `_slotUniforms`'s three lines and `_setSrcRect`'s two -- so a
+   *  difference here is a difference a unit test can see rather than one only a GPU can. */
+  private _instanceRecords = (
+    width: number, height: number, members: readonly AtlasBuildMember[],
+    lw: number[], lh: number[], depth: number,
+  ): Float32Array => {
+    const n = members.length;
+    const hops = 2 * depth;
+    const need = hops * n * INST_FLOATS;
+    if (this._instData.length < need) this._instData = new Float32Array(need);
+    const d = this._instData;
+    let o = 0;
+    for (let h = 0; h < hops; h++) {
+      const dstL = h < depth ? h + 1 : 2 * depth - 1 - h;
+      const srcL = h < depth ? h : dstL + 1;
+      for (let m = 0; m < n; m++) {
+        const s = members[m].Slot;
+        d[o] = s.X >> dstL; d[o + 1] = s.YBottom >> dstL;
+        d[o + 2] = s.W >> dstL; d[o + 3] = s.H >> dstL;
+        if (h === 0) {
+          // `_setSrcRect`'s two branches, for the one hop whose source is the canvas.
+          const r = members[m].Rect;
+          if (r.Full) { d[o + 4] = 0; d[o + 5] = 0; d[o + 6] = 1; d[o + 7] = 1; }
+          else {
+            d[o + 4] = r.X / width; d[o + 5] = r.YBottom / height;
+            d[o + 6] = r.W / width; d[o + 7] = r.H / height;
+          }
+          // There is no slot in a read of the SCENE: the plain tap reads neither, and zeros say
+          // so rather than carrying a plausible-looking value nothing consumes.
+          d[o + 8] = 0; d[o + 9] = 0; d[o + 10] = 0; d[o + 11] = 0;
+          d[o + 12] = 0; d[o + 13] = 0; d[o + 14] = 0; d[o + 15] = 0;
+          d[o + 16] = 0.5 / width; d[o + 17] = 0.5 / height;
+        } else {
+          // Every later hop reads a whole atlas level through its slot, so the source rect is the
+          // identity -- exactly `_setSrcRect(loc, null, ...)`.
+          d[o + 4] = 0; d[o + 5] = 0; d[o + 6] = 1; d[o + 7] = 1;
+          const sx = s.X >> srcL, sy = s.YBottom >> srcL;
+          const sw = s.W >> srcL, sh = s.H >> srcL;
+          d[o + 8] = sx / lw[srcL]; d[o + 9] = sy / lh[srcL];
+          d[o + 10] = sw / lw[srcL]; d[o + 11] = sh / lh[srcL];
+          d[o + 12] = 0.5 / sw; d[o + 13] = 0.5 / sh;
+          d[o + 14] = 1 - 0.5 / sw; d[o + 15] = 1 - 0.5 / sh;
+          d[o + 16] = 0.5 / sw; d[o + 17] = 0.5 / sh;
+        }
+        d[o + 18] = 0; d[o + 19] = 0;
+        o += INST_FLOATS;
+      }
+    }
+    return d.subarray(0, need);
+  };
+
+  /** Point the five per-instance attributes at hop `h`'s slice of the uploaded buffer. */
+  private _pointInstances = (h: number, n: number): void => {
+    const gl = this._gl;
+    const base = h * n * INST_STRIDE;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._instBuf);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, INST_STRIDE, base);
+    gl.vertexAttribPointer(2, 4, gl.FLOAT, false, INST_STRIDE, base + 16);
+    gl.vertexAttribPointer(3, 4, gl.FLOAT, false, INST_STRIDE, base + 32);
+    gl.vertexAttribPointer(4, 4, gl.FLOAT, false, INST_STRIDE, base + 48);
+    gl.vertexAttribPointer(5, 2, gl.FLOAT, false, INST_STRIDE, base + 64);
+  };
+
+  /** The instanced path's VAO: its own unit quad at attribute 0 (divisor 0) and the instance
+   *  buffer at attributes 1..5 (divisor 1).
+   *
+   *  Its OWN quad rather than `QuadGeometry`'s, because divisors and attribute enables are VAO
+   *  state and the shared quad's VAO is bound by a dozen other draw sites; the duplicate is four
+   *  vertices and six indices, and it is the same `[0,0 1,0 0,1 1,1]` with the same
+   *  `[0,1,2 2,1,3]` winding, so the triangles a fragment is interpolated across are the same
+   *  triangles in the same order. */
+  private _ensureInstanceVao = (): void => {
+    if (this._instVao !== null) return;
+    const gl = this._gl;
+    const vao = gl.createVertexArray();
+    const pos = gl.createBuffer();
+    const idx = gl.createBuffer();
+    const inst = gl.createBuffer();
+    if (!vao || !pos || !idx || !inst) throw new Error('[Jaui] Failed to create the instanced atlas VAO');
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, pos);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idx);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 2, 1, 3]), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, inst);
+    for (let a = 1; a <= 5; a++) {
+      gl.enableVertexAttribArray(a);
+      gl.vertexAttribDivisor(a, 1);
+    }
+    // The pointers themselves are set per hop by `_pointInstances`; the divisors and the enables
+    // are the state that never changes.
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    this._instVao = vao;
+    this._instBuf = inst;
   };
 
   /** One slot's three uniforms at one SOURCE level: where it sits in the atlas level, its own
