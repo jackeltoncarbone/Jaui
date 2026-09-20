@@ -31,6 +31,7 @@ import {
   type AtlasBuildMember,
 } from './BlurPass';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
+import { BORDER_DIRECT_L2_WINDOW, BORDER_DIRECT_PHASE } from './Border.Direct';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited, type TickPaceMode } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
@@ -494,6 +495,24 @@ export class Canvas implements DirtyTracker {
    *  the frame is the approved one. Default false: an unflagged pre-lane frame, `?blur-first` and
    *  `?blur-phased` all pre-build their rims and must keep taking the branches they took. */
   private _rimsInWalk: boolean = false;
+  /** A glass BORDER computes its blurred backdrop in its own shader, from ONE blit of the scene,
+   *  instead of out of a four-pass pyramid built for it alone.
+   *
+   *  Jack's third ruling (2026-09-20): "Borders are a subtle effect. Do we need to rethink how to
+   *  achieve them cheaply with exact same look? They don't fill besides the outline portion." They
+   *  do not: a border-only fragment makes ONE backdrop tap and the band it paints is a few device
+   *  px wide, while its pyramid is `Down 2 + Up 2` = four render encoders at ~69 us, twenty times a
+   *  frame, ~5.2 ms per render at dpr 2. The area was never the cost.
+   *
+   *  It is a ROUTING flag and not a picture flag: an admitted border runs the pyramid's own
+   *  effective kernel (`Core/Border.Direct.ts` proves which one and `tests/Border.Kernel.test.ts`
+   *  pins it) with no RGB10_A2 intermediates, so where the two arms differ the direct one is the
+   *  TRUER of the two and the difference is a bit of the 8-bit result. A refused border takes
+   *  today's path, unchanged. Default true; `?border-direct=off` restores the per-card pyramid in
+   *  the same binary. */
+  private _borderDirect: boolean = false;
+  /** The last `jaui:border-direct` gate line, so it prints on a SHAPE change and not per frame. */
+  private _borderDirectLastLine = '';
   /** Rim pyramids the WALK built solo this frame under `fills`. They never reach `_atlasPhase`, so
    *  they are folded into the census after the passes rather than at the rim site: one ledger call
    *  per frame, and `members + solo == built` still holds on the gate line. */
@@ -2269,18 +2288,44 @@ export class Canvas implements DirtyTracker {
             this._blurFirstStats.Used++;
           } else {
             if ((this._blurFirst || this._phasedWalk) && !this._rimsInWalk) this._blurFirstStats.Missed++;
-            else if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }
-            lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
-            r.GenerateBlurMipmap(plan.MaxLod);
-            r.RebindSceneTarget();
-            // `?scene-restarts` / `?small-restarts`: the RIM build's insertion point, taken HERE
-            // and not after the draw below. The build has just bound and drawn into the blur FBOs,
-            // so the scene's encoder has provably ended and nothing has been drawn into the scene
-            // since -- which is the instant `?small-restarts` needs for its claim to add a trivial
-            // encoder and NO scene restart. It stays on this line where the FILL build's moved
-            // past the adaptive-shadow measure, because nothing READS the scene between here and
-            // the rim draw: the scene arm's opening draw has nothing free to make expensive.
-            if (this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();
+            // `?border-direct`: THE RIM'S FOUR PASSES, REPLACED BY ONE BLIT. The border reads a
+            // band a few device px wide and makes exactly one backdrop tap per fragment, and its
+            // pyramid is `Down 2 + Up 2` = four render encoders at ~69 us for every card in the
+            // frame. `ComputeBorderDirect` copies the same region rect out of the scene and hands
+            // back a handle the border's own shader convolves with the pyramid's kernel; see
+            // `Core/Border.Direct.ts` for the admission rule and what a refusal costs (this line).
+            //
+            // It is asked BEFORE the solo census is bumped, because a direct border builds no
+            // pyramid at all: counting it as a walk-built solo member would break the atlas gate's
+            // `members + solo == built` the other way, by inventing a build that did not happen.
+            const direct = this._borderDirect
+              ? (r as WebGL2Renderer)
+                .ComputeBorderDirect(region, w, h, plan.Radius, plan.MaxLod, node.RenderStyle.Refraction)
+              : null;
+            if (direct !== null) {
+              // No `GenerateBlurMipmap`: the admission rule requires `MaxLod == 0`, which is the
+              // case where that call only ever ran `DisableMipmap` on a chain that no longer
+              // exists. No `RebindSceneTarget` either -- the blit leaves the DRAW framebuffer at
+              // the default and `_tgt('default')` says so, so the scene comes back the same way
+              // the pyramid path brings it back.
+              lastBackdrop = direct;
+              r.RebindSceneTarget();
+            } else {
+              if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }
+              if (this._borderDirect) (r as WebGL2Renderer).NoteBorderPyramid();
+              lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
+              r.GenerateBlurMipmap(plan.MaxLod);
+              r.RebindSceneTarget();
+              // `?scene-restarts` / `?small-restarts`: the RIM build's insertion point, taken HERE
+              // and not after the draw below. The build has just bound and drawn into the blur
+              // FBOs, so the scene's encoder has provably ended and nothing has been drawn into the
+              // scene since -- which is the instant `?small-restarts` needs for its claim to add a
+              // trivial encoder and NO scene restart. It stays on this line where the FILL build's
+              // moved past the adaptive-shadow measure, because nothing READS the scene between
+              // here and the rim draw: the scene arm's opening draw has nothing free to make
+              // expensive.
+              if (this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();
+            }
           }
 
           this._panelBuffer.Begin();
@@ -3264,6 +3309,23 @@ export class Canvas implements DirtyTracker {
         + ` pblur=${this._phasedStrays.Pblur}`
         + ` switches=${sw} pixels=DIFFERENT`;
       if (line !== this._atlasLastLine) { this._atlasLastLine = line; JTrace(line); }
+    }
+
+    // `?border-direct`'s gate, on the same terms as the three above: a SHAPE change, not a frame.
+    //
+    // `pyramid=` is the one to read first, and it is printed beside `direct=` rather than inferred
+    // from it for the reason the atlas census prints `solo`: an arm reading `direct=0 pyramid=20`
+    // is the unflagged engine wearing the flag's name -- every border refused by the admission
+    // rule, every encoder still in the frame, and a timing comparison that would pass by having
+    // done nothing. On `glass-grid` it must read `direct=20 pyramid=0`, with `copies=20` and
+    // `EndsByKey.blur` down to the fills' atlas alone beside it.
+    if (this._borderDirect && !this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+      const gl2 = this._renderer;
+      const line = `jaui:border-direct direct=${gl2.BordersDirect} pyramid=${gl2.BordersPyramid}`
+        + ` copies=${gl2.SceneEndsByKey['border-copy'] ?? 0}`
+        + ` blur=${gl2.SceneEndsByKey['blur'] ?? 0} switches=${gl2.SceneSwitches}`
+        + ' pixels=WITHIN-ONE';
+      if (line !== this._borderDirectLastLine) { this._borderDirectLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -6168,6 +6230,58 @@ export class Canvas implements DirtyTracker {
     // The rim routing, decided once, off the flag and its refusals -- never recomputed in the walk.
     // A refused arm leaves it false, so `?blur-first` and `?blur-phased` keep pre-building rims.
     this._rimsInWalk = this._pyramidAtlas && !this._atlasRims;
+    // `?border-direct` -- THE DEFAULT, and Jack's third ruling. Parsed after `?pyramid-atlas`
+    // because the `all` arm builds rims in a PHASE, where there is no per-card build site to
+    // replace; `fills`, `off` and the unflagged engine all build them in the walk, which is where
+    // this substitutes.
+    //
+    // `?border-direct=off` puts every glass rim back on its own pyramid IN THE SAME BINARY -- the
+    // engine this lane inherited, byte for byte, and the "before" every gate reads against. `on`
+    // and the bare flag are the default; ANY OTHER VALUE THROWS rather than quietly arming the
+    // default while reading as if it had not, which is the failure mode `?pyramid-atlas` already
+    // carries the lesson of.
+    if (params.has('border-direct')) {
+      const raw = (params.get('border-direct') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?border-direct takes 'on' or 'off', got '${raw}'`);
+      }
+      this._borderDirect = raw !== 'off';
+    } else {
+      this._borderDirect = true;
+    }
+    // Everything it cannot run beside, named one at a time and refused on the trace rather than
+    // silently disarmed. Each owns the same machinery from the other end: the two source
+    // diagnostics answer the rim's build with a texture of their own, the rim-atlas arm has no
+    // per-card build site left to replace, `?blur-first` and `?blur-phased` pre-build the rim
+    // before the walk reaches it, the card composite's backdrop is not in the scene target at all,
+    // and the restart probes insert AT the rim build and would be measuring a blit.
+    if (this._borderDirect) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-answer-the-build-themselves'
+        : r.DiagBlurSrc !== null ? 'blur-src-measures-a-read-the-gather-makes-sixty-four-of'
+        : this._atlasRims ? 'pyramid-atlas-all-builds-rims-in-a-phase-not-at-a-per-card-site'
+        : this._blurFirst ? 'blur-first-already-pre-built-every-rim'
+        : params.has('blur-phased') ? 'blur-phased-pre-builds-every-rim-in-pass-three'
+        : r.CardCompositeEnabled ? 'card-composite-backdrop-is-not-in-the-scene-target'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-at-the-rim-build-and-a-blit-is-not-one'
+        : null;
+      if (why !== null) {
+        this._borderDirect = false;
+        JTrace(`jaui:border-direct armed=false reason=${why}`);
+      }
+      if (r instanceof WebGL2Renderer) r.DiagBorderDirect = this._borderDirect;
+    }
+    // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
+    // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
+    // parsed, so a mark taken there would print `off` on every arm however the URL read.
+    // `footprint=` is the direct gather's own reach in SOURCE texels per axis, which is the number
+    // a reader needs to know how far a differing pixel could have come from.
+    JTrace(`jaui:border-direct armed=${this._borderDirect ? 'on' : 'off'}`
+      + ` footprint=${BORDER_DIRECT_L2_WINDOW * BORDER_DIRECT_PHASE}px`
+      + (this._borderDirect ? ' pixels=WITHIN-ONE' : ''));
     // `?blur-phased` -- MEASUREMENT ONLY, DIFFERENT PIXELS. See `_blurPhased`. Parsed LAST, after
     // `?blur-first`, because it has to see every flag it interrogates AND because the two are
     // mutually exclusive: both move pyramid builds, and an arm running both would be measuring

@@ -79,6 +79,17 @@ export class SceneReadLedger {
   AtlasMembers = 0;
   AtlasSolo = 0;
   AtlasBytes = 0;
+  /** THE BORDER CENSUS, per frame. `?border-direct` replaces a glass rim's four-pass backdrop
+   *  pyramid with one blit and a gather in the border's own shader, and the only way to tell an
+   *  armed frame from an unarmed one is which branch each rim took.
+   *
+   *  Read them TOGETHER, and `BordersPyramid` first. `BordersDirect = 0, BordersPyramid = 20` under
+   *  the flag is the unflagged engine wearing the flag's name - every rim refused by the admission
+   *  rule, every encoder still there, and a timing comparison that would pass by having done
+   *  nothing. On `glass-grid` at dpr 2 it must read `20 / 0`, with `EndsByKey['border-copy']` at 20
+   *  and `EndsByKey.blur` down to the fills' atlas beside it. */
+  BordersDirect = 0;
+  BordersPyramid = 0;
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -103,6 +114,8 @@ export class SceneReadLedger {
     this.AtlasMembers = 0;
     this.AtlasSolo = 0;
     this.AtlasBytes = 0;
+    this.BordersDirect = 0;
+    this.BordersPyramid = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -154,5 +167,11 @@ export class SceneReadLedger {
 
   /** `n` surfaces the atlas plan could not take, and which built exactly as they do today. */
   NoteAtlasSolo = (n: number): void => { this.AtlasSolo += n; };
+
+  /** One glass border computed its backdrop directly - one blit, no pyramid. */
+  NoteBorderDirect = (): void => { this.BordersDirect++; };
+
+  /** One glass border built a pyramid: the flag is off, or the admission rule refused this build. */
+  NoteBorderPyramid = (): void => { this.BordersPyramid++; };
 }
 

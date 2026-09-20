@@ -35,6 +35,7 @@ import {
   PROGRAMS, programCode, preprocess, codeLines, braceBalance, linesNotIn,
   readPanelFrag, readRenderer, readJaui, stripTsComments,
 } from './Flat.Program.Source';
+import { PANEL_PROGRAM_COUNT } from '../src/Core/WebGL2.Renderer';
 import { GradientCurveOf } from '../src/Core/Gradient.Curve';
 import { MAX_GRADIENT_STOPS, type GradientStop } from '../src/Jiv/Jiv.Types';
 
@@ -151,8 +152,10 @@ describe('the two-stop program is a BOUND SUBSTITUTION, not a rewrite', () => {
   it('every guard tests PRESENCE, and TWO_STOP_GRADIENT is never issued without the other two', () => {
     for (const m of FRAG.match(/^\s*#\s*(if|elif)\b.*$/gm) ?? []) expect(m).toMatch(/defined\s*\(/);
     expect(FRAG).toContain('#if defined(TWO_STOP_GRADIENT)');
+    // Against the constant, not a literal: lane borderdirect issued a sixth variant. The claim —
+    // TWO_STOP_GRADIENT is never issued without the other two — is unchanged and asserted below.
     const adds = RENDERER.match(/batch\.Add\(panelVertSrc, panelFragSrc[^)]*\)/g) ?? [];
-    expect(adds.length).toBe(5);
+    expect(adds.length).toBe(PANEL_PROGRAM_COUNT);
     for (const add of adds) {
       if (add.includes('TWO_STOP_GRADIENT')) {
         expect(add).toContain('MATERIAL_FLAT');
@@ -314,12 +317,16 @@ describe('routing: which draws take the two-stop program', () => {
   });
 
   it('the five-way pick puts it ahead of borderless and behind glass', () => {
-    expect(RENDERER).toContain('const program = isGlass ? this._panelShaderGlass');
+    // Six-way since lane borderdirect, which put the border-direct arm ahead of glass. The
+    // two-stop arm's own position — after glass, ahead of borderless — is what this tests and it
+    // did not move.
+    expect(RENDERER).toContain('const program = isBorderDirect ? this._panelShaderBorderDirect');
+    expect(RENDERER).toContain(': isGlass ? this._panelShaderGlass');
     expect(RENDERER).toContain(': isTwoStop ? this._panelShaderTwoStop');
     expect(RENDERER).toContain(': isBorderless ? this._panelShaderBorderless');
     expect(RENDERER).toContain(': isFlat ? this._panelShaderFlat');
     expect(RENDERER).toContain(': this._panelShaderNone;');
-    expect(RENDERER).toContain('const locs = isGlass ? this._panelLocsGlass');
+    expect(RENDERER).toContain(': isGlass ? this._panelLocsGlass');
     expect(RENDERER).toContain(': isTwoStop ? this._panelLocsTwoStop');
     // And its locations are extracted like every other variant's.
     expect(RENDERER).toContain(
@@ -383,7 +390,7 @@ describe('routing: which draws take the two-stop program', () => {
     expect(compile).not.toBeNull();
     expect(compile![1]).not.toContain('DiagTwoStopGradient');
     expect(compile![1]).not.toContain('if (');
-    expect(RENDERER).toContain('export const PANEL_PROGRAM_COUNT = 5;');
+    expect(RENDERER).toContain(`export const PANEL_PROGRAM_COUNT = ${PANEL_PROGRAM_COUNT};`);
   });
 });
 

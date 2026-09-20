@@ -763,6 +763,143 @@ vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
     if (frostLod < 0.01 && extraLod < 0.01) return texture(u_Scene, uv).rgb;
     return textureLod(u_Backdrop, backdropUv, lod).rgb;
 }
+
+#if defined(BORDER_DIRECT)
+// ── THE GLASS BORDER'S BACKDROP, COMPUTED HERE INSTEAD OF IN A PYRAMID ─────────────────────────
+//
+// Under this variant `u_Backdrop` is NOT a pyramid. It is one blit of the scene over this
+// border's own region rect — the same rect the pyramid was built over, so `u_BackdropXf` is the
+// same map it always was — and the four passes that used to turn it into a pyramid run here, per
+// fragment, over the band the border actually reads. See `Core/Border.Direct.ts` for the
+// admission rule this whole function assumes: k = 1, depth = 2, maxLod = 0, tap offset < 0.75,
+// and a region whose extent is a multiple of 4 so every halving is exact.
+//
+// The arithmetic below is `BlurPass`'s, hop for hop and tap for tap, with ONE substitution: the
+// two DOWN hops are replaced by a 4x4 box, which is what they provably are at a tap offset of 1 or
+// less (the corner taps of a hop sum to `(u+v)x(u+v)` with `u + v = (1,1)`, so each hop is a 2x2
+// box). `tests/Border.Kernel.test.ts` pushes a delta through a CPU port of all four hops and
+// asserts it: a source texel reaches exactly ONE level-2 cell, at weight 1/16 -- algebraically
+// exact, and in float to a ulp of the accumulation, which is thirteen orders under the 1/1023
+// quantum a pyramid level is stored at.
+//
+// What this path does NOT do is round through four RGB10_A2 intermediates — the pyramid quantises
+// to 10 bits at every level on the way down and again on the way up, and this does not. So where
+// the two differ they differ by up to a bit of the 8-bit result, and the direct answer is the
+// truer one.
+uniform vec2 u_BorderTexels;   // level 0 (= the copied region) in texels
+uniform float u_BorderTap;     // the pyramid's own tapOffset for this build
+
+// The level-2 window (4x4 boxes of the source) and the level-1 window (3x3) one level-0 texel
+// reads. File scope rather than function parameters: GLSL ES 3.00 sized-array parameters are
+// legal but unevenly optimised, and these are read by three functions in one call chain.
+vec3 _bdL2[16];
+vec3 _bdL1[9];
+vec2 _bdQ0;                    // level-2 index of _bdL2[0]
+vec2 _bdM0;                    // level-1 index of _bdL1[0]
+
+// Bilinear over the level-2 window, in level-2 texel coordinates. The window holds CLAMPED cells,
+// so a tap that left the region reads the same replicated cell CLAMP_TO_EDGE gave the pyramid —
+// and the clamp is applied at the LEVEL-2 index, never at the source coordinate, because
+// replicating source texels and then boxing them is a different number from replicating the box.
+vec3 _bdTapL2(vec2 pos) {
+    vec2 c = pos - 0.5;
+    vec2 f0 = floor(c);
+    vec2 fr = c - f0;
+    ivec2 k = ivec2(f0 - _bdQ0);   // in [0, 2] on both axes; see BORDER_DIRECT_L2_WINDOW
+    int i0 = k.x, j0 = k.y;
+    vec3 a = mix(_bdL2[j0 * 4 + i0],       _bdL2[j0 * 4 + i0 + 1],       fr.x);
+    vec3 b = mix(_bdL2[(j0 + 1) * 4 + i0], _bdL2[(j0 + 1) * 4 + i0 + 1], fr.x);
+    return mix(a, b, fr.y);
+}
+
+vec3 _bdTapL1(vec2 pos) {
+    vec2 c = pos - 0.5;
+    vec2 f0 = floor(c);
+    vec2 fr = c - f0;
+    ivec2 k = ivec2(f0 - _bdM0);   // in [0, 1] on both axes; see BORDER_DIRECT_L1_WINDOW
+    int i0 = k.x, j0 = k.y;
+    vec3 a = mix(_bdL1[j0 * 3 + i0],       _bdL1[j0 * 3 + i0 + 1],       fr.x);
+    vec3 b = mix(_bdL1[(j0 + 1) * 3 + i0], _bdL1[(j0 + 1) * 3 + i0 + 1], fr.x);
+    return mix(a, b, fr.y);
+}
+
+// `BlurPass.UP_FRAG`'s eight taps, in the same order, over the level-2 window. `h` is
+// `u_HalfPixel * u_Offset` expressed in the SOURCE level's own texels — `0.5 * tapOffset`, which
+// is exactly what `0.5 / srcW * t` is once the normalized coordinate is multiplied back out.
+vec3 _bdUpFromL2(vec2 pos, float h) {
+    vec3 s  = _bdTapL2(pos + vec2(-h * 2.0, 0.0));
+    s += _bdTapL2(pos + vec2(-h,  h)) * 2.0;
+    s += _bdTapL2(pos + vec2(0.0,  h * 2.0));
+    s += _bdTapL2(pos + vec2( h,  h)) * 2.0;
+    s += _bdTapL2(pos + vec2( h * 2.0, 0.0));
+    s += _bdTapL2(pos + vec2( h, -h)) * 2.0;
+    s += _bdTapL2(pos + vec2(0.0, -h * 2.0));
+    s += _bdTapL2(pos + vec2(-h, -h)) * 2.0;
+    return s / 12.0;
+}
+
+vec3 _bdUpFromL1(vec2 pos, float h) {
+    vec3 s  = _bdTapL1(pos + vec2(-h * 2.0, 0.0));
+    s += _bdTapL1(pos + vec2(-h,  h)) * 2.0;
+    s += _bdTapL1(pos + vec2(0.0,  h * 2.0));
+    s += _bdTapL1(pos + vec2( h,  h)) * 2.0;
+    s += _bdTapL1(pos + vec2( h * 2.0, 0.0));
+    s += _bdTapL1(pos + vec2( h, -h)) * 2.0;
+    s += _bdTapL1(pos + vec2(0.0, -h * 2.0));
+    s += _bdTapL1(pos + vec2(-h, -h)) * 2.0;
+    return s / 12.0;
+}
+
+// The direct twin of `sampleBackdrop`, for the border zone's ONE tap. Same signature, same
+// `u_Scene` branch (a panel that authored no frost still reads the raw scene, and the walk still
+// hands it the same snapshot), same region map — only the pyramid read is replaced.
+//
+// `lod` is not computed because it cannot matter: the admission rule requires `maxLod == 0`, which
+// is where the pyramid calls `DisableMipmap` and every LOD resolves to level 0 anyway.
+vec3 sampleBackdropDirect(vec2 uv, float extraLod, float frostLod) {
+    if (frostLod < 0.01 && extraLod < 0.01) return texture(u_Scene, uv).rgb;
+    vec2 inv = 1.0 / u_BorderTexels;
+    // The level-0 texel this tap lands on. The border's `bUv` is the fragment's own screen
+    // position when the rim gathers straight down (`solidness == 0`, which
+    // `_batchTakesBorderDirectProgram` is what guarantees), so this lands on a texel CENTRE and
+    // the hardware bilinear the pyramid path would have run is the identity.
+    vec2 p = floor((uv * u_BackdropXf.xy + u_BackdropXf.zw) * u_BorderTexels);
+    float t = u_BorderTap;
+    float h = 0.5 * t;
+    vec2 l1n = floor(u_BorderTexels * 0.5);
+    vec2 l2n = floor(u_BorderTexels * 0.25);
+    vec2 x1 = (p + 0.5) * 0.5;                 // the level-0 texel's centre, in level-1 texels
+    _bdM0 = floor(x1 - t - 0.5);
+    vec2 x2 = (_bdM0 + 0.5) * 0.5;             // that window's first level-1 texel, in level-2
+    _bdQ0 = floor(x2 - t - 0.5);
+
+    // Level 2 is an exact 4x4 box of the source, so each cell is four bilinear taps at the four
+    // quadrant corners — a bilinear tap at an integer texel coordinate is the mean of the 2x2
+    // straddling it, at weights exactly 0.25 each.
+    for (int j = 0; j < 4; j++) {
+        for (int i = 0; i < 4; i++) {
+            vec2 q = clamp(_bdQ0 + vec2(float(i), float(j)), vec2(0.0), l2n - 1.0);
+            vec2 b = q * 4.0;
+            vec3 s  = textureLod(u_Backdrop, (b + vec2(1.0, 1.0)) * inv, 0.0).rgb;
+            s += textureLod(u_Backdrop, (b + vec2(3.0, 1.0)) * inv, 0.0).rgb;
+            s += textureLod(u_Backdrop, (b + vec2(1.0, 3.0)) * inv, 0.0).rgb;
+            s += textureLod(u_Backdrop, (b + vec2(3.0, 3.0)) * inv, 0.0).rgb;
+            _bdL2[j * 4 + i] = s * 0.25;
+        }
+    }
+    for (int j = 0; j < 3; j++) {
+        for (int i = 0; i < 3; i++) {
+            // Clamped at the LEVEL-1 index for the same reason the level-2 fetch is: the UP hop
+            // into level 0 reads level 1 through CLAMP_TO_EDGE, so a window cell outside the
+            // region has to hold the replicated level-1 texel, not a level-1 texel computed from
+            // replicated level-2 cells.
+            vec2 m = clamp(_bdM0 + vec2(float(i), float(j)), vec2(0.0), l1n - 1.0);
+            _bdL1[j * 3 + i] = _bdUpFromL2((m + 0.5) * 0.5, h);
+        }
+    }
+    return _bdUpFromL1(x1, h);
+}
+#endif
 #endif
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1479,7 +1616,14 @@ void main() {
             float solidness = 1.0 - smoothstep(0.0, 4.0, refractionStrength);
             float borderInset = (max(bezelWidth * 0.75, 6.0) * 1.2 + localBorderWidth) * solidness;
             vec2 bUv = straightUv + vec2(-normal.x, normal.y) * (borderInset / u_Resolution);
+            // THE ONE BACKDROP TAP A BORDER-ONLY PASS MAKES, and the whole reason the rim needed a
+            // pyramid of its own. Under BORDER_DIRECT it is computed from a blit of the scene with
+            // the pyramid's own kernel; the pyramid arm's arithmetic below is untouched.
+#if defined(BORDER_DIRECT)
+            vec3 bSample = sampleBackdropDirect(bUv, bLod, frostLod);
+#else
             vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);
+#endif
             // The rim looks through the same slab as the body, so it carries the body's tint: a rim
             // brighter than the body stays brighter in both themes, lifted by BorderFilter and BorderColor.
             vec3 borderBackdrop = applyTint(applyGrading(
