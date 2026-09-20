@@ -30,7 +30,7 @@ import {
   BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, MAX_CHAINS, CHAIN_BUDGET_BYTES,
 } from './BlurPass';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
-import { TickPace, ParseTickPace, TickPaceText, PACE_STALL_TICKS, type PaceGate } from './Tick.Pace';
+import { TickPace, ParseTickPace, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
 // `Renderer.Factory.ts` and handed in. Canvas has no opinion about
@@ -1274,24 +1274,39 @@ export class Canvas implements DirtyTracker {
 
   /** rAF timestamp of the last `[Jaui.pace]` line, and the totals it printed. */
   private _paceCensusAt = 0;
-  private _paceCensusMark = { Rendered: 0, Skipped: 0, Forced: 0 };
+  private _paceCensusMark = {
+    Rendered: 0, Skipped: 0, Forced: 0, Waited: [0, 0, 0, 0] as PaceWaited, FenceN: 0, FenceSum: 0,
+  };
 
   /** One line a second while `?tick-pace` is armed: the cumulative ledger and the last second's
    *  delta. The delta is what a reader wants (the window's ratio) and the cumulative is what makes
-   *  two lines subtractable across a window that does not start on a second boundary. */
+   *  two lines subtractable across a window that does not start on a second boundary.
+   *
+   *  `waited` is the histogram this lane added — ticks a render waited, bucketed 0/1/2/3+ — and it
+   *  is how a report says whether the gate is pacing on the GPU or waiting on something else.
+   *  `fenceMs` beside it is the fence's own signal latency, mean over the window and max over the
+   *  run, which is what separates "the GPU was busy" from "the fence told us late". */
   private _paceCensus = (time: number): void => {
     if (this._paceCensusAt === 0) { this._paceCensusAt = time; return; }
     const span = time - this._paceCensusAt;
     if (span < 1000) return;
     const c = this._tickPace.Census();
     const m = this._paceCensusMark;
+    const dWaited = c.WaitedTicks.map((v, i) => v - m.Waited[i]).join('/');
+    const dFenceN = c.FenceMs.N - m.FenceN;
+    const dFenceMs = dFenceN > 0 ? Math.round(((c.FenceMs.Sum - m.FenceSum) / dFenceN) * 10) / 10 : 0;
+    const allFenceMs = c.FenceMs.N > 0 ? Math.round((c.FenceMs.Sum / c.FenceMs.N) * 10) / 10 : 0;
     // eslint-disable-next-line no-console
     console.log(
       `[Jaui.pace] ${c.Mode} rendered=${c.Rendered} skipped=${c.Skipped} forced=${c.Forced}`
+      + ` waited=${c.WaitedTicks.join('/')} fenceMs=${allFenceMs}avg/${c.FenceMs.Max}max`
+      + ` inflight<=${c.MaxInFlight}`
       + ` | last ${Math.round(span)}ms +${c.Rendered - m.Rendered} rendered`
-      + ` +${c.Skipped - m.Skipped} skipped +${c.Forced - m.Forced} forced`,
+      + ` +${c.Skipped - m.Skipped} skipped +${c.Forced - m.Forced} forced`
+      + ` waited +${dWaited} fenceMs ${dFenceMs}avg`,
     );
     m.Rendered = c.Rendered; m.Skipped = c.Skipped; m.Forced = c.Forced;
+    m.Waited = c.WaitedTicks; m.FenceN = c.FenceMs.N; m.FenceSum = c.FenceMs.Sum;
     this._paceCensusAt = time;
   };
 
@@ -5358,10 +5373,11 @@ export class Canvas implements DirtyTracker {
       if (why !== null) JTrace(`jaui:blur-chains armed=false reason=${why}`);
       else (r as WebGL2Renderer).DiagBlurChains = n;
     }
-    // `?tick-pace` / `?tick-pace=fence` / `?tick-pace=N` - MEASUREMENT ONLY, PIXEL-IDENTICAL BY
-    // CONSTRUCTION. Render at most once per presented frame. The whole argument, the measurement it
-    // comes from and what a skipped tick does is in `Core/Tick.Pace.ts`; what belongs here is the
-    // gate and its refusals.
+    // `?tick-pace` / `?tick-pace=fence` / `?tick-pace=fence:D` / `?tick-pace=N` - MEASUREMENT ONLY,
+    // PIXEL-IDENTICAL BY CONSTRUCTION. Pace the render on the GPU instead of on the tick: render
+    // while the GPU is no more than D frames behind, D defaulting to 1. The whole argument, the
+    // measurement it comes from, why the depth is 1 and not 0, and what a skipped tick does is in
+    // `Core/Tick.Pace.ts`; what belongs here is the gate and its refusals.
     //
     // NOT PARSED IN `Worker.Boot` the way `?no-depth` is, and that is a reading rather than an
     // oversight: `?no-depth` had to land ahead of `Init` because `Init` BUILDS the scene FBO it
@@ -5375,8 +5391,8 @@ export class Canvas implements DirtyTracker {
       const r = this._renderer;
       const why =
         'Why' in parsed ? parsed.Why
-        // Fence mode polls `PaceReady`, which is WebGL2's `clientWaitSync`. The ratio control needs
-        // no GL at all, so it is allowed on any backend.
+        // Fence mode polls `PaceInFlight`, which is WebGL2's `clientWaitSync`. The ratio control
+        // needs no GL at all, so it is allowed on any backend.
         : parsed.Mode.Kind === 'fence' && !(r instanceof WebGL2Renderer) ? 'fence-mode-needs-webgl2-clientwaitsync'
         : null;
       if (why !== null) {
@@ -5396,9 +5412,7 @@ export class Canvas implements DirtyTracker {
         // and increments on every one), not renders - so under this flag `ticks` and renders part
         // company and the ratio is only readable if the engine says how many of its ticks drew.
         // One evaluate at each end of the window, subtract, divide by the presented frame count.
-        const g = globalThis as unknown as {
-          __jauiTickPace?: () => { Mode: string; Rendered: number; Skipped: number; Forced: number };
-        };
+        const g = globalThis as unknown as { __jauiTickPace?: () => PaceCensus };
         g.__jauiTickPace = () => this._tickPace.Census();
       }
     }

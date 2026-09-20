@@ -18,6 +18,7 @@ import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur
 import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 import { SceneReadLedger } from './Scene.Ledger';
 import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
+import { PACE_FENCE_RING } from './Tick.Pace';
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
@@ -675,10 +676,13 @@ export class WebGL2Renderer implements Renderer {
     this._timerActive = null;
     this._lastGpuMs = null;
     this._pass = null;
-    // `?tick-pace`'s fence belonged to the dead context as well, and a `clientWaitSync` on a stale
+    // `?tick-pace`'s fences belonged to the dead context as well, and a `clientWaitSync` on a stale
     // WebGLSync is the one way this flag could stall the loop for a reason that is not the GPU.
-    // Dropped, not deleted: the object to delete it with is gone. The next frame arms a fresh one.
-    this._paceFence = null;
+    // Dropped, not deleted: the objects to delete them with are gone. The next frame arms a fresh
+    // one, and the gate reads zero in flight until it does -- which renders, and is correct: no
+    // frame of ours is on the GPU.
+    this._paceFences = [];
+    this._paceLastFenceMs = null;
 
     // ── One compile batch for every program the engine can draw with ──
     // Thirteen programs stand between a cold tab and its first pixel. Compiled one at a time —
@@ -1488,48 +1492,82 @@ export class WebGL2Renderer implements Renderer {
    *  than once in `Init` -- the `?no-depth` problem (a flag that lands after the thing it configures
    *  was already built) cannot happen to it. See `Core/Tick.Pace.ts` for what the flag is for. */
   DiagTickPace = false;
-  /** The previous frame's GPU-completion fence, or null when no frame is outstanding. */
-  private _paceFence: WebGLSync | null = null;
+  /** The fences of the rendered frames the GPU has not finished yet, OLDEST FIRST, each with the
+   *  clock reading at which it was armed. A queue rather than a single slot because the gate is a
+   *  DEPTH: `?tick-pace=fence:1` renders while one frame is still outstanding, so two fences can be
+   *  in the air at once and the count of them IS the answer the gate wants. Capped at
+   *  `PACE_FENCE_RING`, which is deeper than the deepest gate. */
+  private _paceFences: Array<{ Sync: WebGLSync; ArmedAt: number }> = [];
+  /** The latency of the fence most recently retired, in ms, waiting to be taken by the ledger.
+   *  Instrument only -- nothing in the decision reads it. */
+  private _paceLastFenceMs: number | null = null;
   /** The arm says itself ONCE, and says whether the driver actually gave us a sync object. A flag
-   *  that silently answers "ready" every tick would publish the baseline under this flag's name. */
+   *  that silently answers "nothing in flight" every tick would publish the baseline under this
+   *  flag's name. */
   private _paceSaid = false;
 
   /**
-   * `?tick-pace`'s gate: has the previous frame's GPU work completed?
+   * `?tick-pace`'s gate: how many of this renderer's frames is the GPU still working on?
+   *
+   * Polls from the OLDEST fence forward and stops at the first one that has not signalled: GPU
+   * commands on one context complete in submission order, so a younger fence cannot have finished
+   * before an older one and there is nothing to learn past the first TIMEOUT_EXPIRED. That makes
+   * this at most one poll per tick in the steady state, the same cost the single-fence gate had.
    *
    * `clientWaitSync` with a timeout of 0 NEVER BLOCKS -- it asks and returns. `SYNC_FLUSH_COMMANDS_BIT`
    * is what makes the question answerable rather than merely cheap: without it a fence whose commands
    * are still sitting unsubmitted in the command buffer can never signal, and the gate would skip
-   * every render forever. The bit flushes once per sync and is a no-op afterwards, so this is one
-   * poll per tick and no more.
+   * every render forever. The bit flushes once per sync and is a no-op afterwards.
    *
    * `WAIT_FAILED` means the sync is not a sync any more (a context that went away between the arm
-   * and the poll). Drop it and answer ready: the alternative is a loop that never renders again,
-   * and the stall guard in `Tick.Pace` is the belt that catches the case this misses.
+   * and the poll). Retire it and do NOT sample its latency: the alternative is a loop that never
+   * renders again, and a garbage latency in the ledger.
    */
-  PaceReady = (): boolean => {
-    const fence = this._paceFence;
-    if (fence === null) return true;
+  PaceInFlight = (): number => {
     const gl = this._gl;
-    const status = gl.clientWaitSync(fence, gl.SYNC_FLUSH_COMMANDS_BIT, 0);
-    if (status === gl.TIMEOUT_EXPIRED) return false;
-    gl.deleteSync(fence);
-    this._paceFence = null;
-    return true;
+    const fences = this._paceFences;
+    const now = performance.now();
+    while (fences.length > 0) {
+      const f = fences[0];
+      const status = gl.clientWaitSync(f.Sync, gl.SYNC_FLUSH_COMMANDS_BIT, 0);
+      if (status === gl.TIMEOUT_EXPIRED) break;
+      gl.deleteSync(f.Sync);
+      fences.shift();
+      if (status !== gl.WAIT_FAILED) this._paceLastFenceMs = now - f.ArmedAt;
+    }
+    return fences.length;
   };
 
-  /** Drop the outstanding fence, if any, and place a new one after this frame's last draw. Built on
-   *  first use like the restart probe, for the same reason: `Init` does not know the flags. */
+  /** How long the last retired fence took to signal, then cleared so each fence is sampled once.
+   *  THIS IS THE FIELD THAT SAYS WHERE A SLOW PACED FRAME WENT: a reading near `gpu/frm` means the
+   *  GPU was genuinely busy; a reading near zero with ticks still waiting means the loss is the
+   *  poll, not the work. */
+  PaceTakeFenceMs = (): number | null => {
+    const ms = this._paceLastFenceMs;
+    this._paceLastFenceMs = null;
+    return ms;
+  };
+
+  /** Place a fence after this frame's last draw. Built on first use like the restart probe, for the
+   *  same reason: `Init` does not know the flags. */
   private _armPaceFence = (): void => {
     const gl = this._gl;
-    if (this._paceFence !== null) { gl.deleteSync(this._paceFence); this._paceFence = null; }
     const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-    this._paceFence = fence;
+    if (fence !== null) {
+      this._paceFences.push({ Sync: fence, ArmedAt: performance.now() });
+      // A ring, not a leak. Only reachable if the gate stopped consulting us (the flag was armed on
+      // a renderer nobody is gating) -- the oldest fence is then the least interesting one.
+      while (this._paceFences.length > PACE_FENCE_RING) {
+        const stale = this._paceFences.shift();
+        if (stale) gl.deleteSync(stale.Sync);
+      }
+    }
     if (!this._paceSaid) {
       this._paceSaid = true;
-      // `fence=false` is the refusal: the gate degrades to "always ready", which is the unflagged
-      // engine, and a cell taken under it is void. Named here rather than at parse time because
-      // whether the driver hands over a sync object is not knowable until a frame has ended.
+      // `fence=false` is the refusal: the gate then counts zero frames in flight forever, which is
+      // the unflagged engine, and a cell taken under it is void. Named here rather than at parse
+      // time because whether the driver hands over a sync object is not knowable until a frame has
+      // ended.
       JTrace(`jaui:tick-pace fence=${fence !== null}`);
     }
   };

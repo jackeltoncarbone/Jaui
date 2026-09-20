@@ -1,25 +1,45 @@
 /**
- * `?tick-pace` — render at most ONCE per presented frame. The arithmetic, with no GL in it.
+ * `?tick-pace` — pace the render on the GPU instead of on the tick. The arithmetic, with no GL in it.
  *
- * WHY THIS EXISTS (ShowStudio.Documentation/Perf/README.md, "THE DIVISOR CORRECTION IS REVERSED"):
- * the harness's own `ticks` column says the engine renders TWICE per presented frame at baseline
- * and ONCE under `?blur-dummy` —
+ * WHY THIS EXISTS (ShowStudio.Documentation/Perf/README.md, "PACING: 66.87 -> 33.48 ms"): the engine
+ * rendered TWICE per presented frame at baseline, and removing the second render cut the frame time
+ * in half with no pixel change. The M4 measured it, three arms x three, interleaved, dpr 2 —
  *
- *     arm (M4, 6 s window)        ticks    p50      presented (6000/p50)    ticks per presented
- *     blur-src-clear (baseline)    182     67.46          89                     2.04
- *     no-blur                      280     43.71         137                     2.04
- *     blur-dummy                   176     34.32         175                     1.00
+ *     arm            p50     p95   ticks  frames  renders/frame  gpu/frm  draws/tick
+ *     base         66.87   67.38     180      99      1.82         60.49    152.41
+ *     tick-pace    50.13   51.64     722     119      1.01         30.44     38.04
+ *     tick-pace=2  33.48   35.06     360     178      1.01         33.29     76.59
  *
- * — and the Metal System Trace, captured inside the canvas column's own window, agrees from the
- * other side: the full-canvas surface is rewritten every 34.4 ms while frames present every
- * 68.4 ms. Once a render exceeds the two-vsync budget the worker keeps ticking on its BeginFrame
- * subscription, each tick renders a whole frame, and the compositor presents every OTHER render.
- * A presented frame costs two renders and the GPU reads 100% busy because half its work is thrown
- * away. That is the "34 ms bed x cards interaction" ten pass-level ablations could not find: it is
- * not in a pass, it is the second render.
+ * — total draws identical across arms (27,165-28,348) and worstPx 0 in all nine rounds. Same work,
+ * different pacing. Renders per presented frame 1.82 -> 1.01 under BOTH flags, and the frame follows
+ * the render.
  *
- * So this flag removes the second render and nothing else. It is a MEASUREMENT flag and changes no
- * default — if the reading confirms, pacing becomes the default in a lane of its own.
+ * TWO THINGS WERE WRONG WITH THAT FIRST CUT, and this file is the second:
+ *
+ *   1. `?tick-pace=2` IS A 30 fps CLAMP. It reaches 33.48 at dpr 2 only because the natural render
+ *      there happens to be ~33 ms. At dpr 1.5 the base arm is bimodal (21.07 / 21.09 / 41.58 / 41.69)
+ *      and `=2` collapses it to 33.35 x4 — to the UPPER mode, not the lower: rendering every other
+ *      callback pins the ceiling at 30 fps whatever the render costs. It is a REGRESSION on the best
+ *      case, and it must never be the default. It stays as the control arm and nothing else.
+ *
+ *   2. THE FENCE GATE UNDER-RENDERED, and the reason was neither the poll nor the fence. The first
+ *      cut allowed ZERO frames in flight: a tick could not render until the previous frame's GPU
+ *      work had completed. That does not remove the second render, it removes the PIPELINE — the
+ *      CPU's issuing and the GPU's execution stop overlapping and the period becomes their SUM
+ *      instead of their MAX. The measured cell says exactly that: 50.13 ms = ~17 ms of CPU issuing
+ *      + ~33 ms of GPU execution (`gpu/frm` 30.44 on a 50 ms frame is a GPU idle 40% of the time),
+ *      against the ratio arm's 33.48 = max(17, 33). It is not the poll cadence: `ticks` reads 722 in
+ *      6 s under the flag, ~120 Hz, an 8.3 ms polling grain — a poll-bound loop would have landed at
+ *      33 + 8.3, not at 33 + 17.
+ *
+ * SO THE GATE IS A DEPTH, NOT A BOOLEAN. `Depth` is how many rendered frames may be outstanding on
+ * the GPU when a tick asks to render. Depth 0 is the first cut (strictly serial, no pipeline, the
+ * 50 ms cell). DEPTH 1 IS THE DEFAULT: one frame in flight, so the GPU never idles waiting for the
+ * CPU's next tick, while the second render — the one the compositor threw away — is still refused,
+ * because a third frame can never be issued while two are outstanding. The steady state is one
+ * render per max(CPU issue, GPU execution) and the flag reaches the ratio arm's throughput WITHOUT
+ * the ratio arm's clamp: at dpr 1.5, where the render fits one vsync, the fence is signalled by the
+ * next tick and the gate is a no-op.
  *
  * WHAT A SKIPPED TICK DOES AND DOES NOT DO, exactly:
  *   DOES     drain the pushed-size slot, advance `_lastTime`, feed the HUD, step every spring
@@ -40,28 +60,41 @@
  *      shipped as auto-commit at the end of the worker task, and the commit() promise the original
  *      spec had was never implemented); a dedicated worker gets no presentation-feedback callback
  *      and no `requestPostAnimationFrame`. That leaves the worker's own rAF cadence — and the
- *      measurement above is precisely what rules it out: rAF fires ~30 times a second against ~15
- *      presented frames, so the BeginFrame subscription is throttled on frame SUBMISSION, not on
- *      presentation. It is the thing producing the two renders; it cannot also be the signal that
- *      one of them landed.
+ *      measurement above is precisely what rules it out: rAF fires ~30 times a second at baseline
+ *      against ~16 presented frames, and 120 times a second under the first cut of this flag. The
+ *      BeginFrame subscription is throttled on frame SUBMISSION, not on presentation. It is the
+ *      thing producing the two renders; it cannot also be the signal that one of them landed.
  *
- *   2. GPU COMPLETION AS THE PROXY — what this implements. A `fenceSync` after the frame's last
- *      draw, polled with `clientWaitSync(..., 0)` at the next tick and never blocking. "The GPU is
- *      still on the previous frame" is then measured rather than assumed, and the render is removed
- *      exactly when it would have been the discarded one. One non-blocking poll per tick. See
- *      `WebGL2Renderer.PaceReady`.
+ *   2. GPU COMPLETION AS THE PROXY — what this implements. A `fenceSync` after each frame's last
+ *      draw, polled with `clientWaitSync(..., 0)` at the next tick and never blocking. "How many of
+ *      my frames is the GPU still on" is then measured rather than assumed. See
+ *      `WebGL2Renderer.PaceInFlight`.
  *
- *   3. A FIXED RATIO (`?tick-pace=2`) — the crude control, NOT the flag's meaning. It skips half
- *      the renders whether or not the GPU is behind, so on a scene whose render fits a vsync it
- *      halves the frame rate for nothing. It exists so the M4 can run it against the real one and
- *      show the difference between "skip when behind" and "skip half".
+ *   3. A FIXED RATIO (`?tick-pace=N`) — the crude control, NOT the flag's meaning, and a clamp.
+ *      See (1) above. It exists so a cell can show the difference between "skip while the GPU is
+ *      behind" and "skip half", and because it issues zero fence polls it is also the only way to
+ *      price the instrument itself.
+ *
+ * HOW THE READING IS TAKEN. `__jauiTickPace()` at each end of the window, subtracted. Besides the
+ * three counters it now carries the two fields this lane added, and they are what say whether the
+ * gate is working or merely armed:
+ *
+ *     WaitedTicks   ticks waited per render, bucketed 0 / 1 / 2 / 3+. Depth 1 on a 33 ms render at
+ *                   a 60 Hz tick should sit in bucket 1. A pile in bucket 3+ is a loop waiting on
+ *                   something that is not the GPU.
+ *     FenceMs       how long, in ms, from arming a fence to the poll that found it signalled. This
+ *                   is the fence's own latency, and it is the field that separates "the GPU is
+ *                   busy" from "the fence tells us late": it should read ~`gpu/frm`, ~30 ms.
+ *     MaxInFlight   the high-water mark of outstanding frames. It proves the depth is REACHED —
+ *                   at depth 1 it must read 2, and a MaxInFlight of 1 says the gate never used the
+ *                   headroom it was given and the cell is the depth-0 cell wearing a new name.
  */
 
 /** How the gate decides. `null` is the unflagged engine: every tick that wants to render, renders. */
 export type TickPaceMode =
-  /** Poll the previous frame's GPU fence; skip while it has not signalled. */
-  | { Kind: 'fence' }
-  /** Render every Nth tick that wants to render. N >= 2. The control arm. */
+  /** Poll the rendered frames' GPU fences; skip while more than `Depth` of them are outstanding. */
+  | { Kind: 'fence'; Depth: number }
+  /** Render every Nth tick that wants to render. N >= 2. The control arm, and a clamp. */
   | { Kind: 'ratio'; N: number };
 
 /** What the gate said about one tick that wanted to render. `forced` is a `render` the stall guard
@@ -72,10 +105,34 @@ export type PaceDecision = 'render' | 'skip' | 'forced';
 /** What the fence-mode gate asks. Implemented by `WebGL2Renderer`; an interface so the decision can
  *  be proved without a GL context, and so `Tick.Pace` imports nothing. */
 export interface PaceGate {
-  /** True when the previous render's GPU work has completed (or there is no previous render).
-   *  Never blocks. */
-  PaceReady(): boolean;
+  /** How many rendered frames the GPU has not finished yet. Polls each outstanding fence once,
+   *  retires the ones that have signalled, and NEVER blocks. */
+  PaceInFlight(): number;
+  /** Milliseconds between arming the fence most recently retired by `PaceInFlight` and the poll
+   *  that retired it — then cleared, so each fence is sampled once. `null` when that poll retired
+   *  nothing. Pure instrument: the decision does not read it. */
+  PaceTakeFenceMs(): number | null;
 }
+
+/**
+ * Frames allowed in flight when the flag names no depth, and the whole point of this lane.
+ *
+ * ONE, not zero. Zero is the strictly-serial gate that measured 50.13 ms at dpr 2 by making the
+ * frame cost the CPU's issuing PLUS the GPU's execution; one lets those two overlap again, which is
+ * the pipeline every renderer relies on, while still refusing the third frame that would be the
+ * discarded render. Not two: at two the CPU may run a whole frame ahead of the GPU and the oldest
+ * frame in the queue is stale by the time it presents, which is the state the unflagged engine was
+ * already in.
+ */
+export const PACE_DEFAULT_DEPTH = 1;
+
+/** The deepest `?tick-pace=fence:D` will accept. Past this the gate is not pacing anything: the
+ *  unflagged engine is depth-infinity, and a cell at depth 4 would be measuring it. */
+export const PACE_MAX_DEPTH = 3;
+
+/** How many fences the renderer keeps. One more than the deepest gate can hold outstanding, so the
+ *  ring never drops a fence the gate is still counting on. */
+export const PACE_FENCE_RING = PACE_MAX_DEPTH + 2;
 
 /**
  * Consecutive skips after which the gate renders anyway.
@@ -90,22 +147,60 @@ export interface PaceGate {
  */
 export const PACE_STALL_TICKS = 8;
 
-/** Parse `?tick-pace`'s value. `null` (bare flag) and `fence` mean the fence gate; a whole number
- *  >= 2 means the ratio control. Anything else is refused, WITH A REASON, because an instrument
- *  that quietly did nothing would publish the baseline under this flag's name. */
+/**
+ * Parse `?tick-pace`'s value.
+ *
+ *     ?tick-pace              the adaptive fence gate at the default depth
+ *     ?tick-pace=fence        the same, spelled out
+ *     ?tick-pace=fence:D      the fence gate at depth D (0..PACE_MAX_DEPTH) — the control that
+ *                             reproduces the first cut's 50 ms cell in the same binary
+ *     ?tick-pace=N            the fixed ratio, N >= 2 — a CLAMP, the control arm, never a default
+ *
+ * Anything else is refused, WITH A REASON, because an instrument that quietly did nothing would
+ * publish the baseline under this flag's name.
+ */
 export const ParseTickPace = (raw: string | null): { Mode: TickPaceMode } | { Why: string } => {
   const v = (raw ?? '').trim();
-  if (v === '' || v === 'fence') return { Mode: { Kind: 'fence' } };
+  if (v === '' || v === 'fence') return { Mode: { Kind: 'fence', Depth: PACE_DEFAULT_DEPTH } };
+  if (v.startsWith('fence:')) {
+    const tail = v.slice('fence:'.length);
+    // `Number('')` is 0, so an empty depth would otherwise parse as the serial gate and a typo
+    // would silently select the arm this lane exists to replace.
+    if (tail === '') return { Why: `fence-depth-must-be-a-whole-number-0-to-${PACE_MAX_DEPTH}` };
+    const d = Number(tail);
+    if (!Number.isInteger(d) || d < 0 || d > PACE_MAX_DEPTH) {
+      return { Why: `fence-depth-must-be-a-whole-number-0-to-${PACE_MAX_DEPTH}` };
+    }
+    return { Mode: { Kind: 'fence', Depth: d } };
+  }
   const n = Number(v);
-  if (!Number.isInteger(n)) return { Why: 'value-must-be-fence-or-a-whole-number-of-ticks' };
+  if (!Number.isInteger(n)) return { Why: 'value-must-be-fence-fence-colon-depth-or-a-whole-number-of-ticks' };
   if (n === 1) return { Why: 'n-1-renders-every-tick-which-is-the-unflagged-engine' };
   if (n < 1) return { Why: 'n-must-be-at-least-2' };
   return { Mode: { Kind: 'ratio', N: n } };
 };
 
-/** How a mode prints in `jaui:tick-pace armed=<mode>` and on the `[Jaui]` line. */
+/** How a mode prints in `jaui:tick-pace armed=<mode>` and on the `[Jaui]` line. The depth is part of
+ *  the name because two cells taken at two depths are two different instruments. */
 export const TickPaceText = (mode: TickPaceMode | null): string =>
-  mode === null ? 'off' : mode.Kind === 'fence' ? 'fence' : `ratio:${mode.N}`;
+  mode === null ? 'off' : mode.Kind === 'fence' ? `fence:${mode.Depth}` : `ratio:${mode.N}`;
+
+/** Ticks waited before a render landed, bucketed: 0, 1, 2, 3-or-more. */
+export type PaceWaited = [number, number, number, number];
+
+/** The cumulative ledger, as `__jauiTickPace()` and `[Jaui.pace]` publish it. */
+export interface PaceCensus {
+  Mode: string;
+  Rendered: number;
+  Skipped: number;
+  Forced: number;
+  WaitedTicks: PaceWaited;
+  FenceMs: { N: number; Sum: number; Max: number };
+  MaxInFlight: number;
+}
+
+/** One decimal, so a printed ledger is readable and two of them are still subtractable. */
+const Round1 = (v: number): number => Math.round(v * 10) / 10;
 
 /**
  * The gate. One instance per engine, always present: an unflagged engine holds one in `null` mode
@@ -124,6 +219,20 @@ export class TickPace {
   /** Renders the stall guard took. Cumulative. Must read 0 in any cell that is quoted. */
   Forced = 0;
 
+  /** Ticks waited per render, bucketed 0 / 1 / 2 / 3+. Booked in every mode, so the histogram is
+   *  comparable across the arms: unflagged is all bucket 0, `=2` is all bucket 1 by construction,
+   *  and the fence gate's distribution is the thing being read. */
+  readonly WaitedTicks: PaceWaited = [0, 0, 0, 0];
+
+  /** Fence latency: how long from arming a fence to the poll that found it signalled. The mean over
+   *  a window is `(Sum2-Sum1)/(N2-N1)`. Zero in every mode but fence — nothing else places a fence. */
+  FenceSamples = 0;
+  FenceMsSum = 0;
+  FenceMsMax = 0;
+
+  /** High-water mark of frames outstanding on the GPU. At depth D a working gate reaches D+1. */
+  MaxInFlight = 0;
+
   private _skipRun = 0;
   /** Ratio mode's own index over WANTS, not over ticks: a tick that did not want to render is
    *  already not rendering, and counting it would make `=2` skip renders that never existed. */
@@ -135,35 +244,57 @@ export class TickPace {
    *  Returns what to do and books it. */
   Decide = (gate: PaceGate | null): PaceDecision => {
     const mode = this.Mode;
-    if (mode === null) { this.Rendered++; return 'render'; }
+    if (mode === null) return this._allow('render');
 
     if (mode.Kind === 'ratio') {
       const render = this._wants % mode.N === 0;
       this._wants++;
-      if (render) { this.Rendered++; return 'render'; }
-      this.Skipped++;
-      return 'skip';
+      return render ? this._allow('render') : this._refuse();
     }
 
     // Fence. A null gate cannot happen — the parse refuses the flag on a renderer that has no
     // fence to poll — but a gate that is not there must render rather than stall.
-    if (gate === null || gate.PaceReady()) { this._skipRun = 0; this.Rendered++; return 'render'; }
-    if (this._skipRun >= PACE_STALL_TICKS) {
-      this._skipRun = 0;
-      this.Forced++;
-      this.Rendered++;
-      return 'forced';
+    if (gate === null) return this._allow('render');
+
+    const inFlight = gate.PaceInFlight();
+    if (inFlight > this.MaxInFlight) this.MaxInFlight = inFlight;
+    const fenceMs = gate.PaceTakeFenceMs();
+    if (fenceMs !== null) {
+      this.FenceSamples++;
+      this.FenceMsSum += fenceMs;
+      if (fenceMs > this.FenceMsMax) this.FenceMsMax = fenceMs;
     }
+
+    // THE GATE, in one line: render while the GPU is no more than `Depth` frames behind. At depth 1
+    // the render that would have been the discarded one is still refused (two outstanding means a
+    // third is not issued) while the pipeline the depth-0 gate broke is back.
+    if (inFlight <= mode.Depth) return this._allow('render');
+    if (this._skipRun >= PACE_STALL_TICKS) { this.Forced++; return this._allow('forced'); }
+    return this._refuse();
+  };
+
+  private _allow = (decision: PaceDecision): PaceDecision => {
+    const waited = this._skipRun;
+    this.WaitedTicks[waited < 3 ? waited : 3]++;
+    this._skipRun = 0;
+    this.Rendered++;
+    return decision;
+  };
+
+  private _refuse = (): PaceDecision => {
     this._skipRun++;
     this.Skipped++;
     return 'skip';
   };
 
   /** The census, for the `[Jaui]` line, `jaui:render:end` and the `__jauiTickPace` global. */
-  Census = (): { Mode: string; Rendered: number; Skipped: number; Forced: number } => ({
+  Census = (): PaceCensus => ({
     Mode: TickPaceText(this.Mode),
     Rendered: this.Rendered,
     Skipped: this.Skipped,
     Forced: this.Forced,
+    WaitedTicks: [...this.WaitedTicks] as PaceWaited,
+    FenceMs: { N: this.FenceSamples, Sum: Round1(this.FenceMsSum), Max: Round1(this.FenceMsMax) },
+    MaxInFlight: this.MaxInFlight,
   });
 }
