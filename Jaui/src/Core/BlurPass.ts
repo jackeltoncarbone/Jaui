@@ -279,6 +279,11 @@ const K_MAX = 8;
 export const CHAIN_BUDGET_BYTES = 48 * 1024 * 1024;
 export const MAX_CHAINS = 6;
 
+/** Distinct level-0 sizes the σ-adaptive pre-downsample keeps a ping-pong pair for. Two is
+ *  what `glass-grid` needs under `?glass-presample` (the fill pipeline and the rim pipeline);
+ *  four leaves room for a scrim and one more class beside them. See `_prePairs`. */
+export const PRE_PAIRS_MAX = 4;
+
 /** The two ceilings above, per PASS rather than per module, so a measurement flag can raise them
  *  for the pass it arms and nothing else in the process moves.
  *
@@ -384,6 +389,74 @@ export const BaseDownsampleFactor = (
   const area = region ? region.w * region.h : fullArea;
   if (area < 0.15 * fullArea) return 1;
   return Math.min(K_MAX, 1 << Math.floor(Math.log2(radius / BASE_SIGMA)));
+};
+
+/** The (k, depth) a per-surface glass build takes under `?glass-presample`. */
+export interface PresamplePlan {
+  /** The sigma-adaptive factor the area gate refused. Always >= 2; a plan is null otherwise. */
+  K: number;
+  /** `PyramidDepth(radius) - log2(k)`, and NOT `PyramidDepth(radius / k)`. See below. */
+  Depth: number;
+}
+
+/** -- `?glass-presample`: THE AREA GATE LIFTED FOR A PER-SURFACE GLASS BUILD ------------------
+ *
+ *  `BaseDownsampleFactor` refuses a region under 15% of the canvas, so a glass card (6% of
+ *  `glass-grid`) is forced to k=1 while its OWN sigma earns k=2 -- `radius` is
+ *  `max(1, BackdropFrostBlur) * dpr` = 8 device px at dpr 2, and `2^floor(log2(8 / 4))` is 2.
+ *  This is the plan the card takes when the gate is lifted, and it differs from what `Blur`
+ *  does for a full-canvas k in ONE respect, which is the whole of this lane's arithmetic.
+ *
+ *  DEPTH IS `PyramidDepth(radius) - log2(k)`, NOT `PyramidDepth(radius / k)`. The shipped rule
+ *  re-derives the depth from the coarse sigma, and at these sigmas `PyramidDepth`'s `ceil`
+ *  cannot see the difference: `PyramidDepth(8)` and `PyramidDepth(4)` are BOTH 2, because depth
+ *  d targets `3 * (2^d - 1)` and depth 2 covers the whole band `3 < sigma <= 9`. A k=2 build at
+ *  depth 2 runs the same chain on a grid twice as coarse, and its tap offset -- which is what
+ *  would otherwise absorb the difference -- is pinned by the 0.7 FLOOR at both sigmas. The
+ *  result is a blur TWICE AS WIDE as the one asked for: a change of picture, not a rounding.
+ *
+ *  Subtracting `log2(k)` instead makes the two arms the same blur by construction:
+ *
+ *      phase       k * 2^(D - log2 k)  ==  2^D          -- the SAME phase, so `ResolveRegionRect`
+ *                                                          returns the SAME rect and `LastRegion`
+ *                                                          the same map: the consumer's
+ *                                                          `u_BackdropXf` does not move.
+ *      tap offset  (radius/k) / (3 * 2^(D - log2 k))  ==  radius / (3 * 2^D)
+ *                                                       -- and BIT for bit, because k is a power
+ *                                                          of two: scaling an IEEE754 numerator
+ *                                                          and denominator by an exact power of
+ *                                                          two gives the identical quotient.
+ *
+ *  So the arm's first three hops are the unflagged arm's first three hops with the same program,
+ *  the same source rect and the same `u_HalfPixel` (`Blur` issues the pre-downsample at the
+ *  chain's own tap offset under this flag, for exactly this reason), and the ONLY difference the
+ *  frame can carry is that level 0 comes back at half resolution and the consumer's hardware
+ *  bilinear does the last 2x reconstruction instead of the pyramid's 8-tap tent hop. That is a
+ *  picture question and this lane does not decide it.
+ *
+ *  Two refusals, both of which would break the identity above rather than merely cost fill:
+ *    - `D - log2(k) < 1`: no chain left to run. k halves until it fits, then gives up.
+ *    - `radius / k < 1`: `Blur`'s tap offset takes `Math.max(1, radius)`, and under that floor
+ *      the two arms' offsets stop being the same number. Unreachable while `k <= radius / 4`,
+ *      and asserted rather than assumed.
+ *  And two by scope: a FULL-canvas region is the shared backdrop's shape and already passes the
+ *  gate, and a region the gate ALREADY admits is re-basing today -- both take the shipped path
+ *  untouched, which is what makes `?glass-presample=off` and every other surface byte-identical.
+ *
+ *  `maxLod` is NOT tested here because it is not this function's to see: a half-resolution level
+ *  0 shifts every mip of the chain built on it by one LOD, so a mip consumer must be refused at
+ *  the call site, where the surface's `GlassBlurPlan.MaxLod` is known. `Core/Jaui.ts` does it. */
+export const PresamplePlanFor = (
+  radius: number, width: number, height: number, region: BackdropRect | undefined, minDepth: number,
+): PresamplePlan | null => {
+  if (region === undefined) return null;
+  if (!(radius > BASE_SIGMA)) return null;
+  if (BaseDownsampleFactor(radius, width, height, region) !== 1) return null;
+  const full = PyramidDepth(radius, minDepth);
+  let k = Math.min(K_MAX, 1 << Math.floor(Math.log2(radius / BASE_SIGMA)));
+  while (k > 1 && (full - Math.log2(k) < 1 || radius / k < 1)) k >>= 1;
+  if (k < 2) return null;
+  return { K: k, Depth: full - Math.log2(k) };
 };
 
 /** Pick pyramid depth from desired sigma. Each Down/Up pair roughly doubles the effective
@@ -648,13 +721,34 @@ export class BlurPass {
   /** Why the rotation stopped, or null. Set once, traced once. */
   private _chainRefusal: string | null = null;
   private _lastDepth: number = 0;
+  /** `?glass-presample`: did the LAST `Blur` call take a presampled plan? Read by the renderer
+   *  on the line after the call and booked to the ledger there, so the counter names builds that
+   *  actually re-based rather than builds that asked to. `false` on every unflagged build and on
+   *  every build the plan refused -- which is what makes `PresampledBuilds` the effect field. */
+  private _lastPresampled: boolean = false;
+  /** The `k` of the last presampled build, or 1. The gate line's `k=`. */
+  private _lastPresampleK: number = 1;
+  get LastPresampled(): boolean { return this._lastPresampled; }
+  get LastPresampleK(): number { return this._lastPresampleK; }
   /** Single FBO reused for the attach-mip-and-blit dance in
    *  GenerateOutputMipmap. Created lazily on first use. */
   private _mipBlitFbo: WebGLFramebuffer | null = null;
-  /** Ping-pong scratch FBOs for the σ-adaptive base downsample (band-limit
-   *  optimization). Created lazily the first time a large blur downsamples. */
-  private _preA: Framebuffer | null = null;
-  private _preB: Framebuffer | null = null;
+  /** Ping-pong scratch FBOs for the σ-adaptive base downsample (band-limit optimization),
+   *  ONE PAIR PER LEVEL-0 SIZE. Created lazily the first time a blur of that size re-bases.
+   *
+   *  It was a single pair, and a single pair is right while the only caller is a full-screen
+   *  scrim: one size, one allocation, reused for the life of the page. `?glass-presample` makes
+   *  forty per-surface builds re-base, and on `glass-grid` they ALTERNATE -- a fill at 284x218,
+   *  then that card's rim at 240x174, twenty times -- so a shared pair would call
+   *  `Framebuffer.Resize` forty times a frame and `Resize` reallocates the texture whenever the
+   *  size moves. That is the thrash `_useChain` exists to prevent, one level down, and it would
+   *  have been paid inside the flag's own arm and read as the flag's cost.
+   *
+   *  Keyed on the RESOLVED RECT rather than on the pre-pass's own size, so a k=4 chain's two
+   *  hops share one entry. Capped, and the cap evicts in insertion order: a page whose glass
+   *  surfaces genuinely differ in size falls back to today's behaviour (a resize per build)
+   *  rather than growing a map that outlives the flag. */
+  private _prePairs = new Map<string, [Framebuffer, Framebuffer]>();
   /** Where the last pyramid's texels sit on screen. Consumers read it off the returned
    *  texture handle and map their screen UV through it before sampling. */
   private _lastRegion: BackdropRegion = BACKDROP_REGION_FULL;
@@ -907,6 +1001,13 @@ export class BlurPass {
    * costs fill and buys correctness. A value that is not a power of two is a caller bug and
    * throws rather than quietly rounding into a third rendering. No caller passes it today; see
    * `PlanBackdropUnion` for the one that would, and for why it does not exist yet.
+   *
+   * `presample` is `?glass-presample`, and it asks ONE thing: lift `BaseDownsampleFactor`'s
+   * 15%-of-canvas gate for THIS build, so a small region whose own sigma earns k > 1 re-bases
+   * like a full-screen scrim already does. It is refused wherever it would not be the same blur
+   * (`PresamplePlanFor`), and refused outright when `baseFactor` pins k -- a pin and a lifted
+   * gate are two answers to the same number. The caller is responsible for the one clause this
+   * method cannot see, `MaxLod == 0`; see `PresamplePlanFor`.
    */
   Blur = (
     input: WebGLTexture,
@@ -916,16 +1017,22 @@ export class BlurPass {
     minDepth: number = 0,
     region?: BackdropRect,
     baseFactor?: number,
+    presample: boolean = false,
   ): WebGLTexture => {
     const gl = this._gl;
 
     // The σ-adaptive factor and the pyramid depth both have to be known BEFORE the region is
     // resolved: together they set the downsample grid the region's origin must land on.
-    const k = baseFactor ?? BaseDownsampleFactor(radius, width, height, region);
+    const pre = presample && baseFactor === undefined
+      ? PresamplePlanFor(radius, width, height, region, minDepth)
+      : null;
+    this._lastPresampled = pre !== null;
+    this._lastPresampleK = pre !== null ? pre.K : 1;
+    const k = baseFactor ?? (pre !== null ? pre.K : BaseDownsampleFactor(radius, width, height, region));
     if (baseFactor !== undefined && (k < 1 || (k & (k - 1)) !== 0)) {
       throw new Error(`[Jaui] Blur baseFactor must be a power of two, got ${k}`);
     }
-    const depth = radius > 0 ? PyramidDepth(radius / k, minDepth) : 0;
+    const depth = radius > 0 ? (pre !== null ? pre.Depth : PyramidDepth(radius / k, minDepth)) : 0;
     const rect = ResolveRegionRect(region, width, height, k * (1 << depth));
     // Computed from the ORIGINAL canvas units: Scale and Offset are ratios, so they survive
     // the σ-adaptive re-base below untouched — a coarser level 0 still covers the same rect.
@@ -974,20 +1081,31 @@ export class BlurPass {
     let srcTex = input;
     let srcW = width, srcH = height;
     let srcRect: RegionRect = rect;
+    // THE TAP OFFSET, HOISTED ABOVE THE PRE-DOWNSAMPLE. It is a pure function of the coarse
+    // sigma and the depth, so computing it here rather than after the ping-pong is the same
+    // number on every existing path -- `radius` is not read again below it. It moves because the
+    // presampled arm's pre-pass has to be issued AT it: the whole identity `PresamplePlanFor`
+    // rests on is that the pre-pass is the unflagged arm's own first DOWN hop, and a hop issued
+    // at `u_Offset` 1.0 beside one issued at 0.7 is the same operator in exact arithmetic (a
+    // DOWN hop at any `t <= 1` is an exact 2x2 box) but not the same fp32 rounding.
+    const coarseRadius = k > 1 ? radius / k : radius;
+    // Use the per-tap offset to fine-tune within the chosen depth.
+    const baseSigma = 3 * Math.pow(2, depth);
+    // Keep tap-offset near 1.0 — wider offsets create the visible "oil pastel"
+    // striations (tap centers drift apart faster than the overlap can cover).
+    const tapOffset = Math.max(0.7, Math.min(1.3, Math.max(1, coarseRadius) / baseSigma));
     // One bracket spans the pre-downsample AND the pyramid's down hops: they are one chain, and
     // splitting them would put a query boundary in the middle of a ping-pong whose tile work
     // resolves at the far end of it.
     let timedDown = false;
     if (k > 1) {
-      if (!this._preA) this._preA = new Framebuffer(gl, { highPrecision: true });
-      if (!this._preB) this._preB = new Framebuffer(gl, { highPrecision: true });
-      const pp = [this._preA, this._preB];
+      const pp = this._usePrePair(rect.W, rect.H);
       // The sigma-adaptive pre-downsample is the first half of the down side; it shares the
       // `blur-down` bucket with the pyramid's own hops rather than splitting a chain in two.
       timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
       gl.useProgram(this._down.Program);
       gl.uniform1i(this._downTexLoc, 0);
-      gl.uniform1f(this._downOffLoc, 1.0);
+      gl.uniform1f(this._downOffLoc, pre !== null ? tapOffset : 1.0);
       let curW = rect.W, curH = rect.H;
       const passes = Math.round(Math.log2(k));
       for (let s = 0; s < passes; s++) {
@@ -1007,16 +1125,10 @@ export class BlurPass {
       // Re-base the pyramid onto the downsampled backdrop. The consumer samples level 0 +
       // its mips through `LastRegion`, which is a UV map — the lower resolution changes how
       // many texels back it, not which part of the screen they stand for.
-      radius = radius / k;
       srcRect = { X: 0, YBottom: 0, W: srcW, H: srcH, Full: true };
     }
 
     this._lastDepth = depth;
-    // Use the per-tap offset to fine-tune within the chosen depth.
-    const baseSigma = 3 * Math.pow(2, depth);
-    // Keep tap-offset near 1.0 — wider offsets create the visible "oil pastel"
-    // striations (tap centers drift apart faster than the overlap can cover).
-    const tapOffset = Math.max(0.7, Math.min(1.3, Math.max(1, radius) / baseSigma));
 
     // Allocate level FBOs at progressively halved sizes. levels[0] is the destination at
     // REGION size (where the upsample chain ends); levels[1..depth] are the smaller ones.
@@ -1694,6 +1806,26 @@ export class BlurPass {
     this._chains.push(fresh);
     this._levels = levels;
     this._evictChains(fresh);
+  };
+
+  /** The ping-pong pair for a level-0 size, allocated once and kept. See `_prePairs`. */
+  private _usePrePair = (w: number, h: number): [Framebuffer, Framebuffer] => {
+    const key = `${w}x${h}`;
+    const hit = this._prePairs.get(key);
+    if (hit !== undefined) return hit;
+    const gl = this._gl;
+    const pair: [Framebuffer, Framebuffer] = [
+      new Framebuffer(gl, { highPrecision: true }),
+      new Framebuffer(gl, { highPrecision: true }),
+    ];
+    this._prePairs.set(key, pair);
+    while (this._prePairs.size > PRE_PAIRS_MAX) {
+      const oldest = this._prePairs.keys().next().value as string;
+      const dead = this._prePairs.get(oldest);
+      this._prePairs.delete(oldest);
+      if (dead !== undefined) for (const fb of dead) fb.Dispose();
+    }
+    return pair;
   };
 
   private _findChain = (w: number, h: number, slot: number): LevelChain | null => {

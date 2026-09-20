@@ -570,7 +570,10 @@ describe('the walk, and the flag', () => {
     // pyramid, so it must NOT be counted as a walk-built solo member, and the census line being
     // inside that arm is what says so.
     expect(render).toContain('if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }');
-    expect(render).toContain('lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);');
+    // Re-aimed by lane presample: the call gained `?glass-presample`'s seventh argument and wrapped
+    // onto a second line. The pin follows the arguments that decide the BUILD -- the live scene
+    // texture, this node's own region -- and stops before the arm, which is off by default.
+    expect(render).toContain('lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,');
     const solo = render.slice(0, render.indexOf('this._atlasWalkSolo++;'));
     expect(solo.lastIndexOf('} else {')).toBeGreaterThan(solo.lastIndexOf('if (direct !== null) {'));
   });
@@ -651,7 +654,7 @@ describe('the walk, and the flag', () => {
   it('a REFUSED member takes the per-card path, which is the engine as it ships', () => {
     expect(JAUI).toContain('for (const c of solo) this._prepassIssue(c.Into, c.Node, c.Plan, w, h);');
     const issue = JAUI.slice(JAUI.indexOf('private _prepassIssue = ('));
-    expect(issue.slice(0, 1600)).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region)');
+    expect(issue.slice(0, 1600)).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region,');
     expect(issue.slice(0, 1600)).toContain('r.GenerateBlurMipmap(plan.MaxLod)');
   });
 

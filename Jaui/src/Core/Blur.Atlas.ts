@@ -1,5 +1,5 @@
 import {
-  BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, ChainBytes, CHAIN_BUDGET_BYTES,
+  BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, ChainBytes, CHAIN_BUDGET_BYTES,
   MAX_LEVELS, type BackdropRect, type RegionRect,
 } from './BlurPass';
 
@@ -289,11 +289,17 @@ export interface AtlasCandidate {
  *    the few texels the snap adds count in the surface's favour, exactly as they do on the GPU.
  */
 export const AtlasAdmitsMember = (
-  c: AtlasCandidate, width: number, height: number,
+  c: AtlasCandidate, width: number, height: number, presample: boolean = false,
 ): boolean => {
   if (c.Radius <= 0) return false;
   if (c.MaxLod > 0) return false;
   if (BaseDownsampleFactor(c.Radius, width, height, c.Region) !== 1) return false;
+  // Refusal 2 again, asked of the plan the build will actually take. `?glass-presample` lifts
+  // the area gate, and every small-region member this atlas exists for is exactly the shape the
+  // gate was refusing -- so without this clause the arm would silently slot k=2 members into a
+  // packer whose slot grid, whose `u_Slot`/`u_Clamp` and whose `PyramidPasses` all assume the
+  // ping-pong is absent. Same answer as the k > 1 line above, for the same reason.
+  if (presample && PresamplePlanFor(c.Radius, width, height, c.Region, 0) !== null) return false;
   const depth = PyramidDepth(c.Radius, 0);
   const rect = ResolveRegionRect(c.Region, width, height, 1 << depth);
   if (rect.Full) return false;
@@ -326,10 +332,15 @@ export const AtlasAdmitsMember = (
 export const PlanBackdropAtlas = (
   members: readonly BackdropAtlasMember[],
   width: number, height: number, radius: number,
-  opts?: { IgnoreSeparation?: boolean; Limits?: AtlasLimits; MaxLod?: number },
+  opts?: { IgnoreSeparation?: boolean; Limits?: AtlasLimits; MaxLod?: number; Presample?: boolean },
 ): BackdropAtlasPlan | null => {
   if (members.length < 2) return null;
   if (radius <= 0) return null;
+  // `?glass-presample` and the atlas cannot both own a member's k. Refused for the whole plan
+  // rather than per member, because one member re-basing and its neighbours not is a MIXED k
+  // across the class, which this planner refuses three lines below for the union's own reason.
+  if (opts?.Presample === true
+    && PresamplePlanFor(radius, width, height, members[0].Region, 0) !== null) return null;
   const limits = opts?.Limits ?? ATLAS_LIMITS_DEFAULT;
   const ignore = opts?.IgnoreSeparation ?? false;
 

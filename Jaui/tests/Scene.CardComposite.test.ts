@@ -523,7 +523,7 @@ describe('the renderer actually does what the arithmetic assumes', () => {
     // uniform downstream (`u_SrcRect`, `u_HalfPixel`, `LastRegion`, and the `u_BackdropXf` the
     // panel shader taps through) is computed from the same numbers and rounds the same way.
     const body = arrowBody(renderer, 'ComputeBlur');
-    expect(body).toContain('pass.Blur(src, this._width, this._height, radius, minDepth, region)');
+    expect(body).toContain('pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined, rebase)');
     // No card dimensions and no pinned base factor reach the pass any more.
     expect(body).not.toContain('blurCard.W, blurCard.H');
     expect(body).not.toContain('BaseDownsampleFactor(');

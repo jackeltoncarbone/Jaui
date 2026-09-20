@@ -1,5 +1,5 @@
 import {
-  BaseDownsampleFactor, PyramidDepth, ResolveRegionRect,
+  BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect,
   type BackdropRect, type RegionRect,
 } from './BlurPass';
 
@@ -103,12 +103,24 @@ export interface BorderDirectRefusal { Ok: false; Why: string }
  */
 export const PlanBorderDirect = (
   region: BackdropRect | undefined, width: number, height: number, radius: number, maxLod: number,
+  presample: boolean = false,
 ): BorderDirectPlan | BorderDirectRefusal => {
   if (region === undefined) return { Ok: false, Why: 'full-canvas' };
   if (!(radius > 0)) return { Ok: false, Why: 'sharp-root' };
   if (maxLod > 0) return { Ok: false, Why: 'mip-consumer' };
   const k = BaseDownsampleFactor(radius, width, height, region);
   if (k !== 1) return { Ok: false, Why: `pre-downsample-k${k}` };
+  // `?glass-presample` lifts the area gate, so `BaseDownsampleFactor` above is no longer the
+  // whole answer to "what k will this build take". The refusal is the SAME refusal for the same
+  // reason -- the gather reproduces a k=1 chain's four hops and nothing else, and a re-based
+  // chain runs them on a grid this kernel has no term for -- but it has to be asked of the plan
+  // the build will actually use. Refused here, and refused again by name in the flag block, on
+  // the principle this file already carries: an admission rule that consults a different k than
+  // the pass it is planning for is the bug `BaseDownsampleFactor`'s module comment warns about.
+  if (presample) {
+    const p = PresamplePlanFor(radius, width, height, region, 0);
+    if (p !== null) return { Ok: false, Why: `presample-k${p.K}` };
+  }
   const depth = PyramidDepth(radius, 0);
   if (depth !== BORDER_DIRECT_DEPTH) return { Ok: false, Why: `depth${depth}` };
   const tapOffset = BorderDirectTapOffset(radius, depth);

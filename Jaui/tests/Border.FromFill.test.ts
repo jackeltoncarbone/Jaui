@@ -115,7 +115,7 @@ describe('borderfromfill > the admission rule', () => {
   it('is the first thing the rim asks, before the snapshot and before the build', () => {
     const ask = JAUI.indexOf('const fromFill = this._borderReadsFill(node, plan);');
     const snap = JAUI.indexOf('const sceneSnap = plan.InstFrostLod < SCENE_TAP_FROST_LOD');
-    const build = JAUI.indexOf('lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);');
+    const build = JAUI.indexOf('lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,');
     expect(ask).toBeGreaterThan(0);
     expect(ask).toBeLessThan(snap);
     expect(ask).toBeLessThan(build);

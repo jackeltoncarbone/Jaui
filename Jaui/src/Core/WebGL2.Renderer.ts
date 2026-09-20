@@ -766,6 +766,10 @@ export class WebGL2Renderer implements Renderer {
   /** DRAWS the frame's atlas builds issued. `?atlas-instanced`'s effect field: 8 under
    *  `?pyramid-atlas=all` and 160 with `=off`, on a frame whose `drawCalls` does not move. */
   get SceneAtlasDraws(): number { return this._sceneLedger.AtlasDraws; }
+  /** `?glass-presample`'s effect field: builds this frame that re-based onto a pre-downsampled
+   *  source, and the `k` the last of them took. 0 and 1 on every unflagged frame. */
+  get PresampledBuilds(): number { return this._sceneLedger.PresampledBuilds; }
+  get LastPresampleK(): number { return this._lastPresampleK; }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
   get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number; EndsByKey: Record<string, number> } {
     const l = this._sceneLedger;
@@ -2246,6 +2250,22 @@ export class WebGL2Renderer implements Renderer {
    *  the instanced quad rasterizes the viewport-clipped quad's exact fragment set. */
   DiagAtlasInstanced = true;
 
+  /** `?glass-presample` -- THE SIGMA-ADAPTIVE PRE-DOWNSAMPLE, FOR A PER-SURFACE GLASS BUILD.
+   *
+   *  `BaseDownsampleFactor` re-bases a pyramid onto a source pre-downsampled by `k ~ sigma/4`
+   *  whenever the region is at least 15% of the canvas -- the band-limit argument, and it is
+   *  sigma-RELATIVE: a scrim at sigma 32 takes k=8 and hands the consumer a level 0 at an EIGHTH
+   *  of device resolution, which ships today. A glass card at sigma 8 earns k=2, which would hand
+   *  the consumer a HALF-resolution level 0 -- strictly gentler than what already ships -- and the
+   *  area gate refuses it because the card is 6% of the canvas.
+   *
+   *  Under this arm the gate is lifted for builds that pass `presample` (per-surface glass fills
+   *  and rims, `MaxLod == 0`), and the pyramid runs over a quarter of the texels. Default OFF:
+   *  the last reconstruction hop changes from the pyramid's 8-tap tent to the consumer's hardware
+   *  bilinear, which is a picture question and Jack's to rule on. See `PresamplePlanFor`. */
+  DiagGlassPresample = false;
+
+
   /** Per-pass residency ceilings for the three `BlurPass` instances, or `null` for the shipped
    *  `MAX_CHAINS` / `CHAIN_BUDGET_BYTES`. Only `?blur-phased` sets it, and only because twenty
    *  fill pyramids have to be alive at once. Handed in at construction and never mutated, so
@@ -2794,7 +2814,13 @@ export class WebGL2Renderer implements Renderer {
     input: GpuTextureHandle, width: number, height: number,
     radius: number, minDepth?: number,
     region?: { x: number; y: number; w: number; h: number },
+    presample?: boolean,
   ): GpuTextureHandle => {
+    // `?glass-presample`: the caller says whether THIS surface may re-base, because the one
+    // clause `BlurPass` cannot see -- `MaxLod == 0` -- lives in the walk's `GlassBlurPlan`. The
+    // flag is ANDed in here rather than trusted from the caller so a site that forgets to ask
+    // can only under-arm, never over-arm; and `false` here is the unflagged call byte for byte.
+    const rebase = presample === true && this.DiagGlassPresample;
     // Bumped FIRST, before the two diagnostics return their stand-ins, so that a handle held across
     // this call reads as stale on every arm and not only on the arms that reach a `BlurPass`.
     this._backdropBuildSeq++;
@@ -2861,7 +2887,8 @@ export class WebGL2Renderer implements Renderer {
       // the two arms is the read. Reassigned rather than wrapped into the call, so the call below
       // stays the byte-for-byte baseline call the card composite's own gates pin.
       src = this._blurSrcFor(src);
-      const result = pass.Blur(src, this._width, this._height, radius, minDepth, region);
+      const result = pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined, rebase);
+      this._notePresampled(pass);
       this._lastProgram = null;
       return _wrap(result, pass.LastRegion);
     }
@@ -2869,7 +2896,8 @@ export class WebGL2Renderer implements Renderer {
     // the build: the DOWN pass reads the stand-in instead of `input`. The HANDLE is swapped, not the
     // call, so the region rides across unchanged and `pass.Blur` below is the baseline line.
     if (this.DiagBlurSrc !== null) input = _wrap(this._blurSrcFor(_unwrap(input)), _regionOf(input));
-    const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region);
+    const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined, rebase);
+    this._notePresampled(pass);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
     // draw re-binds its program correctly.
@@ -2998,7 +3026,7 @@ export class WebGL2Renderer implements Renderer {
     // today its frost is 0 too, so the depth clause would have refused it anyway -- which is luck,
     // and luck is not a guard.
     if (!(refraction >= BORDER_STRAIGHT_GATHER_REFRACTION)) return null;
-    const plan = PlanBorderDirect(region, width, height, radius, maxLod);
+    const plan = PlanBorderDirect(region, width, height, radius, maxLod, this.DiagGlassPresample);
     if (!plan.Ok) return null;
     return this._borderCopy(plan, width, height);
   };
@@ -3040,6 +3068,17 @@ export class WebGL2Renderer implements Renderer {
     this._borderScratchHandle = handle;
     return handle;
   };
+
+  /** `?glass-presample`: book the build the pass just ran, off what the PASS says it did rather
+   *  than off what the flag asked for. A plan the arm refused (a full-canvas region, a sigma
+   *  under `BASE_SIGMA`, a depth with no room for the factor) leaves this at 0, which is what
+   *  keeps `PresampledBuilds` from reading like a win on a frame where nothing re-based. */
+  private _notePresampled = (pass: BlurPass): void => {
+    if (!pass.LastPresampled) return;
+    this._sceneLedger.NotePresampled();
+    this._lastPresampleK = pass.LastPresampleK;
+  };
+  private _lastPresampleK = 1;
 
   /** The rim built a pyramid after all - the direct path refused, or the flag is off. Booked by
    *  the walk, beside `NoteAtlasSolo`, because only the walk knows which branch it took. */
