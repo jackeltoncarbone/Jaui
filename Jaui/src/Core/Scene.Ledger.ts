@@ -90,6 +90,18 @@ export class SceneReadLedger {
    *  and `EndsByKey.blur` down to the fills' atlas beside it. */
   BordersDirect = 0;
   BordersPyramid = 0;
+  /** THE FRAGMENT COUNTS, estimated from the rim instances the direct program actually drew.
+   *
+   *  The M4's cell made eighty render passes and eighty draws leave the frame and the frame got
+   *  2.59 ms SLOWER, and the first hypothesis for that was that the 64-tap gather runs on the whole
+   *  rim QUAD rather than on the band. It does not (`Jiv.Panel.frag` calls it inside
+   *  `if (borderBase > 0.001)`), but the two numbers are what makes that statement checkable from
+   *  a run instead of from a reading of the source: `BorderFragments` is where the gather runs and
+   *  `BorderQuadFragments` is where the PROGRAM runs, and the ratio between them is the thing any
+   *  argument about occupancy has to start from. Both are estimates off the packed instance -- see
+   *  `Border.Direct.EstimateBorderFragments`, which is where the arithmetic lives and is tested. */
+  BorderFragments = 0;
+  BorderQuadFragments = 0;
   /** DRAWS the atlas builds issued this frame, and the reason it is a column of its own: the
    *  harness's `drawCalls` counts SCENE draws and does not see a pyramid pass at all. It read
    *  153 / 153 / 154 across `?pyramid-atlas` off / fills / all -- three arms that differ by 160
@@ -129,6 +141,8 @@ export class SceneReadLedger {
     this.AtlasBytes = 0;
     this.BordersDirect = 0;
     this.BordersPyramid = 0;
+    this.BorderFragments = 0;
+    this.BorderQuadFragments = 0;
     this.AtlasDraws = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
@@ -187,6 +201,12 @@ export class SceneReadLedger {
 
   /** One glass border built a pyramid: the flag is off, or the admission rule refused this build. */
   NoteBorderPyramid = (): void => { this.BordersPyramid++; };
+
+  /** One direct rim DREW: `band` fragments inside its annulus, `quad` in its rasterised rect. */
+  NoteBorderFragments = (band: number, quad: number): void => {
+    this.BorderFragments += band;
+    this.BorderQuadFragments += quad;
+  };
   /** `n` draws one atlas build issued -- `2 x depth` instanced, or `2 x depth x members`. */
   NoteAtlasDraws = (n: number): void => { this.AtlasDraws += n; };
 }
