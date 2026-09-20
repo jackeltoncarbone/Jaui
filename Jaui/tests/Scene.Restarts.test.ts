@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RestartSpread, SrcOverChannel, QuantiseToBits, PROBE_SRC_ALPHA } from '../src/Core/Restart.Diag';
+import { RestartSpread, SrcOverChannel, QuantiseToBits, ProbeDraws, Per,
+  PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from '../src/Core/Restart.Diag';
+import { SceneReadLedger } from '../src/Core/Scene.Ledger';
 
 /**
  * `?scene-restarts=N` and `?small-restarts=N` — the pair that prices H5.
@@ -33,6 +35,10 @@ const src = (...p: string[]): string => readFileSync(join(HERE, '..', 'src', ...
 
 const RENDERER = src('Core', 'WebGL2.Renderer.ts');
 const JAUI = src('Core', 'Jaui.ts');
+
+/** Comment text can name anything; only executable lines are evidence. */
+const stripComments = (s: string): string =>
+  s.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
 
 /** The body of one named arrow member of `WebGL2Renderer`, from its declaration to the next
  *  two-space-indented member. Used so a claim about `_restartProbe` cannot be satisfied by a line
@@ -97,6 +103,17 @@ describe('the probe draw is transparent', () => {
     expect(frag).not.toContain('sampler');
   });
 
+  it('the blur level the scene arm ends on is the SAME FORMAT as the scene and the 1x1 target', () => {
+    // The detour moved onto a real build target; the pixel claim did not widen by one code.
+    // `Framebuffer`'s highPrecision attachment is RGB10_A2 - what the two tests above walk
+    // exhaustively - so the two arms' detour targets differ in SIZE and in nothing else.
+    const fb = src('Core', 'Framebuffer.ts');
+    expect(fb).toContain('gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);');
+    expect(RENDERER).toContain("new BlurPass(this._gl, undefined, this.DiagBlurChains ?? 1");
+    const blur = src('Core', 'BlurPass.ts');
+    expect(blur).toContain('new Framebuffer(gl, { highPrecision: true })');
+  });
+
   it('the probe sets BOTH halves of the blend it depends on, and never clears', () => {
     const probe = member(RENDERER, '_restartProbe');
     expect(probe).toContain('gl.blendEquation(gl.FUNC_ADD)');
@@ -114,13 +131,15 @@ describe('the probe draw is transparent', () => {
     expect(probe).toContain('if (scissorOn) gl.enable(gl.SCISSOR_TEST);');
     // A culled draw opens no encoder, so a scissor the walk happened to set elsewhere would publish
     // the baseline under the flag's name. The 1x1 VIEWPORT is what keeps the draw to one pixel.
-    expect(probe.match(/gl\.viewport\(0, 0, 1, 1\)/g)?.length).toBe(3);
+    // TWO of them now, not three: (a) into the scene and (b) into the detour target.
+    expect(probe.match(/gl\.viewport\(0, 0, 1, 1\)/g)?.length).toBe(2);
   });
 });
 
-// ── 2. The count claim: exactly N a frame, spread ──
+// ── 2. The count claim: exactly N a frame, spread, and NOTHING at the frame end ──
 
-/** Run `points` insertion points and a frame end; return what each point emitted. */
+/** Run `points` insertion points and a frame end; return what each point emitted, with the frame's
+ *  SHORTFALL last. `FrameEnd` emits nothing -- see the third entry in this section. */
 const runFrame = (s: RestartSpread, n: number, points: number): number[] => {
   s.BeginFrame();
   const emitted: number[] = [];
@@ -129,53 +148,78 @@ const runFrame = (s: RestartSpread, n: number, points: number): number[] => {
   return emitted;
 };
 
-describe('RestartSpread emits exactly N a frame', () => {
-  it('pays the whole balance at the frame end on the first frame, when the point count is unknown', () => {
+/** What the points emitted, without the trailing shortfall. */
+const emittedOnly = (f: number[]): number[] => f.slice(0, f.length - 1);
+const shortfallOf = (f: number[]): number => f[f.length - 1];
+
+describe('RestartSpread emits exactly N a frame at the INSERTION POINTS and nowhere else', () => {
+  it('emits nothing on the first frame and reports the whole N as a shortfall', () => {
+    // The point count is not known until a frame has ended, so frame one cannot spread anything.
+    // It used to pay the whole balance at `PresentScene` instead -- see the third test.
     const s = new RestartSpread();
     const f1 = runFrame(s, 40, 40);
-    expect(f1.slice(0, 40)).toEqual(new Array(40).fill(0));
-    expect(f1[40]).toBe(40);
-    expect(s.Emitted).toBe(40);
+    expect(emittedOnly(f1)).toEqual(new Array(40).fill(0));
+    expect(shortfallOf(f1)).toBe(40);
+    expect(s.Emitted).toBe(0);
   });
 
-  it('is one per point from frame two onwards on a steady scene, with nothing left at the end', () => {
+  it('is one per point from frame two onwards on a steady scene, owing nothing at the end', () => {
     const s = new RestartSpread();
     runFrame(s, 40, 40);
     for (let frame = 0; frame < 5; frame++) {
       const f = runFrame(s, 40, 40);
-      expect(f.slice(0, 40)).toEqual(new Array(40).fill(1));
-      expect(f[40]).toBe(0);
+      expect(emittedOnly(f)).toEqual(new Array(40).fill(1));
+      expect(shortfallOf(f)).toBe(0);
+      expect(s.Emitted).toBe(40);
     }
   });
 
-  it('N above the point count is two per point, not a refusal — that is the second point on the line', () => {
+  it('FrameEnd EMITS NOTHING - the small arm\'s `restart-probe:1` transient, killed at the source', () => {
+    // The M4 read one small-arm frame as `switches=41 endsByKey=blur:40,restart-probe:1`, which is
+    // that arm's own void condition. The cause is not the probe: it is WHERE the balance was paid.
+    // `PresentScene` is the end of the walk, where the scene has been drawn into all frame, so a
+    // probe there ends a LIVE scene encoder and books a switch at an instant that is not an
+    // insertion point. `FrameEnd` now returns the shortfall for the gate and draws nothing.
+    const s = new RestartSpread();
+    const f1 = runFrame(s, 40, 40);
+    expect(shortfallOf(f1)).toBe(40);
+    // And the renderer does not turn that number into probes: it books it on the gate.
+    const end = member(RENDERER, 'DiagRestartFrameEnd');
+    expect(end).not.toContain('_emitRestarts');
+    expect(end).toContain('this._restartStats.Shortfall += this._smallRestartSpread.FrameEnd(small);');
+    expect(end).toContain('this._restartStats.Shortfall += this._sceneRestartSpread.FrameEnd(scene);');
+  });
+
+  it('N above the point count is two per point, not a refusal - that is the second point on the line', () => {
     const s = new RestartSpread();
     runFrame(s, 80, 40);
     const f = runFrame(s, 80, 40);
-    expect(f.slice(0, 40)).toEqual(new Array(40).fill(2));
-    expect(f[40]).toBe(0);
+    expect(emittedOnly(f)).toEqual(new Array(40).fill(2));
+    expect(shortfallOf(f)).toBe(0);
   });
 
   it('N below the point count spreads EVENLY rather than bunching at the front', () => {
     const s = new RestartSpread();
     runFrame(s, 5, 40);
-    const f = runFrame(s, 5, 40).slice(0, 40);
+    const f = emittedOnly(runFrame(s, 5, 40));
     const at = f.flatMap((k, i) => (k > 0 ? [i] : []));
     expect(at).toEqual([7, 15, 23, 31, 39]);
     expect(f.reduce((a, b) => a + b, 0)).toBe(5);
   });
 
-  it('still emits exactly N when the point count falls, and when it rises', () => {
+  it('a frame whose point count FELL reports the difference instead of paying it somewhere else', () => {
     const s = new RestartSpread();
     runFrame(s, 40, 40);
     runFrame(s, 40, 40);
-    // A frame with fewer builds: the balance lands at the end rather than going missing.
     const fell = runFrame(s, 40, 12);
-    expect(fell.reduce((a, b) => a + b, 0)).toBe(40);
-    // And a frame with more: the extra points emit nothing rather than overshooting N.
+    // Twelve points against a denominator of forty: each owes floor((i+1)*40/40) = i+1, so twelve
+    // land and twenty-eight do not. They are REPORTED, not drawn at a dirty scene.
+    expect(emittedOnly(fell).reduce((a, b) => a + b, 0)).toBe(12);
+    expect(shortfallOf(fell)).toBe(28);
+    // A frame with MORE points still stops at N rather than overshooting.
     const rose = runFrame(s, 40, 60);
-    expect(rose.reduce((a, b) => a + b, 0)).toBe(40);
-    expect(rose.slice(0, 60).every((k) => k >= 0)).toBe(true);
+    expect(emittedOnly(rose).reduce((a, b) => a + b, 0)).toBe(40);
+    expect(shortfallOf(rose)).toBe(0);
   });
 
   it('holds for every N from 1 to 120 over a forty-build frame', () => {
@@ -183,8 +227,8 @@ describe('RestartSpread emits exactly N a frame', () => {
       const s = new RestartSpread();
       runFrame(s, n, 40);
       const f = runFrame(s, n, 40);
-      expect(f.reduce((a, b) => a + b, 0), `N=${n}`).toBe(n);
-      expect(f[40], `N=${n} left a balance`).toBe(0);
+      expect(emittedOnly(f).reduce((a, b) => a + b, 0), `N=${n}`).toBe(n);
+      expect(shortfallOf(f), `N=${n} left a shortfall`).toBe(0);
     }
   });
 });
@@ -192,41 +236,85 @@ describe('RestartSpread emits exactly N a frame', () => {
 // ── 3. The construction: where the points are, and what each one costs in draws ──
 
 describe('the insertion points and the draw budget', () => {
-  it('sits immediately after a pyramid build handed the scene target back — both build sites', () => {
-    // The instant matters more than the place: the build has just drawn into the blur FBOs, so the
-    // scene encoder has ended and nothing has been drawn into the scene since. That is what lets
-    // `?small-restarts` add a trivial encoder and NO scene restart.
+  it('the RIM build takes its point on the `RebindSceneTarget()` that handed the scene back', () => {
+    // Nothing READS the scene between the rim build and the rim draw, so the scene arm's opening
+    // draw has nothing free to make expensive there and the point stays where the build left it.
     const hooks = JAUI.match(/r\.RebindSceneTarget\(\);\n(?:\s*\/\/.*\n)*\s*if \(this\._restartRenderer !== null\) this\._restartRenderer\.DiagRestartPoint\(\);/g);
-    expect(hooks?.length, 'expected one hook per build site (fill and rim)').toBe(2);
+    expect(hooks?.length, 'exactly one hook sits on a RebindSceneTarget - the rim build').toBe(1);
   });
 
-  it('pays the frame balance before the present, while the scene is still bound', () => {
+  it('the FILL build takes its point AFTER `MeasureShadowBackdrop`, not before it', () => {
+    // THE SECOND LANE'S UNPREDICTED LEDGER SHAPE, fixed at the call site. Taken before the shadow
+    // measure, the scene arm's opening draw left the scene dirty at the probe's 1x1 bind - which
+    // rides the build's end for free at baseline - so every point bought a second encoder end
+    // (`shadow-state:20`) and a second restart (60, not 40). Section 5 runs both placements
+    // through the real ledger and reproduces the M4's cell from the wrong one.
+    const measure = JAUI.indexOf('r.MeasureShadowBackdrop(node,');
+    const point = JAUI.indexOf('if (fillBuilt && this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();');
+    expect(measure, 'the adaptive-shadow measure').toBeGreaterThan(-1);
+    expect(point, 'the fill build\'s insertion point').toBeGreaterThan(-1);
+    expect(point).toBeGreaterThan(measure);
+    // And it only fires where a build actually happened on this surface, not on a pre-built one.
+    expect(JAUI).toContain('            fillBuilt = true;');
+    expect(JAUI).toContain('        let fillBuilt = false;');
+  });
+
+  it('closes the frame without emitting - no probe runs at the present, where the scene is dirty', () => {
     const i = JAUI.indexOf('this._restartRenderer.DiagRestartFrameEnd();');
     const present = JAUI.indexOf('r.PresentScene();');
     expect(i).toBeGreaterThan(-1);
     expect(i).toBeLessThan(present);
+    expect(member(RENDERER, 'DiagRestartFrameEnd')).not.toContain('_emitRestarts');
   });
 
-  it('costs exactly 3 draws a point on the scene arm and 1 on the small arm', () => {
+  it('costs exactly 2 draws a point on the scene arm and 1 on the small arm', () => {
     const probe = member(RENDERER, '_restartProbe');
     const draws = probe.match(/gl\.drawElements\(gl\.TRIANGLES, 6, gl\.UNSIGNED_SHORT, 0\);/g);
-    expect(draws?.length, 'three draw sites in the probe').toBe(3);
-    // Two of the three are inside `if (intoScene)`: (a) starts the scene encoder so that (b) has
-    // one to END, and (c) restarts it. The small arm issues only (b). So draws/tick is +3N under
-    // `?scene-restarts=N`, +N under `?small-restarts=N`, +4N under both.
-    expect(probe.match(/if \(intoScene\) \{/g)?.length).toBe(2);
+    expect(draws?.length, 'two draw sites in the probe').toBe(2);
+    // ONE of the two is inside `if (intoScene)`: (a) opens the scene's encoder so that (b) can END
+    // it. There is no (c) - see section 5 for what it cost. So draws per ENGINE FRAME are +2N under
+    // `?scene-restarts=N`, +N under `?small-restarts=N`, +3N under both.
+    expect(probe.match(/if \(intoScene\) \{/g)?.length).toBe(1);
+    expect(SCENE_PROBE_DRAWS).toBe(2);
+    expect(SMALL_PROBE_DRAWS).toBe(1);
+    expect(ProbeDraws(40, 0)).toBe(80);
+    expect(ProbeDraws(0, 40)).toBe(40);
+    expect(ProbeDraws(40, 40)).toBe(120);
   });
 
-  it('alternates two 1x1 probe targets, so consecutive probes cannot fuse into one encoder', () => {
+  it('the SCENE arm ends on the blur pass\'s own level 0 - a real build\'s target, never invalidated', () => {
+    const probe = member(RENDERER, '_restartProbe');
+    expect(probe).toContain('const level0 = intoScene ? (this._lastBlur?.DiagLevel0 ?? null) : null;');
+    expect(probe).toContain('level0.Bind();');
+    // `BlurPass._bindTarget` invalidates the level because it is about to overwrite it. The probe
+    // is NOT about to overwrite it - the card draw below samples that pyramid - so invalidating
+    // here would be a pixel change wearing a pixel-identical flag's name.
+    expect(stripComments(probe)).not.toContain('invalidateFramebuffer');
+    // The accessor is a getter and nothing else: no arithmetic, no bind, no resize.
+    const blur = src('Core', 'BlurPass.ts');
+    const body = blur.slice(blur.indexOf('get DiagLevel0()'), blur.indexOf('get ChainCensus()'));
+    expect(body).toContain('return this._levels.length > 0 ? this._levels[0] : null;');
+    expect(body).not.toContain('Resize');
+    expect(body).not.toContain('Bind()');
+    // And it IS the target a build ends on: the upsample chain's last hop draws into `_levels[0]`.
+    expect(blur).toContain('for (let i = depth - 1; i >= 0; i--) {');
+    expect(blur).toContain('      const dst = this._levels[i];');
+  });
+
+  it('the SMALL arm keeps its two 1x1 targets, and only it allocates them', () => {
     const probe = member(RENDERER, '_restartProbe');
     expect(probe).toContain('this._restartProbeSlot = slot ^ 1;');
     const init = member(RENDERER, '_initRestartProbeTargets');
     expect(init).toContain('for (let i = 0; i < 2; i++)');
-    // Same FORMAT as the scene, smallest possible SIZE: the arms differ in target bytes alone.
+    // Same FORMAT as the scene, smallest possible SIZE: the bubble with as little under it as a
+    // colour attachment can carry.
     expect(init).toContain('gl.RGB10_A2, 1, 1, 0');
+    // A scene-arm-only run allocates none of it - its detour lands in the blur level.
+    expect(member(RENDERER, '_ensureRestartProbe'))
+      .toContain('if (this.DiagSmallRestarts !== null) this._initRestartProbeTargets(gl);');
   });
 
-  it('books the scene arm\'s ends under their own key and refuses to run off the scene target', () => {
+  it('books both arms\' detour binds under their own key and refuses to run off the scene target', () => {
     expect(RENDERER).toContain("const RESTART_PROBE_KEY = 'restart-probe';");
     const probe = member(RENDERER, '_restartProbe');
     expect(probe).toContain('this._tgt(RESTART_PROBE_KEY);');
@@ -301,10 +389,6 @@ describe('the flag gate', () => {
  */
 
 const WORKER_BOOT = src('Worker', 'Worker.Boot.ts');
-
-/** Comment text can name anything; only executable lines are evidence. */
-const stripComments = (s: string): string =>
-  s.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
 
 /** Where the probe's program and targets are built, read from the renderer rather than assumed. */
 type BuildSite = 'init' | 'begin-frame' | 'nowhere';
@@ -423,10 +507,13 @@ describe('the boot order the flag has to survive', () => {
 // ── 6. Every skip has a name ──────────────────────────────────────────────────────────────────
 
 describe('the skip counters', () => {
-  it('split into four branches, each incrementing its own counter', () => {
+  it('split into five branches, each incrementing its own counter', () => {
     const probe = member(RENDERER, '_restartProbe');
     expect(probe).toContain('this._restartStats.NoShader++;');
     expect(probe).toContain('this._restartStats.NoTarget++;');
+    // The fifth: the scene arm had no blur level 0 to end on, which says the INSERTION POINT is
+    // wrong rather than the instrument, and is a different diagnosis from every other skip.
+    expect(probe).toContain('this._restartStats.NoLevel0++;');
     expect(probe).toContain('this._restartStats.NotScene++;');
     // The fourth is upstream of the probe: a point taken on an instance neither flag reached.
     const point = member(RENDERER, 'DiagRestartPoint');
@@ -437,9 +524,15 @@ describe('the skip counters', () => {
 
   it('are printed on the gate line whatever their value, zeros included', () => {
     const gate = member(RENDERER, '_restartGate');
-    for (const name of ['skippedUnarmed', 'skippedNoShader', 'skippedNoTarget', 'skippedNotScene']) {
+    for (const name of ['skippedUnarmed', 'skippedNoShader', 'skippedNoTarget', 'skippedNoLevel0',
+      'skippedNotScene', 'shortfall', 'probeDraws=', 'drawsPerRestart=']) {
       expect(gate).toContain(name);
     }
+    // `drawsPerRestart` ADDS the two arms rather than picking one, so a cell that armed both
+    // reports 3 and not 2. The gate's own arithmetic is the module's, not a second copy.
+    expect(gate).toContain('const probeDraws = ProbeDraws(s.Scene, s.Small);');
+    expect(gate).toContain('(this.DiagSceneRestarts !== null ? SCENE_PROBE_DRAWS : 0)');
+    expect(gate).toContain('(this.DiagSmallRestarts !== null ? SMALL_PROBE_DRAWS : 0)');
     // The target that was bound instead is named, because "which target" IS the diagnosis.
     expect(gate).toContain('notSceneKeys=');
   });
@@ -452,9 +545,240 @@ describe('the skip counters', () => {
 
   it('reset at the top of the frame they report', () => {
     const begin = member(RENDERER, 'BeginFrame');
-    for (const f of ['Scene', 'Small', 'Unarmed', 'NoShader', 'NoTarget', 'NotScene']) {
+    for (const f of ['Scene', 'Small', 'Shortfall', 'Unarmed', 'NoShader', 'NoTarget', 'NoLevel0', 'NotScene']) {
       expect(begin).toContain(`this._restartStats.${f} = 0;`);
     }
     expect(begin).toContain('this._restartNotSceneKeys = {};');
+  });
+});
+
+
+// ── 7. THE LEDGER, DERIVED ON THE LEDGER'S OWN CODE ───────────────────────────────────────────
+
+/**
+ * What each arm's counters MUST read, worked out by running a glass-grid frame through the real
+ * `SceneReadLedger` rather than predicting it.
+ *
+ * This is the section the third lane exists for. The M4's scene arm printed `switches=100
+ * restarts=60 endsByKey=blur:40,restart-probe:40,shadow-state:20` against a spec of 80 / 40 /
+ * `{blur:40, restart-probe:40}`, and nobody could say from the trace which of the probe's three
+ * draws bought the extra twenty ends. The ledger is pure and importable, so the walk can be run
+ * here in all three shapes - baseline, the old probe, the new one - and the shapes compared. The
+ * OLD shape reproduces the M4's cell to the number, which is what makes the new shape's 80 / 40 /
+ * 60 a derivation and not a hope.
+ *
+ * The walk per card is `Scene.ReadAfterWrite.test.ts`'s, which is itself checked against the
+ * measured baseline (40 switches, 40 restarts, 60 reads): the fill build reads the scene and binds
+ * `blur`; the adaptive shadow reads it again and binds its own 1x1 `shadow-state`; the glass
+ * instance and the text batch draw; the rim build reads and binds `blur`; the rim instance draws.
+ */
+
+const CARDS = 20;
+
+type ProbeShape = 'none' | 'old' | 'new' | 'small';
+
+/** One glass-grid frame. `shape` is which probe runs at the two insertion points, and `fillAfter`
+ *  is whether the FILL build's point is taken after the adaptive-shadow measure (the shipped
+ *  placement) or before it (the second lane's). */
+const glassGridFrame = (
+  shape: ProbeShape, fillAfterShadow: boolean, opts: { Drain: boolean } = { Drain: true },
+): SceneReadLedger => {
+  const l = new SceneReadLedger();
+  l.BeginFrame();
+  // The probe, exactly as `_restartProbe` issues it.
+  const probe = (): void => {
+    if (shape === 'none') return;
+    if (shape === 'small') { l.NoteTargetBind('restart-probe'); return; }   // (b) alone
+    l.NoteWrite();                                                          // (a) into the scene
+    l.NoteTargetBind('restart-probe');                                      // (b) the END
+    if (shape === 'old') l.NoteWrite();                                     // (c), the one removed
+  };
+  for (let band = 0; band < 6; band++) l.NoteWrite();  // the bed
+  for (let card = 0; card < CARDS; card++) {
+    l.NoteRead(); l.NoteTargetBind('blur');            // the FILL build
+    if (!fillAfterShadow) probe();
+    l.NoteRead(); l.NoteTargetBind('shadow-state');    // the adaptive-shadow measure
+    if (fillAfterShadow) probe();
+    l.NoteWrite();                                     // the glass instance
+    l.NoteWrite();                                     // label + sub, one text batch
+    l.NoteRead(); l.NoteTargetBind('blur');            // the RIM build
+    probe();                                           // the rim point, on the rebind either way
+    l.NoteWrite();                                     // the rim instance
+  }
+  if (opts.Drain) l.NoteFrameEndDrain();
+  return l;
+};
+
+const shapeOf = (l: SceneReadLedger): Record<string, number> => ({ ...l.EndsByKey });
+
+describe('what the fixed instrument reads, on the ledger itself', () => {
+  it('baseline is 40 switches, 40 restarts, 60 reads, {blur: 40} - the measured cell', () => {
+    const l = glassGridFrame('none', true);
+    expect(l.Switches).toBe(40);
+    expect(l.Restarts).toBe(40);
+    expect(l.Reads).toBe(60);
+    expect(shapeOf(l)).toEqual({ blur: 40 });
+  });
+
+  it('?scene-restarts=40: switches 80, restarts 40, reads 60, {blur:40, restart-probe:40}', () => {
+    // THE SPEC, and every number in it comes out of the ledger rather than out of the brief.
+    const l = glassGridFrame('new', true);
+    expect(l.Switches).toBe(80);
+    expect(l.Restarts).toBe(40);
+    expect(l.Reads).toBe(60);
+    expect(shapeOf(l)).toEqual({ blur: 40, 'restart-probe': 40 });
+    // `shadow-state` ABSENT, exactly as at baseline: the probe no longer re-dirties the scene in
+    // front of the measure, so its 1x1 bind rides the build's end for free again.
+    expect(shapeOf(l)['shadow-state']).toBeUndefined();
+  });
+
+  it('?small-restarts=40: switches 40, restarts 40, reads 60, {blur: 40} and NO new key', () => {
+    // The small arm's row is its own proof. Its probe runs where the scene encoder has already
+    // ended, so its bind books no switch, and a `small` cell showing `restart-probe` is void.
+    const l = glassGridFrame('small', true);
+    expect(l.Switches).toBe(40);
+    expect(l.Restarts).toBe(40);
+    expect(l.Reads).toBe(60);
+    expect(shapeOf(l)).toEqual({ blur: 40 });
+  });
+
+  it('IS NOT VACUOUS: the old three-draw probe reproduces the M4 cell, 100 / 60 / shadow-state:20', () => {
+    // Perf/README.md, "H4 REFUTED ON A LIVE FLAG": `switches 100 (spec 80), restarts 60 (spec 40),
+    // plus an unpredicted shadow-state:20`. Both deviations fall out of one draw - (c) - landing
+    // in front of a measure that was riding a build's end for free.
+    const l = glassGridFrame('old', false);
+    expect(l.Switches).toBe(100);
+    expect(l.Restarts).toBe(60);
+    expect(l.Reads).toBe(60);
+    expect(shapeOf(l)).toEqual({ blur: 40, 'restart-probe': 40, 'shadow-state': 20 });
+  });
+
+  it('separates the two causes: (c) buys the extra ends, the PLACEMENT alone buys nothing', () => {
+    // Dropping (c) but leaving the point before the measure fixes the switch column and not the
+    // restart column: the scene is clean at the bind (no shadow-state end) but `_written` is still
+    // set by (a), so the measure's READ is still a restart. Both changes are needed and this says
+    // which does which.
+    const cDroppedOnly = glassGridFrame('new', false);
+    expect(shapeOf(cDroppedOnly)).toEqual({ blur: 40, 'restart-probe': 40 });
+    expect(cDroppedOnly.Switches).toBe(80);
+    expect(cDroppedOnly.Restarts).toBe(60);   // <- still wrong, and only the placement fixes it
+    expect(glassGridFrame('new', true).Restarts).toBe(40);
+  });
+
+  it('holds at N=80 - two probes a point, the second point on the line through the origin', () => {
+    // At `=80` a point emits two restarts, so the walk takes each probe twice in a row. The scene
+    // arm's two level-0 draws are separated by its own scene draw, so neither fuses and both book.
+    const l = new SceneReadLedger();
+    l.BeginFrame();
+    const probe2 = (): void => {
+      for (let k = 0; k < 2; k++) { l.NoteWrite(); l.NoteTargetBind('restart-probe'); }
+    };
+    for (let band = 0; band < 6; band++) l.NoteWrite();
+    for (let card = 0; card < CARDS; card++) {
+      l.NoteRead(); l.NoteTargetBind('blur');
+      l.NoteRead(); l.NoteTargetBind('shadow-state');
+      probe2();
+      l.NoteWrite(); l.NoteWrite();
+      l.NoteRead(); l.NoteTargetBind('blur');
+      probe2();
+      l.NoteWrite();
+    }
+    l.NoteFrameEndDrain();
+    expect(l.Switches).toBe(120);
+    expect(l.Restarts).toBe(40);
+    expect(l.Reads).toBe(60);
+    expect(shapeOf(l)).toEqual({ blur: 40, 'restart-probe': 80 });
+  });
+
+  it('the frame-end balance is what booked `restart-probe:1` on the small arm - and it is gone', () => {
+    // The M4 saw one small-arm frame at `switches=41 endsByKey=blur:40,restart-probe:1`. Reproduce
+    // it: on frame ONE the spread knows no point count, so every point emits nothing and the whole
+    // balance of forty fires at the end of the walk - where the rim instance has just drawn into
+    // the scene. The FIRST of the forty binds ends that live encoder and the other thirty-nine are
+    // free, which is why the count is 1 and not 40. It fires BEFORE `NoteFrameEndDrain`, because
+    // `DiagRestartFrameEnd` is called before `PresentScene`.
+    const l = glassGridFrame('none', true, { Drain: false });
+    for (let k = 0; k < 40; k++) l.NoteTargetBind('restart-probe');   // the balance, at a dirty scene
+    l.NoteFrameEndDrain();
+    expect(l.Switches).toBe(41);
+    expect(shapeOf(l)).toEqual({ blur: 40, 'restart-probe': 1 });
+    // The shipped frame end emits nothing, so this sequence cannot occur.
+    expect(member(RENDERER, 'DiagRestartFrameEnd')).not.toContain('_emitRestarts');
+  });
+});
+
+// ── 8. THE DENOMINATOR: draws per FRAME are not draws per TICK ────────────────────────────────
+
+/**
+ * Every restarts arm the M4 read came back at EXACTLY half its specified draws per tick:
+ *
+ *     scene=40  +60 vs +120      small=40  +20 vs +40
+ *     scene=80 +120 vs +240      small=80  +40 vs +80
+ *
+ * while the gate said `emitted=40 points=40 probes=40` and the ledger said `restart-probe:40`.
+ * Forty probes cannot issue twenty probes' worth of draws, so the disagreement is in the UNIT. The
+ * harness reports `drawCalls / engineTicks`, an engine tick is a rAF callback counted in the render
+ * worker (`Tools/PerfHarness/instrument.mjs` patches `requestAnimationFrame` and counts every
+ * callback), and the engine's frame loop is not the only rAF loop in that worker:
+ * `Animation/Animation.Manager.ts` keeps a SCHEDULE-ONLY loop armed while any animatable is
+ * unsettled, and it draws nothing. Two callbacks a rendered frame is the reading that fits all four
+ * cells at once, and the cardcomposite cell's own raw numbers agree: a -1,696 `drawCalls` delta
+ * over a 6,000 ms window at 66.75 -> 71.49 ms a frame needs ticks = 1.88 x frames.
+ *
+ * Nothing in this lane can change the harness's denominator. What it can do is stop the two
+ * instruments disagreeing in silence: the engine now states its own frame count, its own probe-draw
+ * count and - when the harness's counter is in this worker to read - the tick count beside them.
+ */
+
+describe('the census line states the denominator instead of leaving it to be inferred', () => {
+  it('prints frames, probe draws and both per-unit ratios, with the harness ticks when present', () => {
+    const census = member(RENDERER, '_restartCensus');
+    for (const field of ['frames=', 'probeDraws=', 'probeDrawsPerFrame=', 'ticks=', 'ticksPerFrame=',
+      'probeDrawsPerTick=']) {
+      expect(census, `census field ${field}`).toContain(field);
+    }
+    // The harness counter is READ, never written, and never required.
+    expect(census).toContain('__perfWorker');
+    expect(census).toContain("ticks = null");
+    expect(census).toContain("'n/a'");
+    expect(census).not.toContain('__perfWorker.Raf =');
+  });
+
+  it('the frame and draw counters advance once a frame, off the frame end', () => {
+    const end = member(RENDERER, 'DiagRestartFrameEnd');
+    expect(end).toContain('this._restartFrames++;');
+    expect(end).toContain('this._restartProbeDraws += ProbeDraws(this._restartStats.Scene, this._restartStats.Small);');
+  });
+
+  it('the ratios are the arithmetic the M4 reads, and a zero denominator is not a zero', () => {
+    // 40 points x 2 draws = 80 a frame. Over 240 frames that is 19,200 probe draws; at two ticks a
+    // frame the harness divides them by 480 and sees 40 per tick - exactly the half the second
+    // lane's cells came back at, stated now on the engine's own line instead of inferred from it.
+    const FRAMES = 240;
+    const perFrame = ProbeDraws(40, 0);
+    expect(perFrame).toBe(80);
+    expect(Per(perFrame * FRAMES, FRAMES)).toBe(80);         // probeDrawsPerFrame
+    expect(Per(FRAMES * 2, FRAMES)).toBe(2);                  // ticksPerFrame
+    expect(Per(perFrame * FRAMES, FRAMES * 2)).toBe(40);      // probeDrawsPerTick - the M4's +40
+    expect(Per(1, 3)).toBe(0.33);
+    expect(Per(5, 0)).toBeNull();
+  });
+
+  it('the harness really does count every rAF callback in the worker, not the engine\'s frames', () => {
+    // The claim above is about a file this lane does not own, so it is read rather than asserted
+    // from memory: the patch counts on the callback, and the counter is the one the run subtracts
+    // into `engineTicks`.
+    const instrument = readFileSync(join(HERE, '..', '..', '..', '..', 'ShowStudio.App', 'Tools',
+      'PerfHarness', 'instrument.mjs'), 'utf8').replace(/\r\n/g, '\n');
+    expect(instrument).toContain('self.requestAnimationFrame = function (cb) {');
+    expect(instrument).toContain('c.Raf++;');
+    const run = readFileSync(join(HERE, '..', '..', '..', '..', 'ShowStudio.App', 'Tools',
+      'PerfHarness', 'run.mjs'), 'utf8').replace(/\r\n/g, '\n');
+    expect(run).toContain('EngineTicks: after.Worker.Raf - before.Worker.Raf,');
+    // And the second rAF armer: a loop that re-arms every frame and draws nothing.
+    const anim = src('Animation', 'Animation.Manager.ts');
+    expect(anim).toContain('private _tick = (): void => {');
+    const tick = anim.slice(anim.indexOf('private _tick = (): void => {'));
+    expect(tick.slice(0, tick.indexOf('\n  };'))).toContain('requestAnimationFrame(this._tick);');
   });
 });

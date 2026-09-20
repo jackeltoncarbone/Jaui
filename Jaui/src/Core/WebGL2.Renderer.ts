@@ -17,7 +17,7 @@ import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
 import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 import { SceneReadLedger } from './Scene.Ledger';
-import { RestartSpread, PROBE_SRC_ALPHA } from './Restart.Diag';
+import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
@@ -922,9 +922,11 @@ export class WebGL2Renderer implements Renderer {
     this._smallRestartSpread.BeginFrame();
     this._restartStats.Scene = 0;
     this._restartStats.Small = 0;
+    this._restartStats.Shortfall = 0;
     this._restartStats.Unarmed = 0;
     this._restartStats.NoShader = 0;
     this._restartStats.NoTarget = 0;
+    this._restartStats.NoLevel0 = 0;
     this._restartStats.NotScene = 0;
     this._restartNotSceneKeys = {};
     this._snapOnceTaken = false;
@@ -1737,40 +1739,77 @@ export class WebGL2Renderer implements Renderer {
   // pool, or a single uniform. `?blur-first` reordered and the frame moved 6 ms; that is exactly
   // the confound these two are built to avoid.
   //
-  //   `?scene-restarts=N` issues THREE 1-px transparent draws per point:
-  //       (a) into the SCENE, which starts the encoder that the panel draw below would have started
-  //           anyway — no extra load, it only moves the start a few microseconds earlier;
-  //       (b) into the 1x1 probe target, which ENDS that encoder: a 16 MB store;
-  //       (c) back into the SCENE, which starts a second one: a 16 MB load.
-  //     Net per point: +1 scene store, +1 scene load, +1 trivial encoder. (a) is not optional —
-  //     without a live scene encoder to end, (b) and (c) degenerate into exactly `?small-restarts`.
+  //   `?scene-restarts=N` issues TWO 1-px transparent draws per point:
+  //       (a) into the SCENE, which OPENS the scene's encoder -- its tiles load, exactly as they
+  //           load for the panel draw further down the walk;
+  //       (b) into the BLUR PASS'S OWN LEVEL-0 FRAMEBUFFER -- the target a build's final upsample
+  //           hop draws into -- which ENDS that encoder (its tiles store) and opens the same
+  //           encoder a build's last hop opens. Then `RebindSceneTarget()`, the call the build
+  //           itself makes, and the walk carries on at a CLEAN scene.
+  //     Net per point: one scene load, one scene store, one blur level-0 encoder. That is a real
+  //     build's end and not an imitation of one, which is the whole of lane restarts3: the second
+  //     lane's probe detoured through a 1x1 target and its number (+8.5 ms at an effective 40)
+  //     could not be reconciled with `?blur-phased` REMOVING 38 real ends for +0.28.
   //
-  //   `?small-restarts=N` issues ONE: the probe draw alone, at a point where the scene encoder has
-  //     already ended. It adds the trivial encoder and NOTHING else: the scene's next load happens
-  //     at the panel draw, where it happened at baseline. This is the fixed bubble by itself.
+  //     THERE IS NO THIRD DRAW, and its removal is the other half of the fix. The old (c) drew back
+  //     into the scene to "restart" it, which left the scene DIRTY at the instant the walk reaches
+  //     `MeasureShadowBackdrop` -- whose 1x1 bind rides the build's end for free at baseline. Each
+  //     point therefore bought a SECOND, unspecified encoder end and a second restart: the M4's
+  //     `switches=100 restarts=60 shadow-state:20` against a spec of 80 / 40 / none. The load (c)
+  //     used to pay is still paid, by the walk's own next scene draw, where baseline pays it.
   //
-  // So at the same N, (scene - small) is the 16 MB target's tile load+store and `small` is the
-  // per-encoder bubble. H5 predicts ~0.3 ms and ~13 us respectively; "count does not matter"
-  // predicts both are 0.
+  //   `?small-restarts=N` issues ONE: a draw into a dedicated 1x1 target, at a point where the
+  //     scene encoder has already ended. It adds the trivial encoder and NOTHING else: the scene's
+  //     next load happens at the panel draw, where it happened at baseline. The fixed bubble alone.
   //
-  // DRAWS PER TICK, exactly: `+3N` under `?scene-restarts=N`, `+N` under `?small-restarts=N`,
-  // `+4N` under both. Nothing else in the frame moves, so the M4 can gate on that arithmetic.
+  // So at the same N, (scene - small) is the scene target's tile load+store PLUS the difference
+  // between a level-0 encoder and a 1x1 one; `small` is the bubble by itself. H5 predicts ~0.3 ms
+  // and ~13 us respectively; "count does not matter" predicts both are 0.
+  //
+  // DRAWS PER ENGINE FRAME, exactly: `+2N` under `?scene-restarts=N`, `+N` under
+  // `?small-restarts=N`, `+3N` under both. PER ENGINE FRAME, not per engine TICK -- the harness
+  // divides `drawCalls` by the render worker's rAF callbacks, and a worker runs more than one rAF
+  // loop. The census line below prints the engine's own frame count and, when the harness's counter
+  // is there to read, the tick count beside it, so the two instruments cannot disagree in silence.
   //
   // No `pixels=WRONG` on either. Every probe draw writes alpha 0 through
   // `blendFunc(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`, which is `dst' = dst` on every channel of every
-  // format including RGB10_A2's 2-bit alpha — so the two-arm `glassshot` diff must read exactly 0
-  // differing pixels, and a diff that does not is this lane voiding itself rather than a finding.
+  // format, so the two-arm `glassshot` diff must read exactly 0 differing pixels and a diff that
+  // does not is this lane voiding itself rather than a finding. Moving the detour onto the blur
+  // level did not widen that claim by one code: `Framebuffer`'s `highPrecision` attachment is
+  // RGB10_A2, the scene's own format and the 1x1 probe target's, and `Scene.Restarts.test.ts`
+  // already walks all 1024 10-bit and 4 2-bit destination codes through the arithmetic. The blur
+  // writes alpha 1.0 into level 0 and a source alpha of 0 leaves it at 1.0. The two arms' detour
+  // targets now differ in SIZE alone.
   DiagSceneRestarts: number | null = null;
   DiagSmallRestarts: number | null = null;
   private _sceneRestartSpread = new RestartSpread();
   private _smallRestartSpread = new RestartSpread();
   private _restartProbeShader: ShaderProgram | null = null;
-  /** TWO 1x1 RGB10_A2 targets, alternated per probe. One would not do: two consecutive probe draws
-   *  into the SAME framebuffer with no other target drawn between them are one encoder, not two, so
-   *  a single target would silently under-count at N above the point count (`=80` on forty builds
-   *  is two probes per point). Alternating guarantees every probe draw is its own encoder. */
+  /** THE SMALL ARM'S targets: two 1x1 RGB10_A2 framebuffers, alternated per probe. One would not
+   *  do: two consecutive probe draws into the SAME framebuffer with no other target drawn between
+   *  them are one encoder, not two, so a single target would silently under-count at N above the
+   *  point count (`=80` on forty builds is two probes per point). Alternating guarantees every
+   *  probe draw is its own encoder.
+   *
+   *  The SCENE arm does not use them at all any more and they are not allocated for it: its detour
+   *  lands in the blur pass's own level-0 framebuffer, because the thing it has to be equivalent to
+   *  is a real build's end and a build ends on that target. Its two draws straddle a scene draw, so
+   *  consecutive scene-arm probes cannot fuse either and it needs no alternation of its own. */
   private _restartProbeFbos: (WebGLFramebuffer | null)[] = [null, null];
   private _restartProbeSlot = 0;
+  /** Engine frames since the probe was built, and the probe draws they issued. THE DENOMINATOR
+   *  COLUMN. The harness reports `drawCalls / engineTicks`, and an engine tick is a rAF callback in
+   *  the render worker -- which is not the same number as a rendered frame, because more than one
+   *  rAF loop runs there (the schedule-only loop `Animation.Manager` keeps armed while any spring
+   *  is unsettled arms one a frame and draws nothing). Every restarts arm the M4 read came back at
+   *  EXACTLY half its specified draws per tick on all four cells at once, which is what a doubled
+   *  denominator looks like and what a broken emitter does not. So the engine states its own frame
+   *  count, its own probe-draw count and the ratio between them, and -- when the harness's counter
+   *  is present in this worker -- the tick count beside them. */
+  private _restartFrames = 0;
+  private _restartProbeDraws = 0;
+  private _restartCensusLine = '';
   /** Probe encoders added this frame, by arm. The SMALL arm's encoders cannot appear in
    *  `SceneEndsByKey`, and the omission is the point: that column is a breakdown of `SceneSwitches`,
    *  which counts SCENE-encoder ends, and the small arm's whole claim is that it adds none. Putting
@@ -1789,10 +1828,13 @@ export class WebGL2Renderer implements Renderer {
    *  `NoShader` — the flag is set but the probe program does not exist. THE BUG THIS LANE FIXED: on
    *               the worker path `Init` ran before `_initDebugFromUrl`, so the Init-time compile
    *               saw two nulls and built nothing.
-   *  `NoTarget` — the program exists but a 1x1 target does not, i.e. the build half-failed.
+   *  `NoTarget` — the SMALL arm's program exists but a 1x1 target does not: a failed allocation.
+   *  `NoLevel0` — the SCENE arm had no blur level 0 to end on, i.e. the point was taken somewhere a
+   *               pyramid had not built. Its own name because it is the one skip that says the
+   *               INSERTION POINT is wrong rather than the instrument.
    *  `NotScene` — `_boundTarget` was not the scene at the insertion point, broken down by the key
    *               that was bound instead, because "which target" is the whole of the diagnosis. */
-  private _restartStats = { Scene: 0, Small: 0, Unarmed: 0, NoShader: 0, NoTarget: 0, NotScene: 0 };
+  private _restartStats = { Scene: 0, Small: 0, Shortfall: 0, Unarmed: 0, NoShader: 0, NoTarget: 0, NoLevel0: 0, NotScene: 0 };
   private _restartNotSceneKeys: Record<string, number> = {};
   private _restartLine = '';
 
@@ -1820,7 +1862,11 @@ export class WebGL2Renderer implements Renderer {
     // One-off compile rather than the boot batch: the batch is issued and collected inside `Init`,
     // which by then is over. `ShaderCompiler.Compile` is that same batch with one job in it.
     this._restartProbeShader = ShaderCompiler.Compile(gl, BLIT_VERT, RESTART_PROBE_FRAG);
-    this._initRestartProbeTargets(gl);
+    // Only the small arm needs a target of its own. The scene arm ends on the blur pass's level 0,
+    // so allocating a 1x1 pair for it would be two textures nothing ever binds.
+    if (this.DiagSmallRestarts !== null) this._initRestartProbeTargets(gl);
+    this._restartFrames = 0;
+    this._restartProbeDraws = 0;
     // The mark says the instrument exists ON THE INSTANCE THAT DRAWS, which is more than the old
     // Init-time line said: this one cannot print unless a real program and two real targets were
     // built by the renderer whose `BeginFrame` just ran. No `pixels=WRONG` — every probe draw is
@@ -1876,18 +1922,33 @@ export class WebGL2Renderer implements Renderer {
     if (scene !== null) this._emitRestarts(this._sceneRestartSpread.At(scene), true);
   };
 
-  /** Whatever the frame still owes, paid at the end of the walk. Zero on a steady scene from frame
-   *  two onwards; on frame one, and on a frame whose build count fell, this is the whole balance.
-   *  The count is what H5 is priced on, so paying it late is right and dropping it is not. */
+  /** The end of the walk. It EMITS NOTHING, and that is lane restarts3's fix.
+   *
+   *  It used to pay the frame's balance here -- just before `PresentScene`, where the walk has been
+   *  drawing into the scene all frame. So the balance probe's bind ended a LIVE scene encoder and
+   *  booked a switch under `restart-probe` at an instant that is not an insertion point: the M4's
+   *  one-frame `switches=41 endsByKey=blur:40,restart-probe:1` on a SMALL arm, which is that arm's
+   *  own void condition arriving from inside the instrument. Frame one is where it fired, because
+   *  the point count is not known until a frame has ended and frame one therefore owes all of N.
+   *
+   *  What it does instead: rolls the spread's denominator, adds the shortfall to the gate line, and
+   *  counts the frame and its probe draws for the census. A steady frame owes zero; a frame whose
+   *  build count fell owes the difference and now SAYS so under `shortfall` instead of paying it
+   *  somewhere the ledger has to wear. */
   DiagRestartFrameEnd = (): void => {
     const small = this.DiagSmallRestarts;
-    if (small !== null) this._emitRestarts(this._smallRestartSpread.FrameEnd(small), false);
+    if (small !== null) this._restartStats.Shortfall += this._smallRestartSpread.FrameEnd(small);
     const scene = this.DiagSceneRestarts;
-    if (scene !== null) this._emitRestarts(this._sceneRestartSpread.FrameEnd(scene), true);
+    if (scene !== null) this._restartStats.Shortfall += this._sceneRestartSpread.FrameEnd(scene);
+    if (scene !== null || small !== null) {
+      this._restartFrames++;
+      this._restartProbeDraws += ProbeDraws(this._restartStats.Scene, this._restartStats.Small);
+    }
     // `Unarmed` opens the gate too: a renderer the flags never reached would otherwise take forty
     // points and print nothing at all, which is the silence this lane was sent to end.
     const armed = small !== null || scene !== null;
     if ((armed || this._restartStats.Unarmed > 0) && JauiTracing()) this._restartGate();
+    if (armed && JauiTracing()) this._restartCensus();
   };
 
   private _emitRestarts = (count: number, intoScene: boolean): void => {
@@ -1896,13 +1957,13 @@ export class WebGL2Renderer implements Renderer {
 
   private _restartProbe = (intoScene: boolean): void => {
     const gl = this._gl;
-    // THREE SKIPS, THREE NAMES, ONE PER LINE. They are not interchangeable: `NoShader` is a boot
-    // ORDER fault (the flag arrived after the build), `NoTarget` is a failed allocation, and
-    // `NotScene` is the walk standing somewhere the probe must not draw. The first run of this
-    // lane reported all of them as one `skipped=40` and could not tell them apart.
+    // FIVE SKIPS, FIVE NAMES, ONE PER LINE. They are not interchangeable: `NoShader` is a boot
+    // ORDER fault (the flag arrived after the build), `NoTarget` is a failed 1x1 allocation,
+    // `NoLevel0` is the scene arm standing where no pyramid has built, and `NotScene` is the walk
+    // standing somewhere the probe must not draw. The first run of this lane reported all of them
+    // as one `skipped=40` and could not tell them apart.
     const shader = this._restartProbeShader;
     if (shader === null) { this._restartStats.NoShader++; return; }
-    if (this._restartProbeFbos[0] === null || this._restartProbeFbos[1] === null) { this._restartStats.NoTarget++; return; }
     // A card composite would put these draws in the CARD target, where `_noteSceneDraw` marks the
     // card dirty and changes which source a later backdrop read takes -- which is a pixel change,
     // not an encoder count. The flag refuses `?cardcomposite` at parse time; this is the same
@@ -1914,6 +1975,17 @@ export class WebGL2Renderer implements Renderer {
       this._restartNotSceneKeys[k] = (this._restartNotSceneKeys[k] ?? 0) + 1;
       return;
     }
+    // THE TARGET THE DETOUR LANDS ON, and the whole of what lane restarts3 changed. The scene arm
+    // takes the blur pass's own level 0 -- the framebuffer the build's last upsample hop drew into
+    // moments ago, and therefore the one a build ENDS the scene on. `_lastBlur` is the pass that
+    // did that build; nothing runs between it and this call. The small arm keeps its 1x1 pair,
+    // because its claim is about a BUBBLE and the smallest target a colour attachment can have is
+    // the one that carries least else under it.
+    const level0 = intoScene ? (this._lastBlur?.DiagLevel0 ?? null) : null;
+    if (intoScene && level0 === null) { this._restartStats.NoLevel0++; return; }
+    if (!intoScene && (this._restartProbeFbos[0] === null || this._restartProbeFbos[1] === null)) {
+      this._restartStats.NoTarget++; return;
+    }
     // The scissor is the walk's, set for whatever surface it is mid-way through, and a probe draw
     // it happens to exclude would be culled -- no encoder, no restart, and a reading of the
     // baseline under the flag's name. Drop it for the probe and put it back, the same idiom the
@@ -1922,44 +1994,89 @@ export class WebGL2Renderer implements Renderer {
     const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
     if (scissorOn) gl.disable(gl.SCISSOR_TEST);
     // Set BOTH halves of the blend, because the pixel claim depends on both: `FUNC_ADD` with
-    // (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) and a source alpha of 0 is `dst' = dst`; a MIN or MAX
-    // equation would not be. Nothing in this engine sets any other equation -- the state reset in
-    // `Jaui.ts` restores FUNC_ADD and no other call site exists -- so this is insurance, not a
-    // restore, and the closing `RebindSceneTarget` puts the func back where the call site had it.
+    // (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) and a source alpha of 0 leaves the destination alone; a MIN
+    // or MAX equation would not. It matters MORE now than it did: `ComputeBlur` disables blending
+    // on its own path and never turns it back on, so a level-0 draw that inherited that state
+    // would OVERWRITE the pyramid the card is about to sample. The closing `RebindSceneTarget`
+    // puts the func back where the call site had it.
     gl.enable(gl.BLEND);
     gl.blendEquation(gl.FUNC_ADD);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     this._useProgram(shader.Program);
     gl.bindVertexArray(this._quad.Vao);
-    // (a) Start the scene's encoder, so that (b) has one to END. The panel draw below this point in
-    //     the walk would have started the same encoder and paid the same load; this only moves the
-    //     start earlier, which is why the scene arm adds ONE load and one store per point and not two.
+    // (a) OPEN the scene's encoder, so that (b) has a real one to END. The panel draw below this
+    //     point in the walk would have opened the same encoder and paid the same load; this only
+    //     moves the open earlier, which is why the scene arm adds ONE load and one store per point.
     if (intoScene) {
       gl.viewport(0, 0, 1, 1);
       this._noteSceneDraw();
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
     }
-    // (b) The END. A draw into another target is what ends a Metal render encoder -- not a read,
-    //     and not a bare bind. Alternate the two probe targets so consecutive probes cannot fuse.
-    const slot = this._restartProbeSlot;
-    this._restartProbeSlot = slot ^ 1;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this._restartProbeFbos[slot]);
+    // (b) THE END. A draw into another target is what ends a Metal render encoder -- not a read,
+    //     and not a bare bind. The scene arm ends on the blur pass's level 0 with a plain `Bind()`
+    //     and NO `invalidateFramebuffer`: the pass's own `_bindTarget` invalidates because it is
+    //     about to overwrite the level, and doing that here would throw away the pyramid the card
+    //     draw is about to sample. The small arm alternates its two 1x1 targets so consecutive
+    //     probes cannot fuse into one encoder; the scene arm needs no alternation of its own,
+    //     because a scene draw stands between any two of its level-0 draws.
+    if (level0 !== null) {
+      level0.Bind();
+    } else {
+      const slot = this._restartProbeSlot;
+      this._restartProbeSlot = slot ^ 1;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._restartProbeFbos[slot]);
+    }
     this._tgt(RESTART_PROBE_KEY);
     gl.viewport(0, 0, 1, 1);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
     // Back to the scene in EXACTLY the state every call site had: this is the call the build itself
     // makes, so the viewport, the target key and the blend func all land where the walk left them.
+    // And it is the LAST thing the probe does -- there is no draw after it. A draw here would leave
+    // the scene dirty for `MeasureShadowBackdrop`, whose 1x1 bind rides the build's end for free at
+    // baseline, and would buy a second encoder end and a second restart nobody specified.
     this.RebindSceneTarget();
-    // (c) The RESTART: the scene's encoder starts again and its tiles load.
-    if (intoScene) {
-      gl.viewport(0, 0, 1, 1);
-      this._noteSceneDraw();
-      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-      this.RebindSceneTarget();
-    }
     if (scissorOn) gl.enable(gl.SCISSOR_TEST);
     if (intoScene) this._restartStats.Scene++;
     else this._restartStats.Small++;
+  };
+
+  /** The DENOMINATOR line, every `CENSUS_EVERY` engine frames on a `?trace` load.
+   *
+   *  The M4 read every restarts arm at EXACTLY half its specified draws per tick -- all four cells
+   *  at once, `scene=40` at +60 against a spec of +120 and `small=80` at +40 against +80 -- while
+   *  the gate line said `emitted=40 points=40 probes=40` and the ledger said `restart-probe:40`.
+   *  Forty probes cannot issue twenty probes' worth of draws, so the disagreement is a DENOMINATOR:
+   *  the harness divides `drawCalls` by the render worker's rAF callbacks, and the engine's frame
+   *  loop is not the only rAF loop in that worker (`Animation.Manager` keeps a schedule-only one
+   *  armed while any animatable is unsettled, and glass-grid re-targets the bed's every frame). A
+   *  factor of two in that denominator fits all four cells exactly, and nothing else fits any.
+   *
+   *  So the engine states its own frame count and its own probe-draw count, and reads the harness's
+   *  rAF counter out of the worker global when it is there. `ticksPerFrame` is then a number rather
+   *  than an inference, and `probeDrawsPerTick` is exactly the delta the harness's draws-per-tick
+   *  column must show -- which is what stops the two instruments disagreeing in silence. Absent
+   *  harness, `ticks=n/a`: an absence and a zero are different statements. */
+  private _restartCensus = (): void => {
+    const CENSUS_FIRST = 20;
+    const CENSUS_EVERY = 120;
+    const f = this._restartFrames;
+    if (f !== CENSUS_FIRST && (f < CENSUS_FIRST || f % CENSUS_EVERY !== 0)) return;
+    // The harness patches `requestAnimationFrame` in this worker and counts every callback into
+    // `self.__perfWorker.Raf` (`Tools/PerfHarness/instrument.mjs`). Read, never written, and never
+    // required: on an un-instrumented load this is simply absent.
+    let ticks: number | null = null;
+    try {
+      const w = (self as unknown as { __perfWorker?: { Raf?: number } }).__perfWorker;
+      if (w !== undefined && typeof w.Raf === 'number') ticks = w.Raf;
+    } catch { ticks = null; }
+    const draws = this._restartProbeDraws;
+    const line = `jaui:restarts-census frames=${f} probeDraws=${draws}`
+      + ` probeDrawsPerFrame=${Per(draws, f) ?? 'n/a'}`
+      + ` ticks=${ticks ?? 'n/a'} ticksPerFrame=${ticks === null ? 'n/a' : Per(ticks, f) ?? 'n/a'}`
+      + ` probeDrawsPerTick=${ticks === null ? 'n/a' : Per(draws, ticks) ?? 'n/a'}`;
+    if (line === this._restartCensusLine) return;
+    this._restartCensusLine = line;
+    JTrace(line);
   };
 
   /** The flags' gate, on the trace channel, printed when the SHAPE changes rather than every frame.
@@ -1970,6 +2087,12 @@ export class WebGL2Renderer implements Renderer {
    *  `emitted`: equal is the whole gate, and `emitted=40 probes=0` is what the first run reported.
    *  `?small-restarts`'s encoders are reported HERE and not in `endsByKey`, for the reason on
    *  `_restartStats`.
+   *
+   *  `probeDraws` is the frame's OWN draw count for the probes, computed by the shared
+   *  `Restart.Diag.ProbeDraws` -- so the gate, the prediction and the test quote one number and a
+   *  probe count that disagreed with the draw budget would be visible on its own line. It is per
+   *  ENGINE FRAME; `jaui:restarts-census` carries the conversion to the harness's per-TICK unit,
+   *  which is where the M4's factor of two lives.
    *
    *  `switches` and `endsByKey` are also how the SMALL arm proves its own precondition, so no
    *  separate assertion is needed: its probe runs at an instant when the scene encoder has already
@@ -1996,12 +2119,24 @@ export class WebGL2Renderer implements Renderer {
     const s = this._restartStats;
     const notSceneKeys = Object.keys(this._restartNotSceneKeys).sort()
       .map((k) => `${k}:${this._restartNotSceneKeys[k]}`).join(',');
-    line += ` switches=${l.Switches} restarts=${l.Restarts} reads=${l.Reads}`
+    // THE DRAW COUNT, ON THE GATE. `probeDraws` is what the probes issued THIS FRAME, derived from
+    // the same `ProbeDraws` the test asserts and the prediction quotes, so the gate cannot report a
+    // probe count the draw budget disagrees with. It is per ENGINE FRAME; the census line carries
+    // the per-TICK conversion, which is the half the M4's four cells came back at.
+    const probeDraws = ProbeDraws(s.Scene, s.Small);
+    const perRestart = (this.DiagSceneRestarts !== null ? SCENE_PROBE_DRAWS : 0)
+      + (this.DiagSmallRestarts !== null ? SMALL_PROBE_DRAWS : 0);
+    line += ` probeDraws=${probeDraws} drawsPerRestart=${perRestart}`
+      + ` switches=${l.Switches} restarts=${l.Restarts} reads=${l.Reads}`
       + ` endsByKey=${Object.keys(l.EndsByKey).sort().map((k) => `${k}:${l.EndsByKey[k]}`).join(',')}`
-      // ALWAYS PRINTED, ZEROS INCLUDED. `skipped*=0` across the four is half of what makes a cell
+      // ALWAYS PRINTED, ZEROS INCLUDED. `skipped*=0` across the five is half of what makes a cell
       // readable, and the absence of a line is not the same statement as a zero on one.
+      // `shortfall` is the sixth and it is the small arm's old transient with a name: the frame
+      // wanted N and emitted fewer, and it now says so instead of paying the balance at a dirty
+      // scene and booking `restart-probe:1` where no insertion point stands.
+      + ` shortfall=${s.Shortfall}`
       + ` skippedUnarmed=${s.Unarmed} skippedNoShader=${s.NoShader}`
-      + ` skippedNoTarget=${s.NoTarget} skippedNotScene=${s.NotScene}`
+      + ` skippedNoTarget=${s.NoTarget} skippedNoLevel0=${s.NoLevel0} skippedNotScene=${s.NotScene}`
       + (notSceneKeys === '' ? '' : ` notSceneKeys=${notSceneKeys}`);
     if (line === this._restartLine) return;
     this._restartLine = line;

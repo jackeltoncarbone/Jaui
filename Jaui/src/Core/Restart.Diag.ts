@@ -25,6 +25,23 @@
  * work, not what is sampled. `?scene-restarts=N` adds N scene-encoder restarts (each one a 16 MB
  * store and a 16 MB load) plus N trivial encoders; `?small-restarts=N` adds the N trivial encoders
  * ALONE. At the same N, (scene - small) is the load/store term and `small` is the bubble term.
+ *
+ * WHAT THE THIRD LANE CHANGED, and why the second lane's numbers could not be quoted. The M4 read
+ * `scene-restarts=40` at +1.79 ms and `=80` at +8.52 while the phased flag REMOVED 38 real encoder
+ * ends for +0.28. Both cannot be a per-encoder price, and the probe was the odd one out: its
+ * restart was a 1x1 DETOUR, not a build's end. So the scene arm's detour now lands in the blur
+ * pass's OWN level-0 framebuffer - the target a build's last upsample hop draws into, and therefore
+ * the target a build ends the scene on - and the third draw is gone. TWO draws a point:
+ *
+ *     (a) one transparent draw into the SCENE, which OPENS the scene's encoder (its tiles load);
+ *     (b) one transparent draw into the blur pass's level 0, which ENDS it (its tiles store) and
+ *         opens exactly the encoder a build's final hop opens; then `RebindSceneTarget()`.
+ *
+ * There is no (c). The old (c) drew back into the scene and left it DIRTY, so the adaptive-shadow
+ * probe's 1x1 bind - which rides the build's end for free at baseline - ended a SECOND encoder
+ * nobody had specified and its scene read became a second restart. That is the whole of the M4's
+ * `switches=100 restarts=60 shadow-state:20`, and dropping (c) is the whole of the fix. The load
+ * (c) used to pay is still paid, by the walk's own next scene draw, exactly where baseline pays it.
  */
 
 /**
@@ -51,15 +68,41 @@ export const QuantiseToBits = (v: number, bits: number): number => {
  *  constant and the test's argument are the same number. */
 export const PROBE_SRC_ALPHA = 0;
 
+/** Draws one scene-arm restart issues: (a) into the scene, (b) into the blur pass's level 0.
+ *  There is no third. Shared with `Scene.Restarts.test.ts` and with the renderer's gate line so
+ *  the predicted draw count, the counted one and the asserted one are one number. */
+export const SCENE_PROBE_DRAWS = 2;
+/** Draws one small-arm restart issues: the 1x1 probe draw alone. */
+export const SMALL_PROBE_DRAWS = 1;
+
+/** The draws a frame's probes issued, from the two probe counts. The number the harness's
+ *  `drawCalls` delta has to equal PER ENGINE FRAME - which is not per engine TICK, and the gate
+ *  line prints both so the two instruments cannot disagree in silence. */
+export const ProbeDraws = (sceneProbes: number, smallProbes: number): number =>
+  sceneProbes * SCENE_PROBE_DRAWS + smallProbes * SMALL_PROBE_DRAWS;
+
+/** `a / b` to two decimals, or `null` when `b` is not a denominator. The census line's only
+ *  arithmetic, kept here so the ratio the M4 reads is the ratio this suite asserts. */
+export const Per = (a: number, b: number): number | null =>
+  b > 0 ? Math.round((a / b) * 100) / 100 : null;
+
 /**
  * How many extra restarts each insertion point owes, so a frame emits exactly `n` of them spread
  * evenly over however many points the frame turns out to have.
  *
  * The point count is not known until the frame is over, so the denominator is the PREVIOUS frame's
- * count and `FrameEnd` pays whatever the frame still owes. On a steady scene (glass-grid idle is
- * forty builds a frame, every frame) the remainder is zero from frame two onwards and every point
- * emits the same `n / 40`; on frame one, and on any frame whose point count fell, the whole balance
- * lands at the frame's end. Either way the COUNT — the only thing H5 is priced on — is exactly `n`.
+ * count. On a steady scene (glass-grid idle is forty builds a frame, every frame) every point emits
+ * the same `n / 40` from frame two onwards and the frame ends owing nothing.
+ *
+ * `FrameEnd` DOES NOT EMIT, and that is lane restarts3's fix rather than an omission. It used to pay
+ * the balance just before `PresentScene`, where the walk has been drawing into the scene all frame -
+ * so the balance probe's bind ENDED a live scene encoder and booked a switch under `restart-probe`
+ * at an instant that is not an insertion point. That is the M4's one-frame
+ * `switches=41 endsByKey=blur:40,restart-probe:1`, the small arm's own void condition, arriving
+ * from inside the instrument. Now `FrameEnd` only rolls the denominator and RETURNS the shortfall,
+ * which the gate prints: frame one owes its whole `n` (the point count was not known yet) and every
+ * steady frame owes zero, so a non-zero `shortfall` on a steady frame is a fault with a name
+ * instead of a second shape in the ledger.
  *
  * `n` above the point count is not an error and does not need more points: a point emits as many
  * restarts as it owes. `?scene-restarts=80` on forty builds is two per build, which is the second
@@ -91,13 +134,13 @@ export class RestartSpread {
     return owed;
   };
 
-  /** The frame is over: how many restarts it still owes. Rolls the denominator forward. */
+  /** The frame is over. Rolls the denominator forward and returns the SHORTFALL - what the frame
+   *  wanted and did not emit - for the gate to print. Emits nothing; see the class comment. */
   FrameEnd = (n: number): number => {
-    const owed = Math.max(0, n - this._emitted);
+    const short = Math.max(0, n - this._emitted);
     this._lastPoints = this._points;
     this._points = 0;
-    this._emitted += owed;
-    return owed;
+    return short;
   };
 
   /** Clear the frame's running totals. Called by the renderer at `BeginFrame`, after the trace has
