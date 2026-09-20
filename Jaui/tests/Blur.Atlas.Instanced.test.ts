@@ -151,6 +151,9 @@ class ArmGl extends FakeGl {
 const NewPass = (instanced: boolean): { gl: ArmGl; pass: BlurPass } => {
   const gl = new ArmGl();
   const pass = new BlurPass(gl.Gl, undefined, 1, { MaxChains: 8, BudgetBytes: ATLAS_BUDGET_BYTES });
+  // The atlas arm's own five kernels, compiled at arm time rather than at boot. See lane
+  // bootcompile and `BlurPass.EnsureAtlasPrograms`.
+  pass.EnsureAtlasPrograms();
   pass.AtlasInstanced = instanced;
   return { gl, pass };
 };
@@ -367,13 +370,17 @@ describe('the kernels: the same taps, reading varyings instead of uniforms', () 
     }
   });
 
-  it("builds the three instanced programs in the constructor's batch", () => {
-    // Lazily, the compile would land on the first frame with glass on it -- which is the frame
-    // every boot measurement reads. Same rule the slot kernels are built under.
+  it('builds the three instanced programs when the atlas ARMS, not at boot and not lazily', () => {
+    // They are dead on an unflagged page (`?pyramid-atlas` is off by default), so the constructor's
+    // batch is the wrong place; the first frame with glass on it is the frame every boot
+    // measurement reads, so first-use is the wrong place too. `EnsureAtlasPrograms` is the third:
+    // after the URL parse, before the first tick. Lane bootcompile.
     const src = SRC();
-    expect(src).toContain('this._downInst = b.Add(VERT_INST, DOWN_FRAG(TAP_PLAIN, HP_INST));');
-    expect(src).toContain('this._downSlotInst = b.Add(VERT_INST, DOWN_FRAG(TAP_SLOT_INST, HP_INST));');
-    expect(src).toContain('this._upSlotInst = b.Add(VERT_INST, UP_FRAG(TAP_SLOT_INST, HP_INST));');
+    expect(src).toContain('DownInst: b.Add(VERT_INST, DOWN_FRAG(TAP_PLAIN, HP_INST)),');
+    expect(src).toContain('DownSlotInst: b.Add(VERT_INST, DOWN_FRAG(TAP_SLOT_INST, HP_INST)),');
+    expect(src).toContain('UpSlotInst: b.Add(VERT_INST, UP_FRAG(TAP_SLOT_INST, HP_INST)),');
+    const ensure = src.slice(src.indexOf('EnsureAtlasPrograms = ('), src.indexOf('private _atlasProgramsOrThrow'));
+    expect(ensure).toContain('DownInst: b.Add(VERT_INST, DOWN_FRAG(TAP_PLAIN, HP_INST)),');
   });
 
   it('leaves the shipping kernel textually what it was', () => {

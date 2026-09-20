@@ -146,6 +146,10 @@ class RecordingGl extends FakeGl {
 const NewPass = (): { gl: RecordingGl; pass: BlurPass } => {
   const gl = new RecordingGl();
   const pass = new BlurPass(gl.Gl, undefined, 1, { MaxChains: 8, BudgetBytes: ATLAS_BUDGET_BYTES });
+  // The atlas kernels are NOT in a BlurPass's constructor batch any more -- they are compiled when
+  // an atlas arm arms, which is what `WebGL2Renderer.ArmFlaggedPrograms` does off `?pyramid-atlas`.
+  // This is that call; `BlurAtlas` throws without it, and `Boot.Compile.test.ts` covers the throw.
+  pass.EnsureAtlasPrograms();
   // THE PER-SLOT ARM. Every assertion below is about the draws, the viewports and the uniforms
   // that arm issues; the instanced default issues one draw a level and no uniforms at all, and
   // `Blur.Atlas.Instanced.test.ts` compares the two.
@@ -493,13 +497,20 @@ describe('the shipping kernel is textually what it was', () => {
     expect(SRC).toContain('#define TAP(p) textureLod(u_Tex, u_Slot.xy + clamp((p), u_Clamp.xy, u_Clamp.zw) * u_Slot.zw, 0.0)');
   });
 
-  it("builds both variants of both kernels in the constructor's batch", () => {
-    // Lazily, the compile would land on the first frame with glass on it -- which is the frame
-    // every boot measurement reads.
+  it('builds both variants of both kernels, the plain pair at boot and the slot pair at arm time', () => {
+    // The plain pair is in the constructor's batch because an UNFLAGGED page binds it. The slot
+    // pair is not, because an unflagged page never does: `?pyramid-atlas` is off by default and
+    // the atlas path is the only thing that binds them. Neither is lazy-on-first-use -- that would
+    // land the compile on the first frame with glass on it, the frame every boot measurement
+    // reads. See lane bootcompile and `WebGL2Renderer.ArmFlaggedPrograms`.
     expect(SRC).toContain('this._down = b.Add(VERT, DOWN_FRAG(TAP_PLAIN));');
     expect(SRC).toContain('this._up = b.Add(VERT, UP_FRAG(TAP_PLAIN));');
-    expect(SRC).toContain('this._downSlot = b.Add(VERT, DOWN_FRAG(TAP_SLOT));');
-    expect(SRC).toContain('this._upSlot = b.Add(VERT, UP_FRAG(TAP_SLOT));');
+    expect(SRC).toContain('DownSlot: b.Add(VERT, DOWN_FRAG(TAP_SLOT)),');
+    expect(SRC).toContain('UpSlot: b.Add(VERT, UP_FRAG(TAP_SLOT)),');
+    // The kernel SOURCES are untouched: only which batch issues them moved.
+    const ctor = SRC.slice(SRC.indexOf('this._maxChains = maxChains;'), SRC.indexOf('get AtlasProgramsCompiled'));
+    expect(ctor).not.toContain('TAP_SLOT');
+    expect(ctor).not.toContain('VERT_INST');
   });
 
   it('never opens a mip chain for an atlas, because there is no mip atlas', () => {

@@ -564,26 +564,46 @@ export const PlanBackdropUnion = (
   return { Region: region, K: k, Depth: depth, Phase: phase, Fill: fill, MemberFill: memberFill };
 };
 
+/** The five kernels only an ATLAS ARM ever binds: the two slot kernels (`TAP_SLOT`, one slot of an
+ *  atlas instead of a whole pyramid) and the three instanced ones (`VERT_INST`, one draw per LEVEL
+ *  with a per-instance record instead of one draw per slot with three uniforms and a viewport).
+ *
+ *  Grouped into one nullable object rather than five nullable fields, because the invariant is
+ *  all-or-nothing: `EnsureAtlasPrograms` compiles the five together or none of them, and
+ *  `BlurAtlas` refuses to run without them. A field per program would let four of five exist. */
+interface _AtlasPrograms {
+  DownSlot: ShaderProgram;
+  UpSlot: ShaderProgram;
+  DownInst: ShaderProgram;
+  DownSlotInst: ShaderProgram;
+  UpSlotInst: ShaderProgram;
+}
+
+/** Programs EVERY `BlurPass` compiles, because an unflagged page binds all three: the plain DOWN
+ *  and UP kernels (per-card rims, the fills' pyramids, the shared backdrop, the progressive blur's
+ *  root) and the 1-tap COPY that seeds a pyramid. */
+export const BLUR_PROGRAMS_BOOT = 3;
+/** Programs only an atlas arm compiles. See `_AtlasPrograms` and `EnsureAtlasPrograms`. */
+export const BLUR_PROGRAMS_ATLAS = 5;
+
 export class BlurPass {
   private _gl: WebGL2RenderingContext;
   private _down: ShaderProgram;
   private _up: ShaderProgram;
-  /** The same two kernels compiled against `TAP_SLOT`: one slot of an ATLAS instead of a whole
-   *  pyramid. Compiled in the constructor's batch alongside the other three rather than lazily,
-   *  because a lazy compile would land on the first frame that has glass on it -- which is the
-   *  frame every boot measurement reads. Two more programs on the blur batch
-   *  (`jaui:shaders:issued n=` moves by two per BlurPass); nothing else about the batch changes. */
-  private _downSlot: ShaderProgram;
-  private _upSlot: ShaderProgram;
-  /** The same three atlas kernels again, against `VERT_INST`: one draw per LEVEL with a
-   *  per-instance record instead of one draw per slot with three uniforms and a viewport. Same
-   *  taps, same operands, same destination pixels -- see `VERT_INST` for why the rasterized set is
-   *  the viewport-clipped set. Compiled in the constructor's batch for the reason the slot kernels
-   *  are: a lazy compile lands on the first frame that has glass on it. */
-  private _downInst: ShaderProgram;
-  private _downSlotInst: ShaderProgram;
-  private _upSlotInst: ShaderProgram;
   private _copy: ShaderProgram;
+  /** The atlas kernels, or null on every pass that has not been asked for them -- which is EVERY
+   *  pass on an unflagged page, because `?pyramid-atlas` is off by default (Jack's fourth ruling)
+   *  and the atlas path is the only thing that binds them.
+   *
+   *  THEY USED TO BE IN THE CONSTRUCTOR'S BATCH, on the argument that a lazy compile would land on
+   *  the first frame that has glass on it -- the frame every boot measurement reads. That argument
+   *  is right about a compile on FIRST USE and wrong about this one: the flag is known the moment
+   *  the URL is parsed, which on the worker path is after `Init` and still before the first tick,
+   *  so there is a third place to compile that is neither boot nor a frame. See
+   *  `WebGL2Renderer.ArmFlaggedPrograms`. Five programs per `BlurPass` leave the boot batch and an
+   *  unflagged page never issues them at all. */
+  private _atlas: _AtlasPrograms | null = null;
+  private _atlasWired = false;
   private _quad: QuadGeometry;
   /** The instanced path's own VAO, its own copy of the unit quad, and the instance buffer. Its own
    *  copy because `QuadGeometry` is shared by every draw site in the engine and attributes 1..5 at
@@ -747,13 +767,10 @@ export class BlurPass {
     this._chainsLive = chains;
     this._gl = gl;
     const b = batch ?? new ShaderBatch(gl);
+    // BLUR_PROGRAMS_BOOT, and only these: the three an unflagged page binds. The atlas kernels are
+    // compiled by `EnsureAtlasPrograms` when a flag asks for them.
     this._down = b.Add(VERT, DOWN_FRAG(TAP_PLAIN));
     this._up = b.Add(VERT, UP_FRAG(TAP_PLAIN));
-    this._downSlot = b.Add(VERT, DOWN_FRAG(TAP_SLOT));
-    this._upSlot = b.Add(VERT, UP_FRAG(TAP_SLOT));
-    this._downInst = b.Add(VERT_INST, DOWN_FRAG(TAP_PLAIN, HP_INST));
-    this._downSlotInst = b.Add(VERT_INST, DOWN_FRAG(TAP_SLOT_INST, HP_INST));
-    this._upSlotInst = b.Add(VERT_INST, UP_FRAG(TAP_SLOT_INST, HP_INST));
     this._copy = b.Add(VERT, COPY_FRAG);
     this._quad = new QuadGeometry(gl);
 
@@ -766,6 +783,52 @@ export class BlurPass {
 
     if (!batch) { b.Resolve(); this.WireLocations(); }
   }
+
+  /** Have the atlas kernels been compiled on this pass? */
+  get AtlasProgramsCompiled(): boolean { return this._atlas !== null; }
+
+  /**
+   * Compile the five kernels an atlas arm binds, and return how many were issued (0 if this pass
+   * already has them, so the caller's mark cannot double-count).
+   *
+   * WHERE THIS IS CALLED FROM AND WHY IT IS NOT LAZY. Not at boot: `?pyramid-atlas` is off by
+   * default and these programs are dead on an unflagged page. Not on first use either: that lands
+   * on the first frame that has glass, the frame every boot measurement reads. It is called the
+   * moment the flag ARMS -- `WebGL2Renderer.ArmFlaggedPrograms`, driven from `_initDebugFromUrl`
+   * after the whole flag block has decided, which on the worker path is after `Init` has returned
+   * and before the first tick. The compile is booked to the flag arm, which is whose cost it is.
+   *
+   * `batch` is the caller's when there is one still open (main-thread mode parses the URL BEFORE
+   * `Init`, so these join the boot batch there and cost that arm nothing extra); otherwise this
+   * issues all five into a batch of its own and resolves once, which is the same parallel compile
+   * the boot batch gets, just over five programs instead of seventeen.
+   */
+  EnsureAtlasPrograms = (batch?: ShaderBatch): number => {
+    if (this._atlas !== null) return 0;
+    const b = batch ?? new ShaderBatch(this._gl);
+    const a: _AtlasPrograms = {
+      DownSlot: b.Add(VERT, DOWN_FRAG(TAP_SLOT)),
+      UpSlot: b.Add(VERT, UP_FRAG(TAP_SLOT)),
+      DownInst: b.Add(VERT_INST, DOWN_FRAG(TAP_PLAIN, HP_INST)),
+      DownSlotInst: b.Add(VERT_INST, DOWN_FRAG(TAP_SLOT_INST, HP_INST)),
+      UpSlotInst: b.Add(VERT_INST, UP_FRAG(TAP_SLOT_INST, HP_INST)),
+    };
+    this._atlas = a;
+    if (batch === undefined) { b.Resolve(); this._wireAtlasLocations(a); }
+    return BLUR_PROGRAMS_ATLAS;
+  };
+
+  /** The atlas kernels, or a throw naming exactly what was not armed. A silent fallback to the
+   *  plain kernels would paint one member's pyramid over the whole atlas and read as a blur bug. */
+  private _atlasProgramsOrThrow = (): _AtlasPrograms => {
+    const a = this._atlas;
+    if (a === null) {
+      throw new Error('[Jaui] BlurAtlas ran on a BlurPass whose atlas kernels were never compiled.'
+        + ' They are issued when an atlas arm arms, not at boot:'
+        + ' call EnsureAtlasPrograms (WebGL2Renderer.ArmFlaggedPrograms does it off ?pyramid-atlas).');
+    }
+    return a;
+  };
 
   /** Read the uniform locations. The owner of a shared batch calls this after `Resolve`. */
   WireLocations = (): void => {
@@ -780,29 +843,39 @@ export class BlurPass {
     this._upSrcLoc = gl.getUniformLocation(this._up.Program, 'u_SrcRect');
     this._copyTexLoc = gl.getUniformLocation(this._copy.Program, 'u_Tex');
     this._copySrcLoc = gl.getUniformLocation(this._copy.Program, 'u_SrcRect');
-    this._dsTexLoc = gl.getUniformLocation(this._downSlot.Program, 'u_Tex');
-    this._dsHpLoc = gl.getUniformLocation(this._downSlot.Program, 'u_HalfPixel');
-    this._dsOffLoc = gl.getUniformLocation(this._downSlot.Program, 'u_Offset');
-    this._dsSrcLoc = gl.getUniformLocation(this._downSlot.Program, 'u_SrcRect');
-    this._dsSlotLoc = gl.getUniformLocation(this._downSlot.Program, 'u_Slot');
-    this._dsClampLoc = gl.getUniformLocation(this._downSlot.Program, 'u_Clamp');
-    this._usTexLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Tex');
-    this._usHpLoc = gl.getUniformLocation(this._upSlot.Program, 'u_HalfPixel');
-    this._usOffLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Offset');
-    this._usSrcLoc = gl.getUniformLocation(this._upSlot.Program, 'u_SrcRect');
-    this._usSlotLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Slot');
-    this._usClampLoc = gl.getUniformLocation(this._upSlot.Program, 'u_Clamp');
+    // The atlas kernels when this pass has them AND their batch has been resolved by whoever owns
+    // it. `EnsureAtlasPrograms` wires its own when it owns the batch, so this is the other case:
+    // the programs joined a batch the RENDERER resolves, and this is the call that follows it.
+    const atlas = this._atlas;
+    if (atlas !== null && !this._atlasWired) this._wireAtlasLocations(atlas);
+  };
+
+  private _wireAtlasLocations = (a: _AtlasPrograms): void => {
+    const gl = this._gl;
+    this._atlasWired = true;
+    this._dsTexLoc = gl.getUniformLocation(a.DownSlot.Program, 'u_Tex');
+    this._dsHpLoc = gl.getUniformLocation(a.DownSlot.Program, 'u_HalfPixel');
+    this._dsOffLoc = gl.getUniformLocation(a.DownSlot.Program, 'u_Offset');
+    this._dsSrcLoc = gl.getUniformLocation(a.DownSlot.Program, 'u_SrcRect');
+    this._dsSlotLoc = gl.getUniformLocation(a.DownSlot.Program, 'u_Slot');
+    this._dsClampLoc = gl.getUniformLocation(a.DownSlot.Program, 'u_Clamp');
+    this._usTexLoc = gl.getUniformLocation(a.UpSlot.Program, 'u_Tex');
+    this._usHpLoc = gl.getUniformLocation(a.UpSlot.Program, 'u_HalfPixel');
+    this._usOffLoc = gl.getUniformLocation(a.UpSlot.Program, 'u_Offset');
+    this._usSrcLoc = gl.getUniformLocation(a.UpSlot.Program, 'u_SrcRect');
+    this._usSlotLoc = gl.getUniformLocation(a.UpSlot.Program, 'u_Slot');
+    this._usClampLoc = gl.getUniformLocation(a.UpSlot.Program, 'u_Clamp');
     // The instanced kernels keep exactly three uniforms: the sampler, the tap scale, and the
     // destination level's size. Everything else a slot needs is in its instance record.
-    this._diTexLoc = gl.getUniformLocation(this._downInst.Program, 'u_Tex');
-    this._diOffLoc = gl.getUniformLocation(this._downInst.Program, 'u_Offset');
-    this._diDstLoc = gl.getUniformLocation(this._downInst.Program, 'u_DstSize');
-    this._dsiTexLoc = gl.getUniformLocation(this._downSlotInst.Program, 'u_Tex');
-    this._dsiOffLoc = gl.getUniformLocation(this._downSlotInst.Program, 'u_Offset');
-    this._dsiDstLoc = gl.getUniformLocation(this._downSlotInst.Program, 'u_DstSize');
-    this._usiTexLoc = gl.getUniformLocation(this._upSlotInst.Program, 'u_Tex');
-    this._usiOffLoc = gl.getUniformLocation(this._upSlotInst.Program, 'u_Offset');
-    this._usiDstLoc = gl.getUniformLocation(this._upSlotInst.Program, 'u_DstSize');
+    this._diTexLoc = gl.getUniformLocation(a.DownInst.Program, 'u_Tex');
+    this._diOffLoc = gl.getUniformLocation(a.DownInst.Program, 'u_Offset');
+    this._diDstLoc = gl.getUniformLocation(a.DownInst.Program, 'u_DstSize');
+    this._dsiTexLoc = gl.getUniformLocation(a.DownSlotInst.Program, 'u_Tex');
+    this._dsiOffLoc = gl.getUniformLocation(a.DownSlotInst.Program, 'u_Offset');
+    this._dsiDstLoc = gl.getUniformLocation(a.DownSlotInst.Program, 'u_DstSize');
+    this._usiTexLoc = gl.getUniformLocation(a.UpSlotInst.Program, 'u_Tex');
+    this._usiOffLoc = gl.getUniformLocation(a.UpSlotInst.Program, 'u_Offset');
+    this._usiDstLoc = gl.getUniformLocation(a.UpSlotInst.Program, 'u_DstSize');
   };
 
   /**
@@ -1058,6 +1131,10 @@ export class BlurPass {
     members: readonly AtlasBuildMember[], atlasW: number, atlasH: number,
   ): { Texture: WebGLTexture; Regions: BackdropRegion[] } => {
     const gl = this._gl;
+    // BEFORE any GL and before any allocation: the kernels this path binds are compiled when an
+    // atlas arm arms, and a pass that was never armed must say so here rather than at a
+    // `useProgram` on an undefined program four binds later.
+    this._atlasProgramsOrThrow();
     if (members.length === 0) throw new Error('[Jaui] BlurAtlas needs at least one member');
     if (radius <= 0) throw new Error('[Jaui] BlurAtlas is the dual-filter path: radius must be > 0');
     const depth = PyramidDepth(radius, 0);
@@ -1147,6 +1224,7 @@ export class BlurPass {
     depth: number, tapOffset: number,
   ): void => {
     const gl = this._gl;
+    const a = this._atlasProgramsOrThrow();
     gl.bindVertexArray(this._quad.Vao);
 
     // -- DOWN hop 1: the only hop that reads the SCENE, so it takes the PLAIN kernel --
@@ -1169,7 +1247,7 @@ export class BlurPass {
 
     // -- DOWN hops 2..depth: source is the atlas level below, so the slot kernel --
     if (depth >= 2) {
-      gl.useProgram(this._downSlot.Program);
+      gl.useProgram(a.DownSlot.Program);
       gl.uniform1i(this._dsTexLoc, 0);
       gl.uniform1f(this._dsOffLoc, tapOffset);
       this._setSrcRect(this._dsSrcLoc, null, 1, 1);
@@ -1188,7 +1266,7 @@ export class BlurPass {
 
     // -- UP hops depth-1..0 --
     const timedUp = this.Timers !== null && this.Timers.Begin('blur-up');
-    gl.useProgram(this._upSlot.Program);
+    gl.useProgram(a.UpSlot.Program);
     gl.uniform1i(this._usTexLoc, 0);
     gl.uniform1f(this._usOffLoc, tapOffset);
     this._setSrcRect(this._usSrcLoc, null, 1, 1);
@@ -1229,6 +1307,7 @@ export class BlurPass {
     depth: number, tapOffset: number,
   ): void => {
     const gl = this._gl;
+    const a = this._atlasProgramsOrThrow();
     const n = members.length;
     this._ensureInstanceVao();
     gl.bindVertexArray(this._instVao);
@@ -1239,7 +1318,7 @@ export class BlurPass {
     const timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
     const l1 = this._levels[1];
     this._bindTarget(l1, 'a1');
-    gl.useProgram(this._downInst.Program);
+    gl.useProgram(a.DownInst.Program);
     gl.uniform1i(this._diTexLoc, 0);
     gl.uniform1f(this._diOffLoc, tapOffset);
     gl.uniform2f(this._diDstLoc, l1.Width, l1.Height);
@@ -1250,7 +1329,7 @@ export class BlurPass {
 
     // -- DOWN hops 2..depth --
     if (depth >= 2) {
-      gl.useProgram(this._downSlotInst.Program);
+      gl.useProgram(a.DownSlotInst.Program);
       gl.uniform1i(this._dsiTexLoc, 0);
       gl.uniform1f(this._dsiOffLoc, tapOffset);
       for (let i = 2; i <= depth; i++) {
@@ -1267,7 +1346,7 @@ export class BlurPass {
 
     // -- UP hops depth-1..0 --
     const timedUp = this.Timers !== null && this.Timers.Begin('blur-up');
-    gl.useProgram(this._upSlotInst.Program);
+    gl.useProgram(a.UpSlotInst.Program);
     gl.uniform1i(this._usiTexLoc, 0);
     gl.uniform1f(this._usiOffLoc, tapOffset);
     for (let i = depth - 1; i >= 0; i--) {
