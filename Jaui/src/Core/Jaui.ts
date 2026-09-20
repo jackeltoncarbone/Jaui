@@ -438,7 +438,8 @@ export class Canvas implements DirtyTracker {
   private _phasedStrays = { Snaps: 0, Pblur: 0 };
   private _phasedLastLine: string = '';
 
-  // -- `?pyramid-atlas` -- THE DEFAULT COMPOSITION, AND THE ATLAS THAT PAYS FOR IT -------------
+  // -- `?pyramid-atlas` -- A COMPOSITION CHANGE, AND THE ATLAS THAT PAYS FOR IT (ARMS, NOT THE
+  //    DEFAULT: see the ruling under `_pyramidAtlas`) ------------------------------------------
   /** Every glass card's backdrop pyramid built from the scene BEFORE any card is drawn, and the
    *  whole phase's builds issued as ONE atlas.
    *
@@ -459,8 +460,18 @@ export class Canvas implements DirtyTracker {
    *  planner SPLITS a run it cannot fit instead of evicting mid-frame.
    *
    *  `?pyramid-atlas=off` restores the per-card, per-draw composition in the same binary. That is
-   *  the engine this lane inherited, and it is the "before" every gate reads against. */
-  private _pyramidAtlas: boolean = true;
+   *  the engine this lane inherited, and it is the "before" every gate reads against.
+   *
+   *  IT IS NO LONGER THE DEFAULT, and what changed is a measurement, not a mind. JACK'S FOURTH
+   *  RULING (2026-09-20 ~14:20, told what the arm had actually bought): "Back to today's picture."
+   *  The M4's three-arm cell read `all` -1.69 ms and `fills` -0.78 ms per render at dpr 2 against
+   *  a predicted -10.5 and -5.2, and no frame-rate change at either resolution -- and under Jack's
+   *  own standard (physically right, or MORE accurate) the change is not more accurate: a real
+   *  glass edge DOES refract its neighbour. So an absent flag is `off`, today's composition; bare
+   *  `?pyramid-atlas` is still `fills`; `fills` and `all` stay as measurement arms. The whole
+   *  machinery below is unchanged -- what moved is one initialiser and which arm has to be asked
+   *  for by name. */
+  private _pyramidAtlas: boolean = false;
   /** `?pyramid-atlas=all` -- the atlas takes BOTH phases, which is the composition pyramidatlas2
    *  shipped: every glass rim's pyramid hoisted with the fills' and every rim DRAW moved to pass 3,
    *  after all other content. The full lever (152 encoders, ~-10.5 ms at dpr 2) and the only arm
@@ -476,7 +487,7 @@ export class Canvas implements DirtyTracker {
    *  for the full lever. See `Perf/PyramidAtlas2.Finding.md` section 7. */
   private _atlasRims: boolean = false;
   /** Glass RIM pyramids build per-card IN THE WALK and their overlays stay in walk order -- the
-   *  `fills` arm, and the default.
+   *  `fills` arm, which is what the bare flag selects.
    *
    *  This is the ONE term that separates `fills` from `all`, and it is read in one predicate, at
    *  the rim site, and in the frame driver: `_phasedEmitsRim` (a glass rim is held for pass 3 only
@@ -513,6 +524,29 @@ export class Canvas implements DirtyTracker {
   private _borderDirect: boolean = false;
   /** The last `jaui:border-direct` gate line, so it prints on a SHAPE change and not per frame. */
   private _borderDirectLastLine = '';
+  /** `?atlas-instanced` -- ONE INSTANCED DRAW PER ATLAS LEVEL, and the question it asks.
+   *
+   *  The atlas collapsed 160 encoder-opening binds to 4 and 160 render passes to 8 and recovered
+   *  1.69 ms of the 11.06 ms that forty pyramid builds cost per render at dpr 2. The one counter
+   *  it left UNCHANGED BY DESIGN is the draw count: each level is drawn as one slot draw per
+   *  member, so 4 levels x 20 slots is exactly the 20 builds x 4 passes it replaced. The
+   *  surviving ~85% therefore tracks DRAWS -- not passes, not encoders -- and the hypothesis is
+   *  per-draw cost in Chrome's GPU process, where ANGLE translates each GL draw into Metal on the
+   *  CPU side and on the critical path (the Metal trace's 616 sub-0.1 ms GPU-idle bubbles a frame
+   *  are what a starved GPU looks like).
+   *
+   *  So: same texels, same kernels, same destination pixels, 160 draws -> 8. `=off` restores the
+   *  per-slot path in the same binary. Default ON and INERT under `?pyramid-atlas=off`, which is
+   *  now the unflagged engine -- there is no atlas to instance, so the flag changes nothing and
+   *  says so on its mark rather than looking armed.
+   *
+   *  THE PREDICTION IS A HYPOTHESIS TEST WITH BOTH OUTCOMES NAMED, because three of the last four
+   *  predictions from the per-encoder model missed by ~6x and no lane carries "69 us per anything"
+   *  any more. Under the per-draw hypothesis the ~9.4 ms that survived the atlas is ~60 us a draw
+   *  and this arm takes most of it; under the null it moves by ~0 and the pyramid lever is spent.
+   *  `Scene.Ledger`'s `AtlasDraws` is the effect field either way -- the harness's `drawCalls`
+   *  counts scene draws and cannot see a pyramid pass. */
+  private _atlasInstanced: boolean = true;
   /** Rim pyramids the WALK built solo this frame under `fills`. They never reach `_atlasPhase`, so
    *  they are folded into the census after the passes rather than at the rim site: one ledger call
    *  per frame, and `members + solo == built` still holds on the gate line. */
@@ -558,7 +592,7 @@ export class Canvas implements DirtyTracker {
   // is about is a ratio over a WINDOW -- renders per presented frame -- so the two ends of that
   // window subtract these, exactly as they already do the scene ledger. They are mirrors of
   // `_tickPace`'s own totals, kept here so the `[Jaui]` line and `jaui:render:end` read one object.
-  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, SceneEndsByKey: {} as Record<string, number>, CardComposites: 0, CardFallbacks: 0, TicksRendered: 0, TicksSkipped: 0, TicksForced: 0 };
+  private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, SceneEndsByKey: {} as Record<string, number>, AtlasDraws: 0, CardComposites: 0, CardFallbacks: 0, TicksRendered: 0, TicksSkipped: 0, TicksForced: 0 };
   private _cacheDiag = { reached: 0, effH: 0, teleport: 0, opacity: 0, rot: 0, xform: 0, visual: 0, persp: 0, samples: 0, ok: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, CardComposites: 0, CardFallbacks: 0 };
   /** `?scene-restarts=N` / `?small-restarts=N` - the renderer, already narrowed, or null when
@@ -1635,6 +1669,7 @@ export class Canvas implements DirtyTracker {
       this._counts.SceneRestarts = 0;
       this._counts.SceneSwitches = 0;
       this._counts.SceneEndsByKey = {};
+      this._counts.AtlasDraws = 0;
       this._counts.CardComposites = 0;
       this._counts.CardFallbacks = 0;
       { const d = this._cacheDiag; d.reached = d.effH = d.teleport = d.opacity = d.rot = d.xform = d.visual = d.persp = d.samples = d.ok = 0; }
@@ -1756,6 +1791,10 @@ export class Canvas implements DirtyTracker {
         // for once, so the number that matters -- ends on targets ABOVE the cliff -- is readable
         // rather than inferred.
         this._counts.SceneEndsByKey = this._renderer.SceneEndsByKey;
+        // The atlas's own DRAWS. It belongs beside the switch columns and not in the atlas gate
+        // line alone, because `?atlas-instanced`'s whole cell is this number against a frame time
+        // -- and the harness's `drawCalls` does not count a pyramid draw at all.
+        this._counts.AtlasDraws = this._renderer.SceneAtlasDraws;
         this._counts.CardComposites = this._renderer.CardComposites;
         this._counts.CardFallbacks = this._renderer.CardFallbacks;
       }
@@ -1768,7 +1807,7 @@ export class Canvas implements DirtyTracker {
         JTrace(`jaui:render:end ${JMs(performance.now() - tRender)}ms`
           + ` panels=${c.Panels} glass=${c.Glass} text=${c.Text} images=${c.Image} pblur=${c.PBlur}`
           + ` sceneReads=${c.SceneReads} sceneRestarts=${c.SceneRestarts} sceneSwitches=${c.SceneSwitches}`
-          + ` endsByKey=${_endsByKey(c.SceneEndsByKey)}`
+          + ` endsByKey=${_endsByKey(c.SceneEndsByKey)} atlasDraws=${c.AtlasDraws}`
           + ` cards=${c.CardComposites} cardFallbacks=${c.CardFallbacks}`
           // Cumulative, so at the first frame this reads 1/0/0 whatever the mode. It is here because
           // it is the earliest proof the columns are wired at all - a `?tick-pace` run whose
@@ -1873,6 +1912,10 @@ export class Canvas implements DirtyTracker {
             // ...and the ends named by the target that took them, because an end on the 16 MB scene
             // and an end on a 1 MB card are the same 1 in that column and ~1.4 ms apart on the clock.
             ` [${_endsByKey(this._counts.SceneEndsByKey)}]` +
+            // The draws the frame's ATLAS builds issued -- 0 with no atlas armed, 8 under
+            // `?pyramid-atlas=all`, 160 under `all&atlas-instanced=off`. Not a subset of
+            // `drawCalls`: that column is scene draws and has never counted a pyramid pass.
+            ` atlasDraws ${this._counts.AtlasDraws}` +
             ` | lce${this._layerCacheEnabled ? 1 : 0} cf${this._cacheForce ? 1 : 0} us${this._uiStatic ? 1 : 0} ld${layoutDirty ? 1 : 0} ir${this._animationManager.IsRunning ? 1 : 0} | diag reached${this._cacheDiag.reached} effH${this._cacheDiag.effH} tel${this._cacheDiag.teleport} op${this._cacheDiag.opacity} rot${this._cacheDiag.rot} xf${this._cacheDiag.xform} vis${this._cacheDiag.visual} psp${this._cacheDiag.persp} samp${this._cacheDiag.samples} ok${this._cacheDiag.ok}` +
             ` | snap ${this._opMs.Snap.toFixed(1)} blur ${this._opMs.Blur.toFixed(1)} mip ${this._opMs.Mip.toFixed(1)} draw ${this._opMs.Draw.toFixed(1)}` +
             // `?tick-pace`, cumulative. `r` is renders, `s` refused renders, `f` the stall guard's.
@@ -3300,10 +3343,18 @@ export class Canvas implements DirtyTracker {
       const st = this._blurFirstStats;
       const a = this._atlasStats;
       const sw = this._renderer instanceof WebGL2Renderer ? this._renderer.SceneSwitches : -1;
+      const dr = this._renderer instanceof WebGL2Renderer ? this._renderer.SceneAtlasDraws : -1;
       const line = `jaui:pyramid-atlas arm=${this._atlasRims ? 'all' : 'fills'}`
         + ` built=${st.Fill + st.Rim} fill=${st.Fill} rim=${st.Rim}`
         + ` used=${st.Used} missed=${st.Missed}`
         + ` atlases=${a.Atlases} members=${a.Members} solo=${a.Solo} refused=${a.Refused}`
+        // `draws` is the ENGINE's count of the draws the atlas builds issued, and it is on this
+        // line because the harness's `drawCalls` cannot see one: that column read 153 / 153 / 154
+        // across off / fills / all, three arms that differ by 160 pyramid draws. Under
+        // `inst=on` it must read `2 x depth` per atlas (8 on `glass-grid` under `all`, 4 under
+        // `fills`) and under `inst=off` `2 x depth x members` (160 and 80). A cell that reads the
+        // same number on both arms measured one arm twice.
+        + ` draws=${dr} inst=${this._atlasInstanced ? 'on' : 'off'}`
         + ` bytes=${Math.round(a.Bytes / (1024 * 1024) * 10) / 10}MB sizes=${a.Sizes === '' ? 'none' : a.Sizes}`
         + ` shadows=${this._phasedShadow.size} snaps=${this._phasedStrays.Snaps}`
         + ` pblur=${this._phasedStrays.Pblur}`
@@ -6144,31 +6195,36 @@ export class Canvas implements DirtyTracker {
       // flags are off, instead of an `instanceof` per pyramid build.
       this._restartRenderer = r as WebGL2Renderer;
     }
-    // `?pyramid-atlas` -- THE DEFAULT. Parsed before `?blur-phased` so that flag can refuse a
-    // combined arm by name: both run the phased composition, and an arm running the atlas AND the
-    // measurement flag would be reading the atlas under the measurement flag's pool.
+    // `?pyramid-atlas` -- MEASUREMENT ARMS since Jack's fourth ruling. Parsed before
+    // `?blur-phased` so that flag can refuse a combined arm by name: both run the phased
+    // composition, and an arm running the atlas AND the measurement flag would be reading the
+    // atlas under the measurement flag's pool.
     //
-    // THREE ARMS IN ONE BINARY, and the bare flag is the default one:
+    // THREE ARMS IN ONE BINARY, and the bare flag is `fills`. AN ABSENT FLAG IS `off`:
     //
-    //   fills  the DEFAULT. The fills' atlas, and every glass rim building per-card in the walk
-    //          exactly as it does today. Z-order is the baseline's, the rim pixels are the
-    //          baseline's, and the only change left in the frame is the one Jack approved.
-    //          Half the lever: 76 encoders, `EndsByKey.blur` 40 -> 21.
+    //   fills  what the bare flag selects. The fills' atlas, and every glass rim building per-card
+    //          in the walk exactly as it does today. Z-order is the baseline's, the rim pixels are
+    //          the baseline's, and the only change left in the frame is the one Jack approved.
+    //          Half the lever: 76 encoders, `EndsByKey.blur` 40 -> 21, and 0.78 ms measured.
     //   all    pyramidatlas2's composition as shipped -- both phases atlased, every rim drawing in
     //          pass 3 after all other content. The full lever and the measurement arm for it; see
     //          `_atlasRims` for the z-order exposure that keeps it off the default.
-    //   off    today's per-card, per-draw composition, byte for byte. The "before" for every gate.
+    //   off    today's per-card, per-draw composition, byte for byte. THE UNFLAGGED ENGINE, and
+    //          the "before" for every gate.
     //
     // The VALUE is one of those three and nothing else. A flag whose value was ignored would let
-    // `?pyramid-atlas=0`, `=false`, `=no` all arm the default while reading as if they had turned
-    // it off, which is the failure mode a measurement instrument exists to avoid -- and now that
-    // there are two ARMED arms, a typo'd `=fill` or `=rims` would silently publish the wrong one.
+    // `?pyramid-atlas=0`, `=false`, `=no` all arm `fills` while reading as if they had turned it
+    // off, which is the failure mode a measurement instrument exists to avoid -- and with two
+    // ARMED arms a typo'd `=fill` or `=rims` would silently publish the wrong one.
     if (params.has('pyramid-atlas')) {
       const raw = (params.get('pyramid-atlas') ?? '').trim();
       if (raw !== '' && raw !== 'all' && raw !== 'fills' && raw !== 'off') {
         throw new Error(`[Jaui] ?pyramid-atlas takes 'all', 'fills' or 'off', got '${raw}'`);
       }
-      if (raw === 'off') this._pyramidAtlas = false;
+      // The bare flag is `fills`, as it has been since pyramidatlas3; the difference since Jack's
+      // fourth ruling is that an ABSENT flag is `off` rather than `fills`, so the arm is now
+      // armed here and only here.
+      this._pyramidAtlas = raw !== 'off';
       this._atlasRims = raw === 'all';
     }
     // Everything the atlas cannot run beside, named one at a time and refused on the trace rather
@@ -6224,6 +6280,10 @@ export class Canvas implements DirtyTracker {
     // print `off` on every arm however the URL read. A reading taken without this line is a
     // reading of a build that predates the lever.
     JTrace(`jaui:pyramid-atlas armed=${this._pyramidAtlas ? (this._atlasRims ? 'all' : 'fills') : 'off'}`
+      // `default=true` means NOBODY ASKED: the arm on the line is the unflagged engine's. Since
+      // Jack's fourth ruling that is `off`, and a reading that cannot tell "off by default" from
+      // "off because the URL said so" cannot tell a control shot from an arm.
+      + ` default=${!params.has('pyramid-atlas')}`
       + ` budget=${Math.round(ATLAS_BUDGET_BYTES / (1024 * 1024))}MB`
       + (this._pyramidAtlas ? ' pixels=DIFFERENT' : ''));
     this._phasedWalk = this._pyramidAtlas;
@@ -6282,6 +6342,25 @@ export class Canvas implements DirtyTracker {
     JTrace(`jaui:border-direct armed=${this._borderDirect ? 'on' : 'off'}`
       + ` footprint=${BORDER_DIRECT_L2_WINDOW * BORDER_DIRECT_PHASE}px`
       + (this._borderDirect ? ' pixels=WITHIN-ONE' : ''));
+    // `?atlas-instanced` -- how the atlas's hops are ISSUED, and nothing else. Parsed after the
+    // atlas and its refusals so the mark can say whether there is an atlas to instance at all: it
+    // is inert under `off`, which since Jack's fourth ruling is the unflagged engine. On/off by
+    // name only, for the reason every flag in this block is: a value that was ignored would let
+    // `=0` and `=no` arm the default while reading as if they had turned it off.
+    if (params.has('atlas-instanced')) {
+      const raw = (params.get('atlas-instanced') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?atlas-instanced takes 'on' or 'off', got '${raw}'`);
+      }
+      this._atlasInstanced = raw !== 'off';
+    }
+    if (this._renderer instanceof WebGL2Renderer) this._renderer.DiagAtlasInstanced = this._atlasInstanced;
+    // `pixels=SAME`, unlike every other flag in this block -- an instanced slot quad and a
+    // viewport-clipped one land on the same window-space rectangle with integer corners, and the
+    // rasterizer's subpixel snap cannot tell them apart. See `VERT_INST` in `Core/BlurPass.ts`.
+    JTrace(`jaui:atlas-instanced armed=${this._atlasInstanced ? 'on' : 'off'}`
+      + ` atlas=${this._pyramidAtlas ? (this._atlasRims ? 'all' : 'fills') : 'off'}`
+      + ` inert=${!this._pyramidAtlas} pixels=SAME`);
     // `?blur-phased` -- MEASUREMENT ONLY, DIFFERENT PIXELS. See `_blurPhased`. Parsed LAST, after
     // `?blur-first`, because it has to see every flag it interrogates AND because the two are
     // mutually exclusive: both move pyramid builds, and an arm running both would be measuring

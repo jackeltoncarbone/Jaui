@@ -12,7 +12,13 @@ import { FakeGl } from './Blur.Chains.Source';
 import { arrowBody } from './Scene.ReadAfterWrite.Source';
 
 /**
- * THE WIRED ATLAS: `?pyramid-atlas`, which is the DEFAULT.
+ * THE WIRED ATLAS: `?pyramid-atlas`, a MEASUREMENT ARM since Jack's fourth ruling.
+ *
+ * WHICH ARM THIS FILE IS ABOUT. Every build here runs `AtlasInstanced = false` -- the per-slot
+ * path, one `gl.viewport` and one `drawElements` per member per level, which is the atlas exactly
+ * as lane pyramidatlas2 shipped it and what `?atlas-instanced=off` selects. The instanced default
+ * has its own file (`Blur.Atlas.Instanced.test.ts`) and its whole claim is that it agrees with
+ * this one record for record, so the two are deliberately not merged.
  *
  * `Blur.Atlas.test.ts` is the planner's arithmetic -- what may be atlased, how the slots pack,
  * what it saves. This file is the BUILD: the passes `BlurPass.BlurAtlas` actually issues, the
@@ -140,6 +146,10 @@ class RecordingGl extends FakeGl {
 const NewPass = (): { gl: RecordingGl; pass: BlurPass } => {
   const gl = new RecordingGl();
   const pass = new BlurPass(gl.Gl, undefined, 1, { MaxChains: 8, BudgetBytes: ATLAS_BUDGET_BYTES });
+  // THE PER-SLOT ARM. Every assertion below is about the draws, the viewports and the uniforms
+  // that arm issues; the instanced default issues one draw a level and no uniforms at all, and
+  // `Blur.Atlas.Instanced.test.ts` compares the two.
+  pass.AtlasInstanced = false;
   return { gl, pass };
 };
 
@@ -503,9 +513,16 @@ describe('the shipping kernel is textually what it was', () => {
 describe('the walk, and the flag', () => {
   const JAUI = readFileSync(join(__dirname, '../src/Core/Jaui.ts'), 'utf8').replace(/\r\n/g, '\n');
 
-  it('is ON by default, the default arm is `fills`, and the three values are the only ones', () => {
-    expect(JAUI).toContain('private _pyramidAtlas: boolean = true;');
-    expect(JAUI).toContain("if (raw === 'off') this._pyramidAtlas = false;");
+  it('is OFF unless asked for, the bare flag is `fills`, and the three values are the only ones', () => {
+    // JACK'S FOURTH RULING (2026-09-20 ~14:20): the default composition goes back to today's
+    // picture. The arm bought 1.69 ms (`all`) / 0.78 (`fills`) against a predicted 10.5 / 5.2, it
+    // moved no frame rate, and it is not "more accurate" -- a real glass edge refracts its
+    // neighbour. So an ABSENT flag is `off` and the arms have to be asked for by name.
+    expect(JAUI).toContain('private _pyramidAtlas: boolean = false;');
+    expect(JAUI).toContain("this._pyramidAtlas = raw !== 'off';");
+    // ...and the bare flag is still `fills`, which is what makes `?pyramid-atlas` a one-word arm
+    // rather than a fourth spelling of the default.
+    expect(JAUI).not.toContain('private _pyramidAtlas: boolean = true;');
     // `fills` is the DEFAULT arm: the fills' atlas with every rim still building per-card in the
     // walk, so z-order is the baseline's. `all` is pyramidatlas2's composition, which moves every
     // rim draw to pass 3 -- the full lever, and a z-order change Jack's ruling does not cover.
@@ -607,8 +624,12 @@ describe('the walk, and the flag', () => {
     // `atlases=0 members=0 solo=40` is the unflagged engine wearing the flag's name.
     const render = JAUI.slice(JAUI.indexOf('jaui:pyramid-atlas arm='));
     for (const col of ['atlases=${a.Atlases}', 'members=${a.Members}', 'solo=${a.Solo}',
-                       'refused=${a.Refused}', 'missed=${st.Missed}', 'switches=${sw}']) {
-      expect(render.slice(0, 900), col).toContain(col);
+                       'refused=${a.Refused}', 'missed=${st.Missed}', 'switches=${sw}',
+                       // The draws the atlas ISSUED, and which arm issued them. The harness's
+                       // `drawCalls` cannot see a pyramid draw, so this is the one place a cell
+                       // about draws can read one.
+                       'draws=${dr}', "inst=${this._atlasInstanced ? 'on' : 'off'}"]) {
+      expect(render.slice(0, 1800), col).toContain(col);
     }
   });
 

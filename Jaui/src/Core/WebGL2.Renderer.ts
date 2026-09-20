@@ -697,6 +697,9 @@ export class WebGL2Renderer implements Renderer {
    *  `0 / 20` under the flag is the unflagged engine wearing the flag's name. */
   get BordersDirect(): number { return this._sceneLedger.BordersDirect; }
   get BordersPyramid(): number { return this._sceneLedger.BordersPyramid; }
+  /** DRAWS the frame's atlas builds issued. `?atlas-instanced`'s effect field: 8 under
+   *  `?pyramid-atlas=all` and 160 with `=off`, on a frame whose `drawCalls` does not move. */
+  get SceneAtlasDraws(): number { return this._sceneLedger.AtlasDraws; }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
   get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number; EndsByKey: Record<string, number> } {
     const l = this._sceneLedger;
@@ -2023,8 +2026,9 @@ export class WebGL2Renderer implements Renderer {
    *  count test. */
   DiagBlurPhased = false;
 
-  /** `?pyramid-atlas` -- THE DEFAULT, and the one measurement mark in this file that is armed
-   *  unless a flag turns it OFF.
+  /** `?pyramid-atlas` -- MEASUREMENT ARMS (`all` / `fills`), OFF unless a flag asks for one.
+   *  Jack's fourth ruling (2026-09-20) put the default composition back to today's picture after
+   *  the M4 priced the arm at 1.69 ms (`all`) / 0.78 (`fills`) and no frame-rate change.
    *
    *  Set by `Core/Jaui.ts`, which owns the flag, the phased traversal and every refusal; this
    *  renderer's part is to SAY which arm the binary ran, in `Init`, beside the other marks, and to
@@ -2036,6 +2040,24 @@ export class WebGL2Renderer implements Renderer {
    *  12/255, confined to the edge bands facing earlier-drawn neighbours. Anything outside those
    *  bands, or above 12, is a defect and not this flag. */
   DiagPyramidAtlas = false;
+
+  /** `?atlas-instanced` (default ON, INERT unless an atlas is armed). ONE instanced draw per atlas
+   *  level instead of one draw per slot: 160 draws -> 8 under `?pyramid-atlas=all`, 80 -> 4 under
+   *  `fills`, with the same texels and the same kernels. `=off` restores the per-slot path in the
+   *  same binary, which is what makes the pair a cell.
+   *
+   *  It exists to answer ONE question the atlas left open. The atlas cut encoder-opening binds
+   *  160 -> 4 and render passes 160 -> 8 and recovered 1.69 ms of the 11.06 ms forty pyramid
+   *  builds cost per render at dpr 2; the counter it left UNCHANGED BY DESIGN is the draw count.
+   *  If the surviving ~9.4 ms is per-DRAW cost in the GPU process -- ANGLE translating each GL
+   *  draw into Metal, on the CPU side of that process and on the critical path -- this arm removes
+   *  152 of 160 draws and most of it goes; if it is per-texel or per-slot work, this arm reads
+   *  within the run spread and the pyramid lever is spent. Both outcomes are answers, and
+   *  `SceneAtlasDraws` is the field that says the arm engaged at all.
+   *
+   *  `pixels=SAME`, and that is a claim rather than a hope: see `VERT_INST` in `BlurPass` for why
+   *  the instanced quad rasterizes the viewport-clipped quad's exact fragment set. */
+  DiagAtlasInstanced = true;
 
   /** Per-pass residency ceilings for the three `BlurPass` instances, or `null` for the shipped
    *  `MAX_CHAINS` / `CHAIN_BUDGET_BYTES`. Only `?blur-phased` sets it, and only because twenty
@@ -2697,8 +2719,15 @@ export class WebGL2Renderer implements Renderer {
     this._lastBlur = pass;
     this._sceneLedger.NoteTargetBind('blur');
     const src = this.DiagBlurSrc !== null ? this._blurSrcFor(_unwrap(input)) : _unwrap(input);
+    // Per build, off the flag, rather than at construction: the pool builds its passes lazily and
+    // a value baked in at construction would be the value the first glass frame happened to see.
+    pass.AtlasInstanced = this.DiagAtlasInstanced;
     const built = pass.BlurAtlas(src, width, height, radius, members, atlasW, atlasH);
     this._sceneLedger.NoteAtlas(members.length, ChainBytes(atlasW, atlasH));
+    // The draws this build ISSUED -- the effect field for `?atlas-instanced`, and the one column
+    // the harness's `drawCalls` cannot see (it counts scene draws: 153 / 153 / 154 across the
+    // three atlas arms, which differ by 160 pyramid draws).
+    this._sceneLedger.NoteAtlasDraws(pass.AtlasDraws);
     // BlurPass bound its own programs; invalidate the cache exactly as `ComputeBlur` does.
     this._lastProgram = null;
     return built.Regions.map((r) => _wrap(built.Texture, r));
