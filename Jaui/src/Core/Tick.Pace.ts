@@ -3,68 +3,79 @@
  *
  * WHY THIS EXISTS (ShowStudio.Documentation/Perf/README.md, "PACING: 66.87 -> 33.48 ms"): the engine
  * rendered TWICE per presented frame at baseline, and removing the second render cut the frame time
- * in half with no pixel change. Two cuts have been measured on the M4 since, one binary, three arms,
- * interleaved, worstPx 0, equal draw counts —
- *
- *     dpr 2                 p50     p95   distribution (vsyncs per presented frame)
- *     base                66.88   67.42
- *     tick-pace (f:1)     33.52   51.27   1v 40%  2v 16%  3v 42%  4v 2%   <- TRIMODAL: judder
- *     tick-pace=2         33.43   33.92   2v 99-100%                      <- even, but a 30 fps CLAMP
- *     tick-pace=fence:0   50.10   52.03   the serial gate, no pipeline
- *
- *     dpr 1.5               p50     p95
- *     tick-pace (f:1)     16.93   33.87   1v 54%  2v 46%   <- reaches one vsync, cannot HOLD it
- *     tick-pace=2         33.34   34.72   2v 100%          <- can never reach it
- *
- * THE RULE THAT CAME OUT OF THAT TABLE, and the reason this file has a third mode: **for animation,
- * evenness beats the median. A steady 30 fps looks better than an average 30 alternating 60 and 20,
- * and a paced arm is read on its HISTOGRAM, never on p50.** The fence gate ADAPTS (it renders as
- * soon as the GPU is free) but cannot hold a cadence: it races the fence every tick, so frames
- * alternate between one and three vsyncs and 82% of them are nowhere near the median it scores.
- * The ratio gate is EVEN (99-100% on two vsyncs) but cannot adapt: it pins 30 fps whatever the
- * render costs, which is a REGRESSION at dpr 1.5 where one vsync is available.
- *
- * SO THE FLAG'S MEANING IS NOW `lock`: ADAPTIVE AND EVEN.
+ * in half with no pixel change. The flag's meaning is the VSYNC LOCK: release a render only on a
+ * whole number of vsyncs, so the presented sequence is EVEN as well as fast.
  *
  *     N = ceil(period / vsync), and a render is released only when at least N vsync intervals have
  *     passed since the last released render.
  *
- * `period` is the frame's own cost (below), `vsync` is the display's interval (below), and N is
- * re-evaluated slowly, with hysteresis, so it cannot oscillate. A 33 ms render presents every 2
- * vsyncs uniformly — what the clamp achieves, without being a clamp — and a 17 ms render presents
- * every 1, which neither existing arm can hold. The depth-1 fence stays underneath as a SAFETY NET
- * (a mis-estimated N must not be able to queue renders), and the two gates count their skips apart
- * so the ledger says which one acted.
+ * THE M4 MEASURED THAT MECHANISM AND IT IS RIGHT. One binary, interleaved, 3 per arm, read on the
+ * histogram (Perf/README.md, "The M4's tickpace3 cell"):
  *
- * THE TWO ESTIMATES, AND WHY EACH IS TAKEN THE WAY IT IS
+ *     dpr 2                  p50     p95   histogram       gate
+ *     base                 59.34   60.07   2v 23%  4v 77%
+ *     tick-pace (lock)     50.10   52.00   3v 100%         LockN=3 PeriodMs=37.5 VsyncMs=16.67
+ *     tick-pace=lock:16.67 50.00   51.55   2v 43%  3v 57%  LockN=3 PeriodMs=38.1  <- N moved MID-RUN
+ *     tick-pace=fence      17.62   51.95   1v 50%  3v 50%
+ *     tick-pace=2          33.31   35.21   2v 100%         <- uniform AND fastest
  *
- * `period` — the frame's cost, as max(CPU issue, GPU execution), because that is what a pipelined
- * renderer's period IS. Both terms are measured, neither is assumed:
+ * 100% of frames in ONE bucket, at both resolutions, which neither the fence (50/50) nor the base
+ * (23/77) reaches. The vsync derivation is right too: the PINNED arm chose the same N.
  *
- *   CPU  the wall time of `_render` on the worker (`NoteRenderCost`), EMA'd over ~8 rendered frames.
- *   GPU  from the frame-completion fence, and in TWO ways, because one of them is blind in each of
- *        the two states the loop can be in:
- *          * the fence was armed with the GPU otherwise IDLE (`Solo`) — then arm-to-signal IS the
- *            GPU's cost for that frame. This is the state a CORRECTLY locked loop is in, so the
- *            estimate is clean by construction exactly when the lock is right.
- *          * the fence was armed BEHIND another of our frames — then arm-to-signal includes the
- *            queue wait (the depth-1 fence arm legitimately reads ~49 on a 33 ms frame for this
- *            reason) and is useless, but the COMPLETION-TO-COMPLETION gap is the GPU's cost exactly,
- *            because back-to-back execution is what "queued" means. This is the state the loop is in
- *            while N is still too small, which is when the controller most needs to be told to
- *            step up.
- *        A solo sample is de-quantized by half the poll gap: the true completion lies somewhere in
- *        (previous poll, this poll], and a raw arm-to-poll reading takes the top of that interval,
- *        so it is biased LATE by up to a whole poll gap. THE DIRECTION OF THE REMAINING BIAS IS
- *        CHOSEN, and it is chosen low, because the two directions are not symmetrical in a control
- *        loop: an over-estimate makes N too big, the GPU then idles, the samples stay solo, and the
- *        loop sits SLOWER than the display for ever with nothing to correct it. An under-estimate
- *        makes N too small, the loop saturates, the samples become GAP samples — which are exact,
- *        since both of their ends carry the same quantization and it cancels in the difference —
- *        and N steps back up. The controller therefore settles on the smallest cadence the GPU can
- *        actually fill, which is the cadence being asked for. What it costs is one step of
- *        hunting on a period that sits exactly on a boundary, and that is what the margin and the
- *        hold below are for.
+ * AND ITS N SELECTION WAS WRONG, BY THE WHOLE 50-vs-33.3 GAP. The directly measured unpaced render
+ * period on the same build and scene (ticks/s on an arm where every callback renders) is 29.41 ms
+ * at dpr 2 and 18.40 at dpr 1.5. The old estimate — `max(CPU-issue EMA, solo-GPU-fence EMA)` — read
+ * 37.5 and 24.2. By the step-down rule (period + margin <= (N-1) x vsync) the TRUE numbers step and
+ * the ESTIMATES cannot step anywhere, so the lock sat a whole vsync slow.
+ *
+ * WHY A COST MODEL CANNOT PRODUCE THE NUMBER, which is this lane's whole finding:
+ *
+ *   * the SOLO fence latency is arm-to-signal, and arm-to-signal includes whatever the present
+ *     couples to the frame's completion. It is a LATENCY, not a throughput period.
+ *   * the CPU's issuing time overlaps the previous frame's GPU work, so it is not additive either,
+ *     and `max()` of two terms that are each wrong in their own direction is not a period.
+ *
+ * ONLY OBSERVATION CAN. The render period that matters is the COMPLETION-TO-COMPLETION GAP of
+ * consecutive rendered frames WHILE THE LOOP IS SATURATED — a render issued as soon as the previous
+ * one completes. That reading needs no model at all: both of its ends are the same clock, the
+ * quantization at each end is the same poll grain and cancels in a mean over a window, and a frame
+ * whose fence was armed while another of ours was still in flight is saturated BY CONSTRUCTION
+ * (`PaceFenceSample.Solo === false`) rather than by assumption.
+ *
+ * THE CONTROL PROBLEM, AND THE ANSWER: under a correct lock the loop is DELIBERATELY NOT saturated,
+ * so the period cannot be observed while locked. So the lock CREATES OBSERVATION WINDOWS.
+ *
+ *   WARM-UP SATURATES.  Start at N=1. With N=1 and the depth-1 fence underneath, a render costing
+ *                       more than one vsync saturates the loop by construction and every completion
+ *                       gap IS the period. Seed N = ceil((period - margin) / vsync) from the mean of
+ *                       `LOCK_OBSERVE_SAMPLES` saturated gaps. If the warm-up NEVER saturates within
+ *                       `LOCK_WARMUP_MAX_RENDERS`, that is not a failure — it is the proof that N=1
+ *                       is enough, because the loop was releasing on the one-vsync grid (or as fast
+ *                       as its callbacks allowed) and the GPU kept up with every one of them. The
+ *                       source is published as `unsaturated` so a reader is never told a number
+ *                       nobody measured.
+ *   TRIALS RE-OBSERVE.  At most once per DWELL, drop to N-1 for `LOCK_TRIAL_FRAMES` released
+ *                       renders and watch. If the GPU keeps up (no fence refusal, no saturated gap
+ *                       above the trial cadence, and the trial's own release gaps fit it), KEEP the
+ *                       step down — and immediately try one more, so a scene that gets much cheaper
+ *                       walks back down in one burst instead of one step per dwell. If it does not
+ *                       keep up, return to N and RECORD the period from the trial's saturated gaps:
+ *                       a failed trial is itself an observation.
+ *   STEP-UPS ARE EVIDENCE.  A fence refusal while locked means the GPU fell behind the grid, and the
+ *                       loop is saturated at that moment, so the gaps around it are the period
+ *                       again. Step to N+1 on refusals AND a saturated reading that exceeds the
+ *                       cadence — never on one alone.
+ *
+ * WHAT A FAILED TRIAL COSTS, priced rather than waved at: the loop runs at the faster cadence until
+ * the queue backs up enough for the fence to refuse, which on a period P against a trial cadence C
+ * takes about 1/(1 - C/P) releases — three at dpr 2 (29.41 against 16.67), eleven at dpr 1.5 (18.40
+ * against 16.67). So a failed trial is ~3-11 judder frames, ~100-200 ms, once per dwell, and the
+ * dwell DOUBLES after each failure up to `LOCK_DWELL_MAX_MS` (resetting on a success or a step-up).
+ * In a 6 s measurement window at dpr 2 that is one trial: ~3 frames of 180, so the histogram still
+ * reads ~98% in one bucket. THAT IS THE PRICE OF ADAPTIVITY AND IT IS NOT AVOIDABLE — the only
+ * thing that can tell you a cheaper cadence works is running at it. A cost model used to SUPPRESS a
+ * trial would be the old bug wearing a new hat: the over-reading estimate would forbid exactly the
+ * experiment that disproves it.
  *
  * `vsync` — the display's interval, derived from the rAF timestamps and NOT assumed, but it cannot
  * be read off them naively, and this is the weakest link in the file. The worker's BeginFrame
@@ -78,10 +89,7 @@
  * present as a uniform 8.33 ms cadence, and the estimate reads 8.33. That reading is not silently
  * absorbed: it is published as `VsyncMs`, printed on every `[Jaui.pace]` line and on every N
  * change, and `?tick-pace=lock:V` PINS the interval so a cell taken on a derived estimate can be
- * checked against one that cannot be wrong. A grid finer than the display's costs evenness only
- * when the period is not near a multiple of the real vsync (a 20 ms render on a 60 Hz panel would
- * lock to 25 ms and alternate 1v/2v); at dpr 2, where the render is ~33 ms, N simply reads 4
- * instead of 2 and the released cadence is the same 33.3 ms.
+ * checked against one that cannot be wrong. The M4's pinned and derived arms chose the same N.
  *
  * WHAT A SKIPPED TICK DOES AND DOES NOT DO, exactly — unchanged by this lane:
  *   DOES     drain the pushed-size slot, advance `_lastTime`, feed the HUD, step every spring
@@ -93,10 +101,11 @@
  * So a skipped tick cannot change a pixel: the only thing that writes pixels is the render it
  * skipped, and that render is not dropped — it is OWED, and the next tick the gate lets through
  * runs it. On a static scene there is nothing behind at all and the loop is parked, so no tick
- * happens and the flag is a no-op by construction. What the lock changes is the SEQUENCE of
- * presented frames, and it changes it to an even one.
+ * happens and the flag is a no-op by construction. (A paced arm used to freeze a less-converged
+ * adaptive shadow on park; lane tickpace4 fixed that in the RENDERER — converge, then park — so
+ * every pacing arm now reads 0 px against unflagged on the same build.)
  *
- * THE OTHER TWO MODES STAY, as controls, and the depth argument behind `fence` is still true:
+ * THE CONTROLS STAY, all in one binary, and the depth argument behind `fence` is still true:
  *
  *   `fence:D`  D frames may be outstanding when a tick asks to render. D=0 is the strictly serial
  *              gate that measured 50.13 by making the frame cost CPU issue PLUS GPU execution
@@ -104,35 +113,68 @@
  *   `N`        render every Nth want. A 30 fps clamp at N=2. Never a default; it exists to price
  *              the instrument (it issues zero fence polls) and to be the even arm the lock has to
  *              match.
+ *   `observe`  the UNPACED arm with the instrument on: every want renders, exactly as unflagged,
+ *              and the fences are still polled and booked. It is how the report answers "by how
+ *              much does the solo fence latency over-read the throughput period, and where does the
+ *              difference come from" with a number: `SoloMs` (arm-to-signal, the old estimator's
+ *              input), `SatGapMs` (completion-to-completion while saturated, the truth) and
+ *              `RenderMs` (the CPU's own issuing time) for the same scene on the same build. It
+ *              PERTURBS — one `clientWaitSync` per tick, with the flush bit — so it is a
+ *              diagnostic, never a timing cell.
  */
 
 /** How the gate decides. `null` is the unflagged engine: every tick that wants to render, renders. */
 export type TickPaceMode =
-  /** Release a render only on a whole number of vsyncs, chosen from the measured frame cost. The
-   *  flag's meaning. `Depth` is the fence safety net underneath it; `Vsync` pins the display
+  /** Release a render only on a whole number of vsyncs, chosen from OBSERVED render completions.
+   *  The flag's meaning. `Depth` is the fence safety net underneath it; `Vsync` pins the display
    *  interval in ms when `?tick-pace=lock:V` named one, and is null when it is derived. */
   | { Kind: 'lock'; Depth: number; Vsync: number | null }
   /** Poll the rendered frames' GPU fences; skip while more than `Depth` of them are outstanding.
    *  Adaptive, and the arm that measured TRIMODAL at dpr 2. A control now. */
   | { Kind: 'fence'; Depth: number }
   /** Render every Nth tick that wants to render. N >= 2. The control arm, and a clamp. */
-  | { Kind: 'ratio'; N: number };
+  | { Kind: 'ratio'; N: number }
+  /** Gate nothing; poll and book everything. The unpaced arm with the instrument on. */
+  | { Kind: 'observe' };
 
 /** What the gate said about one tick that wanted to render. `forced` is a `render` the stall guard
  *  took rather than a `render` the fence allowed, and it is counted separately BECAUSE a cell with
  *  a non-zero forced count is not measuring what the flag claims to measure. */
 export type PaceDecision = 'render' | 'skip' | 'forced';
 
+/**
+ * Where `PeriodMs` came from. A period without this field is a number a reader has to trust; with
+ * it, a reader can tell a measurement from a default.
+ *
+ *   `none`         nothing has been observed yet.
+ *   `warmup`       the saturated N=1 window at boot. The seed came from this.
+ *   `trial`        a speculative step-down that saturated and therefore failed — which is the most
+ *                  informative outcome a trial has, because a failed trial IS an observation.
+ *   `stepup`       the loop fell behind its own cadence and the gaps around the refusals said by
+ *                  how much.
+ *   `unsaturated`  the warm-up never saturated at N=1, so there is no period to publish AND none is
+ *                  needed: the GPU kept up with every release on the one-vsync grid. `PeriodMs` is
+ *                  0 here and that zero is a statement, not a missing reading.
+ *   `gap`          a non-lock polling arm (`fence`, `observe`) publishing the mean saturated
+ *                  completion gap it happened to see. No controller reads it.
+ */
+export type PacePeriodSource = 'none' | 'warmup' | 'trial' | 'stepup' | 'unsaturated' | 'gap';
+
+/** What happened to one speculative step-down, for the trace. */
+export type PaceTrialOutcome = 'start' | 'kept' | 'failed';
+
 /** One retired frame-completion fence, as the renderer reports it. Everything here is a reading;
  *  `Tick.Pace` decides what each one is evidence OF. */
 export interface PaceFenceSample {
   /** Arm to the poll that retired it. The existing `FenceMs` ledger field, unchanged: at depth 1 it
-   *  legitimately includes the queue wait, which is why it is not the period. */
+   *  legitimately includes the queue wait, and even SOLO it includes the present coupling, which is
+   *  why it is a latency and never the period. */
   Ms: number;
-  /** Previous retirement to this one. When the frame was queued behind another of ours, this IS the
-   *  GPU's per-frame cost. 0 when there is no previous retirement to measure from. */
+  /** Previous retirement to this one. When the frame was QUEUED behind another of ours (`Solo`
+   *  false), this IS the throughput period. 0 when there is no previous retirement to measure from. */
   GapMs: number;
-  /** Was the GPU free of our frames when this fence was armed? Only then is `Ms` the GPU's own cost. */
+  /** Was the GPU free of our frames when this fence was armed? `false` is the saturation proof: the
+   *  gap that ends at this completion contains no idle time, because the GPU had work the whole way. */
   Solo: boolean;
   /** How long since the previous poll — the width of the interval the true completion lies in. */
   PollGapMs: number;
@@ -159,6 +201,10 @@ export interface PaceGate {
  * discarded render. Not two: at two the CPU may run a whole frame ahead of the GPU and the oldest
  * frame in the queue is stale by the time it presents, which is the state the unflagged engine was
  * already in.
+ *
+ * It is ALSO what makes the warm-up observation possible: at N=1 and depth 1, a render longer than
+ * a vsync keeps exactly one frame queued behind the running one, which is the saturated steady
+ * state the period is defined in.
  */
 export const PACE_DEFAULT_DEPTH = 1;
 
@@ -204,29 +250,83 @@ export const PACE_STALL_MS = 100;
  *  not being paced, it is being throttled, and the number to fix is the render. */
 export const LOCK_MAX_N = 8;
 
-/** Frames in the cost EMAs. Short enough to follow a scene change within a few frames, long enough
- *  that one hitched frame moves the estimate by about a tenth of the way. */
-export const LOCK_EMA_FRAMES = 8;
+/**
+ * Saturated completion gaps that make one period OBSERVATION.
+ *
+ * Eight, taken as a MEAN and not a median, and the reason is the clock: a completion is timestamped
+ * by the POLL that found the fence signalled, so both ends of a gap are quantized to the poll grain
+ * (8.33 ms at a 120 Hz callback cadence). A 29.41 ms period read on that grain produces gaps of 25
+ * and 33.3 in the proportion that averages to 29.41 — the mean is unbiased and the median snaps to
+ * whichever grid point happens to win. Eight of them is ~240 ms of saturated rendering at dpr 2,
+ * which is inside the harness's settle slack and short enough that the seed is not a warm-up cell.
+ */
+export const LOCK_OBSERVE_SAMPLES = 8;
 
-/** How far past the boundary the period must be before N moves, as a share of one vsync. 10% of a
- *  vsync is 1.7 ms at 60 Hz: wide enough to swallow the residual quantization in the GPU estimate,
+/** Released renders at N=1 with the fence NEVER having refused, after which the warm-up stops
+ *  waiting and declares N=1 sufficient. It is not a timeout on a measurement, it is the OTHER
+ *  outcome: two dozen releases on the one-vsync grid that the pipeline kept up with IS the proof.
+ *  Two dozen is ~400 ms at 60 Hz and ~3 s on a phone whose callbacks are 120 ms apart — and on the
+ *  phone N=1 is the answer anyway, so the wait costs nothing. */
+export const LOCK_WARMUP_QUIET_RENDERS = 24;
+
+/** ...and the bound for a warm-up that HAS started saturating but has not yet produced
+ *  `LOCK_OBSERVE_SAMPLES` clean gaps. A render barely over one vsync (the M4's 18.40 at dpr 1.5
+ *  against a 16.67 grid) backs the depth-1 queue up only ~1.7 ms per frame, so the first refusal is
+ *  eleven renders in and the eighth clean gap another ten after that. Sixty-four renders is ~1 s at
+ *  that cadence — and cutting it short would hand exactly that case the wrong answer, which is the
+ *  cell the lane was asked to fix. */
+export const LOCK_WARMUP_MAX_RENDERS = 64;
+
+/**
+ * Released renders one speculative step-down runs for before it is KEPT.
+ *
+ * A trial that is going to fail fails early and cheaply — the queue backs up until the fence
+ * refuses, ~1/(1 - cadence/period) releases — so the budget does not price failure, it sets the
+ * RESOLUTION of success: surviving F frames means the cadence overran the period by less than
+ * about 1/F of itself. Twenty-four resolves ~4%, which separates the M4's dpr-1.5 case (18.40 ms
+ * against a 16.67 grid, 10.4% over, refuses at ~frame 11) from a genuine one-vsync render. A larger
+ * budget costs nothing when the trial succeeds — those are good frames at the better cadence.
+ */
+export const LOCK_TRIAL_FRAMES = 24;
+
+/** How long the cadence holds before the next trial is allowed. Two seconds is ~60 locked frames at
+ *  dpr 2, so a failed trial's handful of judder frames is a few percent of a window and the
+ *  histogram still reads in one bucket. */
+export const LOCK_DWELL_MS = 2000;
+
+/** ...doubling after every failed trial, to here. A scene whose cadence is settled stops being
+ *  poked at; one that has just changed (a step-up, or a trial that was KEPT) resets to the base. */
+export const LOCK_DWELL_MAX_MS = 16000;
+
+/** Consecutive untroubled releases that CLOSE a saturated run. Three, because one clean release
+ *  proves nothing on a loop that is only just over the grid — at 18.40 ms against 16.67 the fence
+ *  refuses every second or third frame and the frames between them are part of the same saturated
+ *  run, not a return to idle. Closing on one would keep only the slow half of the pattern and read
+ *  the period 36% high. */
+export const LOCK_SATURATION_EXIT = 3;
+
+/** Fence refusals inside `LOCK_STEPUP_WINDOW_MS` that make a step-up worth considering. NOT a
+ *  CONSECUTIVE run: a consecutive count is a measure of the TICK cadence, not of the GPU — at 60 Hz
+ *  callbacks a badly overrun cadence produces one refusal between releases and at 120 Hz it
+ *  produces three, so a consecutive bar of three would fire on one machine and never on the other.
+ *  That is the same trap `PACE_STALL_MS` was added to this file to close. */
+export const LOCK_STEPUP_REFUSALS = 3;
+
+/** ...and the window they must fall inside. Half a second: recent enough that a refusal from two
+ *  scenes ago cannot help re-time this one, long enough to hold three at any callback cadence. */
+export const LOCK_STEPUP_WINDOW_MS = 500;
+
+/** How far past the boundary an OBSERVED period must be before N moves up, and how much room a
+ *  trial's readings must leave before a step down is kept, as a share of one vsync. 10% of a vsync
+ *  is 1.7 ms at 60 Hz: wide enough to swallow the residual poll quantization in a gap reading,
  *  narrow enough that a genuinely 2-vsync render is never mistaken for a 1-vsync one. It is what
  *  holds N=1 on the M4's ~17 ms dpr-1.5 render (17 < 16.67 + 1.67) instead of flapping to N=2. */
 export const LOCK_MARGIN_SHARE = 0.10;
 
-/** Consecutive evaluations (one per released render) that must agree before N steps. At N=2 on a
- *  33 ms period that is ~270 ms of agreement, so a burst of expensive frames cannot move it. */
-export const LOCK_HOLD_FRAMES = 8;
-
-/** Floor between two N changes, in ms. With the hold above it makes an oscillation impossible to
- *  sustain: the fastest N can move is once a quarter second, and only in one direction at a time. */
+/** Floor between two committed N changes, in ms. The dwell governs trials; this governs step-ups,
+ *  which are evidence-driven and must not have to wait a dwell to correct a cadence the GPU is
+ *  visibly failing — but must not ratchet up eight times in eight frames either. */
 export const LOCK_CHANGE_MS = 250;
-
-/** Cost samples before N is SEEDED straight to `ceil(period / vsync)` instead of stepping to it.
- *  Stepping from N=1 would spend ~8 renders and 250 ms per step juddering at page load, inside the
- *  harness's window; four samples is ~130 ms at dpr 2 and the seed is counted as a change, so it is
- *  visible in `LockChanges` rather than hidden. */
-export const LOCK_SEED_FRAMES = 4;
 
 /** How early a tick may release a render, as a share of one vsync. The gate can only act on a tick,
  *  and the tick grid is NOT the vsync grid (96 Hz callbacks were measured on a 60 Hz panel), so a
@@ -249,6 +349,14 @@ export const VSYNC_MIN_SAMPLES = 8;
  *  published and `VsyncDerived` says whether it was measured or is still this. */
 export const VSYNC_FALLBACK_MS = 1000 / 60;
 
+/** Readings kept for one decision window (the warm-up's, a trial's, a step-up's). Cleared whenever
+ *  the released cadence changes, because a gap that spans two cadences belongs to neither. */
+const DECIDE_RING = 16;
+
+/** Readings kept for the published diagnostics. Never cleared: the whole point of them is to be
+ *  comparable across a run and across arms. */
+const DIAG_RING = 32;
+
 /** A GPU cost sample above this is a hitch (a shader compile, a texture upload, a tab restore), not
  *  the steady-state period the cadence should be chosen from. */
 const GPU_SAMPLE_MAX_MS = 250;
@@ -258,16 +366,62 @@ const Round1 = (v: number): number => Math.round(v * 10) / 10;
 /** Two, for the vsync: 16.67 and 8.33 have to be told apart at a glance. */
 const Round2 = (v: number): number => Math.round(v * 100) / 100;
 
-/** An exponential moving average that starts AT its first sample rather than climbing from zero —
- *  a controller seeded from a ramp would choose its first N from a number no frame ever had. */
-class Ema {
-  Value = 0;
-  N = 0;
-  private readonly _a: number;
-  constructor(frames: number) { this._a = 2 / (frames + 1); }
-  Push = (v: number): void => {
-    this.N++;
-    this.Value = this.N === 1 ? v : this.Value + this._a * (v - this.Value);
+/**
+ * A small ring of timestamped readings, with a MEAN and a MEDIAN over a window.
+ *
+ * Not an EMA. An EMA has a memory that outlives the cadence it was taken under, and this lane
+ * exists because a smoothed cost from the wrong regime chose the cadence. Everything here is a
+ * bounded window of raw observations that gets THROWN AWAY when the regime changes.
+ *
+ * `Mean` is what the period is read with (poll quantization cancels in it, see
+ * `LOCK_OBSERVE_SAMPLES`); `Median` is what the published diagnostics use, where a single hitch
+ * should not move the number a human reads.
+ */
+class Samples {
+  private readonly _v: number[] = [];
+  private readonly _t: number[] = [];
+  private _at = 0;
+  /** Pushes ever, across clears. */
+  Total = 0;
+
+  constructor(private readonly _cap: number) {}
+
+  Push = (v: number, t: number): void => {
+    this.Total++;
+    if (this._v.length < this._cap) { this._v.push(v); this._t.push(t); return; }
+    this._v[this._at] = v;
+    this._t[this._at] = t;
+    this._at = (this._at + 1) % this._cap;
+  };
+
+  Clear = (): void => {
+    this._v.length = 0;
+    this._t.length = 0;
+    this._at = 0;
+  };
+
+  /** Readings at or after `since`. `since` 0 is the whole window. */
+  Count = (since = 0): number => {
+    let n = 0;
+    for (let i = 0; i < this._v.length; i++) if (this._t[i] >= since) n++;
+    return n;
+  };
+
+  /** 0 when nothing in the window qualifies — and 0 is never a legal period, so a caller that
+   *  forgets to check `Count` cannot silently act on an empty ring. */
+  Mean = (since = 0): number => {
+    let sum = 0;
+    let n = 0;
+    for (let i = 0; i < this._v.length; i++) if (this._t[i] >= since) { sum += this._v[i]; n++; }
+    return n === 0 ? 0 : sum / n;
+  };
+
+  Median = (since = 0): number => {
+    const kept: number[] = [];
+    for (let i = 0; i < this._v.length; i++) if (this._t[i] >= since) kept.push(this._v[i]);
+    if (kept.length === 0) return 0;
+    kept.sort((a, b) => a - b);
+    return kept[kept.length >> 1];
   };
 }
 
@@ -385,6 +539,8 @@ export class VsyncEstimator {
  *     ?tick-pace=lock         the same, spelled out
  *     ?tick-pace=lock:V       the lock with the vsync PINNED to V ms — the control that proves a
  *                             derived estimate right or wrong in the same binary
+ *     ?tick-pace=observe      pace NOTHING, instrument everything — the arm that prices the solo
+ *                             fence latency against the observed throughput period
  *     ?tick-pace=fence        the adaptive fence gate at the default depth (trimodal; a control)
  *     ?tick-pace=fence:D      the fence gate at depth D (0..PACE_MAX_DEPTH); D=0 is the first cut
  *     ?tick-pace=N            the fixed ratio, N >= 2 — a CLAMP, the control arm, never a default
@@ -407,6 +563,7 @@ export const ParseTickPace = (raw: string | null): { Mode: TickPaceMode } | { Wh
     }
     return { Mode: { Kind: 'lock', Depth: PACE_DEFAULT_DEPTH, Vsync: ms } };
   }
+  if (v === 'observe') return { Mode: { Kind: 'observe' } };
   if (v === 'fence') return { Mode: { Kind: 'fence', Depth: PACE_DEFAULT_DEPTH } };
   if (v.startsWith('fence:')) {
     const tail = v.slice('fence:'.length);
@@ -420,7 +577,7 @@ export const ParseTickPace = (raw: string | null): { Mode: TickPaceMode } | { Wh
     return { Mode: { Kind: 'fence', Depth: d } };
   }
   const n = Number(v);
-  if (!Number.isInteger(n)) return { Why: 'value-must-be-lock-fence-or-a-whole-number-of-ticks' };
+  if (!Number.isInteger(n)) return { Why: 'value-must-be-lock-observe-fence-or-a-whole-number-of-ticks' };
   if (n === 1) return { Why: 'n-1-renders-every-tick-which-is-the-unflagged-engine' };
   if (n < 1) return { Why: 'n-must-be-at-least-2' };
   return { Mode: { Kind: 'ratio', N: n } };
@@ -432,8 +589,9 @@ export const ParseTickPace = (raw: string | null): { Mode: TickPaceMode } | { Wh
 export const TickPaceText = (mode: TickPaceMode | null): string =>
   mode === null ? 'off'
     : mode.Kind === 'lock' ? (mode.Vsync === null ? 'lock' : `lock:${Round2(mode.Vsync)}`)
-      : mode.Kind === 'fence' ? `fence:${mode.Depth}`
-        : `ratio:${mode.N}`;
+      : mode.Kind === 'observe' ? 'observe'
+        : mode.Kind === 'fence' ? `fence:${mode.Depth}`
+          : `ratio:${mode.N}`;
 
 /** Ticks waited before a render landed, bucketed: 0, 1, 2, 3-or-more. */
 export type PaceWaited = [number, number, number, number];
@@ -447,15 +605,41 @@ export interface PaceCensus {
   WaitedTicks: PaceWaited;
   FenceMs: { N: number; Sum: number; Max: number };
   MaxInFlight: number;
-  /** The lock's current cadence, in vsyncs per presented frame. 0 in every other mode. */
+  /** The lock's current cadence, in vsyncs per presented frame — the one IN FORCE, so during a
+   *  trial it is the trial's. 0 in every other mode. */
   LockN: number;
-  /** How many times N moved, the seed included. A cell whose N is still moving is a cell taken
-   *  during a warm-up, and a large count is an oscillation the hysteresis failed to stop. */
+  /** The cadence the lock has COMMITTED to. A trial shows up as `LockN !== LockCommittedN`. */
+  LockCommittedN: number;
+  /** How many times the COMMITTED cadence moved, the seed included. A failed trial is not a change
+   *  — it is a `Trials`/`TrialsFailed` entry — so this counts decisions, not experiments. A cell
+   *  whose count is still rising is a cell taken during a warm-up. */
   LockChanges: number;
-  /** The smoothed frame cost the cadence was chosen from: max(CPU issue, GPU execution). The fence
-   *  arm publishes it too, from its GPU half alone (only the lock times `_render`), so the two arms
-   *  can be compared on the cost as well as on the cadence. */
+  /** The OBSERVED render period the cadence was chosen from: the mean completion-to-completion gap
+   *  of the last saturated window. Never a cost model, never an EMA of one. 0 means nothing has
+   *  been observed — read `PeriodSource` to find out which kind of nothing. */
   PeriodMs: number;
+  /** Which observation window `PeriodMs` came from. */
+  PeriodSource: PacePeriodSource;
+  /** How long ago that window closed, in ms. -1 when there has never been one. A FRESH period is
+   *  not the goal and cannot be: while the lock is holding, the loop is not saturated and there is
+   *  nothing to observe. An old number here is the design working; a number with no age is a model. */
+  PeriodObservedAt: number;
+  /** Speculative step-downs started, and how many of them the GPU could not hold. */
+  Trials: number;
+  TrialsFailed: number;
+  /** DIAGNOSTIC, never read by a decision. Mean SOLO fence latency, de-quantized by half the poll
+   *  gap — arm-to-signal with the GPU otherwise idle, which is what the OLD estimator believed was
+   *  the period. Compare it against `SatGapMs` to price the over-read. */
+  SoloMs: number;
+  /** DIAGNOSTIC. Mean queued completion-to-completion gap seen anywhere in the run — the throughput
+   *  period as the FENCE sees it, which is the number `SoloMs` has to be compared against. */
+  SatGapMs: number;
+  /** DIAGNOSTIC. Median wall time of `_render` on the worker: the CPU's issuing half, which
+   *  overlaps the previous frame's GPU work and is therefore not additive with it. Between these
+   *  three numbers a report can say whether the solo latency over-reads because of PRESENT COUPLING
+   *  (`SoloMs` >> `SatGapMs` >= `RenderMs`) or because the CPU term dominated a `max()`
+   *  (`RenderMs` >= `SoloMs`). */
+  RenderMs: number;
   /** The display interval the lock is quantizing to, derived or pinned. */
   VsyncMs: number;
   /** Was `VsyncMs` measured, or is it still the fallback? A cell taken on the fallback is a cell
@@ -464,8 +648,8 @@ export interface PaceCensus {
   /** Skips the LOCK took (the tick came early). Normal, and the larger the tick rate the larger
    *  this is — three per render at 120 Hz ticks and N=2. */
   LockSkipped: number;
-  /** Skips the FENCE took (the GPU was still behind). Under a correct lock this is ~0, and a large
-   *  one says the cadence is faster than the GPU can fill. */
+  /** Skips the FENCE took (the GPU was still behind). Under a correct lock this is ~0 outside
+   *  trials, and a large one says the cadence is faster than the GPU can fill. */
   FenceSkipped: number;
 }
 
@@ -494,7 +678,7 @@ export class TickPace {
   readonly WaitedTicks: PaceWaited = [0, 0, 0, 0];
 
   /** Fence latency: how long from arming a fence to the poll that found it signalled. The mean over
-   *  a window is `(Sum2-Sum1)/(N2-N1)`. Zero in every mode but fence and lock. */
+   *  a window is `(Sum2-Sum1)/(N2-N1)`. Zero in the ratio mode, which never polls. */
   FenceSamples = 0;
   FenceMsSum = 0;
   FenceMsMax = 0;
@@ -502,18 +686,45 @@ export class TickPace {
   /** High-water mark of frames outstanding on the GPU. At depth D a working gate reaches D+1. */
   MaxInFlight = 0;
 
-  /** The lock's cadence, in vsyncs. Starts at 1 and is seeded from the first cost estimate. */
+  /** The cadence IN FORCE, in vsyncs. Starts at 1 — which is not a guess, it is the saturating
+   *  warm-up the period is observed in — and during a trial it is one below the committed one. */
   LockN = 1;
+  /** The cadence the lock has committed to. */
+  LockCommittedN = 1;
   LockChanges = 0;
   LockSkipped = 0;
   FenceSkipped = 0;
+  Trials = 0;
+  TrialsFailed = 0;
 
-  /** Called when N moves, so the trace can say so without this file importing one. */
-  OnLockChange: ((n: number, periodMs: number, vsyncMs: number) => void) | null = null;
+  /** Called when the COMMITTED cadence moves, so the trace can say so without this file importing
+   *  one. The period and its source ride along: an N change whose period is `unsaturated` was
+   *  chosen by a proof, not by a reading, and a reader must be able to tell. */
+  OnLockChange: ((n: number, periodMs: number, vsyncMs: number, source: PacePeriodSource) => void) | null = null;
+  /** Called at each end of a speculative step-down. A trial is the only thing in this file that
+   *  deliberately makes frames worse, so it says so on the trace every time. */
+  OnTrial: ((n: number, outcome: PaceTrialOutcome) => void) | null = null;
 
-  private readonly _cpu = new Ema(LOCK_EMA_FRAMES);
-  private readonly _gpu = new Ema(LOCK_EMA_FRAMES);
   private readonly _vsync = new VsyncEstimator();
+
+  /** Release intervals taken inside a saturated run — the OBSERVED period, for the CURRENT
+   *  decision window. Cleared whenever the released cadence changes, because an interval that spans
+   *  two cadences measures neither. */
+  private readonly _sat = new Samples(DECIDE_RING);
+  /** Every release interval inside a trial that the run kept: the trial's own cadence while the
+   *  pipeline is keeping up, and the period once it is not. */
+  private readonly _trialIntervals = new Samples(DECIDE_RING);
+  /** Fence refusals, timestamped, for the step-up's rate test. */
+  private readonly _refusals = new Samples(DECIDE_RING);
+
+  /** The three published diagnostics. Nothing decides on any of them — that is the lane. */
+  private readonly _soloDiag = new Samples(DIAG_RING);
+  private readonly _satDiag = new Samples(DIAG_RING);
+  private readonly _cpuDiag = new Samples(DIAG_RING);
+
+  /** Frames outstanding as of the last poll, so `Decide` reads one number rather than polling
+   *  twice. */
+  private _inFlight = 0;
 
   /** Consecutive refusals of any kind, for the `WaitedTicks` histogram. */
   private _skipRun = 0;
@@ -527,13 +738,38 @@ export class TickPace {
   /** The IDEAL time of the next release, advanced by exactly N vsyncs per render so a release that
    *  jitters by a tick does not drag the cadence with it. */
   private _nextAt = 0;
-  /** Timestamps of the last N change and the last evaluation's direction and agreement count. */
-  private _lastChangeAt = 0;
-  private _holdDir = 0;
-  private _hold = 0;
-  private _seeded = false;
-  /** When a render last ran, so the stall guard can be a duration instead of a tick count. */
+  /** When a render last ran, so the stall guard can be a duration instead of a tick count — and so
+   *  the release INTERVAL, which is what says whether the loop was flat out, is measurable. */
   private _lastRenderAt = 0;
+  /** Is the loop inside a saturated run? See `_noteRelease`. */
+  private _satRun = false;
+  /** Consecutive releases inside a run that the pipeline had no trouble with. */
+  private _clean = 0;
+  /** The latest clock reading this object has seen, so `Census` can age the period without every
+   *  caller of it having to hold a timestamp. */
+  private _now = 0;
+
+  /** The observation the cadence rests on. */
+  private _periodMs = 0;
+  private _periodAt = 0;
+  private _periodSource: PacePeriodSource = 'none';
+
+  /** Warm-up state: renders taken at N=1 while waiting for the loop to saturate. */
+  private _seeded = false;
+  private _warmRenders = 0;
+
+  /** Trial state. */
+  private _trial = false;
+  private _trialRenders = 0;
+  private _lastTrialAt = 0;
+  private _dwellMs = LOCK_DWELL_MS;
+  /** Set by a KEPT trial: try the next step down immediately rather than after a dwell, so a scene
+   *  that got much cheaper walks back down in one burst. */
+  private _trialNow = false;
+
+  private _lastChangeAt = 0;
+  /** The first completion gap after a cadence change spans the change and measures neither side. */
+  private _skipGap = false;
 
   constructor(mode: TickPaceMode | null) { this.Mode = mode; }
 
@@ -541,21 +777,37 @@ export class TickPace {
    *  see the ones that do not want to render too. One subtraction and a ring write. */
   NoteTick = (time: number): void => {
     if (this.Mode === null) return;
+    this._now = time;
     this._vsync.Note(time);
   };
 
-  /** Does the engine need to time `_render` for this mode? Only the lock reads the CPU term, and a
-   *  `performance.now()` pair per frame is not paid on an arm that would not read it. */
-  get WantsRenderCost(): boolean { return this.Mode !== null && this.Mode.Kind === 'lock'; }
+  /** Does the engine need to time `_render` for this mode? The lock and the observe arm publish it
+   *  as a diagnostic; nothing decides on it, and a `performance.now()` pair per frame is not paid
+   *  on an arm that would not read it. */
+  get WantsRenderCost(): boolean {
+    const m = this.Mode;
+    return m !== null && (m.Kind === 'lock' || m.Kind === 'observe');
+  }
 
-  /** The wall time `_render` took, in ms — the CPU half of the period. */
+  /** The wall time `_render` took, in ms. DIAGNOSTIC ONLY. */
   NoteRenderCost = (ms: number): void => {
-    if (ms > 0 && ms < GPU_SAMPLE_MAX_MS) this._cpu.Push(ms);
+    if (ms > 0 && ms < GPU_SAMPLE_MAX_MS) this._cpuDiag.Push(ms, this._now);
   };
 
-  /** The frame's cost, as a pipelined renderer's period is: whichever of the two halves is slower.
-   *  0 until something has been measured. */
-  get PeriodMs(): number { return Math.max(this._cpu.Value, this._gpu.Value); }
+  /** The OBSERVED render period — the mean completion-to-completion gap of the last saturated
+   *  window. 0 when nothing has been observed; `PeriodSource` says which kind of nothing. On a
+   *  non-lock polling arm it is whatever saturated gaps that arm happened to produce. */
+  get PeriodMs(): number {
+    const m = this.Mode;
+    if (m !== null && m.Kind === 'lock') return this._periodMs;
+    return this._satDiag.Count() > 0 ? this._satDiag.Mean() : 0;
+  }
+
+  get PeriodSource(): PacePeriodSource {
+    const m = this.Mode;
+    if (m !== null && m.Kind === 'lock') return this._periodSource;
+    return this._satDiag.Count() > 0 ? 'gap' : 'none';
+  }
 
   /** The display interval the lock quantizes to: pinned if the flag named one, derived if the
    *  callbacks have said enough, the 60 Hz fallback until then. */
@@ -579,6 +831,7 @@ export class TickPace {
    *  lock refusal cannot be a stall when the clock is real. */
   Decide = (gate: PaceGate | null, time: number): PaceDecision => {
     const mode = this.Mode;
+    this._now = time;
     if (mode === null) return this._allow('render', time);
 
     if (mode.Kind === 'ratio') {
@@ -587,11 +840,15 @@ export class TickPace {
       return render ? this._allow('render', time) : this._refuse('ratio');
     }
 
-    // Fence and lock both poll. A null gate cannot happen — the parse refuses both on a renderer
-    // that has no fence to poll — but a gate that is not there must render rather than stall.
+    // Every other mode polls. A null gate cannot happen — the parse refuses them on a renderer that
+    // has no fence to poll — but a gate that is not there must render rather than stall.
     if (gate === null) return this._allow('render', time);
-    const inFlight = this._poll(gate);
+    this._poll(gate);
 
+    // The unpaced arm with the instrument on: the poll above is the whole of it.
+    if (mode.Kind === 'observe') return this._allow('render', time);
+
+    const inFlight = this._inFlight;
     if (mode.Kind === 'fence') {
       if (inFlight <= mode.Depth) return this._allow('render', time);
       if (this._stalled(time)) { this.Forced++; return this._allow('forced', time); }
@@ -619,7 +876,9 @@ export class TickPace {
         this._nextAt = time + this.LockN * vsync;
         return this._allow('forced', time);
       }
-      return this._refuse('fence');
+      const decision = this._refuse('fence');
+      this._noteFenceRefusal(time, vsync);
+      return decision;
     }
 
     this._evaluateLock(time, vsync);
@@ -630,66 +889,201 @@ export class TickPace {
     return this._allow('render', time);
   };
 
-  /** Poll the fences, book the ledger, and feed the GPU half of the period estimate. */
-  private _poll = (gate: PaceGate): number => {
+  /**
+   * Poll the fences and book the ledger. PURE INSTRUMENT — nothing the controller reads comes out
+   * of here, and that is the shape of the fix: the fence says only STOP or GO, and the period is
+   * observed off the loop's own release cadence (`_noteRelease`).
+   *
+   * The two latency channels are kept apart because the whole 50-vs-33.3 cell is the difference
+   * between them. A SOLO sample's arm-to-signal is a LATENCY: the GPU was idle when the fence was
+   * armed, so it contains that frame's execution AND whatever the present couples to its
+   * completion, and it is what the old estimator believed was the period. A QUEUED sample's
+   * completion-to-completion gap has no idle time in it at either end. `SoloMs` over `SatGapMs` on
+   * one arm of one binary is the over-read, priced.
+   */
+  private _poll = (gate: PaceGate): void => {
     const inFlight = gate.PaceInFlight();
+    this._inFlight = inFlight;
     if (inFlight > this.MaxInFlight) this.MaxInFlight = inFlight;
     const s = gate.PaceTakeFence();
-    if (s !== null) {
-      this.FenceSamples++;
-      this.FenceMsSum += s.Ms;
-      if (s.Ms > this.FenceMsMax) this.FenceMsMax = s.Ms;
-      // Solo: arm-to-signal IS the GPU's cost, biased late by the poll grain — de-quantize by half
-      // the interval the completion is known to lie in. Queued: the completion-to-completion gap is
-      // the cost exactly, and both of its ends carry the same bias, so it needs no correction.
-      const g = s.Solo ? Math.max(s.Ms - s.PollGapMs / 2, 0) : s.GapMs;
-      if (g > 0 && g < GPU_SAMPLE_MAX_MS) this._gpu.Push(g);
+    if (s === null) return;
+    this.FenceSamples++;
+    this.FenceMsSum += s.Ms;
+    if (s.Ms > this.FenceMsMax) this.FenceMsMax = s.Ms;
+    const now = this._now;
+    if (s.Solo) {
+      // De-quantized by half the poll gap: the true completion lies in (previous poll, this poll].
+      const solo = Math.max(s.Ms - s.PollGapMs / 2, 0);
+      if (solo > 0 && solo < GPU_SAMPLE_MAX_MS) this._soloDiag.Push(solo, now);
+      return;
     }
-    return inFlight;
+    const gap = s.GapMs;
+    if (gap > 0 && gap < GPU_SAMPLE_MAX_MS) this._satDiag.Push(gap, now);
   };
 
   /**
-   * Choose N. Once per released render, and it moves slowly ON PURPOSE.
+   * Book one released render's interval, and decide whether the loop is in a SATURATED RUN.
    *
-   * The boundary test is asymmetric by a margin in BOTH directions, so a period sitting exactly on
-   * a vsync boundary — the M4's ~17 ms at dpr 1.5 — holds the N it has instead of flapping. Going
-   * up needs the period to overrun the current cadence by the margin; coming down needs it to fit
-   * the next one DOWN with the margin to spare. Neither happens until `LOCK_HOLD_FRAMES`
-   * consecutive evaluations have agreed, and never twice inside `LOCK_CHANGE_MS`.
+   * Saturation is a STATE, not a per-frame flag, and that distinction is load-bearing. A loop
+   * running flat out at 18.40 ms against a 16.67 ms grid releases at 16.67 and 25 alternately —
+   * only the 25s follow a fence refusal, so a per-interval test would keep the 25s, drop the 16.7s
+   * and read the period as 25. The run keeps BOTH: it opens on the first fence refusal and closes
+   * only after `LOCK_SATURATION_EXIT` consecutive releases the pipeline had no trouble with, so
+   * what it averages is the loop's actual throughput — which is precisely `ticks/s` on an unpaced
+   * arm, the number the M4 measured as 29.41 and 18.40 and the one the old estimate missed.
+   *
+   * On the `observe` arm there is no gate to refuse anything and every want renders, so the loop is
+   * flat out by construction and the run is always open.
+   */
+  private _noteRelease = (time: number): void => {
+    const mode = this.Mode;
+    if (mode === null || mode.Kind === 'ratio') return;
+    const prev = this._lastRenderAt;
+    if (mode.Kind === 'observe') this._satRun = true;
+    else if (this._fenceRun > 0) { this._satRun = true; this._clean = 0; }
+    else if (this._satRun && ++this._clean >= LOCK_SATURATION_EXIT) this._satRun = false;
+    if (!this._satRun || prev <= 0) return;
+    const interval = time - prev;
+    if (!(interval > 0 && interval < GPU_SAMPLE_MAX_MS)) return;
+    if (this._trial) this._trialIntervals.Push(interval, time);
+    // The first interval after a cadence change spans the change and measures neither side of it.
+    if (this._skipGap) { this._skipGap = false; return; }
+    this._sat.Push(interval, time);
+  };
+
+  /**
+   * The lock's controller. Once per released render. It has exactly three states, and NONE of them
+   * derives a cadence from a cost model.
    */
   private _evaluateLock = (time: number, vsync: number): void => {
-    const period = this.PeriodMs;
-    if (period <= 0) return;
-    const margin = vsync * LOCK_MARGIN_SHARE;
+    if (!this._seeded) { this._warmUp(time, vsync); return; }
+    if (this._trial) { this._judgeTrial(time, vsync); return; }
+    this._maybeTrial(time);
+  };
 
-    if (!this._seeded) {
-      // Not before the estimates mean anything, and not on an assumed grid: a seed taken off the
-      // fallback vsync would pin the cadence to a display nobody measured. The GPU term needs at
-      // least one reading of its own — a seed off the CPU half alone would choose a cadence for a
-      // frame whose expensive half has not reported yet, which on a GPU-bound scene is every
-      // frame. Twice the sample count without one is a renderer that will never hand one over
-      // (`fence=false`), and seeding on the CPU alone beats never seeding.
-      const cost = Math.max(this._cpu.N, this._gpu.N);
-      const ready = (this._gpu.N >= 1 && cost >= LOCK_SEED_FRAMES) || this._cpu.N >= 2 * LOCK_SEED_FRAMES;
-      if (!ready || !this.VsyncDerived) return;
+  /**
+   * WARM-UP. N=1 and the depth-1 fence, which saturates the loop whenever a render costs more than
+   * one release interval — and that is the only state in which a completion gap is a period.
+   *
+   * Two outcomes, both of them conclusions:
+   *   saturated    `LOCK_OBSERVE_SAMPLES` gaps arrived. Their mean is the period; seed from it.
+   *   unsaturated  two dozen renders went by with the GPU free at every arm. N=1 is PROVED
+   *                sufficient — the loop was releasing as fast as its callbacks and grid allowed
+   *                and the GPU kept up with all of it — so there is nothing to seed and no number
+   *                to publish. That is the phone, and it is also any scene under one vsync.
+   */
+  private _warmUp = (time: number, vsync: number): void => {
+    this._warmRenders++;
+    // A seed on an assumed grid is a seed nobody measured, so wait for the callbacks to say.
+    if (!this.VsyncDerived) return;
+    if (this._sat.Count() >= LOCK_OBSERVE_SAMPLES) {
+      this._observe(this._sat.Mean(), time, 'warmup');
       this._seeded = true;
-      const seed = this._clampN(Math.ceil((period - margin) / vsync));
-      if (seed !== this.LockN) this._setN(seed, time, period, vsync);
+      this._commitN(this._clampN(Math.ceil((this._periodMs - vsync * LOCK_MARGIN_SHARE) / vsync)), time, vsync);
       return;
     }
+    const bound = this._sat.Total === 0 ? LOCK_WARMUP_QUIET_RENDERS : LOCK_WARMUP_MAX_RENDERS;
+    if (this._warmRenders >= bound) {
+      this._seeded = true;
+      this._periodSource = 'unsaturated';
+      this._periodAt = time;
+      this._lastTrialAt = time;
+    }
+  };
 
-    let want = this.LockN;
-    if (period > this.LockN * vsync + margin) want = this.LockN + 1;
-    else if (this.LockN > 1 && period + margin <= (this.LockN - 1) * vsync) want = this.LockN - 1;
-    want = this._clampN(want);
+  /** A step down is only ever taken by RUNNING at it. Once per dwell — or immediately after one
+   *  that was kept, so a scene that got much cheaper does not take a dwell per vsync to find out. */
+  private _maybeTrial = (time: number): void => {
+    if (this.LockCommittedN <= 1) return;
+    if (!this._trialNow && time - this._lastTrialAt < this._dwellMs) return;
+    this._trialNow = false;
+    this.Trials++;
+    this._trial = true;
+    this._trialRenders = 0;
+    this._trialIntervals.Clear();
+    this._sat.Clear();
+    this._skipGap = true;
+    // `_nextAt` is NOT touched here: `Decide` advances the ideal grid by the cadence in force
+    // immediately after this returns, and that cadence is now the trial's.
+    this.LockN = this.LockCommittedN - 1;
+    this.OnTrial?.(this.LockN, 'start');
+  };
 
-    if (want === this.LockN) { this._hold = 0; this._holdDir = 0; return; }
-    const dir = want > this.LockN ? 1 : -1;
-    if (dir !== this._holdDir) { this._holdDir = dir; this._hold = 0; }
-    this._hold++;
-    if (this._hold < LOCK_HOLD_FRAMES) return;
+  /**
+   * Judge the trial in flight. Called once per released render inside it; a fence refusal judges it
+   * from `_noteFenceRefusal` instead, and sooner.
+   *
+   * Two failure tests, and they are different evidence. SATURATED gaps above the trial cadence are
+   * the period itself saying the cadence cannot be filled — two of them end the trial at once. The
+   * trial's WHOLE gap population is the weaker, slower test at the end of the budget: when the GPU
+   * is keeping up those gaps are the release cadence, so a median above it means the releases
+   * themselves were not landing on the grid.
+   */
+  private _judgeTrial = (time: number, vsync: number): void => {
+    this._trialRenders++;
+    const margin = vsync * LOCK_MARGIN_SHARE;
+    const cadence = this.LockN * vsync;
+    if (this._sat.Count() >= 2 && this._sat.Mean() > cadence + margin) {
+      this._observe(this._sat.Mean(), time, 'trial');
+      this._failTrial(time);
+      return;
+    }
+    if (this._trialRenders < LOCK_TRIAL_FRAMES) return;
+    const gaps = this._trialIntervals.Mean();
+    if (gaps > 0 && gaps > cadence + margin) { this._failTrial(time); return; }
+    this._trial = false;
+    const kept = this.LockN;
+    this._commitN(kept, time, vsync);
+    this._trialNow = true;
+    this.OnTrial?.(kept, 'kept');
+  };
+
+  private _failTrial = (time: number): void => {
+    this._trial = false;
+    this.TrialsFailed++;
+    this.LockN = this.LockCommittedN;
+    this._dwellMs = Math.min(this._dwellMs * 2, LOCK_DWELL_MAX_MS);
+    this._lastTrialAt = time;
+    this._trialNow = false;
+    this._trialIntervals.Clear();
+    this._sat.Clear();
+    this._skipGap = true;
+    this._fenceRun = 0;
+    this._refusals.Clear();
+    this.OnTrial?.(this.LockN, 'failed');
+  };
+
+  /**
+   * A fence refusal under the lock. Inside a trial it is the verdict; outside one it is the only
+   * evidence a step-up ever gets — and it is not enough on its own. The loop is saturated at that
+   * moment, so the gaps around it ARE the period, and the step-up asks BOTH questions: is this
+   * happening often (a rate, inside a window, not a consecutive run — see `LOCK_STEPUP_REFUSALS`),
+   * and does the measured period actually exceed the cadence?
+   */
+  private _noteFenceRefusal = (time: number, vsync: number): void => {
+    if (!this._seeded) return;   // the warm-up saturates ON PURPOSE; refusals there are the point
+    if (this._trial) {
+      if (this._sat.Count() >= 2) this._observe(this._sat.Mean(), time, 'trial');
+      this._failTrial(time);
+      return;
+    }
+    this._refusals.Push(1, time);
+    if (this.LockN >= LOCK_MAX_N) return;
     if (this._lastChangeAt > 0 && time - this._lastChangeAt < LOCK_CHANGE_MS) return;
-    this._setN(this._clampN(this.LockN + dir), time, period, vsync);
+    const since = time - LOCK_STEPUP_WINDOW_MS;
+    if (this._refusals.Count(since) < LOCK_STEPUP_REFUSALS) return;
+    if (this._sat.Count(since) < 2) return;
+    const seen = this._sat.Mean(since);
+    if (seen <= this.LockN * vsync + vsync * LOCK_MARGIN_SHARE) return;
+    this._observe(seen, time, 'stepup');
+    this._commitN(this._clampN(this.LockN + 1), time, vsync);
+  };
+
+  private _observe = (ms: number, time: number, source: PacePeriodSource): void => {
+    if (!(ms > 0) || !Number.isFinite(ms)) return;
+    this._periodMs = ms;
+    this._periodAt = time;
+    this._periodSource = source;
   };
 
   /** Has the fence refused for long enough, in BOTH ticks and milliseconds, to be a stall rather
@@ -699,16 +1093,26 @@ export class TickPace {
 
   private _clampN = (n: number): number => Math.min(LOCK_MAX_N, Math.max(1, n));
 
-  private _setN = (n: number, time: number, period: number, vsync: number): void => {
+  /** Commit a cadence: the released grid AND the decision of record. Everything observed under the
+   *  previous cadence is thrown away here, because that is what makes the next reading a reading. */
+  private _commitN = (n: number, time: number, vsync: number): void => {
+    const moved = n !== this.LockCommittedN;
+    this.LockCommittedN = n;
     this.LockN = n;
-    this.LockChanges++;
     this._lastChangeAt = time;
-    this._hold = 0;
-    this._holdDir = 0;
-    this.OnLockChange?.(n, period, vsync);
+    this._lastTrialAt = time;
+    this._dwellMs = LOCK_DWELL_MS;
+    this._sat.Clear();
+    this._refusals.Clear();
+    this._skipGap = true;
+    if (moved) {
+      this.LockChanges++;
+      this.OnLockChange?.(n, this._periodMs, vsync, this._periodSource);
+    }
   };
 
   private _allow = (decision: PaceDecision, time: number): PaceDecision => {
+    this._noteRelease(time);
     this._lastRenderAt = time;
     const waited = this._skipRun;
     this.WaitedTicks[waited < 3 ? waited : 3]++;
@@ -728,20 +1132,36 @@ export class TickPace {
   };
 
   /** The census, for the `[Jaui]` line, `jaui:render:end` and the `__jauiTickPace` global. */
-  Census = (): PaceCensus => ({
-    Mode: TickPaceText(this.Mode),
-    Rendered: this.Rendered,
-    Skipped: this.Skipped,
-    Forced: this.Forced,
-    WaitedTicks: [...this.WaitedTicks] as PaceWaited,
-    FenceMs: { N: this.FenceSamples, Sum: Round1(this.FenceMsSum), Max: Round1(this.FenceMsMax) },
-    MaxInFlight: this.MaxInFlight,
-    LockN: this.Mode !== null && this.Mode.Kind === 'lock' ? this.LockN : 0,
-    LockChanges: this.LockChanges,
-    PeriodMs: Round1(this.PeriodMs),
-    VsyncMs: Round2(this.VsyncMs),
-    VsyncDerived: this.VsyncDerived,
-    LockSkipped: this.LockSkipped,
-    FenceSkipped: this.FenceSkipped,
-  });
+  Census = (): PaceCensus => {
+    const lock = this.Mode !== null && this.Mode.Kind === 'lock';
+    return {
+      Mode: TickPaceText(this.Mode),
+      Rendered: this.Rendered,
+      Skipped: this.Skipped,
+      Forced: this.Forced,
+      WaitedTicks: [...this.WaitedTicks] as PaceWaited,
+      FenceMs: { N: this.FenceSamples, Sum: Round1(this.FenceMsSum), Max: Round1(this.FenceMsMax) },
+      MaxInFlight: this.MaxInFlight,
+      LockN: lock ? this.LockN : 0,
+      LockCommittedN: lock ? this.LockCommittedN : 0,
+      LockChanges: this.LockChanges,
+      PeriodMs: Round1(this.PeriodMs),
+      PeriodSource: this.PeriodSource,
+      PeriodObservedAt: lock ? (this._periodAt === 0 ? -1 : Round1(this._now - this._periodAt))
+        : (this._satDiag.Count() > 0 ? 0 : -1),
+      Trials: this.Trials,
+      TrialsFailed: this.TrialsFailed,
+      // MEANS for the two fence readings and a MEDIAN for the CPU one, for the reason in
+      // `LOCK_OBSERVE_SAMPLES`: both fence numbers are timestamped by the POLL that found the fence
+      // signalled, so both are quantized to the poll grain and only a mean is unbiased. `_render`'s
+      // wall time is read directly and is not quantized, so there a median is the better statistic.
+      SoloMs: Round1(this._soloDiag.Mean()),
+      SatGapMs: Round1(this._satDiag.Mean()),
+      RenderMs: Round1(this._cpuDiag.Median()),
+      VsyncMs: Round2(this.VsyncMs),
+      VsyncDerived: this.VsyncDerived,
+      LockSkipped: this.LockSkipped,
+      FenceSkipped: this.FenceSkipped,
+    };
+  };
 }

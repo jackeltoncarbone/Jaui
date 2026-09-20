@@ -1324,8 +1324,16 @@ export class Canvas implements DirtyTracker {
       // estimates it was chosen from (and `derived` says whether that vsync was measured or is
       // still the 60 Hz fallback), and the two skip columns say WHICH gate refused. Under a lock
       // that fits, `fskip` is ~0 and `lskip` is however many ticks the callback cadence brings early.
-      + ` lockN=${c.LockN} changes=${c.LockChanges} period=${c.PeriodMs} vsync=${c.VsyncMs}`
+      + ` lockN=${c.LockN}/${c.LockCommittedN} changes=${c.LockChanges}`
+      + ` period=${c.PeriodMs}(${c.PeriodSource},${c.PeriodObservedAt}ms ago)`
+      + ` trials=${c.Trials}/${c.TrialsFailed}failed vsync=${c.VsyncMs}`
       + ` derived=${c.VsyncDerived} lskip=${c.LockSkipped} fskip=${c.FenceSkipped}`
+      // The three diagnostics, and NOTHING decides on them. `solo` is arm-to-signal with the GPU
+      // idle - what the old estimator believed the period was; `satgap` is the observed
+      // completion-to-completion period; `render` is the CPU's own issuing half. `solo` well above
+      // `satgap` with `render` below both is present coupling; `render` at or above `solo` is the
+      // CPU term that used to win a `max()`.
+      + ` | solo=${c.SoloMs} satgap=${c.SatGapMs} render=${c.RenderMs}`
       + ` | last ${Math.round(span)}ms +${c.Rendered - m.Rendered} rendered`
       + ` +${c.Skipped - m.Skipped} skipped +${c.Forced - m.Forced} forced`
       + ` waited +${dWaited} fenceMs ${dFenceMs}avg`,
@@ -5466,12 +5474,17 @@ export class Canvas implements DirtyTracker {
       if (why !== null) JTrace(`jaui:blur-chains armed=false reason=${why}`);
       else (r as WebGL2Renderer).DiagBlurChains = n;
     }
-    // `?tick-pace` / `=lock:V` / `=fence` / `=fence:D` / `=N` - MEASUREMENT ONLY, PIXEL-IDENTICAL BY
-    // CONSTRUCTION. The flag's meaning is now the VSYNC LOCK: release a render only on a whole
-    // number of vsyncs, N = ceil(frame cost / vsync), re-chosen slowly with hysteresis - adaptive
-    // AND even, where the fence gate was adaptive and trimodal and the ratio clamp even and fixed.
-    // The whole argument, the measurement it comes from, how the two estimates are taken and what a
-    // skipped tick does is in `Core/Tick.Pace.ts`; what belongs here is the gate and its refusals.
+    // `?tick-pace` / `=lock:V` / `=observe` / `=fence` / `=fence:D` / `=N` - MEASUREMENT ONLY,
+    // PIXEL-IDENTICAL BY CONSTRUCTION. The flag's meaning is the VSYNC LOCK: release a render only
+    // on a whole number of vsyncs, N = ceil(period / vsync) - adaptive AND even, where the fence
+    // gate was adaptive and trimodal and the ratio clamp even and fixed.
+    //
+    // `period` is now an OBSERVED completion-to-completion gap taken in a window the lock makes
+    // saturated on purpose (the N=1 warm-up, a speculative trial, the frames around a fence
+    // refusal), never a cost model: the M4 chose 50 ms where 33.3 was available because
+    // max(CPU EMA, solo fence EMA) read 37.5 against a true 29.41. The whole argument, what each
+    // observation window is, what a trial costs and what a skipped tick does is in
+    // `Core/Tick.Pace.ts`; what belongs here is the gate and its refusals.
     //
     // NOT PARSED IN `Worker.Boot` the way `?no-depth` is, and that is a reading rather than an
     // oversight: `?no-depth` had to land ahead of `Init` because `Init` BUILDS the scene FBO it
@@ -5506,8 +5519,15 @@ export class Canvas implements DirtyTracker {
         // a 16.67 ms vsync as "17", which is the one digit that says whether the grid was read as
         // the display's or as half of it.
         const ms1 = (v: number): string => (Math.round(v * 10) / 10).toFixed(1);
-        this._tickPace.OnLockChange = (n, periodMs, vsyncMs) => JTrace(
-          `jaui:tick-pace lock N=${n} period=${ms1(periodMs)} vsync=${ms1(vsyncMs)}`);
+        // `source=` is the field this lane added and the one to read first: a cadence chosen from
+        // `warmup`/`trial`/`stepup` was chosen from an OBSERVED completion period, and one chosen
+        // from `unsaturated` was chosen by a proof that N=1 is enough. Neither is a cost model, and
+        // the 50-vs-33.3 cell exists because the old one was.
+        this._tickPace.OnLockChange = (n, periodMs, vsyncMs, source) => JTrace(
+          `jaui:tick-pace lock N=${n} period=${ms1(periodMs)} source=${source} vsync=${ms1(vsyncMs)}`);
+        // A trial deliberately makes frames worse for a handful of renders, so it never happens
+        // silently: a report that sees judder in a window can tell a trial from a regression.
+        this._tickPace.OnTrial = (n, outcome) => JTrace(`jaui:tick-pace trial N=${n} ${outcome}`);
         JTrace(`jaui:tick-pace armed=${TickPaceText(parsed.Mode)}`);
         // The cumulative ledger, out to a reader that must not reach into the engine - the same
         // channel `__jauiPassProfile` and `__jauiSceneLedger` use, and for the same reason. The

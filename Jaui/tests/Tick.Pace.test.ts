@@ -2,34 +2,45 @@ import { describe, it, expect } from 'vitest';
 import {
   TickPace, ParseTickPace, TickPaceText, VsyncEstimator,
   PACE_STALL_TICKS, PACE_DEFAULT_DEPTH, PACE_MAX_DEPTH, PACE_FENCE_RING,
-  LOCK_HOLD_FRAMES, LOCK_CHANGE_MS, LOCK_MAX_N, VSYNC_FALLBACK_MS, VSYNC_MIN_SAMPLES,
+  LOCK_CHANGE_MS, LOCK_MAX_N, LOCK_DWELL_MS, LOCK_DWELL_MAX_MS, LOCK_TRIAL_FRAMES,
+  LOCK_OBSERVE_SAMPLES, LOCK_WARMUP_QUIET_RENDERS, LOCK_SATURATION_EXIT, LOCK_MARGIN_SHARE,
+  VSYNC_FALLBACK_MS, VSYNC_MIN_SAMPLES,
   type PaceGate, type PaceDecision, type TickPaceMode, type PaceFenceSample,
 } from '../src/Core/Tick.Pace';
 
 /**
  * `?tick-pace` — pace the render on the DISPLAY instead of on the tick.
  *
- * Three cuts of this flag have now been measured on the M4. The first removed the second render
+ * Four cuts of this flag have now been measured on the M4. The first removed the second render
  * with a strictly serial gate and cost 50.13 ms (no CPU/GPU pipeline). The second made the gate a
  * DEPTH and reached 33.52 — and was found to be TRIMODAL: 1v 40%, 2v 16%, 3v 42%, a 3x swing the
- * p50 scored as a success. The fixed-ratio control is even (2v 99-100%) and a 30 fps clamp. This
- * lane is the third: lock the released cadence to a whole number of vsyncs, N = ceil(period /
- * vsync), re-chosen slowly with hysteresis — adaptive AND even.
+ * p50 scored as a success. The third locked the released cadence to a whole number of vsyncs and
+ * was PERFECTLY EVEN (100% of frames in one bucket at both resolutions) and chose the WRONG N: it
+ * sat at 50.10 ms where the fixed-ratio clamp reached 33.31, because its period came from a cost
+ * MODEL — max(CPU-issue EMA, solo-fence EMA) — that read 37.5 against a directly measured 29.41.
  *
- * What has to be true for a reading under it to mean anything, and all of it is pinned here —
- * none of it needs a GPU, because none of it is about one:
+ * This lane replaces that model with an OBSERVATION and keeps everything else. What has to be true
+ * for a reading under it to mean anything, and all of it is pinned here — none of it needs a GPU,
+ * because none of it is about one:
  *
  *   1. IT LOSES NO RENDER, in every mode including the lock. A skipped tick defers a render, it
  *      does not drop one.
- *   2. THE STALL GUARD CANNOT BECOME THE MECHANISM — and under the lock that now means it must
- *      count FENCE refusals only. A lock refusal is the gate working, there are three of them per
- *      render at a 120 Hz callback cadence, and a guard that counted them would fire constantly.
+ *   2. THE STALL GUARD CANNOT BECOME THE MECHANISM — and under the lock that means it must count
+ *      FENCE refusals only. A lock refusal is the gate working, there are three of them per render
+ *      at a 120 Hz callback cadence, and a guard that counted them would fire constantly.
  *   3. THE VSYNC IS DERIVED, NOT ASSUMED, and it survives the back-pressured callback cadence that
  *      is the unflagged state (33.3 ms of BeginFrame is two vsyncs, not a 30 Hz display).
- *   4. N IS CHOSEN FROM MEASURED COST AND DOES NOT FLAP. A period sitting exactly on a vsync
- *      boundary — the M4's ~17 ms at dpr 1.5 — holds N=1 rather than oscillating.
- *   5. THE RELEASED SEQUENCE IS EVEN, which is the whole point, and the model says so as
- *      arithmetic: the release intervals in the steady state are one number, not three.
+ *   4. THE PERIOD IS OBSERVED, NEVER MODELLED. Nothing the controller reads comes out of a fence
+ *      latency or a smoothed cost: the number is the loop's own release cadence inside a SATURATED
+ *      RUN, which is the same quantity as `ticks/s` on an unpaced arm. A solo fence latency is
+ *      published beside it, for the report, and no decision may touch it.
+ *   5. THE LOOP MAKES ITS OWN OBSERVATION WINDOWS, because a correctly locked loop is not saturated
+ *      and has nothing to observe: the N=1 warm-up, a speculative trial once per dwell, and the
+ *      frames around a fence refusal.
+ *   6. N DOES NOT FLAP. A period on a boundary holds; a failed trial is not a cadence change; a
+ *      step-up needs a refusal RATE and a saturated reading above the cadence, never one alone.
+ *   7. THE RELEASED SEQUENCE IS EVEN, which is the whole point, and the model says so as
+ *      arithmetic: outside the warm-up and the trials, the release intervals are ONE number.
  */
 
 // ── Fence stand-ins ──
@@ -349,7 +360,11 @@ describe('?tick-pace absent — the loop is the loop it was', () => {
       FenceMs: { N: 0, Sum: 0, Max: 0 },
       MaxInFlight: 0,
       // The lock's columns read zero rather than absent, so one parser reads every arm.
-      LockN: 0, LockChanges: 0, PeriodMs: 0,
+      LockN: 0, LockCommittedN: 0, LockChanges: 0, Trials: 0, TrialsFailed: 0,
+      // Nothing observed, and the source says WHICH nothing — the field that separates "no reading
+      // yet" from "a reading of zero" and from "N=1 needs no reading".
+      PeriodMs: 0, PeriodSource: 'none', PeriodObservedAt: -1,
+      SoloMs: 0, SatGapMs: 0, RenderMs: 0,
       VsyncMs: Math.round(VSYNC_FALLBACK_MS * 100) / 100, VsyncDerived: false,
       LockSkipped: 0, FenceSkipped: 0,
     });
@@ -584,30 +599,38 @@ describe('?tick-pace — WaitedTicks, FenceMs, MaxInFlight and the skip split', 
     expect(c.FenceMs.Sum / c.FenceMs.N).toBeCloseTo(31.67, 1);
   });
 
-  it('a SOLO fence is a GPU cost reading, de-quantized by half the poll gap', () => {
-    // Arm-to-poll is biased LATE by up to a whole poll interval, and on the 8.3 ms polling grain
-    // this flag produces that is a quarter of a vsync — enough to push N up one.
+  it('A SOLO FENCE IS A LATENCY AND NOT A PERIOD, and it is published as one', () => {
+    // THE WHOLE LANE IN ONE ASSERTION. Arm-to-signal on an idle GPU contains that frame's execution
+    // AND whatever the present couples to its completion; the M4 read 37.5 that way against a
+    // directly measured 29.41 and locked to 50 ms where 33.3 was free. So it lands in `SoloMs`,
+    // de-quantized by half the poll gap, and NOTHING may decide on it — `PeriodMs` stays 0 here
+    // because a loop nobody ever refused has not observed a period at all.
     const pace = new TickPace(Fence(1));
     const gate: PaceGate = {
       PaceInFlight: () => 0,
       PaceTakeFence: () => ({ Ms: 36, GapMs: 0, Solo: true, PollGapMs: 8 }),
     };
     Loop(pace, gate, Active(6, [0]));
-    expect(pace.PeriodMs).toBeCloseTo(32, 5);
+    expect(pace.Census().SoloMs).toBeCloseTo(32, 5);
+    expect(pace.PeriodMs).toBe(0);
+    expect(pace.Census().PeriodSource).toBe('none');
   });
 
-  it('a QUEUED fence is read on its completion GAP, because arm-to-signal includes the queue', () => {
+  it('a QUEUED fence gap is the throughput period as the FENCE sees it — the number to compare', () => {
     // This is why the depth-1 arm's FenceMs reads ~49 on a 33 ms frame and must never be the
-    // period. The gap between two completions of back-to-back frames IS the GPU's cost.
+    // period. The gap between two completions of back-to-back frames has no idle time at either
+    // end, so it IS the throughput — and `SoloMs` over `SatGapMs` on one arm of one binary is the
+    // over-read this lane was asked to price.
     const pace = new TickPace(Fence(1));
     const gate: PaceGate = {
       PaceInFlight: () => 1,
       PaceTakeFence: () => ({ Ms: 49, GapMs: 33, Solo: false, PollGapMs: 8 }),
     };
     Loop(pace, gate, Active(6, [0]));
-    expect(pace.PeriodMs).toBeCloseTo(33, 5);
-    // And the raw latency still lands in the ledger unmodified — two different questions.
+    expect(pace.Census().SatGapMs).toBeCloseTo(33, 5);
+    // And the raw latency still lands in the ledger unmodified — three different questions.
     expect(pace.Census().FenceMs.Max).toBe(49);
+    expect(pace.Census().SoloMs).toBe(0);
   });
 
   it('MaxInFlight proves the depth was REACHED — a cell at depth 1 that never saw 2 is depth 0', () => {
@@ -639,8 +662,10 @@ describe('?tick-pace — WaitedTicks, FenceMs, MaxInFlight and the skip split', 
       if (forcedAtOneSecond < 0 && t >= 1000) forcedAtOneSecond = pace.Forced;
       t = next;
     }
-    // The cadence found the render: five vsyncs is 83.35 ms, the first multiple over 70.
-    expect(pace.LockN).toBe(5);
+    // The cadence found the render: five vsyncs is 83.35 ms, the first multiple over 70. Read the
+    // COMMITTED cadence: a speculative trial may be in flight at any instant, and `LockN` is then
+    // the trial's, which is the point of publishing both.
+    expect(pace.LockCommittedN).toBe(5);
     expect(pace.Census().LockSkipped).toBeGreaterThan(PACE_STALL_TICKS * 3);
     // And the lock, not the fence, is what is holding the ticks back.
     expect(pace.Census().LockSkipped).toBeGreaterThan(pace.Census().FenceSkipped * 3);
@@ -682,33 +707,43 @@ describe('?tick-pace — what the M4 should read, derived from a CPU and a GPU o
     const gaps = renders.slice(1).map((v, i) => v - renders[i]);
     // The steady state, not the ramp: the second half of the run.
     const tail = gaps.slice(Math.floor(gaps.length / 2));
+    // The released cadence is read on its HISTOGRAM, never on its mean — that is the rule the
+    // trimodal cut produced and it is how the M4's cells are read. `Mode` is the interval the most
+    // frames landed on and `Share` is the fraction that did.
+    const hist = new Map<number, number>();
+    for (const g of tail) { const k = Math.round(g * 10) / 10; hist.set(k, (hist.get(k) ?? 0) + 1); }
+    const top = [...hist.entries()].sort((a, b) => b[1] - a[1])[0] ?? [0, 0];
     return {
       Pace: pace, Pipe: pipe, Renders: renders, Gaps: gaps, Tail: tail,
       Period: tail.reduce((a, b) => a + b, 0) / tail.length,
       Spread: Math.max(...tail) - Math.min(...tail),
+      Hist: hist, Bucket: top[0], Share: tail.length === 0 ? 0 : top[1] / tail.length,
     };
   };
 
-  // The M4's shape at dpr 2: ~17 ms of CPU issuing, ~33 ms of GPU execution (gpu/frm 30.44 on the
-  // fence arm, 33.29 on the ratio arm), on the 120 Hz callback cadence the flag itself produces.
-  const M4 = { Cpu: 17, Gpu: 33, Tick: 1000 / 120, Ms: 6000 };
+  // The M4's shape at dpr 2, with the render period as the flatprogram cell MEASURED it rather
+  // than as the earlier cuts guessed it: 29.41 ms (34.00 renders/s on the unpaced arm), ~17 ms of
+  // CPU issuing, on the 120 Hz callback cadence the flag itself produces.
+  const M4 = { Cpu: 17, Gpu: 29.41, Tick: 1000 / 120, Ms: 6000 };
+  // ...and at dpr 1.5, where the measured period is 18.40 — ABOVE one vsync, so two is the right
+  // answer and 33.3 is the honest lock cadence there.
+  const M4_15 = { Cpu: 10, Gpu: 18.40, Tick: 1000 / 120, Ms: 6000 };
 
-  it('DEPTH 0 SETTLES AT 50 ms — the CPU and the GPU stop overlapping and the frame costs their SUM', () => {
+  it('DEPTH 0 COSTS THE SUM — the CPU and the GPU stop overlapping', () => {
     const r = Run({ ...M4, Mode: Fence(0) });
-    expect(r.Period).toBeGreaterThan(48);
-    expect(r.Period).toBeLessThan(52);
+    expect(r.Period).toBeGreaterThan(M4.Cpu + M4.Gpu - 1);
+    expect(r.Period).toBeLessThan(M4.Cpu + M4.Gpu + M4.Tick);
     expect(r.Pipe.Peak).toBe(1);
     expect(r.Pace.Forced).toBe(0);
-    // Not the poll: the grain here is 8.33 ms, so a poll-bound loop would have landed near 41.7.
-    expect(r.Period - (M4.Cpu + M4.Gpu)).toBeLessThan(M4.Tick);
   });
 
-  it('DEPTH 1 SETTLES AT 33.3 ms — the ratio arm s throughput, reached adaptively', () => {
+  it('DEPTH 1 SETTLES AT THE PERIOD — the throughput, reached adaptively and unevenly', () => {
     const r = Run({ ...M4, Mode: Fence(1) });
-    expect(r.Period).toBeGreaterThan(32);
-    expect(r.Period).toBeLessThan(35);
     expect(Math.abs(r.Period - M4.Gpu)).toBeLessThan(M4.Tick);
     expect(r.Pace.Forced).toBe(0);
+    // ...and it cannot HOLD it: the M4 read 1v 50% / 3v 50% on this arm. That is the whole reason
+    // the flag's meaning is the lock and not this.
+    expect(r.Share).toBeLessThan(0.95);
   });
 
   it('depth 1 never lets a THIRD frame into the queue — the discarded render stays removed', () => {
@@ -717,28 +752,62 @@ describe('?tick-pace — what the M4 should read, derived from a CPU and a GPU o
     expect(r.Pace.Census().MaxInFlight).toBe(2);
   });
 
-  it('THE LOCK REACHES THE SAME 33.3 AND RELEASES IT EVENLY — one interval, not three', () => {
+  it('THE LOCK REACHES 33.3 AND RELEASES IT EVENLY — one interval, not three', () => {
     // The fence arm reached this median on the M4 and spent 82% of its frames at 16.7 or 50 ms
-    // getting there. Evenness is the claim, so evenness is the assertion: in the steady state the
-    // released intervals are ONE number. (The presented sequence is the compositor's and only the
-    // machine can say; what the engine controls is when it releases, and this is that.)
+    // getting there; the tickpace3 lock was even and landed on 50. Evenness AND the right cadence
+    // is the claim, so both are the assertion: in the steady state the released intervals are ONE
+    // number, and that number is two vsyncs on a 29.41 ms render.
     const r = Run({ ...M4, Mode: Lock() });
-    expect(r.Period).toBeGreaterThan(32);
-    expect(r.Period).toBeLessThan(35);
-    expect(r.Spread).toBeLessThan(0.01);
+    expect(r.Bucket).toBeCloseTo(2 * V60, 1);
+    // Not 100%: a failed trial once per dwell is the price of adaptivity, and it is priced rather
+    // than hidden. Over a 6 s window at dpr 2 that is one trial of a handful of frames.
+    expect(r.Share).toBeGreaterThan(0.95);
     expect(r.Pace.Forced).toBe(0);
     // Every release is a whole number of the derived grid.
     const v = r.Pace.VsyncMs;
-    expect(Math.abs(r.Period / v - Math.round(r.Period / v))).toBeLessThan(0.02);
+    expect(Math.abs(r.Bucket / v - Math.round(r.Bucket / v))).toBeLessThan(0.02);
   });
 
-  it('the lock on a PINNED 60 Hz grid reads N=2 and settles within a few frames', () => {
+  it('THE CELL THE LANE EXISTS FOR: 33.3 at dpr 2, where tickpace3 read 50.10', () => {
+    // The M4, one binary, interleaved: base 59.34 (2v 23% / 4v 77%), the old lock 50.10 (3v 100%),
+    // the clamp 33.31 (2v 100%). The clamp was faster than the adaptive arm, which is the whole
+    // indictment. With the period OBSERVED rather than modelled the lock has to reach the clamp's
+    // cadence and keep the clamp's evenness.
     const r = Run({ ...M4, Mode: Lock(V60) });
-    expect(r.Pace.LockN).toBe(2);
-    expect(r.Period).toBeCloseTo(2 * V60, 1);
-    expect(r.Spread).toBeLessThan(0.01);
-    // The seed, and then nothing: a cadence that is still moving is a cadence that is oscillating.
+    expect(r.Pace.LockCommittedN).toBe(2);
+    expect(r.Bucket).toBeCloseTo(33.3, 1);
+    expect(r.Share).toBeGreaterThan(0.95);
+    // And the number it chose from is the MEASURED one, within the tick grain it is quantized by.
+    const c = r.Pace.Census();
+    expect(c.PeriodSource).toBe('warmup');
+    expect(Math.abs(c.PeriodMs - M4.Gpu)).toBeLessThan(M4.Tick);
+    // One committed change, the seed. A failed trial is not one.
+    expect(c.LockChanges).toBe(1);
+    expect(c.Trials).toBeGreaterThanOrEqual(1);
+    expect(c.TrialsFailed).toBe(c.Trials);
+    expect(c.Forced).toBe(0);
+  });
+
+  it('dpr 1.5: 18.40 is ABOVE one vsync, so N=2 IS the answer and the lock says so', () => {
+    // The fence arm reaches 16.68 on 71% of frames there and cannot hold it — that is 1v/2v
+    // judder, not a cadence. 18.40 does not fit 16.67 with the margin, so the even choice is 33.3
+    // until the render is under ~15 ms. The lock must land on it BY OBSERVATION, not by being a
+    // clamp: the same code reads N=1 on a 13 ms render two tests below.
+    const r = Run({ ...M4_15, Mode: Lock(V60) });
+    expect(r.Pace.LockCommittedN).toBe(2);
+    expect(r.Bucket).toBeCloseTo(33.3, 1);
+    expect(r.Share).toBeGreaterThan(0.95);
+    expect(r.Pace.Census().PeriodSource).toBe('warmup');
+  });
+
+  it('the lock on a PINNED 60 Hz grid reads N=2 and settles inside the warm-up', () => {
+    const r = Run({ ...M4, Mode: Lock(V60) });
+    expect(r.Pace.LockCommittedN).toBe(2);
+    // The seed, and then nothing: a committed cadence that is still moving is one that is
+    // oscillating. Trials move `LockN` and must not move this.
     expect(r.Pace.LockChanges).toBe(1);
+    // ...and it lands inside the harness's settle slack: ~12 saturated renders at ~30 ms.
+    expect(r.Renders.filter(t => t < 600).length).toBeGreaterThan(LOCK_OBSERVE_SAMPLES);
   });
 
   it('a grid read FINER than the display still releases on the display s grid at dpr 2', () => {
@@ -748,8 +817,8 @@ describe('?tick-pace — what the M4 should read, derived from a CPU and a GPU o
     const derived = Run({ ...M4, Mode: Lock() });
     const pinned = Run({ ...M4, Mode: Lock(V60) });
     expect(derived.Pace.VsyncMs).toBeCloseTo(M4.Tick, 1);
-    expect(derived.Pace.LockN).toBe(2 * pinned.Pace.LockN);
-    expect(derived.Period).toBeCloseTo(pinned.Period, 1);
+    expect(derived.Pace.LockCommittedN).toBe(2 * pinned.Pace.LockCommittedN);
+    expect(derived.Bucket).toBeCloseTo(pinned.Bucket, 1);
   });
 
   it('depth 1 waits ONE tick per render in the steady state — the histogram the report should read', () => {
@@ -790,38 +859,108 @@ describe('?tick-pace — what the M4 should read, derived from a CPU and a GPU o
     expect(ratio.Period / lock.Period).toBeCloseTo(2, 5);
   });
 
-  it('N STEPS UP when the render gets more expensive, and not before it has to', () => {
-    // Half a run at 33 ms and half at 66: the cadence must follow, once, in each direction, and
-    // never inside the rate limit.
-    const pace = new TickPace(Lock(V60));
-    const changes: Array<{ N: number; At: number }> = [];
+  /** One clock, one pipeline, a cost that can change halfway - the shape every hysteresis test
+   *  wants. Returns the driver so a test can step through several regimes on one `TickPace`. */
+  const Driver = (mode: TickPaceMode, cpu: number, gpu: number, tick = M4.Tick) => {
+    const pace = new TickPace(mode);
+    const pipe = new Pipeline(cpu, gpu);
+    const changes: Array<{ N: number; At: number; Source: string }> = [];
+    const trials: Array<{ N: number; At: number; Outcome: string }> = [];
     let t = 0;
-    const pipe = new Pipeline(17, 33);
-    pace.OnLockChange = n => changes.push({ N: n, At: t });
-    const step = (cpu: number, gpu: number, ms: number): void => {
-      pipe.Cpu = cpu;
-      pipe.Cost = gpu;
+    pace.OnLockChange = (n, _p, _v, source) => changes.push({ N: n, At: t, Source: source });
+    pace.OnTrial = (n, outcome) => trials.push({ N: n, At: t, Outcome: outcome });
+    const step = (c: number, g: number, ms: number): number[] => {
+      pipe.Cpu = c;
+      pipe.Cost = g;
       const until = t + ms;
+      const renders: number[] = [];
       while (t < until) {
         pipe.Now = t;
         pace.NoteTick(t);
         const d = pace.Decide(pipe, t);
-        let next = t + M4.Tick;
-        if (d !== 'skip') { const free = pipe.Render(); pace.NoteRenderCost(cpu); next = Math.ceil(free / M4.Tick) * M4.Tick; }
+        let next = t + tick;
+        if (d !== 'skip') {
+          renders.push(t);
+          const free = pipe.Render();
+          pace.NoteRenderCost(c);
+          next = Math.ceil((free + 1e-9) / tick) * tick;
+        }
         t = next;
       }
+      return renders;
     };
-    step(17, 33, 2000);
-    expect(pace.LockN).toBe(2);
-    step(30, 66, 3000);
-    expect(pace.LockN).toBe(4);
-    step(17, 33, 4000);
-    expect(pace.LockN).toBe(2);
-    // Up once, down once, plus the seed — and never twice inside the rate limit.
-    expect(changes.length).toBeLessThanOrEqual(6);
-    for (let i = 1; i < changes.length; i++) {
-      expect(changes[i].At - changes[i - 1].At).toBeGreaterThanOrEqual(LOCK_CHANGE_MS);
+    return { Pace: pace, Pipe: pipe, Changes: changes, Trials: trials, Step: step, At: () => t };
+  };
+
+  it('N STEPS UP when the render gets more expensive - on a refusal RATE plus a reading, not on one', () => {
+    // Half a run at 29.4 ms and half at 66: the cadence must follow. A step-up needs BOTH that the
+    // fence is refusing often (a rate, inside a window) AND that the observed period around those
+    // refusals exceeds the cadence - one alone is a hitch, not a regime.
+    const d = Driver(Lock(V60), M4.Cpu, M4.Gpu);
+    d.Step(M4.Cpu, M4.Gpu, 2500);
+    expect(d.Pace.LockCommittedN).toBe(2);
+    d.Step(30, 66, 3000);
+    expect(d.Pace.LockCommittedN).toBe(4);
+    expect(d.Changes.filter(c => c.Source === 'stepup').length).toBeGreaterThan(0);
+    // Never two changes inside the rate limit.
+    for (let i = 1; i < d.Changes.length; i++) {
+      expect(d.Changes[i].At - d.Changes[i - 1].At).toBeGreaterThanOrEqual(LOCK_CHANGE_MS);
     }
+    expect(d.Pace.Forced).toBe(0);
+  });
+
+  it('N COMES BACK DOWN, and the only thing that can bring it down is RUNNING at the faster cadence', () => {
+    // The scene gets cheap again. A cost model would step down off a number that is over-read by
+    // construction (the M4's 37.5 against 29.41) and never move; a TRIAL cannot be wrong about
+    // whether a cadence works, because it IS the cadence. Each kept trial immediately tries the
+    // next one, so three steps do not cost three dwells.
+    const d = Driver(Lock(V60), 30, 66);
+    d.Step(30, 66, 2500);
+    expect(d.Pace.LockCommittedN).toBe(4);
+    d.Step(8, 12, 12000);
+    expect(d.Pace.LockCommittedN).toBe(1);
+    expect(d.Trials.filter(x => x.Outcome === 'kept').length).toBeGreaterThanOrEqual(3);
+    expect(d.Pace.Forced).toBe(0);
+  });
+
+  it('A FAILED TRIAL IS NOT A CADENCE CHANGE - it is an experiment, and it is counted as one', () => {
+    // The distinction the ledger has to make: `LockChanges` counts DECISIONS, so a cell whose
+    // count is 1 is a cell with a settled cadence even though `LockN` dipped for a few frames.
+    const d = Driver(Lock(V60), M4.Cpu, M4.Gpu);
+    d.Step(M4.Cpu, M4.Gpu, 6000);
+    const c = d.Pace.Census();
+    expect(c.LockChanges).toBe(1);
+    expect(c.Trials).toBeGreaterThanOrEqual(1);
+    expect(c.TrialsFailed).toBe(c.Trials);
+    expect(d.Changes.map(x => x.Source)).toEqual(['warmup']);
+    // ...and the failed trial recorded a period of its own: a trial that fails IS an observation.
+    expect(['warmup', 'trial']).toContain(c.PeriodSource);
+  });
+
+  it('THE DWELL DOUBLES AFTER A FAILED TRIAL, so a settled cadence stops being poked at', () => {
+    // A trial costs a handful of judder frames. On a scene that is never going to accept one, the
+    // cost has to decay - otherwise the flag trades one juddering arm for a slowly juddering one.
+    const d = Driver(Lock(V60), M4.Cpu, M4.Gpu);
+    d.Step(M4.Cpu, M4.Gpu, 20000);
+    const starts = d.Trials.filter(x => x.Outcome === 'start').map(x => x.At);
+    expect(starts.length).toBeGreaterThan(2);
+    const gaps = starts.slice(1).map((v, i) => v - starts[i]);
+    for (let i = 1; i < gaps.length; i++) expect(gaps[i]).toBeGreaterThan(gaps[i - 1]);
+    expect(gaps[0]).toBeGreaterThanOrEqual(LOCK_DWELL_MS * 0.9);
+    expect(gaps[gaps.length - 1]).toBeLessThanOrEqual(LOCK_DWELL_MAX_MS * 1.5);
+  });
+
+  it('A TRIAL FAILS FAST AND SUCCEEDS SLOWLY, which is why it can be afforded at all', () => {
+    // Failure is detected when the queue backs up enough for the fence to refuse - about
+    // 1/(1 - cadence/period) releases, three at dpr 2. Success has to survive the whole budget,
+    // and those are GOOD frames at the better cadence, so they cost nothing.
+    const d = Driver(Lock(V60), M4.Cpu, M4.Gpu);
+    d.Step(M4.Cpu, M4.Gpu, 6000);
+    const starts = d.Trials.filter(x => x.Outcome === 'start');
+    const ends = d.Trials.filter(x => x.Outcome !== 'start');
+    expect(starts.length).toBeGreaterThan(0);
+    expect(ends.length).toBeGreaterThan(0);
+    expect(ends[0].At - starts[0].At).toBeLessThan(LOCK_TRIAL_FRAMES * V60 * 0.5);
   });
 
   it('N NEVER OSCILLATES on a period sitting exactly on the boundary', () => {
@@ -845,19 +984,26 @@ describe('?tick-pace — what the M4 should read, derived from a CPU and a GPU o
       }
       t = next;
     }
-    expect(pace.LockN).toBe(2);
+    expect(pace.LockCommittedN).toBe(2);
     expect(pace.LockChanges).toBeLessThanOrEqual(1);
   });
 
   it('N is bounded — a render nobody should ship is not silently throttled to 2 fps', () => {
     const r = Run({ Mode: Lock(V60), Cpu: 100, Gpu: 400, Tick: V60, Ms: 8000 });
-    expect(r.Pace.LockN).toBeLessThanOrEqual(LOCK_MAX_N);
+    expect(r.Pace.LockCommittedN).toBeLessThanOrEqual(LOCK_MAX_N);
   });
 
-  it('the hold is long enough that a burst of expensive frames cannot move the cadence', () => {
-    // LOCK_HOLD_FRAMES consecutive agreeing evaluations at ~33 ms is a quarter of a second of
-    // agreement — a scroll that spikes three frames does not get to re-time the engine.
-    expect(LOCK_HOLD_FRAMES * 33).toBeGreaterThan(LOCK_CHANGE_MS);
+  it('the constants agree with each other: a trial is cheap, a dwell is long, a run needs proof', () => {
+    // The numbers that decide what this flag costs, checked against each other rather than
+    // asserted one at a time. A dwell has to be many trials long or the judder is not amortized;
+    // eight observations have to fit inside one trial or a trial could never record anything; and
+    // the saturation run has to close on more than one clean frame (see `LOCK_SATURATION_EXIT`).
+    expect(LOCK_DWELL_MS).toBeGreaterThan(LOCK_TRIAL_FRAMES * V60 * 2);
+    expect(LOCK_TRIAL_FRAMES).toBeGreaterThan(LOCK_OBSERVE_SAMPLES);
+    expect(LOCK_SATURATION_EXIT).toBeGreaterThan(1);
+    expect(LOCK_DWELL_MAX_MS).toBeGreaterThan(LOCK_DWELL_MS);
+    expect(LOCK_MARGIN_SHARE).toBeLessThan(0.5);
+    expect(LOCK_CHANGE_MS).toBeLessThan(LOCK_DWELL_MS);
   });
 
   it('the phone reads nothing: fewer ticks than frames means there is no second render to remove', () => {
@@ -878,22 +1024,105 @@ describe('?tick-pace — what the M4 should read, derived from a CPU and a GPU o
     expect(c.FenceMs.Sum / c.FenceMs.N).toBeGreaterThan(M4.Gpu * 0.8);
   });
 
-  it('THE PERIOD IS MEASURED, and it reads the frame s cost on both the lock and the fence arm', () => {
-    // max(CPU issue, GPU execution) — the pipelined period, not the fence's latency, which at depth
-    // 1 legitimately reads ~49 on this shape. If this number is wrong, N is wrong.
+  it('THE PERIOD IS OBSERVED, and the observation is the loop s own release cadence', () => {
+    // The lane, as arithmetic. The number the controller acts on must be the throughput period -
+    // the same quantity the harness measures as `ticks/s` on an unpaced arm - and it must be
+    // within the grain the tick grid quantizes it by. Nothing above it, because an over-read is
+    // what put the M4 on 50 ms; nothing derived from `FenceMs`, because that is a latency.
     const lock = Run({ ...M4, Mode: Lock(V60) });
-    // Within one poll interval BELOW the truth, and never above it. The bias is deliberate and its
-    // direction is the design: an over-read parks the loop at a slower cadence with nothing to
-    // correct it, while an under-read saturates the GPU, turns the samples into exact completion
-    // GAPS, and steps back up. It must therefore never read high.
-    expect(lock.Pace.PeriodMs).toBeGreaterThan(M4.Gpu - M4.Tick);
-    expect(lock.Pace.PeriodMs).toBeLessThan(M4.Gpu * 1.05);
-    // And the cadence it chose from that reading is the right one, which is the only thing the
-    // estimate has to get right.
-    expect(lock.Pace.LockN).toBe(2);
+    const c = lock.Pace.Census();
+    expect(c.PeriodSource).toBe('warmup');
+    expect(Math.abs(c.PeriodMs - M4.Gpu)).toBeLessThan(M4.Tick);
+    // The fence's own latency is a DIFFERENT number and the ledger keeps them apart: at depth 1 it
+    // legitimately reads far above the period, which is exactly why it cannot choose a cadence.
+    expect(c.FenceMs.Sum / c.FenceMs.N).toBeGreaterThan(c.PeriodMs * 0.5);
+    expect(c.LockCommittedN).toBe(2);
+  });
 
+  it('PeriodObservedAt AGES, and an old reading under a holding lock is the design, not a bug', () => {
+    // While the lock is holding, the loop is not saturated and there is NOTHING to observe: the
+    // period cannot be fresh and a fresh one would be a model. So the ledger publishes the age and
+    // lets a reader judge it, rather than refreshing a number nobody measured.
+    const r = Run({ ...M4, Mode: Lock(V60), Ms: 3000 });
+    const c = r.Pace.Census();
+    expect(c.PeriodObservedAt).toBeGreaterThan(0);
+    expect(c.PeriodMs).toBeGreaterThan(0);
+  });
+
+  it('A LOOP NOBODY EVER REFUSED PUBLISHES NO PERIOD, and holds N=1 - the phone, and any cheap scene', () => {
+    // The trap the lane has to avoid: a phone whose callbacks are 111-127 ms apart releases a
+    // frame every 120 ms, so its release interval is 120 and a naive observer would lock it to
+    // eight vsyncs. Its BeginFrame rate is the constraint, not its render - the fence never
+    // refuses - so there is no saturated run, no period, and N=1.
+    const phone = Run({ Mode: Lock(V60), Cpu: 40, Gpu: 60, Tick: 120, Ms: 6000 });
+    expect(phone.Pace.Census().PeriodSource).toBe('unsaturated');
+    expect(phone.Pace.Census().PeriodMs).toBe(0);
+    expect(phone.Pace.LockCommittedN).toBe(1);
+    expect(phone.Pace.Census().Trials).toBe(0);
+
+    // Same verdict for a render that simply fits: 13 ms under a 16.67 grid, never refused.
+    const fast = Run({ Mode: Lock(V60), Cpu: 8, Gpu: 13, Tick: V60, Ms: 3000 });
+    expect(fast.Pace.Census().PeriodSource).toBe('unsaturated');
+    expect(fast.Pace.LockCommittedN).toBe(1);
+    expect(fast.Pace.Census().FenceSkipped).toBe(0);
+
+    // And a CPU-bound loop the GPU always beats: the worker's own occupancy already paces it, the
+    // fence never refuses, and the lock has nothing to add.
     const cpuBound = Run({ Mode: Lock(V60), Cpu: 40, Gpu: 10, Tick: V60, Ms: 3000 });
-    // CPU-bound: the GPU half says 10 and the period must not believe it.
-    expect(cpuBound.Pace.PeriodMs).toBeGreaterThan(35);
+    expect(cpuBound.Pace.Census().PeriodSource).toBe('unsaturated');
+    expect(cpuBound.Pace.LockCommittedN).toBe(1);
+  });
+
+  it('the WARM-UP is what saturates, and it does it inside the harness s settle slack', () => {
+    // N=1 plus the depth-1 fence is the saturating state by construction, and it is the ONE window
+    // the lock gets for free. Eight observations at ~30 ms is ~240 ms, which is why the seed can
+    // be inside the slack before a measured window opens rather than inside the window itself.
+    const d = Driver(Lock(V60), M4.Cpu, M4.Gpu);
+    d.Step(M4.Cpu, M4.Gpu, 1500);
+    const seed = d.Changes[0];
+    expect(seed.Source).toBe('warmup');
+    expect(seed.N).toBe(2);
+    expect(seed.At).toBeLessThan(600);
+    // The warm-up runs at N=1, so it is the fence arm and nothing worse: no forcing, no stall.
+    expect(d.Pace.Forced).toBe(0);
+  });
+
+  it('=observe GATES NOTHING and books EVERYTHING - the arm that prices the over-read', () => {
+    // The unpaced arm with the instrument on. It must be the unflagged loop frame for frame (that
+    // is what makes it a control) while still publishing the three numbers that answer "by how
+    // much does the solo fence latency over-read the throughput period, and why".
+    const obs = Run({ ...M4, Mode: { Kind: 'observe' } });
+    expect(obs.Pace.Skipped).toBe(0);
+    expect(obs.Pace.Forced).toBe(0);
+    expect(obs.Pace.Census().LockN).toBe(0);
+    expect(obs.Pace.Census().PeriodSource).toBe('gap');
+    expect(Math.abs(obs.Pace.Census().PeriodMs - M4.Gpu)).toBeLessThan(M4.Tick);
+    expect(obs.Pace.Census().RenderMs).toBeCloseTo(M4.Cpu, 1);
+    expect(TickPaceText({ Kind: 'observe' })).toBe('observe');
+    expect(ParseTickPace('observe')).toEqual({ Mode: { Kind: 'observe' } });
+
+    // Frame for frame the unflagged loop: same renders, same instants.
+    const off = Run({ ...M4, Mode: null });
+    expect(obs.Renders).toEqual(off.Renders);
+  });
+
+  it('NOTHING the controller reads comes out of a fence latency - the regression test for the bug', () => {
+    // The tickpace3 failure, reproduced as a stimulus: a gate whose fences report an enormous SOLO
+    // latency and never refuse. The old estimator would have read that latency as the period and
+    // chosen N from it. The new one must publish it as `SoloMs`, leave `PeriodMs` at 0, and hold
+    // N=1 - because a loop that was never refused has not been measured.
+    const pace = new TickPace(Lock(V60));
+    const liar: PaceGate = {
+      PaceInFlight: () => 0,
+      PaceTakeFence: () => ({ Ms: 140, GapMs: 140, Solo: true, PollGapMs: 8 }),
+    };
+    Loop(pace, liar, All(400));
+    const c = pace.Census();
+    expect(c.SoloMs).toBeGreaterThan(100);
+    expect(c.PeriodMs).toBe(0);
+    expect(c.PeriodSource).toBe('unsaturated');
+    expect(c.LockCommittedN).toBe(1);
+    expect(c.LockChanges).toBe(0);
   });
 });
+
