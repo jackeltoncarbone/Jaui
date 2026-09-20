@@ -519,7 +519,7 @@ export class Canvas implements DirtyTracker {
    *  effective kernel (`Core/Border.Direct.ts` proves which one and `tests/Border.Kernel.test.ts`
    *  pins it) with no RGB10_A2 intermediates, so where the two arms differ the direct one is the
    *  TRUER of the two and the difference is a bit of the 8-bit result. A refused border takes
-   *  today's path, unchanged. Default true; `?border-direct=off` restores the per-card pyramid in
+   *  today's path, unchanged. Default FALSE since the M4 measured the gather +2.59 ms at dpr 2 (2026-09-20); `?border-direct` arms it in
    *  the same binary. */
   private _borderDirect: boolean = false;
   /** The last `jaui:border-direct` gate line, so it prints on a SHAPE change and not per frame. */
@@ -6307,7 +6307,7 @@ export class Canvas implements DirtyTracker {
       }
       this._borderDirect = raw !== 'off';
     } else {
-      this._borderDirect = true;
+      this._borderDirect = false;
     }
     // Everything it cannot run beside, named one at a time and refused on the trace rather than
     // silently disarmed. Each owns the same machinery from the other end: the two source
