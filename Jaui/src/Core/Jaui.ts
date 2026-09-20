@@ -34,6 +34,11 @@ import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_
 import {
   BORDER_DIRECT_L2_WINDOW, BORDER_DIRECT_PHASE, type BorderDirectArm,
 } from './Border.Direct';
+import {
+  PlanOcclusion, CoveredPixels, RasterPixels, IntersectPixelRect, PixelRectEmpty, PixelRectArea,
+  CarvePieceTransform, PILL_GUARD_FRACTION, DEFAULT_OCCLUSION_LIMITS,
+  type PixelRect, type OcclusionFill, type OcclusionVerdict,
+} from './Occlusion';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited, type TickPaceMode } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
@@ -128,6 +133,54 @@ const _hasBackdropFilter = (node: Jiv): boolean => {
     || s.BackdropFrostBlur > 0.001
     || Math.abs(s.Tint) > 0.001;
 };
+
+/** What the occlusion pre-pass accumulates as it walks. `Order` is the node visit index, which is
+ *  the paint order for everything this lever reasons about; `Reads` is the subset of those indices
+ *  at which a surface SAMPLES the scene, and a fill withheld before one of those would change what
+ *  it read however well the final image is covered. */
+interface OcclusionScan {
+  Order: number;
+  Fills: OcclusionFill[];
+  Nodes: Jiv[];
+  Reads: number[];
+  Canvas: PixelRect;
+  MinAreaPx: number;
+}
+
+/** A fill smaller than this share of the drawing buffer is neither a candidate nor a coverer. The
+ *  win is in full-bleed surfaces, and the pair test is quadratic in the admitted count -- a page of
+ *  chips must not pay for a lever that could never fire on one. */
+const OCCLUSION_MIN_AREA_FRACTION = 1 / 16;
+
+/** What `__jauiOcclusion()` publishes. The census a reader outside the engine has no other way to
+ *  ask for: what the pre-pass admitted, what it withheld, and -- the one that has to hold -- how
+ *  many of the coverers it reasoned about the walk actually painted. */
+export interface OcclusionCensus {
+  Armed: boolean;
+  /** Fills the pre-pass admitted as candidate or coverer (both roles, one list). */
+  Candidates: number;
+  /** ...of which could stand as a coverer. */
+  Coverers: number;
+  /** Paint indices at which something samples the scene. A fill withheld before one of these would
+   *  change what it read, so no coverer past the first of them may count. */
+  Reads: number;
+  /** Nodes the pre-pass visited at their paint point. Its own cost, in one number. */
+  Nodes: number;
+  Skipped: number;
+  Carved: number;
+  /** Instances the carves emitted in place of the fills they replaced. */
+  Pieces: number;
+  /** Device pixels withheld this frame. THE effect field. */
+  Px: number;
+  /** Coverers the WALK painted, against `Coverers` the pre-pass planned on. These must agree. */
+  CoverersSeen: number;
+  /** Verdicts the walk never reached -- the same disagreement from the other end. */
+  Missed: number;
+  /** The pre-pass's own wall time, so the lever can be shown to cost less than it saves. */
+  Ms: number;
+  /** Empty unless a flag refused the lever outright, in which case it names which. */
+  Refused: string;
+}
 import { DirtyFlag } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
@@ -531,6 +584,31 @@ export class Canvas implements DirtyTracker {
   private _borderArm: BorderDirectArm = 'on';
   /** The last `jaui:border-direct` gate line, so it prints on a SHAPE change and not per frame. */
   private _borderDirectLastLine = '';
+  /** `?occlusion` -- AN OPAQUE FILL THAT LATER OPAQUE FILLS COVER IS NOT DRAWN. Default ON.
+   *
+   *  `Core/Occlusion.ts` carries the pixel argument and the arithmetic; this field is only whether
+   *  the walk consults it. `?occlusion=off` restores the previous engine's emission byte for byte
+   *  in the same binary -- no pre-pass runs, no verdict is looked up, no instance is withheld. */
+  private _occlusion: boolean = true;
+  /** The frame's verdicts, keyed by the node whose fill they rule on. Built by the pre-pass before
+   *  the walk, because a coverer is by definition LATER than what it covers and the walk cannot
+   *  know it at the moment it would emit P. Empty when the flag is off or nothing was admitted. */
+  private _occlusionPlan = new Map<Jiv, OcclusionVerdict>();
+  /** Every node the pre-pass counted as a COVERER, and the count the walk actually painted. The
+   *  two traversals are the same functions, so these must agree; if they ever do not, a verdict
+   *  was taken on a tree the walk did not paint, and that is a pixel bug rather than a slow frame.
+   *  The gate line prints both. */
+  private _occlusionCoverers = new Set<Jiv>();
+  /** Non-null only while the pre-pass traversal is running. `_blurFirstNode` is shared with it --
+   *  deliberately, so there is ONE answer to "which nodes paint, in what order" -- and this is how
+   *  that traversal knows to record instead of to build. */
+  private _occlusionScan: OcclusionScan | null = null;
+  private _occlusionStats = {
+    Candidates: 0, Coverers: 0, Reads: 0, Nodes: 0, Skipped: 0, Carved: 0, Pieces: 0,
+    Px: 0, CoverersSeen: 0, Missed: 0, Ms: 0, Refused: '',
+  };
+  /** The last `jaui:occlusion` gate line, printed on a SHAPE change rather than per frame. */
+  private _occlusionLastLine = '';
   /** `?atlas-instanced` -- ONE INSTANCED DRAW PER ATLAS LEVEL, and the question it asks.
    *
    *  The atlas collapsed 160 encoder-opening binds to 4 and 160 render passes to 8 and recovered
@@ -1935,7 +2013,15 @@ export class Canvas implements DirtyTracker {
             // settled reads 0. Named `shadowSnap` rather than `snap` because `snap` three columns
             // left is the snapshot pass's milliseconds. `armed` distinguishes "did not park" from
             // "`?shadow-snap=off`".
-            ` | shadowSnap=${this._shadowSnapped} armed=${this._shadowSnapArmed ? 1 : 0}`
+            ` | shadowSnap=${this._shadowSnapped} armed=${this._shadowSnapArmed ? 1 : 0}` +
+            // `?occlusion`, per frame and exact (the gate line quantises `px` so it can key on a
+            // shape; this does not). `occludedPx` is the fill this frame did not shade. `prepassMs`
+            // beside it is what the decision cost, so the lever can be shown to save more than it
+            // spends rather than assumed to.
+            ` | occluded=${this._occlusionStats.Skipped + this._occlusionStats.Carved}` +
+            ` occludedPx=${this._occlusionStats.Px}` +
+            ` prepassMs=${this._occlusionStats.Ms.toFixed(2)}` +
+            ` armed=${this._occlusion ? 1 : 0}`
           );
           this._profSum.Dirty = this._profSum.Layout = this._profSum.Text = 0;
           this._profSum.Render = this._profSum.Total = 0;
@@ -2997,7 +3083,21 @@ export class Canvas implements DirtyTracker {
         //                still does border/shadow/clip — image is just
         //                another fill mode, not a separate draw pipeline.
         flushText();
-        if (!this._diagNoPanels) {
+        // `?occlusion`: the pre-pass ruled on this fill before the walk started. A `Skip` emits
+        // nothing at all; a `Carve` emits the pieces the cover left behind, into the same batch,
+        // in the same z-slot, from the same style. Two `size` checks so an unarmed frame pays two
+        // integer compares per panel and no hash lookup.
+        const occPlan = this._occlusionPlan;
+        const occ = occPlan.size === 0 ? undefined : occPlan.get(node);
+        if (this._occlusionCoverers.size !== 0 && this._occlusionCoverers.has(node)) {
+          this._occlusionStats.CoverersSeen++;
+        }
+        if (occ !== undefined) {
+          this._occlusionStats.Missed--;
+          if (occ.Kind === 'Carve') {
+            this._emitCarvedFill(node, eff, occ.Pieces, clipMeta.Offset, clipMeta.Count, ownBorderMode);
+          }
+        } else if (!this._diagNoPanels) {
         const flatBgPaint = this._computeBgPaint(node);
         if (flatBgPaint !== undefined) {
           flushPanels();
@@ -3214,6 +3314,10 @@ export class Canvas implements DirtyTracker {
     // draws into the scene through raw GL that this ledger cannot see, so the honest place is
     // after it — and no scene in the perf harness has one.
     if (this._blurFirst && !this._diagNoUi) this._blurFirstPrepass(w, h);
+    // `?occlusion` (DEFAULT ON, SAME PIXELS). Which opaque fills the walk below is about to emit
+    // for nothing, decided here because a coverer is later in paint order than what it covers and
+    // the walk cannot know it at the moment it would push P. Inert and ~free when the flag is off.
+    this._occlusionPrepass(w, h);
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
     if (this._phasedWalk && !this._diagNoUi) {
       // THE PHASED COMPOSITION, run for `?blur-phased` and for the DEFAULT `?pyramid-atlas` alike
@@ -3390,6 +3494,27 @@ export class Canvas implements DirtyTracker {
         + ` arm=${this._borderArm}`
         + (this._borderArm === 'on' ? ' pixels=WITHIN-ONE' : ' pixels=DIFFERENT-PROBE-ARM');
       if (line !== this._borderDirectLastLine) { this._borderDirectLastLine = line; JTrace(line); }
+    }
+
+    // `?occlusion`'s gate, on the same terms: a SHAPE change, not a frame.
+    //
+    // `coverers=<planned>/<seen>` and `missed=` are the two that must hold, and they are printed
+    // rather than inferred because they are the only way the pre-pass and the walk can be caught
+    // disagreeing about which nodes paint. `planned != seen`, or `missed != 0`, means a verdict was
+    // taken on a tree the walk did not paint -- a pixel bug, not a slow frame. `px=` is the effect
+    // field: device pixels of fill withheld this frame, which on a bed of a page fill under six
+    // opaque bands is the page fill minus the rows its bands feather across.
+    if (this._occlusion && !this._diagNoUi) {
+      const st = this._occlusionStats;
+      // `px` is quantised to a tenth of a megapixel HERE and nowhere else. A bed that slides moves
+      // its seams a fraction of a pixel a frame, so the exact count breathes and a line keyed on
+      // it would print every frame instead of on a change of shape. The exact number is on the
+      // `[Jaui]` census and on `__jauiOcclusion()`, which is where a cell should read it.
+      const line = `jaui:occlusion panels=${st.Skipped + st.Carved} px=${(st.Px / 1e6).toFixed(1)}M`
+        + ` skipped=${st.Skipped} carved=${st.Carved} pieces=${st.Pieces}`
+        + ` candidates=${st.Candidates} coverers=${st.Coverers}/${st.CoverersSeen}`
+        + ` missed=${st.Missed} reads=${st.Reads} nodes=${st.Nodes}`;
+      if (line !== this._occlusionLastLine) { this._occlusionLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -4260,6 +4385,195 @@ export class Canvas implements DirtyTracker {
   // the walk counts a MISS and builds, so the disagreement is a number in the report rather than
   // a silently different experiment.
 
+  /** The SHAPE rect a panel instance rasterises its fill into, in device px.
+   *
+   *  It is the instance's own numbers: `JivInstanceBuffer.Push` centres the panel on the mapped
+   *  local centre and gives it half-extents `cx * Width * d / 2`, and (at cos 1 / sin 0, which is
+   *  the only case this lever admits) `a_Rect` is that box grown by the border/shadow margin. The
+   *  margin carries no ink when both are absent, so the SHAPE is the rect to reason about and the
+   *  quad is not. `tests/Occlusion.Wired.test.ts` pins this against a real `Push`. */
+  private _occlusionShapeRect = (node: Jiv, eff: Mat2x3): { X0: number; Y0: number; X1: number; Y1: number } => {
+    const d = this._dpr;
+    const wDev = matScaleX(eff) * node.Width * d;
+    const hDev = matScaleY(eff) * node.Height * d;
+    const cxDev = matApplyX(eff, node.X + node.Width * 0.5, node.Y + node.Height * 0.5) * d;
+    const cyDev = matApplyY(eff, node.X + node.Width * 0.5, node.Y + node.Height * 0.5) * d;
+    return { X0: cxDev - wDev / 2, Y0: cyDev - hDev / 2, X1: cxDev + wDev / 2, Y1: cyDev + hDev / 2 };
+  };
+
+  /** One node, at its paint point, as the occlusion pre-pass sees it.
+   *
+   *  Three outcomes and no fourth: it SAMPLES the scene (its order joins `Reads` and nothing after
+   *  it may count as a coverer for a fill before it), it is a fill worth reasoning about, or it is
+   *  neither and only advances the paint order. */
+  private _occlusionRecord = (
+    scan: OcclusionScan, node: Jiv, eff: Mat2x3, stack: ClipStack, effH: Mat3x3 | null,
+  ): void => {
+    const order = scan.Order++;
+    const rs = node.RenderStyle;
+    const material = rs.Material;
+    // Conservative on purpose, and wider than the glass FILL predicate: a glass slab with no
+    // refraction takes the plain panel branch but its RIM still snapshots the scene, and the rim
+    // paints after this node's children rather than here. Marking the read at the node's own
+    // (earlier) order can only refuse a coverer that would have been legal.
+    if (material === 'ProgressiveBlur' || _isGlass(material) || _hasBackdropFilter(node)) {
+      scan.Reads.push(order);
+      return;
+    }
+    if (scan.Fills.length >= DEFAULT_OCCLUSION_LIMITS.MaxCandidates) return;
+    // 3D and rotation are out: a projective or rotated panel's ink is not the axis-aligned rect
+    // this arithmetic is written in, and its AABB would claim cover it does not have.
+    if (effH !== null || eff[1] !== 0 || eff[2] !== 0 || eff[0] <= 0 || eff[3] <= 0) return;
+    if (rs.BlendMode !== 'Normal') return;
+
+    const d = this._dpr;
+    const r = this._occlusionShapeRect(node, eff);
+    const raster = IntersectPixelRect(RasterPixels(r.X0, r.Y0, r.X1, r.Y1), scan.Canvas);
+    if (PixelRectArea(raster) < scan.MinAreaPx) return;
+
+    const bg = rs.Background;
+    const flat = bg.Kind === 'Color';
+    // An IMAGE fill's alpha is the texture's, which the CPU cannot read, so it is neither opaque
+    // nor reproducible at a sub-rect. A gradient is opaque when every STOP is -- the shader's
+    // Hermite over a constant alpha returns that constant to a float ulp (see the report).
+    const opaqueBg = flat ? bg.Color.A >= 1
+      : bg.Kind === 'Image' ? false
+      : bg.Stops.every((s) => s.Color.A >= 1);
+    // `_hasPaintedBorder` rather than a second border predicate: it is the one the rim overlay
+    // routes on, and a fill this admitted while that refused would be a fill with a stroke outside
+    // it. The shadow is the same clause from the other side -- it paints UNDER and AROUND the fill.
+    const paintsOutsideTheFill = this._hasPaintedBorder(node)
+      || (rs.ShadowColor.A > 0.001 && !JivInstanceBuffer.DiagNoShadow);
+    const opaque = opaqueBg && node.EffectiveOpacity >= 1 && !paintsOutsideTheFill;
+
+    const avgScale = (matScaleX(eff) + matScaleY(eff)) * 0.5;
+    let radius = 0;
+    for (let i = 0; i < 4; i++) radius = Math.max(radius, rs.BorderRadius[i] * avgScale * d);
+    let rawMin = rs.BorderRadiusRaw[0];
+    for (let i = 1; i < 4; i++) rawMin = Math.min(rawMin, rs.BorderRadiusRaw[i]);
+    const halfMin = Math.min(r.X1 - r.X0, r.Y1 - r.Y0) * 0.5;
+    const authored = Math.min(Math.max(rawMin, 0) * avgScale * d, halfMin + 1);
+    // Past the guard the corner field can reach its PILL leg, whose interior is a capsule and not
+    // the rect this inset assumes. `Core/Occlusion.ts` derives the 0.88 the leg really needs; the
+    // guard sits at half, so the leg is unreachable rather than approximated.
+    const squareEnough = Math.max(radius, authored) <= PILL_GUARD_FRACTION * halfMin;
+
+    let cover: PixelRect = { X0: 0, Y0: 0, X1: 0, Y1: 0 };
+    let covers = opaque && squareEnough;
+    if (covers) {
+      cover = IntersectPixelRect(CoveredPixels(r.X0, r.Y0, r.X1, r.Y1, radius), scan.Canvas);
+      // A clip only ever SHRINKS what a coverer writes at alpha 1, and a clip whose own shape this
+      // arithmetic cannot bound (rotated, or round enough to be a capsule) makes the coverer
+      // unusable rather than merely smaller.
+      for (const c of stack) {
+        if ((c.Cos ?? 1) !== 1 || (c.Sin ?? 0) !== 0) { covers = false; break; }
+        const cw = c.W * d, ch = c.H * d;
+        const cr = Math.max(c.RTL, c.RTR, c.RBR, c.RBL) * d;
+        if (cr > PILL_GUARD_FRACTION * Math.min(cw, ch) * 0.5) { covers = false; break; }
+        const cx0 = c.X * d, cy0 = c.Y * d;
+        cover = IntersectPixelRect(cover, CoveredPixels(cx0, cy0, cx0 + cw, cy0 + ch, cr));
+      }
+      if (covers && PixelRectEmpty(cover)) covers = false;
+    }
+    // A fill is withheld only when it is itself opaque and reads nothing: the pixel argument would
+    // survive a translucent P (it is overwritten either way), but a translucent fill is not what
+    // this lever is for and a glass one would take a read out of the frame.
+    const skippable = opaque;
+    // A carve re-emits P at a sub-rect, so its fill must not depend on where that sub-rect is
+    // (`resolveBgFill` reads `panelLocal` for every mode but `Color`) and its silhouette must be
+    // the rect itself (a rounded P would be carved into square pieces).
+    //
+    // `BorderWidth === 0` is the STRICTER clause, and it is here rather than in `opaque` because
+    // of what a piece's own transform does: `Push` scales `BorderBlur`, `BezelWidth`, `BorderFade`,
+    // `Thickness` and the shadow terms by `avgScale`, which a thin piece necessarily changes. Every
+    // one of those lanes is an EXACT no-op at `BorderWidth == 0` on a non-glass fill with no shadow
+    // (`tests/Borderless.Program.test.ts` is the line-set proof for the border chain), so the
+    // difference the transform makes cannot reach a pixel. At a non-zero border width it could.
+    const carvable = flat && skippable && radius === 0 && authored === 0
+      && rs.BorderWidth === 0 && rs.Thickness === 0;
+    if (!covers && !skippable) return;
+    scan.Fills.push({ Order: order, Raster: raster, Cover: cover, Covers: covers, Skippable: skippable, Carvable: carvable });
+    scan.Nodes.push(node);
+  };
+
+  /** THE OCCLUSION PRE-PASS. Every fill the coming walk would emit, in the order it would emit
+   *  them, ruled on before the first of them is pushed.
+   *
+   *  It is a PRE-pass and not a walk-time test because it cannot be one: a coverer is by definition
+   *  later in paint order than what it covers, so at the instant the walk would emit P the thing
+   *  that makes P invisible has not been reached. What it does NOT do is answer "which nodes paint,
+   *  in what order" for itself -- it runs `_blurFirstNode`, the traversal `?blur-first` and
+   *  `?blur-phased` already share, so there is one answer and `coverers=<planned>/<seen>` on the
+   *  gate line is what says the walk agreed. */
+  private _occlusionPrepass = (w: number, h: number): void => {
+    const st = this._occlusionStats;
+    this._occlusionPlan.clear();
+    this._occlusionCoverers.clear();
+    st.Candidates = 0; st.Coverers = 0; st.Reads = 0; st.Nodes = 0;
+    st.Skipped = 0; st.Carved = 0; st.Pieces = 0; st.Px = 0;
+    st.CoverersSeen = 0; st.Missed = 0; st.Ms = 0;
+    if (!this._occlusion || this._diagNoUi) return;
+    const t0 = performance.now();
+    const scan: OcclusionScan = {
+      Order: 0, Fills: [], Nodes: [], Reads: [],
+      Canvas: { X0: 0, Y0: 0, X1: w, Y1: h },
+      MinAreaPx: w * h * OCCLUSION_MIN_AREA_FRACTION,
+    };
+    this._occlusionScan = scan;
+    const scope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
+    this._blurFirstNode(this.Root, MAT_IDENTITY, EmptyClipStack, scope, null, null, w, h);
+    this._blurFirstReplay(scope, w, h);
+    this._occlusionScan = null;
+    st.Nodes = scan.Order;
+    st.Reads = scan.Reads.length;
+    st.Candidates = scan.Fills.length;
+    const plan = PlanOcclusion(scan.Fills, scan.Reads, { ...DEFAULT_OCCLUSION_LIMITS, MinAreaPx: scan.MinAreaPx });
+    // A node the traversal reached TWICE (a teleport replayed into a layered scope) has two paint
+    // points and one entry in a map keyed by the node, so its verdict is dropped rather than
+    // applied to whichever of the two the walk hits first.
+    const twice = new Set<Jiv>();
+    const once = new Set<Jiv>();
+    for (const n of scan.Nodes) { if (once.has(n)) twice.add(n); else once.add(n); }
+    for (let i = 0; i < scan.Fills.length; i++) {
+      const node = scan.Nodes[i];
+      if (twice.has(node)) continue;
+      if (scan.Fills[i].Covers) { st.Coverers++; this._occlusionCoverers.add(node); }
+      const v = plan.get(scan.Fills[i].Order);
+      if (v === undefined) continue;
+      this._occlusionPlan.set(node, v);
+      st.Px += v.Px;
+      if (v.Kind === 'Skip') st.Skipped++;
+      else { st.Carved++; st.Pieces += v.Pieces.length; }
+    }
+    st.Missed = this._occlusionPlan.size;
+    st.Ms = performance.now() - t0;
+  };
+
+  /** Re-emit a carved fill as the pieces the cover left behind.
+   *
+   *  Through `Push` with a synthetic scale-and-translate, never by writing instance floats: the
+   *  instance that comes out differs from the one P would have pushed in `a_Rect` and
+   *  `a_PanelGeom` alone, and every other lane -- colour, radii, opacity, grade, clip, border mode
+   *  -- is the same expression on the same style. A piece's new edges are whole device
+   *  coordinates, so no pixel centre lies within half a pixel of one and its alpha is exactly the
+   *  1 P had there; an edge clamped back onto P's OWN edge keeps P's own feather unchanged. */
+  private _emitCarvedFill = (
+    node: Jiv, eff: Mat2x3, pieces: readonly PixelRect[],
+    clipOffset: number, clipCount: number, borderMode: 'Normal' | 'Suppress',
+  ): void => {
+    const d = this._dpr;
+    const r = this._occlusionShapeRect(node, eff);
+    for (const p of pieces) {
+      const clamped = {
+        X0: Math.max(r.X0, p.X0), Y0: Math.max(r.Y0, p.Y0),
+        X1: Math.min(r.X1, p.X1), Y1: Math.min(r.Y1, p.Y1),
+      };
+      if (clamped.X1 <= clamped.X0 || clamped.Y1 <= clamped.Y0) continue;
+      const m = CarvePieceTransform(clamped, node.X, node.Y, node.Width, node.Height, d);
+      this._panelBuffer.Push(node, d, m, clipOffset, clipCount, -1, borderMode);
+    }
+  };
+
   /** Build every pyramid the coming walk would build, in the order it would build them. */
   private _blurFirstPrepass = (w: number, h: number): void => {
     this._blurFirstFill.clear();
@@ -4306,6 +4620,15 @@ export class Canvas implements DirtyTracker {
       this._blurFirstDescend(node, eff, stack, scope, effH, childPersp, false, w, h);
       return;
     }
+    // THE OCCLUSION PRE-PASS rides this traversal rather than copying it. It builds nothing, so it
+    // returns before the two build sites; `_blurFirstDescend`'s rim emit refuses for the same
+    // reason. This is the node's paint point, which is what makes `scan.Order` the paint order.
+    const scan = this._occlusionScan;
+    if (scan !== null) {
+      this._occlusionRecord(scan, node, eff, stack, effH);
+      this._blurFirstDescend(node, eff, stack, scope, effH, childPersp, false, w, h);
+      return;
+    }
     // The pblur branch is tested FIRST in the walk and wins, so a ProgressiveBlur surface never
     // reaches the glass fill. Its own pyramid is NOT pre-built: it is seeded from a snapshot of
     // the scene-so-far, so moving it in front of the bed would change what it samples rather than
@@ -4337,6 +4660,9 @@ export class Canvas implements DirtyTracker {
     const emitRim = (): void => {
       if (!rimPending) return;
       rimPending = false;
+      // The occlusion pre-pass builds nothing: it rode this traversal for its ORDER, and a rim's
+      // scene read is already booked at its node's own (earlier) paint point.
+      if (this._occlusionScan !== null) return;
       // Only a GLASS rim builds a pyramid; a flat one is a solid stroke.
       if (!_isGlass(node.RenderStyle.Material)) return;
       if (this._prepassSites === 'fill') return;
@@ -6452,6 +6778,56 @@ export class Canvas implements DirtyTracker {
           JTrace('jaui:blur-phased note=blur-src-holds-the-source-constant-so-this-arm-is-a-pure-count-test');
         }
       }
+    }
+    // `?occlusion` -- AN OPAQUE FILL LATER OPAQUE FILLS COVER IS NOT DRAWN. Default ON, and parsed
+    // here, after every flag it interrogates, because every one of its refusals is a flag that
+    // moves either WHICH nodes paint or the ORDER they paint in -- and the pre-pass's whole claim
+    // is that it answers those two questions the same way the walk does.
+    //
+    // `?occlusion=off` is the previous engine in the same binary: no pre-pass, no verdict, no
+    // instance withheld. On/off by name only, for the reason every flag in this block is -- a value
+    // that was ignored would let `=0` and `=no` arm the default while reading as if they had not.
+    if (params.has('occlusion')) {
+      const raw = (params.get('occlusion') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?occlusion takes 'on' or 'off', got '${raw}'`);
+      }
+      this._occlusion = raw !== 'off';
+    }
+    // Each refusal names the thing it cannot stand beside, and each is a property of the URL rather
+    // than of a frame, so the decision is taken once here and the walk pays one boolean. The layer
+    // cache composites a subtree from a cached FBO and the pre-pass does not model it; the phased
+    // and pre-pass blur arms REORDER the paint and pre-build pyramids the walk would build later,
+    // so "later than P" stops meaning what it means here; the card composite draws into a target
+    // that is not the scene; and the `no-*` diagnostics remove the very draws this reasons about.
+    if (this._occlusion) {
+      const r = this._renderer;
+      const why =
+        this._layerCacheEnabled ? 'layer-cache-composites-a-subtree-the-pre-pass-does-not-model'
+        : this._phasedWalk || this._blurPhased ? 'phased-walk-repaints-the-tree-in-three-passes'
+        : this._blurFirst ? 'blur-first-builds-every-pyramid-ahead-of-the-fills-it-would-withhold'
+        : this._diagNoPanels || this._diagNoUi || this._diagNoGlass || this._diagNoPblur
+          ? 'a-no-star-diagnostic-already-removes-the-draws-this-reasons-about'
+        : r instanceof WebGL2Renderer && r.CardCompositeEnabled
+          ? 'card-composite-draws-into-a-target-that-is-not-the-scene'
+        : null;
+      if (why !== null) {
+        this._occlusion = false;
+        this._occlusionStats.Refused = why;
+      }
+    }
+    // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
+    // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
+    // parsed, so a mark taken there would print `off` on every arm however the URL read.
+    // `default=true` means nobody asked, so a reader can tell a control shot from an arm.
+    JTrace(`jaui:occlusion armed=${this._occlusion ? 'on' : 'off'}`
+      + ` default=${!params.has('occlusion')}`
+      + ` minArea=1/${Math.round(1 / OCCLUSION_MIN_AREA_FRACTION)}`
+      + ` maxPieces=${DEFAULT_OCCLUSION_LIMITS.MaxPieces} pixels=SAME`
+      + (this._occlusionStats.Refused !== '' ? ` reason=${this._occlusionStats.Refused}` : ''));
+    {
+      const g = globalThis as unknown as { __jauiOcclusion?: () => OcclusionCensus };
+      g.__jauiOcclusion = () => ({ Armed: this._occlusion, ...this._occlusionStats });
     }
     // ── THE PROGRAMS THE ARMS ABOVE NEED, COMPILED HERE ──────────────────────────────────────
     // LAST in this method, after every flag has been read and every refusal taken, because what a
