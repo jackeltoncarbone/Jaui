@@ -5582,6 +5582,27 @@ export class Canvas implements DirtyTracker {
         : !armed ? ' reason=flat-program-off'
         : blBad ? ` reason=only-on-and-off-are-values-got-${borderless}` : '';
       JTrace(`jaui:borderless-program armed=${blArmed ? 'on' : 'off'} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}${blWhy}`);
+
+      // `?two-stop-gradient=off` - PIXEL-IDENTICAL BY CONSTRUCTION, and DEFAULT ON.
+      //
+      // The fifth panel variant (MATERIAL_FLAT + NO_SHAPE_GRADIENT + TWO_STOP_GRADIENT) binds
+      // `sampleBgGradient`'s knot loop to 2 instead of 16, so a two-stop band's spline is one
+      // straight-line evaluation with constant uniform indices. `=off` sends those batches back to
+      // the borderless program - flatprogram2's routing - so both arms live in one binary and
+      // differ by a program bind.
+      //
+      // BOTH of the flags above imply this one off, and the mark names WHICH: the variant is cut
+      // on top of their two defines, so with either routing gone there is no batch that can reach
+      // it. Read the three lines together; each never claims more than the one above it.
+      const twoStop = params.get('two-stop-gradient');
+      const tsBad = twoStop !== null && twoStop !== '' && twoStop !== 'on' && twoStop !== 'off';
+      const tsArmed = blArmed && (tsBad || twoStop !== 'off');
+      if (webgl2) (r as WebGL2Renderer).DiagTwoStopGradient = tsArmed;
+      const tsWhy = !webgl2 ? ' reason=webgl2-only'
+        : !armed ? ' reason=flat-program-off'
+        : !blArmed ? ' reason=borderless-program-off'
+        : tsBad ? ` reason=only-on-and-off-are-values-got-${twoStop}` : '';
+      JTrace(`jaui:two-stop-gradient armed=${tsArmed ? 'on' : 'off'} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}${tsWhy}`);
     }
     // `?shadow-snap=off` — THE DIAGNOSTIC ARM, and the fix is DEFAULT ON.
     //

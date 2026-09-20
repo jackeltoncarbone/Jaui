@@ -158,6 +158,36 @@ const _unwrap = (handle: GpuTextureHandle): WebGLTexture =>
 const _regionOf = (handle: GpuTextureHandle | null | undefined): BackdropRegion =>
   handle?.Region ?? BACKDROP_REGION_FULL;
 
+/**
+ * Can this draw's fill reach `sampleBgGradient`'s knot loop past `i == 1`?
+ *
+ * `TWO_STOP_GRADIENT` binds that loop to 2. The bound is unobservable exactly when no fragment of
+ * the draw takes an iteration the 2-bound loop would not, and the loop is reached only from
+ * `u_BgMode` 2 or 3 with `u_BgGradStopCount >= 2`. So three admissions, each for its own reason:
+ *
+ *   - **No paint, Color, or Image.** `resolveBgFill` returns before `sampleBgGradient` on every
+ *     one (mode 0 falls through to `v_Tint`, mode 1 returns the texture or the placeholder), and
+ *     `_bindBgPaint` writes `u_BgGradStopCount = 0` on all three anyway. The loop is dead code and
+ *     the bound cannot be seen. Admitted deliberately rather than left out: the page's black fill
+ *     is ~8 Mpx of mode 0, and the whole thesis of the flat program is that a program's register
+ *     footprint and instruction size are set by its heaviest path whether a fragment takes it or
+ *     not. A fill that never evaluates a spline should not be shaded by a program that can.
+ *   - **A gradient of 2 knots.** The 16-bound loop enters at `i == 1`, finds `1 > last` false
+ *     (`last == 1`), and either takes the segment and breaks or falls to `i == 2` and breaks on
+ *     `i > last` with `v` still `u_BgGradValue[last]`. The 2-bound loop does the same single
+ *     iteration and leaves through the bound with the same `v`. Same expressions, same order.
+ *   - **A gradient of 0 or 1 knots.** `sampleBgGradient` returns at `u_BgGradStopCount <= 0` or
+ *     takes the `== 1` arm before the loop exists.
+ *
+ * `Count` is `GradientCurveOf`'s fitted knot count, not the authored stop count: an EASED two-stop
+ * gradient lays down extra knots and is refused here, which is right - the fragment really would
+ * walk them. The bed's bands are `LinearGradient(angle, from, to)`, uneased, so `Count === 2`.
+ */
+const _paintFitsTwoStops = (bgPaint: BgPaint | undefined): boolean => {
+  if (bgPaint === undefined || bgPaint.Mode === 'Color' || bgPaint.Mode === 'Image') return true;
+  return bgPaint.Curve.Count <= 2;
+};
+
 
 /** How far OUTSIDE the region it was asked for a backdrop pyramid can actually read its source.
  *
@@ -194,11 +224,12 @@ interface _CardTarget {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/** Panel program variants compiled from the ONE `Jiv.Panel.frag`: glass, non-glass, flat, and
- *  flat-and-borderless. Exported so `?flat-program` / `?borderless-program`'s init marks cannot
- *  claim a count the boot does not build; `tests/Flat.Program.test.ts` asserts
- *  `_compilePanelShader` issues exactly this many. */
-export const PANEL_PROGRAM_COUNT = 4;
+/** Panel program variants compiled from the ONE `Jiv.Panel.frag`: glass, non-glass, flat,
+ *  flat-and-borderless, and flat-and-borderless-with-a-two-stop-gradient. Exported so
+ *  `?flat-program` / `?borderless-program` / `?two-stop-gradient`'s init marks cannot claim a
+ *  count the boot does not build; `tests/Flat.Program.test.ts` asserts `_compilePanelShader`
+ *  issues exactly this many. */
+export const PANEL_PROGRAM_COUNT = 5;
 
 const PANEL_FLOATS_PER_INSTANCE = 60;
 // Offsets INTO one packed panel instance of the five numbers the fragment's `hasBackdropFilter`
@@ -427,12 +458,23 @@ export class WebGL2Renderer implements Renderer {
   // fragment — along with the whole chain. It is the ONE exclusion in this pair that removes
   // instructions whose RESULT is provably zero rather than instructions that are unreachable.
   private _panelShaderBorderless!: ShaderProgram;
+  // MATERIAL_FLAT + NO_SHAPE_GRADIENT + TWO_STOP_GRADIENT. `sampleBgGradient` walks a cubic
+  // Hermite spline of up to MAX_BG_GRAD_STOPS knots: a loop whose trip count the compiler cannot
+  // prove, a data-dependent `break`, and three uniform arrays indexed by a variable. The bed's six
+  // bands are `LinearGradient(angle, from, to)` - TWO stops - so that loop body runs exactly once,
+  // at `i == 1`, on every one of the ~8 Mpx it covers. This variant binds the LOOP (not the
+  // arrays, which must stay 16 wide: `_bindBgPaint` uploads a 16-wide Float32Array) to 2, so the
+  // compiler unrolls it into one straight-line evaluation with constant indices. The expressions
+  // are the same text in the same order - the only edit to the `.frag` is which macro the `for`
+  // reads its bound from.
+  private _panelShaderTwoStop!: ShaderProgram;
   // Uniform location bundles per variant — each program has its own
   // location IDs even when the uniform names match.
   private _panelLocsGlass!: _PanelLocs;
   private _panelLocsNone!: _PanelLocs;
   private _panelLocsFlat!: _PanelLocs;
   private _panelLocsBorderless!: _PanelLocs;
+  private _panelLocsTwoStop!: _PanelLocs;
   /** `?flat-program=off` sends every panel back through the full program. Default ON: the flat
    *  program is pixel-identical by construction, so the only reason to hold the old routing is to
    *  measure the two arms against each other in ONE binary. Set by `Jaui._initDebugFromUrl`. */
@@ -442,6 +484,11 @@ export class WebGL2Renderer implements Renderer {
    *  full program and therefore implies this one off, which `Jaui._initDebugFromUrl` enforces at
    *  the flag rather than here, so this field means exactly one thing. Default ON. */
   DiagBorderlessProgram = true;
+  /** `?two-stop-gradient=off` sends batches that would take the two-stop program back to the
+   *  borderless one - i.e. to flatprogram2's routing - in the same binary. `?flat-program=off` and
+   *  `?borderless-program=off` both imply this one off, which `Jaui._initDebugFromUrl` enforces at
+   *  the flag rather than here, so this field means exactly one thing. Default ON. */
+  DiagTwoStopGradient = true;
   // Retained-mode capture view-offset (device px). (0,0) for the normal pass;
   // compositeOrCapture sets it to the subtree AABB origin so panel/text draws
   // project into the capture FBO while v_PixelPos stays screen-space (clips
@@ -1285,17 +1332,26 @@ export class WebGL2Renderer implements Renderer {
     // superellipse leg takes the borderless program on top of that: nothing in it reads the SDF's
     // gradient, so nothing in it computes one. The extra scan is over the same instance floats the
     // flat scan just walked, on batches that have already been classified flat.
+    //
+    // And on top of THAT, a borderless batch whose bgPaint cannot reach `sampleBgGradient`'s knot
+    // loop past `i == 1` takes the two-stop program. That is a per-DRAW question, not a per-
+    // instance one: the stop count is a batch uniform (`u_BgGradStopCount`, set from `bgPaint`
+    // just below), because a Gradient background flushes the Color batch and draws alone. One
+    // read of `bgPaint`, no scan.
     const isGlass = useGlassShader;
     const isFlat = !isGlass
       && this.DiagFlatProgram
       && backdrop === null
       && this._batchTakesFlatProgram(baseFrostLod);
     const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
+    const isTwoStop = isBorderless && this.DiagTwoStopGradient && _paintFitsTwoStops(bgPaint);
     const program = isGlass ? this._panelShaderGlass
+      : isTwoStop ? this._panelShaderTwoStop
       : isBorderless ? this._panelShaderBorderless
       : isFlat ? this._panelShaderFlat
       : this._panelShaderNone;
     const locs = isGlass ? this._panelLocsGlass
+      : isTwoStop ? this._panelLocsTwoStop
       : isBorderless ? this._panelLocsBorderless
       : isFlat ? this._panelLocsFlat
       : this._panelLocsNone;
@@ -3604,11 +3660,21 @@ export class WebGL2Renderer implements Renderer {
     // never issued alone: it is only sound under MATERIAL_FLAT, whose exclusions are what leave
     // the border chain as the gradient's only consumer. Issued unconditionally too, for the same
     // reason — `?borderless-program` changes routing and not the boot.
+    //
+    // A FIFTH adds TWO_STOP_GRADIENT on top of those two: the knot loop in `sampleBgGradient`
+    // bound to 2 instead of 16, so a two-stop band's spline is one straight-line evaluation with
+    // constant uniform indices rather than an unprovable loop over dynamically indexed arrays.
+    // Stacked on the borderless pair rather than offered on MATERIAL_FLAT alone because the bed
+    // is entirely borderless (the page fill and the six bands), and one program that covers the
+    // bed beats two that cover it and a surface nobody has measured. Issued unconditionally, in
+    // both arms of `?two-stop-gradient`, for the reason the fourth was.
     this._panelShaderGlass = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_GLASS: true });
     this._panelShaderNone  = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_NONE:  true });
     this._panelShaderFlat  = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT:  true });
     this._panelShaderBorderless =
       batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true });
+    this._panelShaderTwoStop = batch.Add(panelVertSrc, panelFragSrc,
+      { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true, TWO_STOP_GRADIENT: true });
   };
 
   private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
@@ -3620,6 +3686,7 @@ export class WebGL2Renderer implements Renderer {
     // ones the bound program actually declares land.
     this._panelLocsFlat  = _extractPanelLocs(gl, this._panelShaderFlat.Program);
     this._panelLocsBorderless = _extractPanelLocs(gl, this._panelShaderBorderless.Program);
+    this._panelLocsTwoStop = _extractPanelLocs(gl, this._panelShaderTwoStop.Program);
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jaui] Failed to create panel instance buffer');

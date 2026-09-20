@@ -40,6 +40,7 @@ export const PROGRAMS = {
   MATERIAL_NONE: ['MATERIAL_NONE'],
   MATERIAL_FLAT: ['MATERIAL_FLAT'],
   BORDERLESS: ['MATERIAL_FLAT', 'NO_SHAPE_GRADIENT'],
+  TWO_STOP: ['MATERIAL_FLAT', 'NO_SHAPE_GRADIENT', 'TWO_STOP_GRADIENT'],
 } as const satisfies Record<string, readonly string[]>;
 export type ProgramName = keyof typeof PROGRAMS;
 

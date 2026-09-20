@@ -116,6 +116,25 @@ uniform vec2 u_SpecularTilt;
 // (0..1), premultiplied OKLab + alpha in u_BgGradValue[i], slopes in
 // u_BgGradTangent[i]. MAX_BG_GRAD_STOPS matches Jiv.Types.MAX_GRADIENT_STOPS.
 #define MAX_BG_GRAD_STOPS 16
+// The BOUND of `sampleBgGradient`'s knot loop, and the ONLY thing TWO_STOP_GRADIENT changes.
+//
+// The uniform ARRAYS above keep all MAX_BG_GRAD_STOPS slots in every variant: `GradientCurveOf`
+// always packs a 16-wide Float32Array and `_bindBgPaint` uploads the whole thing, so a narrower
+// declaration would be a GL error, not an optimisation. What costs a flat band fragment is the
+// LOOP - a trip count the compiler cannot prove, a data-dependent `break`, and three uniform
+// arrays indexed by a variable. With the bound at 2 the body runs exactly once, at `i == 1`,
+// with constant indices: the compiler unrolls it and the fetches become direct loads.
+//
+// This is a bound substitution and nothing else. Every expression inside the loop is the same
+// text in the same order under both defines, which is what makes the two programs' arithmetic
+// identical for the gradients the routing admits (`u_BgGradStopCount <= 2`): at two stops the
+// 16-bound loop takes `i == 1` and then leaves through `i > last`, and the 2-bound loop takes
+// `i == 1` and then leaves through the bound. Same iteration, same `v`, same everything after.
+#if defined(TWO_STOP_GRADIENT)
+#define BG_GRAD_LOOP_STOPS 2
+#else
+#define BG_GRAD_LOOP_STOPS MAX_BG_GRAD_STOPS
+#endif
 uniform int       u_BgMode;
 uniform sampler2D u_BgTexture;
 uniform vec4      u_BgUv;            // scale.xy, offset.zw
@@ -176,7 +195,7 @@ vec4 sampleBgGradient(float t) {
     if (u_BgGradStopCount == 1 || t <= u_BgGradPos[0]) {
         v = u_BgGradValue[0];
     } else {
-        for (int i = 1; i < MAX_BG_GRAD_STOPS; i++) {
+        for (int i = 1; i < BG_GRAD_LOOP_STOPS; i++) {
             if (i > last) break;
             float p1 = u_BgGradPos[i];
             if (t <= p1) {

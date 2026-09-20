@@ -314,11 +314,14 @@ describe('what the borderless program keeps, byte for byte', () => {
 
 describe('routing: which batches take the borderless program', () => {
   it('compiles a FOURTH program, and NO_SHAPE_GRADIENT is never issued without MATERIAL_FLAT', () => {
-    expect(RENDERER).toContain('export const PANEL_PROGRAM_COUNT = 4;');
+    // Five variants now: lane bgfill stacked TWO_STOP_GRADIENT on this one. The claim this test
+    // makes is unchanged and is about the DEFINE SET, not the count - every Add that carries
+    // NO_SHAPE_GRADIENT carries MATERIAL_FLAT too.
+    expect(RENDERER).toContain('export const PANEL_PROGRAM_COUNT = 5;');
     expect(RENDERER).toContain(
       'batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true })');
     const adds = RENDERER.match(/batch\.Add\(panelVertSrc, panelFragSrc[^)]*\)/g) ?? [];
-    expect(adds.length).toBe(4);
+    expect(adds.length).toBe(5);
     for (const add of adds) {
       if (add.includes('NO_SHAPE_GRADIENT')) expect(add).toContain('MATERIAL_FLAT');
     }
