@@ -384,7 +384,7 @@ describe('the loop really is wired this way (the real source, not the model)', (
     expect(probes.slice(0, 900)).toContain('r.MeasureShadowBackdrop(');
     expect(probes.slice(0, 900)).toContain('if (!b.Plan.AdaptiveShadow) continue;');
     const rimPlan = JAUI.slice(JAUI.indexOf('private _glassRimBlurPlan'));
-    expect(rimPlan.slice(0, 1400)).toContain('AdaptiveShadow: false,');
+    expect(rimPlan.slice(0, rimPlan.indexOf('FrostCssPx: frostCssPx,'))).toContain('AdaptiveShadow: false,');
     // Neither call site knows about the snap: the renderer field is what carries it, so a third
     // probe site added later is covered without being told.
     expect(probes.slice(0, 900)).not.toContain('ShadowSnap');

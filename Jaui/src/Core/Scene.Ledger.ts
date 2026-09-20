@@ -66,6 +66,19 @@ export class SceneReadLedger {
    *  targets can be checked rather than believed. Keys today: `scene` (never counted, by
    *  definition), `snapshot`, `blur`, `card`, `cache`, `shadow-state`, `default`. */
   EndsByKey: Record<string, number> = {};
+  /** THE ATLAS CENSUS, per frame. `?pyramid-atlas` collapses a frame's per-card pyramid builds
+   *  into one build per PHASE, so the columns that say whether it actually did are: how many
+   *  atlases were built, how many members they carried, how many surfaces the plan REFUSED and
+   *  built alone, and how many bytes of level chain the atlases hold.
+   *
+   *  `Solo` is the one to read first. A plan that atlases nothing and solos everything reads
+   *  `atlases=0 members=0 solo=40` and is the unflagged engine wearing the flag's name -- the
+   *  vacuous-success shape this ledger has been bitten by before. On `glass-grid` it must read
+   *  `atlases=2 members=40 solo=0`, and `EndsByKey.blur` must read 2 beside it. */
+  Atlases = 0;
+  AtlasMembers = 0;
+  AtlasSolo = 0;
+  AtlasBytes = 0;
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -86,6 +99,10 @@ export class SceneReadLedger {
     this.Restarts = 0;
     this.Switches = 0;
     this.EndsByKey = {};
+    this.Atlases = 0;
+    this.AtlasMembers = 0;
+    this.AtlasSolo = 0;
+    this.AtlasBytes = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -127,5 +144,15 @@ export class SceneReadLedger {
    *  the flag instead of counting it, so the end-of-frame binds are silent rather than special-cased
    *  one at a time. */
   NoteFrameEndDrain = (): void => { this._writtenSinceSwitch = false; };
+
+  /** One atlas was built, carrying `members` slots and holding `bytes` of level chain. */
+  NoteAtlas = (members: number, bytes: number): void => {
+    this.Atlases++;
+    this.AtlasMembers += members;
+    this.AtlasBytes += bytes;
+  };
+
+  /** `n` surfaces the atlas plan could not take, and which built exactly as they do today. */
+  NoteAtlasSolo = (n: number): void => { this.AtlasSolo += n; };
 }
 

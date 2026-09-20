@@ -191,8 +191,12 @@ describe('?blur-phased — the walk\'s own functions, and the pre-pass\'s own bu
   it('takes the recorded handle at BOTH build sites, and a disagreement is still counted', () => {
     expect((jaui.match(/this\._blurFirstStats\.Missed\+\+/g) ?? []).length).toBe(2);
     expect((jaui.match(/this\._blurFirstStats\.Used\+\+/g) ?? []).length).toBe(2);
-    expect(jaui).toContain('const preFill = this._blurFirst || this._blurPhased ? this._blurFirstFill.get(node) : undefined;');
-    expect(jaui).toContain('const preRim = this._blurFirst || this._blurPhased ? this._blurFirstRim.get(node) : undefined;');
+    // `_phasedWalk` is `_blurPhased || _pyramidAtlas`: both arms run the phased traversal, and
+    // these sites are about the phased WALK (a pre-built handle is waiting) rather than about
+    // which of the two asked for it. One field, read at every site that used to read the flag.
+    expect(jaui).toContain('private _phasedWalk: boolean = false;');
+    expect(jaui).toContain('const preFill = this._blurFirst || this._phasedWalk ? this._blurFirstFill.get(node) : undefined;');
+    expect(jaui).toContain('const preRim = this._blurFirst || this._phasedWalk ? this._blurFirstRim.get(node) : undefined;');
   });
 
   it('gates the walk through THREE predicates and nothing else', () => {
@@ -211,7 +215,7 @@ describe('?blur-phased — the walk\'s own functions, and the pre-pass\'s own bu
 
   it('runs the five passes in the one order that gives three encoders', () => {
     const render = arrowBody(jaui, '_render');
-    const block = render.slice(render.indexOf('if (this._blurPhased && !this._diagNoUi)'));
+    const block = render.slice(render.indexOf('if (this._phasedWalk && !this._diagNoUi)'));
     const steps = [
       'phase(1);',
       "this._blurPhasedBuild('fill', w, h);",
@@ -243,7 +247,7 @@ describe('?blur-phased — the walk\'s own functions, and the pre-pass\'s own bu
       expect(probes).not.toContain(forbidden);
     }
     const render = arrowBody(jaui, '_render');
-    expect(render).toContain('const preShadow = this._blurPhased ? this._phasedShadow.get(node) : undefined;');
+    expect(render).toContain('const preShadow = this._phasedWalk ? this._phasedShadow.get(node) : undefined;');
   });
 
   it('counts the two things that make an arm incomparable instead of hiding them', () => {
