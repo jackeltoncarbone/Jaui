@@ -145,13 +145,22 @@ describe('the renderer feeds the ledger at every scene read', () => {
     const sites = drawSites(renderer);
     expect(sites.length).toBeGreaterThan(8); // a guard on the matcher, not on the renderer
     const unnoted = sites.filter((d) => !d.Before.includes('_noteSceneDraw()'));
-    // Exactly one, and it is the adaptive-shadow probe: the single draw in this file that CANNOT
-    // land in the scene, because it renders into the 1x1 `_shadowStateFbo`. A new draw entry point
-    // that forgets the note lands here as a second element and fails the lane, which is the point.
-    expect(unnoted).toHaveLength(1);
-    const probe = arrowBody(renderer, 'MeasureShadowBackdrop');
-    expect(probe).toContain(unnoted[0].Line);
-    expect(probe).toContain('_shadowStateFbo');
+    // Exactly two, and BOTH are draws that cannot land in the scene because they render into a 1x1
+    // target of their own. A new draw entry point that forgets the note lands here as a third
+    // element and fails the lane, which is the point.
+    expect(unnoted).toHaveLength(2);
+    // (1) The adaptive-shadow probe, into `_shadowStateFbo`.
+    const shadow = arrowBody(renderer, 'MeasureShadowBackdrop');
+    expect(shadow).toContain('_shadowStateFbo');
+    // (2) `?scene-restarts` / `?small-restarts`'s restart probe, into `_restartProbeFbos`. It MUST
+    //     NOT note a write: it is the draw that ENDS the scene's encoder by landing somewhere else,
+    //     and booking it as a scene write would price a restart the frame did not take. Its two
+    //     scene-side draws, which do land in the scene, are noted -- so this method contributes
+    //     exactly one unnoted site and not three.
+    const restart = arrowBody(renderer, '_restartProbe');
+    expect(restart).toContain('_restartProbeFbos[slot]');
+    expect(restart.match(/_noteSceneDraw\(\);/g)).toHaveLength(2);
+    for (const d of unnoted) expect(shadow.includes(d.Line) || restart.includes(d.Line)).toBe(true);
   });
 
   it('a write is only booked when the SCENE is the bound target', () => {

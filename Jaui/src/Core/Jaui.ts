@@ -340,6 +340,12 @@ export class Canvas implements DirtyTracker {
   private _counts = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SharedBuilds: 0, CacheCap: 0, CacheComp: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, SceneEndsByKey: {} as Record<string, number>, CardComposites: 0, CardFallbacks: 0 };
   private _cacheDiag = { reached: 0, effH: 0, teleport: 0, opacity: 0, rot: 0, xform: 0, visual: 0, persp: 0, samples: 0, ok: 0 };
   private _countsRolling = { Panels: 0, Glass: 0, Text: 0, Image: 0, PBlur: 0, SceneReads: 0, SceneRestarts: 0, SceneSwitches: 0, CardComposites: 0, CardFallbacks: 0 };
+  /** `?scene-restarts=N` / `?small-restarts=N` - the renderer, already narrowed, or null when
+   *  neither flag armed. The two insertion points sit inside the pyramid-build branch of the
+   *  hottest walk in the engine, so an unarmed frame pays one null check per build and not an
+   *  `instanceof`. Set by `_initDebugFromUrl` only after both flags have passed their gates, which
+   *  is why a REFUSED flag leaves it null and the walk untouched. */
+  private _restartRenderer: WebGL2Renderer | null = null;
   /** Per-op CPU time (ms) inside the glass/pblur backdrop pipeline, summed
    *  per frame. A call that forces a CPU↔GPU sync shows its GPU cost here as
    *  inflated CPU time — so the dominant op points at the bottleneck. */
@@ -1816,6 +1822,12 @@ export class Canvas implements DirtyTracker {
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
             r.GenerateBlurMipmap(plan.MaxLod);
             r.RebindSceneTarget();
+            // `?scene-restarts` / `?small-restarts`: one insertion point per pyramid BUILD, taken
+            // HERE and not after the draw below. The build has just bound and drawn into the blur
+            // FBOs, so the scene's encoder has provably ended and nothing has been drawn into the
+            // scene since -- which is the instant `?small-restarts` needs for its claim to add a
+            // trivial encoder and NO scene restart. Nothing before or after it moves.
+            if (this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();
           }
 
           this._panelBuffer.Begin();
@@ -2306,6 +2318,10 @@ export class Canvas implements DirtyTracker {
             r.GenerateBlurMipmap(plan.MaxLod);
             this._opMs.Mip += performance.now() - _tMip;
             r.RebindSceneTarget();
+            // The second of the two insertion points, and the same instant as the rim path's: a
+            // build has just handed the scene target back. Twenty cards x (fill + rim) is the forty
+            // builds a glass-grid frame makes, so `=40` is one restart per build and `=80` is two.
+            if (this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();
           }
         }
 
@@ -2664,6 +2680,11 @@ export class Canvas implements DirtyTracker {
     // tile-based mobile renderers (scene never leaves tile memory).
     // Headless: there is no swap chain — the scene stays in `_sceneFbo` for the caller to sample
     // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
+    // `?scene-restarts` / `?small-restarts`: pay whatever the frame still owes, so the count is
+    // exactly N on every frame and not only on a frame with the expected number of builds. Zero on
+    // a steady scene from frame two onwards; on frame one, when the point count is not yet known,
+    // this is the whole balance. Ahead of the present, which is where the scene is still bound.
+    if (this._restartRenderer !== null) this._restartRenderer.DiagRestartFrameEnd();
     if (!this._headless) {
       r.PresentScene();
       this._ffPresented = true;
@@ -4929,6 +4950,48 @@ export class Canvas implements DirtyTracker {
           JTrace('jaui:blur-first note=static-source-fills-from-an-undrawn-scene-so-it-reads-as-clear');
         }
       }
+    }
+    // `?scene-restarts=N` / `?small-restarts=N` - MEASUREMENT ONLY, PIXEL-IDENTICAL. The pair that
+    // prices H5, the one hypothesis the xctrace join left standing: cost ~ the sum over ENCODERS of
+    // (a fixed bubble + the target's tile load/store). Read `Core/Restart.Diag.ts` for the shape and
+    // `WebGL2Renderer.DiagSceneRestarts` for the construction; what belongs here is only the gate.
+    //
+    // Every ordering experiment is dead - `?snap-once` moved the reads and the frame did not move,
+    // the card composite took ends 40 -> 1 and cost 6.6%, and `?blur-first` reordered the builds
+    // ahead of the bed and made the frame 6 ms SLOWER. So H5 has to be priced by a pair that moves
+    // encoder COUNT and NOTHING else, and that is what these two are: same order, same builds, same
+    // sources, same uniforms, +3N (scene) or +N (small) 1-px transparent draws.
+    //
+    // Both refuse rather than degrade, each refusal named on the trace, because an instrument that
+    // quietly did something else would publish a number under the wrong flag's name:
+    //   - `?cardcomposite` puts the walk's draws in a CARD target, where a probe draw would mark the
+    //     card dirty and change which source a later backdrop read takes. That is a PIXEL change,
+    //     and these two flags' whole contract is that the two-arm diff reads exactly 0.
+    //   - `?blur-first` builds every pyramid ahead of the bed, so the insertion point is no longer
+    //     the instant after a build handed the scene back - the scene may be mid-encoder there, and
+    //     `?small-restarts`'s claim to add no scene restart would not hold. (It is WRONG PIXELS
+    //     anyway, which is the other half of the reason.)
+    //   - `?no-blur` and `?blur-dummy` break the SAME precondition from the other direction: the
+    //     build issues no GL, so nothing unbound the scene and the encoder is still live at the
+    //     insertion point. The small arm would then end it and the two arms would collapse into one.
+    for (const flag of ['scene-restarts', 'small-restarts'] as const) {
+      const raw = params.get(flag);
+      if (raw === null) continue;
+      const n = Number(raw);
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : raw.trim() === '' || !Number.isInteger(n) || n < 1 ? 'n-must-be-a-whole-number-of-restarts-at-least-1'
+        : r.CardCompositeEnabled ? 'card-composite-draws-into-a-card-target-and-a-probe-draw-would-dirty-it'
+        : this._blurFirst ? 'blur-first-moves-every-build-off-the-insertion-point'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-leave-the-scene-encoder-live-at-the-insertion-point'
+        : null;
+      if (why !== null) { JTrace(`jaui:${flag} armed=false reason=${why}`); continue; }
+      if (flag === 'scene-restarts') (r as WebGL2Renderer).DiagSceneRestarts = n;
+      else (r as WebGL2Renderer).DiagSmallRestarts = n;
+      // One cached narrowing so the two insertion points in the walk cost a null check when the
+      // flags are off, instead of an `instanceof` per pyramid build.
+      this._restartRenderer = r as WebGL2Renderer;
     }
   };
 
