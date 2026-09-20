@@ -709,7 +709,7 @@ export class Canvas implements DirtyTracker {
    *  face and the body's grade and Tint are applied ONCE where today they are applied twice (see
    *  the rim site in `descendChildren`, which measured that pair at 1.6-1.9x). Default `scene`: the
    *  engine this lane inherited, byte for byte and counter for counter. Jack rules on the images. */
-  private _borderSourceFill: boolean = false;
+  private _borderSourceFill: boolean = true;
   /** The last `jaui:border-source` gate line, printed on a SHAPE change like the three above it. */
   private _borderSourceLastLine = '';
   /** What each glass FILL left for its own rim this frame, and the frame it left it in.
@@ -7283,9 +7283,11 @@ export class Canvas implements DirtyTracker {
     // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
     // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
     // parsed, so a mark taken there would print `scene` on every arm however the URL read.
+    // 2026-09-20 RULING (Jack, "Border reads the backdrop"): the default IS `fill`. The rim reads the
+    // fill's own pyramid; `?border-source=scene` is the control arm that rebuilds yesterday's rim.
     JTrace(`jaui:border-source armed=${this._borderSourceFill ? 'fill' : 'scene'}`
       + ` default=${params.has('border-source') ? 'false' : 'true'}`
-      + (this._borderSourceFill ? ' pixels=DIFFERENT' : ''));
+      + (this._borderSourceFill ? '' : ' pixels=DIFFERENT'));
 
     // `?glass-presample=on|off` -- LIFT THE AREA GATE FOR A PER-SURFACE GLASS BUILD.
     //

@@ -61,8 +61,8 @@ describe('borderfromfill > the flag, read off the source', () => {
     expect(JAUI).toContain("this._borderSourceFill = raw !== 'scene';");
   });
 
-  it('the default is `scene`, declared on the field and not only in a comment', () => {
-    expect(JAUI).toContain('private _borderSourceFill: boolean = false;');
+  it('the default is `fill` (the 2026-09-20 ruling), declared on the field and not only in a comment', () => {
+    expect(JAUI).toContain('private _borderSourceFill: boolean = true;');
   });
 
   it('the mark prints on both arms, says which is armed, and flags the picture change', () => {
@@ -71,7 +71,7 @@ describe('borderfromfill > the flag, read off the source', () => {
     // `default=` distinguishes "scene because nobody asked" from "scene because the URL said so" --
     // the distinction lane atlasinstanced had to add after a control shot was taken from an arm.
     expect(JAUI).toContain("+ ` default=${params.has('border-source') ? 'false' : 'true'}`");
-    expect(JAUI).toContain("+ (this._borderSourceFill ? ' pixels=DIFFERENT' : ''));");
+    expect(JAUI).toContain("+ (this._borderSourceFill ? '' : ' pixels=DIFFERENT'));");
   });
 
   it('every flag it cannot run beside is refused BY NAME on the trace, and `fills` is not one', () => {
