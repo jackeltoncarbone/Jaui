@@ -1286,7 +1286,12 @@ export class Canvas implements DirtyTracker {
       this._tickErrorCount++;
       park = false;
     }
-    if (park) { this._parked = true; return; }
+    // `?tick-pace`'s instrument is the interval from a RENDERED tick to the NEXT callback, and a
+    // park breaks it: the callback that eventually arrives is a WAKE, not a cadence. Declared here
+    // rather than inferred, because nothing inside `Tick.Pace` can tell a 300 ms idle from a 300 ms
+    // frame. It also abandons an observation window — the page stopped doing the work the window
+    // was there to measure, so there is no verdict to be had.
+    if (park) { this._tickPace.NotePark(); this._parked = true; return; }
     this._frameId = requestAnimationFrame(this._tick);
   };
 
@@ -1326,13 +1331,24 @@ export class Canvas implements DirtyTracker {
       // that fits, `fskip` is ~0 and `lskip` is however many ticks the callback cadence brings early.
       + ` lockN=${c.LockN}/${c.LockCommittedN} changes=${c.LockChanges}`
       + ` period=${c.PeriodMs}(${c.PeriodSource},${c.PeriodObservedAt}ms ago)`
-      + ` trials=${c.Trials}/${c.TrialsFailed}failed vsync=${c.VsyncMs}`
+      + ` windows=${c.Windows} vsync=${c.VsyncMs}`
       + ` derived=${c.VsyncDerived} lskip=${c.LockSkipped} fskip=${c.FenceSkipped}`
-      // The three diagnostics, and NOTHING decides on them. `solo` is arm-to-signal with the GPU
-      // idle - what the old estimator believed the period was; `satgap` is the observed
-      // completion-to-completion period; `render` is the CPU's own issuing half. `solo` well above
-      // `satgap` with `render` below both is present coupling; `render` at or above `solo` is the
-      // CPU term that used to win a `max()`.
+      // THE INSTRUMENT, and the two numbers to read first. `ungated` is the last observation
+      // window's mean callback interval with the gate fully open - the render period, and the only
+      // quantity in this file that has ever equalled the harness's `ticks/s`. `rgap` is the same
+      // interval measured per RENDERED tick under whatever gate is in force; on the `observe` arm
+      // the two must agree (that is the self-check), and under the lock whether `rgap` tracks the
+      // period or falls back to the display cadence is what decides `?tick-pace=lock:live`.
+      // `busy`/`cpu` are the last window's two occupancy shares - the discriminator that stands in
+      // for `ticks/frame`, which a worker cannot compute because it has no presentation signal.
+      + ` | ungated=${c.UngatedGapMs} rgap=${c.RenderedGapMs}`
+      + ` busy=${c.WindowBusyShare} cpu=${c.WindowCpuShare} rising=${c.WindowRising}`
+      // The two fence diagnostics, and NOTHING decides on them - they are in the ledger only to
+      // keep the 1.6x over-read priced. Both are coupled to the PRESENT: `solo` read the same ~31
+      // ms at two resolutions that differ by 44% of the pixel work, which is an argument that it is
+      // a latency floor and not an execution time, and `satgap` is a queued completion gap ~ the
+      // frame time. `render` is the CPU's own issuing half, and it is also the classifier's CPU
+      // channel - the only evidence a CPU-bound loop leaves.
       + ` | solo=${c.SoloMs} satgap=${c.SatGapMs} render=${c.RenderMs}`
       + ` | last ${Math.round(span)}ms +${c.Rendered - m.Rendered} rendered`
       + ` +${c.Skipped - m.Skipped} skipped +${c.Forced - m.Forced} forced`
@@ -1354,7 +1370,7 @@ export class Canvas implements DirtyTracker {
     // Order matters. This has to run BEFORE the zero-size gate: at boot the slot is the only thing
     // that gives the canvas a size, so draining after the gate would let the first frame that
     // finally had a size in hand bail out on the size it was carrying.
-    if (this._pendingResize !== null) this._applySize();
+    if (this._pendingResize !== null) { this._applySize(); this._tickPace.NoteSceneChange(); }
 
     // Boot-time zero-size gate. Until the worker bridge has delivered a
     // real resize (ResizeFromBridge → _pendingResize → the drain above sets
@@ -5474,17 +5490,21 @@ export class Canvas implements DirtyTracker {
       if (why !== null) JTrace(`jaui:blur-chains armed=false reason=${why}`);
       else (r as WebGL2Renderer).DiagBlurChains = n;
     }
-    // `?tick-pace` / `=lock:V` / `=observe` / `=fence` / `=fence:D` / `=N` - MEASUREMENT ONLY,
-    // PIXEL-IDENTICAL BY CONSTRUCTION. The flag's meaning is the VSYNC LOCK: release a render only
-    // on a whole number of vsyncs, N = ceil(period / vsync) - adaptive AND even, where the fence
-    // gate was adaptive and trimodal and the ratio clamp even and fixed.
+    // `?tick-pace` / `=lock:V` / `=lock:live` / `=observe` / `=fence` / `=fence:D` / `=N` -
+    // MEASUREMENT ONLY, PIXEL-IDENTICAL BY CONSTRUCTION. The flag's meaning is the VSYNC LOCK:
+    // release a render only on a whole number of vsyncs, N = ceil(period / vsync) - adaptive AND
+    // even, where the fence gate was adaptive and trimodal and the ratio clamp even and fixed.
     //
-    // `period` is now an OBSERVED completion-to-completion gap taken in a window the lock makes
-    // saturated on purpose (the N=1 warm-up, a speculative trial, the frames around a fence
-    // refusal), never a cost model: the M4 chose 50 ms where 33.3 was available because
-    // max(CPU EMA, solo fence EMA) read 37.5 against a true 29.41. The whole argument, what each
-    // observation window is, what a trial costs and what a skipped tick does is in
-    // `Core/Tick.Pace.ts`; what belongs here is the gate and its refusals.
+    // `period` is the UNGATED CALLBACK CADENCE, measured in a window the lock opens by taking its
+    // own gate off for ~300 ms, and it is the only quantity that has ever read the render period:
+    // the worker's rAF is gated on SUBMISSION, so an unflagged loop ticks at the render period
+    // (25.0 ms at dpr 2) while presenting at twice it. Every FENCE-derived number over-read by
+    // ~1.6x because the fence sees the SWAP - `SoloMs` read the same ~31 ms at two resolutions that
+    // differ by 44% of the pixel work. The whole argument, what a window costs, what the occupancy
+    // classifier is for and what a skipped tick does is in `Core/Tick.Pace.ts`; what belongs here
+    // is the gate, its refusals, and the two signals `Tick.Pace` cannot see for itself - a PARK
+    // (`NotePark`, which breaks the interval the instrument measures) and a canvas RESIZE
+    // (`NoteSceneChange`, the one scene-change signal this engine actually has).
     //
     // NOT PARSED IN `Worker.Boot` the way `?no-depth` is, and that is a reading rather than an
     // oversight: `?no-depth` had to land ahead of `Init` because `Init` BUILDS the scene FBO it
@@ -5519,15 +5539,18 @@ export class Canvas implements DirtyTracker {
         // a 16.67 ms vsync as "17", which is the one digit that says whether the grid was read as
         // the display's or as half of it.
         const ms1 = (v: number): string => (Math.round(v * 10) / 10).toFixed(1);
-        // `source=` is the field this lane added and the one to read first: a cadence chosen from
-        // `warmup`/`trial`/`stepup` was chosen from an OBSERVED completion period, and one chosen
-        // from `unsaturated` was chosen by a proof that N=1 is enough. Neither is a cost model, and
-        // the 50-vs-33.3 cell exists because the old one was.
+        // `source=` is the field to read first: `warmup`/`window` is a cadence chosen from the
+        // measured UNGATED callback interval, `live` from `RenderedGapMs`, and `unsaturated` from
+        // the classification that the interval the window measured was a callback rate and not a
+        // render period. None of them is a fence reading, and the 50-vs-33.3 and the still-clamped
+        // dpr-1.5 cells exist because the previous two were.
         this._tickPace.OnLockChange = (n, periodMs, vsyncMs, source) => JTrace(
           `jaui:tick-pace lock N=${n} period=${ms1(periodMs)} source=${source} vsync=${ms1(vsyncMs)}`);
-        // A trial deliberately makes frames worse for a handful of renders, so it never happens
-        // silently: a report that sees judder in a window can tell a trial from a regression.
-        this._tickPace.OnTrial = (n, outcome) => JTrace(`jaui:tick-pace trial N=${n} ${outcome}`);
+        // An observation window runs the page at the UNFLAGGED cadence for ~300 ms, so it never
+        // happens silently: a report that sees a slow patch inside a measured window can tell a
+        // re-observation from a regression, and can tell WHY it opened.
+        this._tickPace.OnWindow = (phase, reason, meanMs, source) => JTrace(
+          `jaui:tick-pace window ${phase} reason=${reason} mean=${ms1(meanMs)} source=${source}`);
         JTrace(`jaui:tick-pace armed=${TickPaceText(parsed.Mode)}`);
         // The cumulative ledger, out to a reader that must not reach into the engine - the same
         // channel `__jauiPassProfile` and `__jauiSceneLedger` use, and for the same reason. The
