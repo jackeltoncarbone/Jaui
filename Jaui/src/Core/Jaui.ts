@@ -4482,6 +4482,18 @@ export class Canvas implements DirtyTracker {
     // the flag arrived. NOT `?no-blur`: every draw still lands, because the dummy is not the scene's
     // own attachment and so no glass draw is a feedback loop.
     if (params.has('blur-dummy') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagBlurDummy = true;
+    // `?blur-src-static` / `?blur-src-clear` — MEASUREMENT ONLY, WRONG PIXELS. Leave every draw,
+    // every pyramid, every encoder end and every counter exactly as baseline and change ONE thing:
+    // which texture the pyramid's DOWN pass samples. `static` points it at a canvas-sized texture
+    // holding frame 1 forever; `clear` at one cleared once and never written. They separate the two
+    // mechanisms left in the build-over-written-content cell — the READ's own bandwidth (H1, which
+    // predicts `static` stays at the baseline number) from a same-frame write→sample hazard the
+    // driver services per transition (H2, which predicts `static` falls to the no-panels number).
+    // Parsed here like `?snap-once` so Init can say the flag arrived (`jaui:blur-src` in the trace).
+    // Both given: `clear` wins, because it is the stronger ablation and a run that meant to ask for
+    // one and typed both should read as the cheaper arm rather than silently as the other.
+    if (params.has('blur-src-static') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagBlurSrc = 'static';
+    if (params.has('blur-src-clear') && this._renderer instanceof WebGL2Renderer) this._renderer.DiagBlurSrc = 'clear';
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
     if (params.has('no-glass-draw')) this._diagNoGlassDraw = true;

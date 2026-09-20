@@ -628,6 +628,7 @@ export class WebGL2Renderer implements Renderer {
     // the wrong build, and that is now checkable from the trace rather than from the command line.
     if (this.DiagSnapOnce) JTrace('jaui:snap-once armed=true pixels=WRONG');
     if (this.DiagBlurDummy) JTrace('jaui:blur-dummy armed=true pixels=WRONG');
+    if (this.DiagBlurSrc !== null) JTrace(`jaui:blur-src armed=${this.DiagBlurSrc} pixels=WRONG`);
 
     // Probe for GPU timer-query support. The extension object exposes the
     // two enums we need; if it's missing, _timerExt stays null and
@@ -1372,6 +1373,129 @@ export class WebGL2Renderer implements Renderer {
     return this._snapshotBlit(undefined);
   };
 
+  /** `?blur-src-static` / `?blur-src-clear` (MEASUREMENT ONLY - WRONG PIXELS). Change WHICH TEXTURE
+   *  the backdrop pyramid's DOWN pass samples, and nothing else in the frame.
+   *
+   *  What the ledger narrowed to: a pyramid build over a source holding WRITTEN content costs
+   *  ~0.9 ms (`glass-grid`, ~72 GPU ms whether the bed is busy, flat, snapshotted, or the ends are
+   *  40 or 1), while 39 builds over a CLEARED scene cost 13.80 total and no builds at all cost
+   *  34.32. Read-after-write, compressibility, residency and encoder ends are each dead by their own
+   *  controlled experiment. Two mechanisms remain and nothing so far separates them:
+   *
+   *    H1  the READ itself. Sampling a region out of a 16 MB texture with the DOWN pass's bilinear
+   *        taps costs bandwidth and cache misses; a cleared texture never touches memory. Predicts
+   *        the cost follows the SOURCE's size, and a texture written once reads as expensively as
+   *        one written this frame -> `static` stays at ~72.
+   *    H2  a same-frame WRITE -> SAMPLE hazard: before a texture this frame's render pass or blit
+   *        wrote is sampled, the driver services a sync, a layout conversion or a decompression, per
+   *        transition rather than per texel -> `static` falls to ~35.
+   *
+   *  `static` is a canvas-sized RGB10_A2 texture - the scene target's own format, filtering and size
+   *  - holding a blit of frame 1 and never written again. `clear` is the same texture cleared once
+   *  to opaque black and never written, which reproduces the `?no-panels` cell WITHOUT removing the
+   *  bed's draws (that cell removed work as well as content, which is the last gap in its reading).
+   *
+   *  The pixels are WRONG by design under both: a static backdrop shows frame 1 while the bed moves
+   *  under it, a cleared one shows blurred black. Never ship, never screenshot.
+   *
+   *  Checked AFTER `?no-blur` and `?blur-dummy` at every site, because every table in the perf
+   *  ledger is read under those two flags' current meaning and neither may shift by a line. */
+  DiagBlurSrc: 'static' | 'clear' | null = null;
+  private _blurSrcTex: WebGLTexture | null = null;
+  private _blurSrcFbo: WebGLFramebuffer | null = null;
+  private _blurSrcW = 0;
+  private _blurSrcH = 0;
+  private _blurSrcFilled = false;
+
+  /** The stand-in texture, or null when there is nothing to stand in with yet and the caller must
+   *  take the baseline path: the flag is off, the one-time fill has not run (frame 1, and the frame
+   *  a resize lands on), or the canvas has since changed size. */
+  private _blurSrcSubstitute = (): WebGLTexture | null => {
+    if (this.DiagBlurSrc === null || !this._blurSrcFilled || this._blurSrcTex === null) return null;
+    if (this._blurSrcW !== this._width || this._blurSrcH !== this._height) return null;
+    return this._blurSrcTex;
+  };
+
+  /** The texture to sample in place of `src`. Substitutes only for the three CANVAS-SIZED textures
+   *  that carry scene content - the scene attachment, the snapshot and the frame snapshot the card
+   *  composite cuts its seeds from - so the stand-in is always the same size as what it replaces and
+   *  every uniform the build and its consumer compute stays on the same floating-point values. A
+   *  caller sampling anything else is measuring something else and is left alone. */
+  private _blurSrcFor = (src: WebGLTexture): WebGLTexture => {
+    const sub = this._blurSrcSubstitute();
+    if (sub === null) return src;
+    if (src !== this._sceneFbo.Texture && src !== this._snapshotTex && src !== this._frameSnapTex) return src;
+    return sub;
+  };
+
+  /** Build and fill the stand-in, once per context and once per canvas size.
+   *
+   *  Called from `PresentScene` immediately after `NoteFrameEndDrain`, and that instant is the whole
+   *  reason the fill lives there rather than at the first read. It is the one point in the frame
+   *  where the scene ledger's switch flag is provably drained, so the framebuffer binds below book
+   *  ZERO encoder ends - `EndsByKey`, `SceneSwitches` and `SceneRestarts` come out byte-identical to
+   *  baseline on the fill frame as on every other, which is exactly what a measurement flag has to
+   *  be able to claim. It also means the `static` arm holds a WHOLE frame (bed plus every card),
+   *  which is the content a real backdrop read sees, rather than the bed alone that a fill at the
+   *  first `ComputeBlur` would have caught.
+   *
+   *  The cost of that choice: frame 1 takes the baseline path, because the texture does not exist
+   *  until the end of it. One frame of a multi-second window, far outside any steady-state reading.
+   *
+   *  Raw GL, no `_tgt`: `_tgt` is the ledger's booking call and booking this would be booking a
+   *  frame the flag is not measuring. The binds are left where `PresentScene` is about to put them
+   *  anyway, one line later. */
+  private _fillBlurSrcOnce = (): void => {
+    const gl = this._gl;
+    const W = this._width, H = this._height;
+    if (W <= 0 || H <= 0) return;
+    if (this._blurSrcFilled && this._blurSrcTex !== null && this._blurSrcW === W && this._blurSrcH === H) return;
+    if (this._blurSrcTex !== null) gl.deleteTexture(this._blurSrcTex);
+    if (this._blurSrcFbo !== null) gl.deleteFramebuffer(this._blurSrcFbo);
+    // RGB10_A2 with LINEAR/LINEAR and CLAMP_TO_EDGE: the scene target's format and the snapshot's,
+    // to the letter. A different internal format or filter would change what the DOWN pass's taps
+    // cost and the flag would be measuring its own texture rather than the read.
+    const tex = gl.createTexture();
+    if (!tex) throw new Error('[Jaui] failed to create the ?blur-src texture');
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, W, H, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const fbo = gl.createFramebuffer();
+    if (!fbo) throw new Error('[Jaui] failed to create the ?blur-src framebuffer');
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    // Both a clear and a blit are scissored, and the walk's scissor state at end of frame is not
+    // this method's to assume. Saved and restored rather than forced, so the flag cannot change the
+    // state the present inherits.
+    const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
+    if (scissorOn) gl.disable(gl.SCISSOR_TEST);
+    if (this.DiagBlurSrc === 'clear') {
+      // Opaque black, and CLEARED rather than written: on a driver that keeps fast-clear metadata a
+      // cleared attachment never touches memory, which is the state `?no-panels` was accidentally
+      // measuring and the state this arm reproduces with the bed's draws left in.
+      const prev = gl.getParameter(gl.COLOR_CLEAR_VALUE) as Float32Array;
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.clearColor(prev[0], prev[1], prev[2], prev[3]);
+    } else {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo);
+      gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+    if (scissorOn) gl.enable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._blurSrcTex = tex;
+    this._blurSrcFbo = fbo;
+    this._blurSrcW = W;
+    this._blurSrcH = H;
+    this._blurSrcFilled = true;
+    JTrace(`jaui:blur-src filled=${this.DiagBlurSrc} ${W}x${H} pixels=WRONG`);
+  };
+
   ComputeBlur = (
     input: GpuTextureHandle, width: number, height: number,
     radius: number, minDepth?: number,
@@ -1429,11 +1553,20 @@ export class WebGL2Renderer implements Renderer {
         // a third that does not is a wrong picture, and a wrong picture says so.
         throw new Error('[Jaui] a card composite cannot build a full-canvas pyramid: pass a region');
       }
-      const src = this._cardBackdropSource(blurCard, region, CardReadGuard(this._cardGridPhase));
+      let src = this._cardBackdropSource(blurCard, region, CardReadGuard(this._cardGridPhase));
+      // `?blur-src-*` swaps the SAMPLED texture and leaves the resolve above untouched: the copy,
+      // its blit traffic and its encoder end all still happen, so the only thing that moves between
+      // the two arms is the read. Reassigned rather than wrapped into the call, so the call below
+      // stays the byte-for-byte baseline call the card composite's own gates pin.
+      src = this._blurSrcFor(src);
       const result = pass.Blur(src, this._width, this._height, radius, minDepth, region);
       this._lastProgram = null;
       return _wrap(result, pass.LastRegion);
     }
+    // `?blur-src-*`, after `?no-blur` and `?blur-dummy` and after the ledger has booked the read and
+    // the build: the DOWN pass reads the stand-in instead of `input`. The HANDLE is swapped, not the
+    // call, so the region rides across unchanged and `pass.Blur` below is the baseline line.
+    if (this.DiagBlurSrc !== null) input = _wrap(this._blurSrcFor(_unwrap(input)), _regionOf(input));
     const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
@@ -1535,6 +1668,11 @@ export class WebGL2Renderer implements Renderer {
     const probeCard = this._activeCard;
     let sharp = _unwrap(scene);
     if (probeCard !== null && sharp === probeCard.Fbo.Texture) sharp = this._cardSharpTap(probeCard, rect);
+    // `?blur-src-*`: the probe's sharp tap is a scene read too, and leaving it on the live
+    // attachment would leave one path in the frame still sampling a this-frame-written texture -
+    // which is the exact thing the two flags exist to remove. The resolve above and the ledger's
+    // own note below both stay where they are; only the bound texture moves.
+    sharp = this._blurSrcFor(sharp);
 
     const program = this._shadowShader!;
     const locs = this._shadowLocs!;
@@ -1728,8 +1866,14 @@ export class WebGL2Renderer implements Renderer {
     // address that texture in screen UV and go on doing so. Everything outside the copied rect is
     // last frame's, exactly as it already was for a scissored snapshot.
     const snapCard = this._activeCard;
-    if (snapCard !== null) return this._cardIntoSnapshot(snapCard, scissor);
-    return this._snapshotBlit(scissor);
+    const snapped = snapCard !== null ? this._cardIntoSnapshot(snapCard, scissor) : this._snapshotBlit(scissor);
+    // `?blur-src-*` substitutes the RETURN, not the work: the blit above still runs, still reads the
+    // scene, still books its `snapshot` end. Swapping the handle rather than skipping the copy is
+    // what keeps `EndsByKey` and every other counter identical to baseline while no consumer -
+    // pyramid source, `u_Scene` sharp tap or shadow probe - samples a texture this frame wrote.
+    // Both flagged textures are canvas-sized with no region, exactly as the snapshot handle is.
+    const sub = this._blurSrcSubstitute();
+    return sub === null ? snapped : _wrap(sub);
   };
 
   /** Make `_snapshotTex` exist at the canvas's current size. Split out of `_snapshotBlit` because
@@ -2391,6 +2535,10 @@ export class WebGL2Renderer implements Renderer {
     // every configuration. Counting a constant would make `Switches` incomparable with `Restarts`,
     // which excludes the present for the same reason. Drain the flag rather than exempt each bind.
     this._sceneLedger.NoteFrameEndDrain();
+    // `?blur-src-*` builds its stand-in HERE, on the far side of the drain, so the fill's binds book
+    // no encoder end on the one frame it runs. See `_fillBlurSrcOnce`. Off by default: one field
+    // test on a frame that is about to issue a full-canvas blit anyway.
+    if (this.DiagBlurSrc !== null) this._fillBlurSrcOnce();
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     this._tgt('default');
