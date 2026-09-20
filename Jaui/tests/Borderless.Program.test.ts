@@ -41,6 +41,7 @@ import {
   PROGRAMS, programCode, preprocess, codeLines, braceBalance, linesNotIn,
   readPanelFrag, readRenderer, readJaui, readInstanceBuffer, stripTsComments,
 } from './Flat.Program.Source';
+import { PANEL_PROGRAM_COUNT } from '../src/Core/WebGL2.Renderer';
 
 const FRAG = readPanelFrag();
 const RENDERER = stripTsComments(readRenderer());
@@ -317,11 +318,15 @@ describe('routing: which batches take the borderless program', () => {
     // Five variants now: lane bgfill stacked TWO_STOP_GRADIENT on this one. The claim this test
     // makes is unchanged and is about the DEFINE SET, not the count - every Add that carries
     // NO_SHAPE_GRADIENT carries MATERIAL_FLAT too.
-    expect(RENDERER).toContain('export const PANEL_PROGRAM_COUNT = 5;');
+    // Re-aimed at the constant, not a literal: lane borderdirect issued a SIXTH variant
+    // (MATERIAL_GLASS + BORDER_DIRECT). What this test is about — NO_SHAPE_GRADIENT is never
+    // issued without MATERIAL_FLAT, and the count the constant claims is the count compiled — is
+    // unchanged.
+    expect(RENDERER).toContain(`export const PANEL_PROGRAM_COUNT = ${PANEL_PROGRAM_COUNT};`);
     expect(RENDERER).toContain(
       'batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true })');
     const adds = RENDERER.match(/batch\.Add\(panelVertSrc, panelFragSrc[^)]*\)/g) ?? [];
-    expect(adds.length).toBe(5);
+    expect(adds.length).toBe(PANEL_PROGRAM_COUNT);
     for (const add of adds) {
       if (add.includes('NO_SHAPE_GRADIENT')) expect(add).toContain('MATERIAL_FLAT');
     }
@@ -347,12 +352,16 @@ describe('routing: which batches take the borderless program', () => {
 
   it('every bordered flat batch and every glass instance keeps its current program', () => {
     // The four-way pick, in order. Glass first (so no glass batch can fall through), then
-    // borderless, then flat, then the full program.
-    expect(RENDERER).toContain('const program = isGlass ? this._panelShaderGlass');
+    // borderless, then flat, then the full program. Lane borderdirect put ONE arm ahead of glass —
+    // a glass batch whose backdrop handle is the border scratch — so the anchor moved by one line
+    // and glass is now the second test rather than the first. Nothing below it moved.
+    expect(RENDERER).toContain('const program = isBorderDirect ? this._panelShaderBorderDirect');
+    expect(RENDERER).toContain(': isGlass ? this._panelShaderGlass');
     expect(RENDERER).toContain(': isBorderless ? this._panelShaderBorderless');
     expect(RENDERER).toContain(': isFlat ? this._panelShaderFlat');
     expect(RENDERER).toContain(': this._panelShaderNone;');
-    expect(RENDERER).toContain('const locs = isGlass ? this._panelLocsGlass');
+    expect(RENDERER).toContain('const locs = isBorderDirect ? this._panelLocsBorderDirect');
+    expect(RENDERER).toContain(': isGlass ? this._panelLocsGlass');
     expect(RENDERER).toContain(': isBorderless ? this._panelLocsBorderless');
   });
 

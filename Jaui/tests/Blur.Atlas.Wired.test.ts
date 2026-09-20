@@ -536,8 +536,15 @@ describe('the walk, and the flag', () => {
     // the rim z-order are the engine's as it shipped.
     const render = arrowBody(JAUI, '_render');
     expect(render).toContain('const preRim = (this._blurFirst || this._phasedWalk) && !this._rimsInWalk');
-    expect(render).toContain('else if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }');
+    // Re-aimed by lane borderdirect: the walk-built-rim census and the build itself moved into the
+    // `else` arm of the direct path's `if`, so the `else if` became a plain `if` on the line below
+    // a `} else {`. Intent unchanged and now sharper — a rim that takes the DIRECT path builds no
+    // pyramid, so it must NOT be counted as a walk-built solo member, and the census line being
+    // inside that arm is what says so.
+    expect(render).toContain('if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }');
     expect(render).toContain('lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);');
+    const solo = render.slice(0, render.indexOf('this._atlasWalkSolo++;'));
+    expect(solo.lastIndexOf('} else {')).toBeGreaterThan(solo.lastIndexOf('if (direct !== null) {'));
   });
 
   it('does not issue a rim phase or walk pass 3 under `fills`', () => {

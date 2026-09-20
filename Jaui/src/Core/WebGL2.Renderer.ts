@@ -11,7 +11,7 @@ import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Re
 import { ShaderBatch, ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
-import { BlurPass, PyramidDepth, ChainBytes, type ChainLimits, type AtlasBuildMember } from './BlurPass';
+import { BlurPass, PyramidDepth, ChainBytes, type ChainLimits, type AtlasBuildMember, type BackdropRect } from './BlurPass';
 import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
@@ -19,6 +19,7 @@ import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 import { SceneReadLedger } from './Scene.Ledger';
 import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
 import { PACE_FENCE_RING, type PaceFenceSample } from './Tick.Pace';
+import { PlanBorderDirect, type BorderDirectPlan } from './Border.Direct';
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
@@ -99,6 +100,10 @@ interface _PanelLocs {
   xformTex:     WebGLUniformLocation | null;
   shadowState:    WebGLUniformLocation | null;
   shadowBackdrop: WebGLUniformLocation | null;
+  // ── BORDER_DIRECT only: null on every other variant, which is why they are set
+  // unconditionally beside the rest (a null location is a specified no-op).
+  borderTexels:   WebGLUniformLocation | null;
+  borderTap:      WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -123,6 +128,8 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   xformTex:     gl.getUniformLocation(p, 'u_XformTex'),
   shadowState:    gl.getUniformLocation(p, 'u_ShadowState'),
   shadowBackdrop: gl.getUniformLocation(p, 'u_ShadowBackdrop'),
+  borderTexels:   gl.getUniformLocation(p, 'u_BorderTexels'),
+  borderTap:      gl.getUniformLocation(p, 'u_BorderTap'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -225,11 +232,11 @@ interface _CardTarget {
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /** Panel program variants compiled from the ONE `Jiv.Panel.frag`: glass, non-glass, flat,
- *  flat-and-borderless, and flat-and-borderless-with-a-two-stop-gradient. Exported so
- *  `?flat-program` / `?borderless-program` / `?two-stop-gradient`'s init marks cannot claim a
- *  count the boot does not build; `tests/Flat.Program.test.ts` asserts `_compilePanelShader`
- *  issues exactly this many. */
-export const PANEL_PROGRAM_COUNT = 5;
+ *  flat-and-borderless, flat-and-borderless-with-a-two-stop-gradient, and glass-with-a-direct
+ *  border backdrop. Exported so `?flat-program` / `?borderless-program` / `?two-stop-gradient` /
+ *  `?border-direct`'s init marks cannot claim a count the boot does not build;
+ *  `tests/Flat.Program.test.ts` asserts `_compilePanelShader` issues exactly this many. */
+export const PANEL_PROGRAM_COUNT = 6;
 
 const PANEL_FLOATS_PER_INSTANCE = 60;
 // Offsets INTO one packed panel instance of the five numbers the fragment's `hasBackdropFilter`
@@ -262,6 +269,15 @@ const PANEL_BACKDROP_FILTER_EPSILON = 0.001;
 const PANEL_OFF_HALF_W = 6;
 const PANEL_OFF_HALF_H = 7;
 const PANEL_OFF_BORDER_WIDTH = 27;
+// `borderEdgeAa`, NEGATED by `Jiv.InstanceBuffer` on a 'GlassBorderOnly' instance - the shader's
+// `borderOnly` flag (`v_StyleParams.x < 0.0`). And `Refraction`, which the fragment's `solidness`
+// (`1 - smoothstep(0, 4, refractionStrength)`) is the only reader of.
+const PANEL_OFF_BORDER_EDGE_AA = 28;
+const PANEL_OFF_REFRACTION = 38;
+/** `solidness` is exactly 0 - and the rim's inward `borderInset` with it - at or above this, because
+ *  `smoothstep`'s upper edge returns exactly 1. The number is `Jiv.Panel.frag`'s, not a copy with a
+ *  life of its own: `tests/Border.Direct.test.ts` reads the shader and asserts the literal. */
+const BORDER_STRAIGHT_GATHER_REFRACTION = 4;
 const PANEL_OFF_SMOOTH_PACKED = 29;
 // `Jiv.Panel.frag`'s `CornerParams`, constant for constant. Rounded to float32 because the
 // fragment evaluates them in `highp float` off the same float32 instance data.
@@ -475,6 +491,16 @@ export class WebGL2Renderer implements Renderer {
   private _panelLocsFlat!: _PanelLocs;
   private _panelLocsBorderless!: _PanelLocs;
   private _panelLocsTwoStop!: _PanelLocs;
+  /** MATERIAL_GLASS + BORDER_DIRECT: the glass program with the border zone's ONE backdrop tap
+   *  computed from a blit of the scene instead of read out of a pyramid. Only ever bound for a
+   *  `'GlassBorderOnly'` draw whose backdrop handle came out of `ComputeBorderDirect`; see
+   *  `_batchTakesBorderDirectProgram`, which refuses rather than reasoning. */
+  private _panelShaderBorderDirect!: ShaderProgram;
+  private _panelLocsBorderDirect!: _PanelLocs;
+  /** `?border-direct=off` puts every glass rim back on its own four-pass pyramid in the same
+   *  binary - today's engine, byte for byte. Default ON. Set by `Jaui._initDebugFromUrl`, which
+   *  owns the flag and every refusal. */
+  DiagBorderDirect = true;
   /** `?flat-program=off` sends every panel back through the full program. Default ON: the flat
    *  program is pixel-identical by construction, so the only reason to hold the old routing is to
    *  measure the two arms against each other in ONE binary. Set by `Jaui._initDebugFromUrl`. */
@@ -667,6 +693,10 @@ export class WebGL2Renderer implements Renderer {
    *  design moved its ends onto small targets or merely counted fewer of them. Sums to
    *  `SceneSwitches`. */
   get SceneEndsByKey(): Record<string, number> { return this._sceneLedger.EndsByKey; }
+  /** Glass borders on the frame just walked, split by which backdrop they took. Read together:
+   *  `0 / 20` under the flag is the unflagged engine wearing the flag's name. */
+  get BordersDirect(): number { return this._sceneLedger.BordersDirect; }
+  get BordersPyramid(): number { return this._sceneLedger.BordersPyramid; }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
   get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number; EndsByKey: Record<string, number> } {
     const l = this._sceneLedger;
@@ -1344,19 +1374,32 @@ export class WebGL2Renderer implements Renderer {
     // instance one: the stop count is a batch uniform (`u_BgGradStopCount`, set from `bgPaint`
     // just below), because a Gradient background flushes the Color batch and draws alone. One
     // read of `bgPaint`, no scan.
+    // And a GLASS batch whose backdrop handle is the one `ComputeBorderDirect` just produced
+    // takes the border-direct program. The HANDLE is the routing signal rather than a new
+    // parameter: it is minted fresh per copy, so identity says both "this is a scratch of the
+    // scene, not a pyramid" and "it is THIS draw's scratch" with nothing to keep in sync.
     const isGlass = useGlassShader;
+    const isBorderDirect = isGlass && backdrop !== null && backdrop === this._borderScratchHandle;
+    if (isBorderDirect && !this._batchTakesBorderDirectProgram()) {
+      // The walk hands this handle to exactly one draw: the rim's, one instance, border-only, with
+      // the rim gathering straight down. Anything else would shade the card's INTERIOR through a
+      // raw scene copy the shader is about to treat as a pyramid, and a wrong picture says so.
+      throw new Error('[Jaui] a border-direct backdrop reached a batch that is not a straight-gathering glass rim');
+    }
     const isFlat = !isGlass
       && this.DiagFlatProgram
       && backdrop === null
       && this._batchTakesFlatProgram(baseFrostLod);
     const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
     const isTwoStop = isBorderless && this.DiagTwoStopGradient && _paintFitsTwoStops(bgPaint);
-    const program = isGlass ? this._panelShaderGlass
+    const program = isBorderDirect ? this._panelShaderBorderDirect
+      : isGlass ? this._panelShaderGlass
       : isTwoStop ? this._panelShaderTwoStop
       : isBorderless ? this._panelShaderBorderless
       : isFlat ? this._panelShaderFlat
       : this._panelShaderNone;
-    const locs = isGlass ? this._panelLocsGlass
+    const locs = isBorderDirect ? this._panelLocsBorderDirect
+      : isGlass ? this._panelLocsGlass
       : isTwoStop ? this._panelLocsTwoStop
       : isBorderless ? this._panelLocsBorderless
       : isFlat ? this._panelLocsFlat
@@ -1376,6 +1419,11 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(locs.scene, 2);
     gl.uniform1f(locs.baseFrostLod, baseFrostLod);
     gl.uniform2f(locs.specTilt, specTiltX, specTiltY);
+    // Null on every variant but BORDER_DIRECT, so this is unconditional for the reason the flat
+    // program's missing uniforms are: `gl.uniform*` with a null location is a specified no-op.
+    // `TexelsX/Y` is level 0's own size, which for a direct border IS the copied rect.
+    gl.uniform2f(locs.borderTexels, backdropRegion.TexelsX, backdropRegion.TexelsY);
+    gl.uniform1f(locs.borderTap, this._borderTapOffset);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, backdrop ? _unwrap(backdrop) : this._dummyTex);
@@ -2652,6 +2700,139 @@ export class WebGL2Renderer implements Renderer {
    *  they do today. Booked by the walk, because only the walk knows how many it handed over. */
   NoteAtlasSolo = (n: number): void => { this._sceneLedger.NoteAtlasSolo(n); };
 
+  // -- THE GLASS BORDER'S BACKDROP, WITHOUT A PYRAMID -------------------------------------------
+  //
+  // A rim's `ComputeBlur` is four render passes - `Down 2 + Up 2` - and behind ANGLE a pass is its
+  // own render command encoder at ~69 us. Twenty cards are eighty of them and ~5.2 ms per render at
+  // dpr 2, to serve a band a few device px wide that makes ONE backdrop tap per fragment. This
+  // replaces the four passes with ONE blit and runs the kernel in the border's own shader; see
+  // `Core/Border.Direct.ts` for what makes that exact and `Jiv.Panel.frag`'s `sampleBackdropDirect`
+  // for the arithmetic.
+  //
+  // THE FEEDBACK RULE is why the blit exists at all. The rim draws INTO the scene target, and
+  // sampling a texture attached to the bound framebuffer is a feedback loop: GL ES 3.0 4.4.3 makes
+  // the values UNDEFINED, and ANGLE does not police it - on D3D11 the SRV is unbound and the read
+  // comes back black, on Metal it is whatever the tile holds. The pyramid never hit it because it
+  // rendered into its own level FBOs. So the border's source rect is copied out of the scene first
+  // and the shader samples the copy.
+  //
+  // A BLIT IS NOT A RENDER PASS. ANGLE's Metal backend turns `blitFramebuffer` into a
+  // MTLBlitCommandEncoder copy when the blit is same-size, same-format, unflipped, unscaled,
+  // unmasked and unscissored - this one is all six, translated only - and the card composite's own
+  // seed / replay / write-back blits are the measured precedent for that path. On D3D11 it is a
+  // `CopySubresourceRegion`. Four render encoders out, one blit encoder in.
+  private _borderScratch: Framebuffer | null = null;
+  private _borderScratchHandle: GpuTextureHandle | null = null;
+  private _borderTapOffset = 0.7;
+
+  /** Copy this border's source rect out of the scene, or `null` when the direct path cannot
+   *  reproduce this build's kernel and the caller must take today's pyramid.
+   *
+   *  The three source diagnostics ride across by REFUSING rather than by half-arming: `?no-blur`
+   *  and `?blur-dummy` have a per-card answer of their own that this would have to duplicate, and
+   *  `?blur-src-*` measures a READ of a stand-in texture that the gather would sample sixty-four
+   *  times instead of once. Each of them keeps every rim on its pyramid, which is the arm they were
+   *  calibrated against. A card composite keeps it too: its backdrop is not in the scene target at
+   *  all, so there is nothing at `rect` to copy. */
+  ComputeBorderDirect = (
+    region: BackdropRect, width: number, height: number, radius: number, maxLod: number,
+    refraction: number,
+  ): GpuTextureHandle | null => {
+    if (!this.DiagBorderDirect) return null;
+    if (this.DiagNoBlur || this.DiagBlurDummy || this.DiagBlurSrc !== null) return null;
+    if (this._activeCard !== null) return null;
+    // The SAME question `_batchTakesBorderDirectProgram` asks of the packed instance, asked here
+    // off the style, because the two have to agree BEFORE the copy: a surface that gets a scratch
+    // handle and then fails the batch gate is a THROW, and the throw is right (it means the
+    // routing is wrong) but reaching it from a legitimate stylesheet would be this lane's bug and
+    // not the caller's. `JwiftSolidGlass` authors `Refraction: 0` and is the class this holds out;
+    // today its frost is 0 too, so the depth clause would have refused it anyway -- which is luck,
+    // and luck is not a guard.
+    if (!(refraction >= BORDER_STRAIGHT_GATHER_REFRACTION)) return null;
+    const plan = PlanBorderDirect(region, width, height, radius, maxLod);
+    if (!plan.Ok) return null;
+    return this._borderCopy(plan, width, height);
+  };
+
+  private _borderCopy = (plan: BorderDirectPlan, width: number, height: number): GpuTextureHandle => {
+    const gl = this._gl;
+    const rect = plan.Rect;
+    // Same reason `_snapshotBlit` drains: a pending card is not in the scene yet, and a border
+    // whose source was copied over it would gather a backdrop with that card missing.
+    if (this._cardQueue.length !== 0) this._drainCards(true);
+    const fbo = this._borderScratch ?? (this._borderScratch = new Framebuffer(gl, { highPrecision: true }));
+    // ONE scratch for every rim in the frame, for the reason `BlurPass._useChain` hands twenty
+    // same-sized rim builds one chain: each rim DRAWS before the next one copies.
+    fbo.Resize(rect.W, rect.H);
+    this._sceneLedger.NoteRead();
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo.Framebuffer);
+    this._tgt('border-copy');
+    // Billed to `snapshot`, which is what it is - a region copy of the scene - rather than opening
+    // a row in `PassClass` for it. `EndsByKey` is where this lane's own count lives.
+    const timed = this._pass !== null && this._pass.Begin('snapshot');
+    gl.blitFramebuffer(
+      rect.X, rect.YBottom, rect.X + rect.W, rect.YBottom + rect.H,
+      0, 0, rect.W, rect.H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
+    if (timed) this._pass!.End();
+    this._borderTapOffset = plan.TapOffset;
+    this._sceneLedger.NoteBorderDirect();
+    // The SAME map `BlurPass._region` builds for a region-sized pyramid, because the copy is
+    // region-sized for the same reason the pyramid was: `ScaleX = width / rect.W`, `OffsetX =
+    // -rect.X / rect.W`. The consumer's two mads do not move, so nothing about `u_BackdropXf`'s
+    // floating point differs between the arms.
+    const handle = _wrap(fbo.Texture, {
+      ScaleX: width / rect.W, ScaleY: height / rect.H,
+      OffsetX: -rect.X / rect.W, OffsetY: -rect.YBottom / rect.H,
+      TexelsX: rect.W, TexelsY: rect.H,
+    });
+    this._borderScratchHandle = handle;
+    return handle;
+  };
+
+  /** The rim built a pyramid after all - the direct path refused, or the flag is off. Booked by
+   *  the walk, beside `NoteAtlasSolo`, because only the walk knows which branch it took. */
+  NoteBorderPyramid = (): void => { this._sceneLedger.NoteBorderPyramid(); };
+
+  /**
+   * Can every instance in the pending batch be shaded by the BORDER_DIRECT program?
+   *
+   * Two questions per instance, both exact, both off the same packed floats the fragment reads.
+   *
+   * 1. **Is it border-only?** `Jiv.InstanceBuffer` sets the flag by NEGATING `borderEdgeAa`, and
+   *    the fragment reads `v_StyleParams.x < 0.0`. It matters because BORDER_DIRECT rebinds
+   *    `u_Backdrop` from a pyramid to a RAW SCENE COPY, and every other tap in the shader - the
+   *    refracted fill, the CA pair, the wide rim glow, the rim-spec catchlight - still reads it
+   *    through `sampleBackdrop`. On a border-only instance all four are dead: three are gated on
+   *    `borderOnly == 0.0` at the source and the fourth on `rimSpecAlpha > 0.0`, which the
+   *    `borderOnly` block's `fillAlpha = 0.0` makes exactly zero. On anything else they are live
+   *    and would shade the interior out of an unblurred scene.
+   *
+   * 2. **Does the rim gather STRAIGHT DOWN?** `borderInset` is scaled by `solidness = 1 -
+   *    smoothstep(0, 4, refractionStrength)`, which is exactly 0 at or above 4 - so the tap is the
+   *    fragment's own screen position, which lands on a level-0 texel CENTRE and makes the
+   *    hardware bilinear the pyramid path would have run the identity. Below 4 the tap sits at a
+   *    continuous position, the gather would have to fold a bilinear over four level-0 texels into
+   *    its own weights, and its level-2 window widens from 4 to 5 per axis (64 taps to 100). That
+   *    is real work with a real cost and it is NOT built; `JwiftGlass` authors `Refraction: 8` and
+   *    `JwiftSolidGlass` authors 0, so this is the line between them and it is drawn in the open.
+   *
+   * One instance answering no is a THROW at the call site rather than a fallback, because the walk
+   * only ever hands a direct backdrop to a single-instance rim batch: a false here means the
+   * routing is wrong, not that this batch is unusual.
+   */
+  private _batchTakesBorderDirectProgram = (): boolean => {
+    const d = this._panelInstanceData;
+    for (let i = 0; i < this._panelInstanceCount; i++) {
+      const b = i * PANEL_FLOATS_PER_INSTANCE;
+      if (!(d[b + PANEL_OFF_BORDER_EDGE_AA] < 0)) return false;
+      if (!(d[b + PANEL_OFF_REFRACTION] >= BORDER_STRAIGHT_GATHER_REFRACTION)) return false;
+    }
+    return true;
+  };
+
   GenerateBlurMipmap = (maxLod?: number): void => {
     if (this.DiagNoBlur) return;
     if (this.DiagBlurDummy) return;
@@ -3738,6 +3919,12 @@ export class WebGL2Renderer implements Renderer {
       batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true });
     this._panelShaderTwoStop = batch.Add(panelVertSrc, panelFragSrc,
       { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true, TWO_STOP_GRADIENT: true });
+    // A SIXTH: the glass program with the border zone's backdrop tap computed directly. Stacked on
+    // MATERIAL_GLASS, never on MATERIAL_FLAT, because a flat panel has no border zone to feed and
+    // the whole apparatus is inside `#if !defined(MATERIAL_FLAT)`. Issued unconditionally, in both
+    // arms of `?border-direct`, so the flag changes ROUTING and not the boot.
+    this._panelShaderBorderDirect = batch.Add(panelVertSrc, panelFragSrc,
+      { MATERIAL_GLASS: true, BORDER_DIRECT: true });
   };
 
   private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
@@ -3750,6 +3937,7 @@ export class WebGL2Renderer implements Renderer {
     this._panelLocsFlat  = _extractPanelLocs(gl, this._panelShaderFlat.Program);
     this._panelLocsBorderless = _extractPanelLocs(gl, this._panelShaderBorderless.Program);
     this._panelLocsTwoStop = _extractPanelLocs(gl, this._panelShaderTwoStop.Program);
+    this._panelLocsBorderDirect = _extractPanelLocs(gl, this._panelShaderBorderDirect.Program);
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jaui] Failed to create panel instance buffer');

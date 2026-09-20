@@ -26,6 +26,7 @@ import {
   VARIANTS, preprocess, codeLines, braceBalance, variantCode, linesNotIn,
   readPanelFrag, readRenderer, readJaui, readInstanceBuffer, stripTsComments,
 } from './Flat.Program.Source';
+import { PANEL_PROGRAM_COUNT } from '../src/Core/WebGL2.Renderer';
 
 const FRAG = readPanelFrag();
 const RENDERER = stripTsComments(readRenderer());
@@ -162,15 +163,21 @@ describe('what the flat program keeps, byte for byte', () => {
     // The flat fragment needs no varying the others do not produce, so there is nothing to cut
     // that a pixel gate could see — and the adaptive-shadow texel fetch is per VERTEX anyway.
     expect(RENDERER).toContain('batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT:  true })');
-    expect((RENDERER.match(/panelVertSrc/g) ?? []).length).toBe(1 + 5); // the import + five Adds
+    // Counted against PANEL_PROGRAM_COUNT rather than a literal: the claim is "one vertex shader
+    // however many fragment variants there are", and lane borderdirect added a sixth. Re-aimed,
+    // intent unchanged.
+    expect((RENDERER.match(/panelVertSrc/g) ?? []).length).toBe(1 + PANEL_PROGRAM_COUNT);
   });
 });
 
 describe('routing: which batches take the flat program', () => {
   it('compiles exactly PANEL_PROGRAM_COUNT panel variants, and the constant says so', () => {
-    expect(RENDERER).toContain('export const PANEL_PROGRAM_COUNT = 5;');
+    // The constant and the Adds, against each other rather than against a literal on both sides —
+    // which is what the test is FOR. `6` since lane borderdirect's MATERIAL_GLASS + BORDER_DIRECT.
+    expect(RENDERER).toContain(`export const PANEL_PROGRAM_COUNT = ${PANEL_PROGRAM_COUNT};`);
+    expect(PANEL_PROGRAM_COUNT).toBe(6);
     const adds = RENDERER.match(/batch\.Add\(panelVertSrc, panelFragSrc/g) ?? [];
-    expect(adds.length).toBe(5);
+    expect(adds.length).toBe(PANEL_PROGRAM_COUNT);
   });
 
   it('issues the flat program unconditionally, so both arms are one binary', () => {
