@@ -1,6 +1,52 @@
 /**
  * `?tick-pace` — pace the render on the DISPLAY instead of on the tick. The arithmetic, no GL in it.
  *
+ * THE DEFAULT, AS OF JACK'S PACING RULING (2026-09-20 ~13:00; Perf/README.md, "THE PACING RULING"):
+ * THE DEPTH-1 FENCE - wait for the last frame to finish before starting the next. No flag arms it,
+ * and it estimates nothing. `TickPaceDefault()` is the mode an unflagged engine holds;
+ * `?tick-pace=off` (also `=none`, `=0`) is the loop this engine ran before pacing existed and is
+ * the CONTROL ARM every gate from here on is measured against.
+ *
+ * WHY THE FENCE AND NOT THE LOCK, in one place, so no fifth lane re-derives it. The lock is still
+ * the better SHAPE - a whole number of vsyncs per frame is even as well as fast - and its mechanism
+ * has been right since tickpace3: 100% of frames in one bucket at both resolutions, the pinned
+ * vsync arm choosing the same N as the derived one. What has never been right is the PERIOD. Four
+ * designs have now over-read it at dpr 1.5 by 20-40% each: tickpace3's solo-fence EMA, tickpace5's
+ * saturated-run trials, tickpace6's ungated observation windows, and the waited-ticks histogram
+ * that was refuted before it reached a lane. They failed on ONE gap, not on four bugs. The rule
+ * that picks N needs the PRESENTED cadence - vsyncs per presented frame - and a worker cannot
+ * observe it: rAF there is BeginFrame-on-SUBMISSION and `OffscreenCanvas.commit()` never shipped,
+ * so there is no presentation signal in the engine at all. Every quantity that IS observable - a
+ * fence latency, a completion gap, a queue depth, a callback cadence - is coupled to the present or
+ * to the queue, and every one of them reads high.
+ *
+ * The fence needs none of them. It asks the GPU a question with a yes/no answer - is the last frame
+ * still running? - so it is the only arm that ADAPTS WITHOUT ESTIMATING. The M4, one binary,
+ * interleaved:
+ *
+ *     dpr 2     fence:1   32.56 p50 / 33.76 p95    1v 48%  2v 51%  3v 1%
+ *               unpaced   49.65                                    3v 62%
+ *     dpr 1.5   fence:1   16.67 / 17.21   1v 100%
+ *               unpaced   16.66 / 17.25   1v 100%   <- INDISTINGUISHABLE: a fast page is untouched
+ *
+ * Never worse than unpaced at either resolution, pixel-identical, and its whole cost is the
+ * 16.7/33.3 ALTERNATION on a page whose render falls between one and two vsyncs. A smarter rhythm
+ * on top of it is a later lane and needs a presentation signal the platform does not provide.
+ *
+ * WHAT THE DEFAULT USES, AND WHAT IS INERT UNDER IT - asked plainly by the brief, because this file
+ * grew around the lock and most of it now runs on a measurement flag only:
+ *
+ *   LIVE    `Decide`'s fence branch (poll, compare the count with `Depth`, refuse), the stall guard
+ *           on its FLAT `PACE_STALL_MS` / `PACE_STALL_TICKS` floor, the `WaitedTicks` histogram,
+ *           `MaxInFlight`, the two fence latency diagnostics, and the vsync estimator (published,
+ *           never acted on - the fence quantizes to nothing).
+ *   INERT   every observation window (`_scheduleWindow` is reached from the LOCK branch alone, so
+ *           `Windows` stays 0 and `UngatedGapMs` stays 0), `NotePark` and `NoteSceneChange` (both
+ *           return at their first line for a non-lock mode), the cadence-scaled stall floor (a lock
+ *           term), the refusal-burst trigger, `lock:live`, and `LockN`, which stays 1 internally and
+ *           publishes as 0. `WantsRenderCost` is false, so the default pays no `performance.now()`
+ *           pair per rendered frame either.
+ *
  * WHY THIS EXISTS (ShowStudio.Documentation/Perf/README.md, "PACING: 66.87 -> 33.48 ms"): the engine
  * rendered TWICE per presented frame at baseline, and removing the second render cut the frame time
  * in half with no pixel change. The flag's meaning is the VSYNC LOCK: release a render only on a
@@ -126,7 +172,8 @@
  *              flush bit — so it is a diagnostic, never a timing cell.
  */
 
-/** How the gate decides. `null` is the unflagged engine: every tick that wants to render, renders. */
+/** How the gate decides. `null` is `?tick-pace=off` - the UNPACED CONTROL, every tick that wants to
+ *  render renders, and it is no longer what an unflagged engine holds. See `TickPaceDefault`. */
 export type TickPaceMode =
   /** Release a render only on a whole number of vsyncs, chosen from the OBSERVED ungated callback
    *  cadence. The flag's meaning. `Depth` is the fence safety net underneath it; `Vsync` pins the
@@ -134,7 +181,9 @@ export type TickPaceMode =
    *  `Live` selects `RenderedGapMs` as the live period instead of re-observation windows. */
   | { Kind: 'lock'; Depth: number; Vsync: number | null; Live: boolean }
   /** Poll the rendered frames' GPU fences; skip while more than `Depth` of them are outstanding.
-   *  Adaptive, trimodal at dpr 2 and the outright best arm at dpr 1.5. A control. */
+   *  THE DEFAULT at `Depth` 1 (`TickPaceDefault`), by Jack's ruling: adaptive without estimating
+   *  anything, never worse than unpaced at either resolution, and pixel-identical. Trimodal at
+   *  dpr 2 (the 16.7/33.3 alternation is its whole cost) and the outright best arm at dpr 1.5. */
   | { Kind: 'fence'; Depth: number }
   /** Render every Nth tick that wants to render. N >= 2. The control arm, and a clamp. */
   | { Kind: 'ratio'; N: number }
@@ -236,6 +285,18 @@ export interface PaceGate {
  * window measures is the same quantity the harness reads as `ticks/s` on an unflagged arm.
  */
 export const PACE_DEFAULT_DEPTH = 1;
+
+/**
+ * THE MODE AN UNFLAGGED ENGINE HOLDS - the depth-1 fence, by the pacing ruling at the top of this
+ * file. `?tick-pace` (bare) and `?tick-pace=fence` parse to exactly this, so the unflagged arm and
+ * those two flagged ones are ONE instrument and a pixel gate between them is a gate on a console
+ * line and nothing else.
+ *
+ * A FACTORY, not a frozen constant, for one reason: two engines can share a page and a mode object
+ * that travelled between them would make `Mode === Mode` mean something, which is a comparison no
+ * reader should be able to write. Read `Kind` and `Depth`.
+ */
+export const TickPaceDefault = (): TickPaceMode => ({ Kind: 'fence', Depth: PACE_DEFAULT_DEPTH });
 
 /** The deepest `?tick-pace=fence:D` will accept. Past this the gate is not pacing anything: the
  *  unflagged engine is depth-infinity, and a cell at depth 4 would be measuring it. */
@@ -628,25 +689,40 @@ export class VsyncEstimator {
 /**
  * Parse `?tick-pace`'s value.
  *
- *     ?tick-pace              THE VSYNC LOCK at the default depth — the flag's meaning
- *     ?tick-pace=lock         the same, spelled out
+ *     (no flag)               THE DEPTH-1 FENCE — the shipping default, `TickPaceDefault()`
+ *     ?tick-pace              the same gate, named: identical pacing, and in `Jaui.ts` it is what
+ *                             turns the once-a-second `[Jaui.pace]` line on
+ *     ?tick-pace=off          THE UNPACED LOOP — also `=none` and `=0`. No fence, no poll, no gate.
+ *                             The engine's loop before pacing existed, and the control arm.
+ *     ?tick-pace=fence        the default, spelled out
+ *     ?tick-pace=fence:D      the fence gate at depth D (0..PACE_MAX_DEPTH)
+ *     ?tick-pace=lock         THE VSYNC LOCK at the default depth — a MEASUREMENT flag now, kept
+ *                             because its mechanism is right and only its period was ever wrong
  *     ?tick-pace=lock:V       the lock with the vsync PINNED to V ms — the control that proves a
  *                             derived estimate right or wrong in the same binary
  *     ?tick-pace=lock:live    the lock taking its period from `RenderedGapMs` instead of from
- *                             re-observation windows — the path the M4 decides
+ *                             re-observation windows — refuted on the M4, kept as the refutation
  *     ?tick-pace=lock:live:V  ...with the vsync pinned as well
  *     ?tick-pace=observe      pace NOTHING, instrument everything — the arm that prices the ungated
  *                             callback cadence against the two present-coupled fence readings
- *     ?tick-pace=fence        the adaptive fence gate at the default depth (a control)
- *     ?tick-pace=fence:D      the fence gate at depth D (0..PACE_MAX_DEPTH)
- *     ?tick-pace=N            the fixed ratio, N >= 2 — a CLAMP, the control arm, never a default
+ *     ?tick-pace=N            the fixed ratio, N >= 2 — a CLAMP and a measurement arm
  *
  * Anything else is refused, WITH A REASON, because an instrument that quietly did nothing would
- * publish the baseline under this flag's name.
+ * publish some other arm's number under this flag's name. What a REFUSED value falls back to is
+ * `Jaui.ts`'s decision and it is the DEFAULT, not `off`: a typo must not be able to move a page
+ * onto the control arm silently.
  */
-export const ParseTickPace = (raw: string | null): { Mode: TickPaceMode } | { Why: string } => {
+export const ParseTickPace = (raw: string | null): { Mode: TickPaceMode | null } | { Why: string } => {
   const v = (raw ?? '').trim();
-  if (v === '' || v === 'lock') {
+  // No flag at all and the bare flag are THE SAME GATE. The bare spelling is not a synonym kept for
+  // politeness: it is how an operator asks for the default's ledger on the console without changing
+  // a single decision, which is what makes "unflagged vs `?tick-pace`" a zero-pixel gate.
+  if (v === '') return { Mode: TickPaceDefault() };
+  // THE CONTROL ARM, and it is the ABSENCE of a mode rather than a mode: `null` arms no fence,
+  // polls nothing, gates nothing, and `NoteTick` returns before it measures. Three spellings because
+  // this is the arm every future cell's "before" column is taken on and it has to be unmissable.
+  if (v === 'off' || v === 'none' || v === '0') return { Mode: null };
+  if (v === 'lock') {
     return { Mode: { Kind: 'lock', Depth: PACE_DEFAULT_DEPTH, Vsync: null, Live: false } };
   }
   if (v.startsWith('lock:')) {
@@ -679,8 +755,9 @@ export const ParseTickPace = (raw: string | null): { Mode: TickPaceMode } | { Wh
     return { Mode: { Kind: 'fence', Depth: d } };
   }
   const n = Number(v);
-  if (!Number.isInteger(n)) return { Why: 'value-must-be-lock-observe-fence-or-a-whole-number-of-ticks' };
-  if (n === 1) return { Why: 'n-1-renders-every-tick-which-is-the-unflagged-engine' };
+  if (!Number.isInteger(n)) return { Why: 'value-must-be-off-fence-lock-observe-or-a-whole-number-of-ticks' };
+  // Not malformed - it is the control arm under another name, and it has one now.
+  if (n === 1) return { Why: 'n-1-renders-every-tick-which-is-tick-pace-off' };
   if (n < 1) return { Why: 'n-must-be-at-least-2' };
   return { Mode: { Kind: 'ratio', N: n } };
 };
@@ -1105,6 +1182,8 @@ export class TickPace {
     }
 
     const inFlight = this._inFlight;
+    // THE DEFAULT, at `Depth` 1: wait for the last frame to finish before starting the next. Three
+    // lines, no estimate, and nothing below this branch runs on an unflagged page.
     if (mode.Kind === 'fence') {
       if (inFlight <= mode.Depth) return this._allow('render', time);
       if (this._stalled(time)) { this.Forced++; return this._allow('forced', time); }

@@ -32,7 +32,7 @@ import {
 } from './BlurPass';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
-import { TickPace, ParseTickPace, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited } from './Tick.Pace';
+import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited, type TickPaceMode } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
 // `Renderer.Factory.ts` and handed in. Canvas has no opinion about
@@ -510,12 +510,22 @@ export class Canvas implements DirtyTracker {
    *  `instanceof`. Set by `_initDebugFromUrl` only after both flags have passed their gates, which
    *  is why a REFUSED flag leaves it null and the walk untouched. */
   private _restartRenderer: WebGL2Renderer | null = null;
-  /** `?tick-pace` — the gate between a tick that wants to render and the render. Always present; in
-   *  `null` mode (no flag) `Decide` is one comparison and every tick renders, which is what keeps
-   *  the RENDERED/SKIPPED columns readable on BOTH arms of a comparison. See `Core/Tick.Pace.ts`. */
+  /** `?tick-pace` — the gate between a tick that wants to render and the render. Always present,
+   *  and as of Jack's pacing ruling it is ARMED BY DEFAULT with the depth-1 fence: `_initDebugFromUrl`
+   *  replaces this instance on the next line of the constructor, and `?tick-pace=off` is what puts
+   *  the engine back on the unpaced loop. The `null` here is the state before that runs, which is
+   *  before a tick can happen. `Decide` in `null` mode is one comparison and every tick renders,
+   *  which is what keeps the RENDERED/SKIPPED columns readable on BOTH arms of a comparison.
+   *  See `Core/Tick.Pace.ts`. */
   private _tickPace = new TickPace(null);
   /** The fence the gate polls, already narrowed, or null in every mode that does not poll one. */
   private _paceGate: PaceGate | null = null;
+  /** Is the once-a-second `[Jaui.pace]` console line armed? THE FLAG BEING NAMED, not the gate being
+   *  armed - the gate is now armed on every page, and an unconditional `console.log` plus its string
+   *  build, once a second, on every Jaui page forever is not a default. `?tick-pace` bare selects the
+   *  default's exact pacing and turns this on; `__jauiTickPace()` carries the same ledger with no
+   *  flag at all, and that is what a reader of an unflagged page uses. */
+  private _paceCensusOn = false;
   /** A render the gate refused and the engine still owes. Read by the render-on-demand gate (so the
    *  next tick wants the render again) and by the park predicate (so the loop cannot go to sleep
    *  holding it). This is the whole reason a skipped tick loses no pixels: the render is deferred,
@@ -1720,14 +1730,14 @@ export class Canvas implements DirtyTracker {
     // Fire every tick so frame-wait callbacks are never starved on idle frames.
     this._firePostFrame();
 
-    // `?tick-pace`'s ledger on the plain console, once a second, ONLY when the flag is armed.
+    // `?tick-pace`'s ledger on the plain console, once a second, ONLY when the flag was NAMED.
     // Deliberately not folded into the `[Jaui]` line below it: that line needs `?wkr-jaui-prof`,
     // which also arms the per-pass GPU timers and makes every other frame a split frame — perturbing
     // the exact quantity this flag was built to measure. The worker's console is captured by the
     // perf harness (`instrument.mjs` wraps `console.*`; the page's CDP Log domain carries the same
     // lines), so this puts renders-per-window in the report with no harness change and no split
     // frame. Six lines in a 6 s window, each different, well inside the harness's 60-line cap.
-    if (this._tickPace.Mode !== null) this._paceCensus(time);
+    if (this._paceCensusOn) this._paceCensus(time);
 
     if (hud) {
       const tEnd = performance.now();
@@ -5701,78 +5711,108 @@ export class Canvas implements DirtyTracker {
       if (why !== null) JTrace(`jaui:blur-chains armed=false reason=${why}`);
       else (r as WebGL2Renderer).DiagBlurChains = n;
     }
-    // `?tick-pace` / `=lock:V` / `=lock:live` / `=observe` / `=fence` / `=fence:D` / `=N` -
-    // MEASUREMENT ONLY, PIXEL-IDENTICAL BY CONSTRUCTION. The flag's meaning is the VSYNC LOCK:
-    // release a render only on a whole number of vsyncs, N = ceil(period / vsync) - adaptive AND
-    // even, where the fence gate was adaptive and trimodal and the ratio clamp even and fixed.
+    // `?tick-pace` - THE PACING GATE, AND IT IS ON BY DEFAULT (Jack's ruling, 2026-09-20 ~13:00;
+    // Perf/README.md, "THE PACING RULING"). With no flag the engine paces with the DEPTH-1 FENCE:
+    // wait for the last frame to finish before starting the next. Pixel-identical by construction,
+    // never worse than unpaced at either resolution on the M4 (dpr 2 32.56/33.76 against an unpaced
+    // 49.65; dpr 1.5 16.67 against 16.66 - indistinguishable), and it estimates NOTHING, which is
+    // the whole reason it is the one that shipped.
     //
-    // `period` is the UNGATED CALLBACK CADENCE, measured in a window the lock opens by taking its
-    // own gate off for ~300 ms, and it is the only quantity that has ever read the render period:
-    // the worker's rAF is gated on SUBMISSION, so an unflagged loop ticks at the render period
-    // (25.0 ms at dpr 2) while presenting at twice it. Every FENCE-derived number over-read by
-    // ~1.6x because the fence sees the SWAP - `SoloMs` read the same ~31 ms at two resolutions that
-    // differ by 44% of the pixel work. The whole argument, what a window costs, what the occupancy
-    // classifier is for and what a skipped tick does is in `Core/Tick.Pace.ts`; what belongs here
-    // is the gate, its refusals, and the two signals `Tick.Pace` cannot see for itself - a PARK
-    // (`NotePark`, which breaks the interval the instrument measures) and a canvas RESIZE
-    // (`NoteSceneChange`, the one scene-change signal this engine actually has).
+    // `?tick-pace=off` (`=none`, `=0`) is the UNPACED LOOP, byte for byte the loop before pacing
+    // existed, and it is the control arm every gate from here on is measured against. The lock
+    // (`=lock`, `=lock:V`, `=lock:live`), the clamp (`=N`) and `=observe` stay as MEASUREMENT flags:
+    // the lock's mechanism was always right and only its period was wrong, and four designs failed
+    // on the same gap - the rule that picks N needs the PRESENTED cadence and a worker has no
+    // presentation signal at all. The whole argument, what a window costs, what the occupancy
+    // classifier is for, what a skipped tick does and which parts of that file are INERT under the
+    // default is in `Core/Tick.Pace.ts`; what belongs here is the gate, its refusals, and the two
+    // signals `Tick.Pace` cannot see for itself - a PARK (`NotePark`, which breaks the interval the
+    // instrument measures) and a canvas RESIZE (`NoteSceneChange`). Both are lock-only and inert
+    // under the default; they stay wired because the lock still ships as a flag.
     //
-    // NOT PARSED IN `Worker.Boot` the way `?no-depth` is, and that is a reading rather than an
-    // oversight: `?no-depth` had to land ahead of `Init` because `Init` BUILDS the scene FBO it
-    // configures. Nothing this flag touches is built by `Init` - the fence is placed per frame in
-    // `EndFrame` and the gate is consulted per tick, both of which happen long after the Canvas (and
-    // so this parse) exists. `_platform.GetUrlSearch()` is the PAGE's search in worker mode, handed
-    // over on the init message, so the flag and its mark arrive on both this path and main-thread
-    // mode. The renderer says separately whether the driver actually gave it a fence.
-    if (params.has('tick-pace')) {
-      const parsed = ParseTickPace(params.get('tick-pace'));
+    // NOT PARSED IN `Worker.Boot` the way `?no-depth` is, and with a DEFAULT to arm that reading
+    // matters more than it did: `?no-depth` had to land ahead of `Init` because `Init` BUILDS the
+    // scene FBO it configures. Nothing this gate touches is built by `Init` - the fence is placed
+    // per frame in `EndFrame` and the gate is consulted per tick, both of which happen long after
+    // the Canvas constructor (and so this parse) has run. So the default is alive on the harness and
+    // worker path where `renderer.Init()` runs FIRST, and the proof is the effect field rather than
+    // the ordering: `jaui:tick-pace fence=true` from the renderer's first `EndFrame`, a non-zero
+    // `TicksSkipped`, and `__jauiTickPace().Mode` reading `fence:1`.
+    // `_platform.GetUrlSearch()` is the PAGE's search in worker mode, handed over on the init
+    // message, so the flag and its mark arrive on both this path and main-thread mode.
+    {
+      // NAMED, not armed: the gate is armed on every page now, and this is only what decides
+      // whether the once-a-second `[Jaui.pace]` line prints.
+      const named = params.has('tick-pace');
+      const raw = params.get('tick-pace');
+      const parsed = ParseTickPace(raw);
       const r = this._renderer;
-      const why =
-        'Why' in parsed ? parsed.Why
-        // The lock and the fence gate both poll `PaceInFlight`, which is WebGL2's `clientWaitSync`
-        // - the lock reads the GPU's cost off the same fences it guards itself with. The ratio
-        // control needs no GL at all, so it is allowed on any backend.
-        : parsed.Mode.Kind !== 'ratio' && !(r instanceof WebGL2Renderer) ? 'fence-mode-needs-webgl2-clientwaitsync'
-        : null;
-      if (why !== null) {
-        JTrace(`jaui:tick-pace armed=false reason=${why}`);
-      } else if (!('Why' in parsed)) {
-        this._tickPace = new TickPace(parsed.Mode);
-        if (parsed.Mode.Kind !== 'ratio') {
-          const gl2 = r as WebGL2Renderer;
-          gl2.DiagTickPace = true;
-          this._paceGate = gl2;
-        }
-        // Every N change, named on the trace with the two estimates that moved it - so an
-        // oscillation is READABLE rather than something a report has to infer from a frame
-        // histogram. A healthy run prints one of these (the seed) and then goes quiet.
-        // One decimal, not `JMs`: that rounds anything over 10 ms to a whole number and would print
-        // a 16.67 ms vsync as "17", which is the one digit that says whether the grid was read as
-        // the display's or as half of it.
-        const ms1 = (v: number): string => (Math.round(v * 10) / 10).toFixed(1);
-        // `source=` is the field to read first: `warmup`/`window` is a cadence chosen from the
-        // measured UNGATED callback interval, `live` from `RenderedGapMs`, and `unsaturated` from
-        // the classification that the interval the window measured was a callback rate and not a
-        // render period. None of them is a fence reading, and the 50-vs-33.3 and the still-clamped
-        // dpr-1.5 cells exist because the previous two were.
-        this._tickPace.OnLockChange = (n, periodMs, vsyncMs, source) => JTrace(
-          `jaui:tick-pace lock N=${n} period=${ms1(periodMs)} source=${source} vsync=${ms1(vsyncMs)}`);
-        // An observation window runs the page at the UNFLAGGED cadence for ~300 ms, so it never
-        // happens silently: a report that sees a slow patch inside a measured window can tell a
-        // re-observation from a regression, and can tell WHY it opened.
-        this._tickPace.OnWindow = (phase, reason, meanMs, source) => JTrace(
-          `jaui:tick-pace window ${phase} reason=${reason} mean=${ms1(meanMs)} source=${source}`);
-        JTrace(`jaui:tick-pace armed=${TickPaceText(parsed.Mode)}`);
-        // The cumulative ledger, out to a reader that must not reach into the engine - the same
-        // channel `__jauiPassProfile` and `__jauiSceneLedger` use, and for the same reason. The
-        // effect field this lane exists to publish is RENDERS per presented frame, and the harness's
-        // `ticks` column counts rAF CALLBACKS (`instrument.mjs` wraps `self.requestAnimationFrame`
-        // and increments on every one), not renders - so under this flag `ticks` and renders part
-        // company and the ratio is only readable if the engine says how many of its ticks drew.
-        // One evaluate at each end of the window, subtract, divide by the presented frame count.
-        const g = globalThis as unknown as { __jauiTickPace?: () => PaceCensus };
-        g.__jauiTickPace = () => this._tickPace.Census();
+      // A value this parse cannot read does NOT fall through to the unpaced loop. `off` is a real
+      // arm now, so a typo that landed there would move the page onto the CONTROL silently and
+      // publish it as the shipping engine. It falls to the default - what the page would have done
+      // with no flag - and the refusal is named on its own line first.
+      if ('Why' in parsed) JTrace(`jaui:tick-pace armed=false reason=${parsed.Why}`);
+      const wanted: TickPaceMode | null = 'Why' in parsed ? TickPaceDefault() : parsed.Mode;
+      // The fence, the lock and the observe arm all poll `PaceInFlight`, which is WebGL2's
+      // `clientWaitSync`; the ratio clamp needs no GL at all and runs on any backend. A backend with
+      // no fence to poll cannot pace, so it runs UNPACED - and says so, because a page quietly on a
+      // different arm from every other page is the one thing worse than no pacing.
+      const gateless = wanted !== null && wanted.Kind !== 'ratio' && !(r instanceof WebGL2Renderer);
+      const mode: TickPaceMode | null = gateless ? null : wanted;
+      this._tickPace = new TickPace(mode);
+      if (mode !== null && mode.Kind !== 'ratio') {
+        const gl2 = r as WebGL2Renderer;
+        gl2.DiagTickPace = true;
+        this._paceGate = gl2;
       }
+      // Every N change, named on the trace with the two estimates that moved it - so an
+      // oscillation is READABLE rather than something a report has to infer from a frame
+      // histogram. A healthy run prints one of these (the seed) and then goes quiet.
+      // One decimal, not `JMs`: that rounds anything over 10 ms to a whole number and would print
+      // a 16.67 ms vsync as "17", which is the one digit that says whether the grid was read as
+      // the display's or as half of it.
+      const ms1 = (v: number): string => (Math.round(v * 10) / 10).toFixed(1);
+      // `source=` is the field to read first: `warmup`/`window` is a cadence chosen from the
+      // measured UNGATED callback interval, `live` from `RenderedGapMs`, and `unsaturated` from
+      // the classification that the interval the window measured was a callback rate and not a
+      // render period. None of them is a fence reading, and the 50-vs-33.3 and the still-clamped
+      // dpr-1.5 cells exist because the previous two were.
+      this._tickPace.OnLockChange = (n, periodMs, vsyncMs, source) => JTrace(
+        `jaui:tick-pace lock N=${n} period=${ms1(periodMs)} source=${source} vsync=${ms1(vsyncMs)}`);
+      // An observation window runs the page at the UNFLAGGED cadence for ~300 ms, so it never
+      // happens silently: a report that sees a slow patch inside a measured window can tell a
+      // re-observation from a regression, and can tell WHY it opened.
+      this._tickPace.OnWindow = (phase, reason, meanMs, source) => JTrace(
+        `jaui:tick-pace window ${phase} reason=${reason} mean=${ms1(meanMs)} source=${source}`);
+      // WHICH ARM, and WHY it is that arm - four shapes, because "armed=fence:1" alone cannot tell
+      // the default from a page that asked for it, and an operator reading a report has to know
+      // whether the flag they typed was honoured.
+      //
+      //   armed=fence:1 default=true    no flag at all. The shipping engine.
+      //   armed=fence:1 reason=default  `?tick-pace` bare: the same gate, plus the console line.
+      //   armed=off reason=control      `?tick-pace=off`: the unpaced loop, deliberately.
+      //   armed=off reason=fence-mode-needs-webgl2-clientwaitsync   no fence on this backend.
+      //   armed=<mode>                  a measurement flag, honoured as typed.
+      const how = gateless ? ' reason=fence-mode-needs-webgl2-clientwaitsync'
+        : mode === null ? ' reason=control'
+        : !named ? ' default=true'
+        : (raw ?? '').trim() === '' ? ' reason=default'
+        : '';
+      JTrace(`jaui:tick-pace armed=${TickPaceText(mode)}${how}`);
+      // The cumulative ledger, out to a reader that must not reach into the engine - the same
+      // channel `__jauiPassProfile` and `__jauiSceneLedger` use, and for the same reason.
+      // INSTALLED UNCONDITIONALLY now that the gate is the default: an unflagged page is the arm
+      // a report most needs to read, and this is the only way to read it without the console line.
+      // The effect field is RENDERS per presented frame, and the harness's `ticks` column counts
+      // rAF CALLBACKS (`instrument.mjs` wraps `self.requestAnimationFrame` and increments on every
+      // one), not renders - so under the gate `ticks` and renders part company and the ratio is
+      // only readable if the engine says how many of its ticks drew. One evaluate at each end of
+      // the window, subtract, divide by the presented frame count.
+      const g = globalThis as unknown as { __jauiTickPace?: () => PaceCensus };
+      g.__jauiTickPace = () => this._tickPace.Census();
+      // The console line is armed by the flag being NAMED, including `=off` - a control arm that
+      // printed nothing would be the one arm with no ledger on the console. See `_paceCensusOn`.
+      this._paceCensusOn = named;
     }
     // `?flat-program=off` — PIXEL-IDENTICAL BY CONSTRUCTION, and DEFAULT ON.
     //

@@ -1728,11 +1728,17 @@ export class WebGL2Renderer implements Renderer {
    *  mode, and the trace mark below says which FBO was built so the reading cannot be misfiled. */
   DiagNoDepth = false;
 
-  /** `?tick-pace` (MEASUREMENT ONLY - PIXEL-IDENTICAL BY CONSTRUCTION). Arm the frame-completion
-   *  fence this renderer answers `PaceInFlight` from. Set by `Jaui._initDebugFromUrl` AFTER `Init` has
-   *  run in worker mode, which is fine and is why the fence is built per frame in `EndFrame` rather
-   *  than once in `Init` -- the `?no-depth` problem (a flag that lands after the thing it configures
-   *  was already built) cannot happen to it. See `Core/Tick.Pace.ts` for what the flag is for. */
+  /** THE PACING GATE'S FENCE - PIXEL-IDENTICAL BY CONSTRUCTION, and ON BY DEFAULT since Jack's
+   *  pacing ruling. Arm the frame-completion fence this renderer answers `PaceInFlight` from.
+   *
+   *  Set by `Jaui._initDebugFromUrl`, which runs in the Canvas constructor and therefore AFTER
+   *  `Init` on the worker path. That is fine, and it is exactly why the fence is built per frame in
+   *  `EndFrame` rather than once in `Init`: the `?no-depth` problem - a flag that lands after the
+   *  thing it configures was already built - cannot happen to it, and so a DEFAULT set at
+   *  construction is alive on the first frame the engine draws.
+   *
+   *  False only on `?tick-pace=off`, on the ratio clamp (which needs no GL) and on a non-WebGL2
+   *  backend. See `Core/Tick.Pace.ts` for what the gate is and which of its machinery is inert. */
   DiagTickPace = false;
   /** The fences of the rendered frames the GPU has not finished yet, OLDEST FIRST, each with the
    *  clock reading at which it was armed. A queue rather than a single slot because the gate is a
@@ -1811,7 +1817,8 @@ export class WebGL2Renderer implements Renderer {
   };
 
   /** Place a fence after this frame's last draw. Built on first use like the restart probe, for the
-   *  same reason: `Init` does not know the flags. */
+   *  same reason: `Init` does not know the flags - and since the gate became the default, that is
+   *  what makes the default reach the worker path at all. */
   private _armPaceFence = (): void => {
     const gl = this._gl;
     const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -1832,9 +1839,10 @@ export class WebGL2Renderer implements Renderer {
     if (!this._paceSaid) {
       this._paceSaid = true;
       // `fence=false` is the refusal: the gate then counts zero frames in flight forever, which is
-      // the unflagged engine, and a cell taken under it is void. Named here rather than at parse
-      // time because whether the driver hands over a sync object is not knowable until a frame has
-      // ended.
+      // the UNPACED loop - so it is both a void cell and, since the gate became the default, a page
+      // silently on `?tick-pace=off`. Named here rather than at parse time because whether the
+      // driver hands over a sync object is not knowable until a frame has ended. `fence=true` with
+      // no flag at all is the proof that the default reached the worker path.
       JTrace(`jaui:tick-pace fence=${fence !== null}`);
     }
   };
