@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  TickPace, ParseTickPace, TickPaceText, VsyncEstimator,
+  TickPace, ParseTickPace, TickPaceDefault, TickPaceText, VsyncEstimator,
   PACE_STALL_TICKS, PACE_DEFAULT_DEPTH, PACE_MAX_DEPTH, PACE_FENCE_RING,
   LOCK_CHANGE_MS, LOCK_MAX_N, LOCK_MARGIN_SHARE, LOCK_LIVE_HOLD, LIVE_MIN_SAMPLES,
   WINDOW_TICKS, WINDOW_WARMUP_SKIP, WINDOW_DWELL_MS, WINDOW_DWELL_MAX_MS,
@@ -204,13 +204,38 @@ const Lock = (vsync: number | null = null, live = false): TickPaceMode =>
 // ── Parsing ──
 
 describe('?tick-pace — the parse', () => {
-  it('the bare flag is the VSYNC LOCK — adaptive and even — and =lock spells it out', () => {
-    expect(ParseTickPace(null)).toEqual({ Mode: { Kind: 'lock', Depth: 1, Vsync: null, Live: false } });
-    expect(ParseTickPace('')).toEqual({ Mode: { Kind: 'lock', Depth: 1, Vsync: null, Live: false } });
-    expect(ParseTickPace('  ')).toEqual({ Mode: { Kind: 'lock', Depth: 1, Vsync: null, Live: false } });
-    expect(ParseTickPace('lock')).toEqual({ Mode: { Kind: 'lock', Depth: 1, Vsync: null, Live: false } });
-    // And the safety net under it is still one frame in flight, not zero.
+  it('NO FLAG AND THE BARE FLAG ARE THE DEPTH-1 FENCE — the shipping default, by the pacing ruling', () => {
+    // `ParseTickPace(null)` is the call `Jaui.ts` makes on a page with no `?tick-pace` at all, and
+    // it must return the SAME gate the bare flag does: that identity is what makes "unflagged vs
+    // `?tick-pace`" a zero-pixel gate on a console line and nothing else.
+    expect(ParseTickPace(null)).toEqual({ Mode: { Kind: 'fence', Depth: 1 } });
+    expect(ParseTickPace('')).toEqual({ Mode: { Kind: 'fence', Depth: 1 } });
+    expect(ParseTickPace('  ')).toEqual({ Mode: { Kind: 'fence', Depth: 1 } });
+    expect(ParseTickPace('fence')).toEqual({ Mode: { Kind: 'fence', Depth: 1 } });
+    expect(TickPaceDefault()).toEqual({ Kind: 'fence', Depth: 1 });
+    // ONE, not zero: depth 0 is the strictly serial gate that measured 50.13 at dpr 2 by making the
+    // frame cost the CPU's issuing PLUS the GPU's execution.
     expect(PACE_DEFAULT_DEPTH).toBe(1);
+    // A FACTORY, so two engines on one page can never share a mode object.
+    expect(TickPaceDefault()).not.toBe(TickPaceDefault());
+  });
+
+  it('=off (and =none, =0) is the UNPACED CONTROL — the absence of a mode, not a mode', () => {
+    // The "before" column of every gate from here on. `null` arms no fence, polls nothing and
+    // measures nothing, which is exactly the loop the engine ran before pacing existed.
+    for (const spelling of ['off', 'none', '0', ' off ']) {
+      expect(ParseTickPace(spelling), `"${spelling}" is the control arm`).toEqual({ Mode: null });
+    }
+    expect(TickPaceText(null)).toBe('off');
+  });
+
+  it('=lock is now a MEASUREMENT flag and has to be spelled out to get it', () => {
+    // It used to be what the bare flag meant. It is not the default any more, and the one-line
+    // reason is in the file header: its mechanism was always right and its PERIOD never was — four
+    // estimator designs over-read at dpr 1.5, because the rule needs the presented cadence and a
+    // worker has no presentation signal. The arm stays; it just cannot be reached by accident.
+    expect(ParseTickPace('lock')).toEqual({ Mode: { Kind: 'lock', Depth: 1, Vsync: null, Live: false } });
+    expect(ParseTickPace('')).not.toEqual({ Mode: { Kind: 'lock', Depth: 1, Vsync: null, Live: false } });
   });
 
   it('=lock:V pins the vsync, so a derived grid can be checked against one that cannot be wrong', () => {
@@ -234,7 +259,7 @@ describe('?tick-pace — the parse', () => {
     }
   });
 
-  it('=fence and =fence:D stay, as the controls they now are', () => {
+  it('=fence:D still names a depth, so the default can be priced against its neighbours', () => {
     expect(ParseTickPace('fence')).toEqual({ Mode: { Kind: 'fence', Depth: 1 } });
     for (let d = 0; d <= PACE_MAX_DEPTH; d++) {
       expect(ParseTickPace(`fence:${d}`)).toEqual({ Mode: { Kind: 'fence', Depth: d } });
@@ -247,13 +272,15 @@ describe('?tick-pace — the parse', () => {
   });
 
   it('refuses with a reason rather than quietly running the baseline under the flag name', () => {
-    // Every one of these would otherwise publish an unpaced number in a cell labelled ?tick-pace.
-    for (const bad of ['1', '0', '-2', '1.5', 'x', 'true']) {
+    // Every one of these would otherwise publish some other arm's number in a cell labelled
+    // ?tick-pace. `0` is NOT in this list any more: it is a spelling of `off`.
+    for (const bad of ['1', '-2', '1.5', 'x', 'true']) {
       const r = ParseTickPace(bad);
       expect(r, `"${bad}" must be refused`).toHaveProperty('Why');
     }
-    // N=1 is refused for its own reason: it is not malformed, it is the unflagged engine.
-    expect(ParseTickPace('1')).toEqual({ Why: 'n-1-renders-every-tick-which-is-the-unflagged-engine' });
+    // N=1 is refused for its own reason: it is not malformed, it is the control arm spelled as a
+    // ratio - and the control arm has a name of its own now.
+    expect(ParseTickPace('1')).toEqual({ Why: 'n-1-renders-every-tick-which-is-tick-pace-off' });
   });
 
   it('refuses a malformed depth — and `fence:` in particular, which Number() reads as 0', () => {
@@ -266,6 +293,7 @@ describe('?tick-pace — the parse', () => {
     // Two cells taken under different depths or different grids are two different instruments and
     // must not share a label. The live N is NOT in the name: it moves.
     expect(TickPaceText(null)).toBe('off');
+    expect(TickPaceText(TickPaceDefault())).toBe('fence:1');
     expect(TickPaceText(Lock())).toBe('lock');
     expect(TickPaceText(Lock(16.67))).toBe('lock:16.67');
     expect(TickPaceText(Fence(1))).toBe('fence:1');
@@ -366,7 +394,7 @@ describe('?tick-pace=lock — the vsync is DERIVED from the callbacks, and the c
 
 // ── The unflagged engine ──
 
-describe('?tick-pace absent — the loop is the loop it was', () => {
+describe('?tick-pace=off — the UNPACED CONTROL, the loop before pacing existed', () => {
   it('every tick that wants to render, renders; nothing is ever skipped or owed', () => {
     const pace = new TickPace(null);
     const r = Loop(pace, null, Active(30, [0, 7, 19]));
@@ -378,12 +406,12 @@ describe('?tick-pace absent — the loop is the loop it was', () => {
     expect(pace.Rendered).toBe(9);
   });
 
-  it('counts RENDERED on the unflagged arm too, so the ratio reads on both sides of a comparison', () => {
+  it('counts RENDERED on the control arm too, so the ratio reads on both sides of a comparison', () => {
     const pace = new TickPace(null);
     Loop(pace, null, Active(10, [0]));
     expect(pace.Census()).toEqual({
       Mode: 'off', Rendered: 3, Skipped: 0, Forced: 0,
-      // Unflagged, every render waited nothing — the histogram's own baseline.
+      // Unpaced, every render waited nothing — the histogram's own baseline.
       WaitedTicks: [3, 0, 0, 0],
       FenceMs: { N: 0, Sum: 0, Max: 0 },
       MaxInFlight: 0,
@@ -400,13 +428,193 @@ describe('?tick-pace absent — the loop is the loop it was', () => {
     });
   });
 
-  it('the unflagged arm pays NOTHING for the instrument — NoteTick returns before it measures', () => {
-    // The instrument is two subtractions and a ring write per callback, and an engine with no flag
-    // must not pay even that. `RenderedGapMs` staying 0 through a whole run is the assertion.
+  it('the control arm pays NOTHING for the instrument — NoteTick returns before it measures', () => {
+    // The instrument is two subtractions and a ring write per callback, and the arm that stands for
+    // "the engine before pacing" must not pay even that. `RenderedGapMs` staying 0 is the assertion.
     const pace = new TickPace(null);
     Loop(pace, null, All(200));
     expect(pace.Census().RenderedGapMs).toBe(0);
     expect(pace.Census().UngatedGapMs).toBe(0);
+  });
+
+  it('=off NEVER POLLS A FENCE — no gate, no clientWaitSync, nothing in the ledger', () => {
+    // Byte for byte the old loop: the gate object is handed over and is never asked. A control arm
+    // that polled would be paying the instrument's cost in the column labelled "before".
+    let asked = 0;
+    const counted: PaceGate = {
+      PaceInFlight: () => { asked++; return 3; },
+      PaceTakeFence: NoSample,
+    };
+    const pace = new TickPace(null);
+    const r = Loop(pace, counted, All(60));
+    expect(asked).toBe(0);
+    expect(pace.Skipped).toBe(0);
+    expect(pace.MaxInFlight).toBe(0);
+    expect(r.RenderedAt.length).toBe(60);
+  });
+});
+
+// ── The default ──
+
+/**
+ * THE DEPTH-1 FENCE IS THE DEFAULT (Jack's ruling, 2026-09-20 ~13:00).
+ *
+ * What has to be true for that to be a shippable default rather than a flag with the sign flipped:
+ *
+ *   1. IT IS THE SAME INSTRUMENT AS `?tick-pace=fence`, decision for decision, so the unflagged arm
+ *      and the flagged one are one arm and a pixel gate between them is a gate on a console line.
+ *   2. A FAST PAGE IS UNTOUCHED. When the GPU keeps up, the gate never refuses and the loop is the
+ *      loop it was — which is the dpr 1.5 cell (16.67 against an unpaced 16.66) as arithmetic.
+ *   3. IT ESTIMATES NOTHING. No window opens, no period is read, no cadence is chosen, `LockN` is
+ *      published as 0. Four designs failed on the period; the default does not have one.
+ *   4. THE STALL GUARD IS THE FLAT FLOOR, not the lock's cadence-scaled one — the default has no
+ *      cadence to scale by, and a guard that never fires on a healthy page is the whole ask.
+ *   5. IT LOSES NO RENDER, the same property every other mode has, because that is what `_paceOwed`
+ *      and the park predicate are for.
+ */
+describe('?tick-pace — THE DEFAULT is the depth-1 fence, and it is the fence arm exactly', () => {
+  it('the default and =fence:1 make the SAME DECISIONS on the same pipeline — one instrument', () => {
+    // A 25 ms render on a 16.67 ms callback grid: the dpr-2 case, where the gate is doing something
+    // on most ticks. If these two ever parted company, "unflagged vs ?tick-pace" would stop being a
+    // zero-pixel gate and every cell taken under the flag would be a cell about a different engine.
+    const run = (mode: TickPaceMode): { d: PaceDecision[]; at: number[] } => {
+      const gpu = new Pipeline(0.6, 25);
+      const pace = new TickPace(mode);
+      const r = Loop(pace, gpu, All(120), {
+        OnTick: i => { gpu.Now = i * V60; },
+        OnRender: () => { gpu.Render(); },
+      });
+      return { d: r.Decisions, at: r.RenderedAt };
+    };
+    const byDefault = run(TickPaceDefault());
+    const byFlag = run(Fence(1));
+    expect(byDefault.d).toEqual(byFlag.d);
+    expect(byDefault.at).toEqual(byFlag.at);
+    // ...and it is actually pacing on this scene, or the equality above would be vacuous.
+    expect(byDefault.d).toContain('skip');
+  });
+
+  it('A FAST PAGE IS UNTOUCHED — a render that fits inside a callback is never refused', () => {
+    // The dpr 1.5 cell as arithmetic: 16.04 ms of render on a 16.67 ms grid presents in one vsync,
+    // the queue never reaches depth 2, and the gate refuses nothing. The M4 measured the two arms
+    // indistinguishable (16.67 / 1v 100% against an unpaced 16.66 / 1v 100%); this is why.
+    const gpu = new Pipeline(0.6, 16.04);
+    const pace = new TickPace(TickPaceDefault());
+    const r = Loop(pace, gpu, All(200), {
+      OnTick: i => { gpu.Now = i * V60; },
+      OnRender: () => { gpu.Render(); },
+    });
+    expect(pace.Skipped).toBe(0);
+    expect(pace.Forced).toBe(0);
+    expect(r.RenderedAt.length).toBe(200);
+    // Every render waited nothing — the unpaced histogram, produced by the paced engine.
+    expect(pace.Census().WaitedTicks).toEqual([200, 0, 0, 0]);
+  });
+
+  it('IT ESTIMATES NOTHING — no window ever opens and no period is ever chosen', () => {
+    // The whole reason this arm shipped and the lock did not. A window is ~500-700 ms of the page
+    // running ungated; the default does not have one, cannot open one, and publishes the lock's
+    // columns as zeros rather than as a cadence nobody measured.
+    const gpu = new Pipeline(0.6, 25);
+    const pace = new TickPace(TickPaceDefault());
+    let windows = 0;
+    let locks = 0;
+    pace.OnWindow = () => { windows++; };
+    pace.OnLockChange = () => { locks++; };
+    Loop(pace, gpu, All(400), {
+      OnTick: i => { gpu.Now = i * V60; },
+      OnRender: () => { gpu.Render(); },
+    });
+    const c = pace.Census();
+    expect(windows).toBe(0);
+    expect(locks).toBe(0);
+    expect(c.Windows).toBe(0);
+    expect(c.LockN).toBe(0);
+    expect(c.LockCommittedN).toBe(0);
+    expect(c.LockChanges).toBe(0);
+    expect(c.LockSkipped).toBe(0);
+    expect(c.UngatedGapMs).toBe(0);
+    // The CPU half is not timed either: `_render` is not wrapped in a `performance.now()` pair on
+    // an arm that would never read the number.
+    expect(pace.WantsRenderCost).toBe(false);
+    // It IS pacing, and every refusal it took was the fence's.
+    expect(c.FenceSkipped).toBeGreaterThan(0);
+    expect(c.FenceSkipped).toBe(c.Skipped);
+  });
+
+  it('the two signals the engine declares are INERT under it — a park and a resize change nothing', () => {
+    // `NotePark` and `NoteSceneChange` return at their first line for a non-lock mode. They stay
+    // wired because the lock still ships as a measurement flag, and a default that quietly used
+    // them would be a default with state the brief says it does not have.
+    const gpu = new Pipeline(0.6, 25);
+    const pace = new TickPace(TickPaceDefault());
+    const withSignals = Loop(pace, gpu, All(120), {
+      OnTick: i => {
+        gpu.Now = i * V60;
+        if (i % 7 === 0) pace.NoteSceneChange();
+        if (i % 11 === 0) pace.NotePark();
+      },
+      OnRender: () => { gpu.Render(); },
+    });
+    const quiet = new Pipeline(0.6, 25);
+    const clean = new TickPace(TickPaceDefault());
+    const without = Loop(clean, quiet, All(120), {
+      OnTick: i => { quiet.Now = i * V60; },
+      OnRender: () => { quiet.Render(); },
+    });
+    expect(withSignals.Decisions).toEqual(without.Decisions);
+    expect(pace.Census().Windows).toBe(0);
+  });
+
+  it('THE STALL GUARD IS THE FLAT FLOOR, and on a healthy page it never fires', () => {
+    // The lock scales the guard by its own cadence because its releases are N vsyncs apart by
+    // design; the default has no cadence, so it keeps the flat `PACE_STALL_MS` / `PACE_STALL_TICKS`
+    // floor — eight consecutive FENCE refusals AND 100 ms since the last render.
+    const dead = new TickPace(TickPaceDefault());
+    const r = Loop(dead, NEVER, All(PACE_STALL_TICKS + 1));
+    expect(r.Decisions).toEqual([
+      ...Array<PaceDecision>(PACE_STALL_TICKS).fill('skip'), 'forced',
+    ]);
+    // ...and a real GPU, however slow, never reaches it: 25 ms of render on a 16.67 grid refuses at
+    // most one tick in a row.
+    const gpu = new Pipeline(0.6, 25);
+    const live = new TickPace(TickPaceDefault());
+    Loop(live, gpu, All(400), {
+      OnTick: i => { gpu.Now = i * V60; },
+      OnRender: () => { gpu.Render(); },
+    });
+    expect(live.Forced).toBe(0);
+  });
+
+  it('IT LOSES NO RENDER — the default draws the SAME NUMBER of frames as the unpaced control', () => {
+    // The count is asserted against the CONTROL rather than against a number worked out by hand,
+    // because the number depends on how the render-on-demand tail overlaps (a request at 30 and
+    // another at 31 RESET the three-frame hold, they do not add to it) and an arithmetic slip there
+    // would make this test pass while proving nothing. What the gate may move is WHEN a render
+    // happens. What it may never move is HOW MANY.
+    const wants = Active(240, [0, 30, 31, 90, 200]);
+    const slow = new Pipeline(0.6, 25);
+    const paced = new TickPace(TickPaceDefault());
+    const r = Loop(paced, slow, wants, {
+      OnTick: i => { slow.Now = i * V60; },
+      OnRender: () => { slow.Render(); },
+    });
+    const control = new TickPace(null);
+    const c = Loop(control, null, wants);
+    expect(r.RenderedAt.length).toBe(c.RenderedAt.length);
+    expect(paced.Rendered).toBe(control.Rendered);
+    expect(paced.Forced).toBe(0);
+    // ...and the gate really was in the way, or the equality is a statement about nothing.
+    expect(paced.Skipped).toBeGreaterThan(0);
+    expect(r.RenderedAt).not.toEqual(c.RenderedAt);
+    // The park predicate only ever read true with nothing owed — `Loop` mirrors `_paceOwed`.
+    expect(r.ParkedAt.length).toBeGreaterThan(0);
+  });
+
+  it('the census names the default `fence:1`, which is what `__jauiTickPace().Mode` must read', () => {
+    const pace = new TickPace(TickPaceDefault());
+    Loop(pace, ALWAYS, Active(10, [0]));
+    expect(pace.Census().Mode).toBe('fence:1');
   });
 });
 
