@@ -22,6 +22,9 @@
  * `Jwift.Glass.jss`, so a re-spaced grid or a retuned class moves the prediction rather than
  * silently invalidating it).
  */
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   readRenderer, readJaui, readPerfJss, readJwiftGlass, arrowBody, jssClass, jssNumber, jssBlurPt,
@@ -36,6 +39,11 @@ import { FakeGl } from './Blur.Chains.Source';
 
 const jaui = readJaui();
 const renderer = readRenderer();
+/** The render worker's boot sequence. Read here rather than added to the shared source helpers,
+ *  because exactly one question needs it: does `Init` run before the URL is parsed. */
+const workerBoot = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'Worker', 'Worker.Boot.ts'), 'utf8',
+).replace(/\r\n/g, '\n');
 
 // ── The scene, read from the sheets that own it ────────────────────────────────────────────────
 // `glassshot` shoots `idle`, which is `glass-grid` standing still: the same twenty PerfCards on the
@@ -364,6 +372,140 @@ describe('the pool has to hold twenty fill pyramids at once, and the shipped poo
     // And the constructor's range check follows the pass's OWN ceiling, not the module's.
     expect(() => new BlurPass(new FakeGl().Gl, undefined, MAX_CHAINS + 1)).toThrow();
     expect(() => new BlurPass(new FakeGl().Gl, undefined, MAX_CHAINS + 1, LIMITS)).not.toThrow();
+  });
+});
+
+// ── The handle a card is HANDED, end to end ───────────────────────────────────────────────────
+//
+// `Perf/BlurPhased.Finding.md` predicted 60,000-200,000 differing pixels for `?blur-phased` against
+// unflagged and the fold measured 2,932,936 (71.6%), every card refracting a DIFFERENT REGION of
+// the bed behind a hard horizontal seam. This block is where that comes from, and it is the one
+// thing the flag's other gate could not see: under `?blur-src-clear` every build reads the same
+// stand-in, so a card handed the WRONG pyramid gets the same texels anyway and the pairing reads a
+// perfectly honest 0. The bug lives strictly between the build and the draw.
+
+describe('the pyramid a card is handed is the pyramid its own build wrote', () => {
+  const PHASED_CHAINS = Number(/const PHASED_CHAINS = (\d+);/.exec(jaui)![1]);
+  const LIMITS = { MaxChains: MAX_CHAINS * PHASED_CHAINS, BudgetBytes: CHAIN_BUDGET_BYTES * 2 };
+
+  /** One build phase, recorded the way `Jaui._blurFirstBuild` records it: the texture `ComputeBlur`
+   *  returns, and the region `_wrap` freezes onto the handle beside it. */
+  const buildPhase = (
+    gl: FakeGl, pass: BlurPass, src: WebGLTexture, margin: number,
+  ): { Tex: object; Region: object; Wrote: string }[] =>
+    Array.from({ length: 20 }, (_, i) => {
+      const tex = pass.Blur(src, CANVAS_W, CANVAS_H, RADIUS, 0, RegionFor(CardBox(i), margin));
+      return { Tex: tex, Region: pass.LastRegion as object, Wrote: gl.ValueOf(tex, 0) };
+    });
+
+  it('a handle carries a COPY of the region, so nineteen builds cannot overwrite the twentieth', () => {
+    // The brief's second hypothesis, and it is WRONG: `BlurPass._region` returns a fresh object
+    // literal on every call and `ComputeBlur` freezes it onto the handle immediately, so twenty
+    // consecutive builds on one pass leave twenty distinct maps. `LastRegion` is not aliased.
+    const gl = new FakeGl();
+    const pass = new BlurPass(gl.Gl, undefined, PHASED_CHAINS, LIMITS);
+    const src = gl.MakeSource(CANVAS_W, CANVAS_H, 'scene') as unknown as WebGLTexture;
+    const built = buildPhase(gl, pass, src, FILL_MARGIN);
+    expect(new Set(built.map(b => b.Region)).size).toBe(20);
+    // And each one really is card k's map: the offset is -rect.X / rect.W, equal down a column and
+    // strictly decreasing across a row.
+    const ox = built.map(b => (b.Region as { OffsetX: number }).OffsetX);
+    for (let i = 1; i < COLS; i++) expect(ox[i]).toBeLessThan(ox[i - 1]);
+    for (let i = COLS; i < 20; i++) expect(ox[i]).toBeCloseTo(ox[i % COLS], 12);
+  });
+
+  it('card k binds the texture card k built — not merely one of twenty that exist', () => {
+    const gl = new FakeGl();
+    const pass = new BlurPass(gl.Gl, undefined, PHASED_CHAINS, LIMITS);
+    const src = gl.MakeSource(CANVAS_W, CANVAS_H, 'scene') as unknown as WebGLTexture;
+    const fills = buildPhase(gl, pass, src, FILL_MARGIN);
+    const rims = buildPhase(gl, pass, src, RIM_MARGIN);
+    // The two build phases are over; pass 2 and pass 3 draw. What does each card's handle hold NOW?
+    for (let i = 0; i < 20; i++) {
+      expect(gl.ValueOf(fills[i].Tex, 0)).toBe(fills[i].Wrote);
+      expect(gl.ValueOf(rims[i].Tex, 0)).toBe(rims[i].Wrote);
+    }
+    // Non-vacuous: the twenty pyramids are twenty DIFFERENT pictures, because each is built over
+    // its own region of the bed. If they were not, "card k holds card k's" would be free.
+    expect(new Set(fills.map(f => f.Wrote)).size).toBe(20);
+    expect(new Set(rims.map(r => r.Wrote)).size).toBe(20);
+  });
+
+  it('at N=1 every card is handed the LAST build’s pyramid through its OWN region map', () => {
+    // The fold's 71.6%, reproduced. Nineteen fills are overwritten before their cards draw, so
+    // card 6 samples the bed under card 19 while its `u_BackdropXf` still says card 6 — a card
+    // refracting a different region of the bed, exactly as the crop showed.
+    const gl = new FakeGl();
+    const pass = new BlurPass(gl.Gl, undefined, 1);
+    const src = gl.MakeSource(CANVAS_W, CANVAS_H, 'scene') as unknown as WebGLTexture;
+    const fills = buildPhase(gl, pass, src, FILL_MARGIN);
+    expect(new Set(fills.map(f => f.Tex)).size).toBe(1);
+    const last = fills[19].Wrote;
+    for (let i = 0; i < 20; i++) expect(gl.ValueOf(fills[i].Tex, 0)).toBe(last);
+    // Nineteen of twenty are handed a picture that is not theirs. Card 19 is right by accident,
+    // and it is the only one.
+    expect(fills.filter((f, i) => i < 19 && f.Wrote !== last).length).toBe(19);
+    // The regions are still each card's own — which is precisely why the arm is not merely blurry
+    // but WRONG, and why `?blur-src-clear` (one constant source) reads a clean 0 regardless.
+    expect(new Set(fills.map(f => f.Region)).size).toBe(20);
+  });
+});
+
+// ── Why the pool never rotated: Init froze it before the URL was parsed ────────────────────────
+
+describe('the pool configuration must survive Init running before the flags', () => {
+  it('worker mode Inits the renderer BEFORE the Canvas that parses the URL', () => {
+    // The trap, pinned on the boot source rather than described. `_initDebugFromUrl` runs in the
+    // `Canvas` constructor; `Init` builds `_blur`. In the worker the second happens first, and the
+    // App renders in the worker on every page — so this is every perf-harness `canvas` column.
+    const init = workerBoot.indexOf('await renderer.Init(');
+    const canvas = workerBoot.indexOf('const canvas = new Canvas(');
+    expect(init).toBeGreaterThan(0);
+    expect(canvas).toBeGreaterThan(init);
+    expect(jaui).toContain('this._initDebugFromUrl();');
+    // `?no-depth` is hand-patched off the init message for exactly this reason, and it is the only
+    // one that was. The two pool fields were not, and `BlurPass` freezes them at construction.
+    expect(workerBoot).toContain('renderer.DiagNoDepth = new URLSearchParams');
+    expect(workerBoot).not.toContain('DiagBlurChains');
+    expect(workerBoot).not.toContain('DiagChainLimits');
+  });
+
+  it('so both pool fields are ACCESSORS that mark the pass for a rebuild', () => {
+    expect(renderer).toContain('set DiagBlurChains(chains: number | null) {');
+    expect(renderer).toContain('set DiagChainLimits(limits: ChainLimits | null) {');
+    expect(renderer.slice(renderer.indexOf('set DiagBlurChains('), renderer.indexOf('set DiagBlurChains(') + 220))
+      .toContain('this._blurPoolDirty = true;');
+    expect(renderer.slice(renderer.indexOf('set DiagChainLimits('), renderer.indexOf('set DiagChainLimits(') + 220))
+      .toContain('this._blurPoolDirty = true;');
+  });
+
+  it('and `ComputeBlur` reconciles before it picks the pass', () => {
+    const body = arrowBody(renderer, 'ComputeBlur');
+    expect(body).toContain('this._reconcileBlurPool();');
+    // Ahead of the selection, or the frame's forty builds all run on the frozen pass.
+    expect(body.indexOf('this._reconcileBlurPool();'))
+      .toBeLessThan(body.indexOf('const pass = radius > 0'));
+  });
+
+  it('the rebuild is refused once the pool holds anything, and never runs unflagged', () => {
+    const body = arrowBody(renderer, '_reconcileBlurPool');
+    // Unflagged: nothing assigns the two fields, so the dirty bit is never set — and even if it
+    // were, the configuration matches what Init froze and the pass is left exactly alone.
+    expect(body).toContain('if (!this._blurPoolDirty) return;');
+    expect(body).toContain('if (chains === this._blurPoolChains && limits === this._blurPoolLimits) return;');
+    expect(body).toContain('refused=live-chains');
+    // Init records what it froze, which is what makes the comparison possible at all.
+    expect(renderer).toContain('this._blurPoolChains = this._diagBlurChains ?? 1;');
+    expect(renderer).toContain('new BlurPass(gl, batch, this._blurPoolChains,');
+  });
+
+  it('the phased gate line carries the pool, so a cell taken at 1/1/1 is discardable', () => {
+    expect(jaui).toContain('pool=${pool}');
+    expect(jaui).toContain('this._renderer.BlurPoolCensus');
+    expect(renderer).toContain('get BlurPoolCensus(): string {');
+    // The census the gate prints is the pass's own, not a restatement of the flag.
+    expect(renderer.slice(renderer.indexOf('get BlurPoolCensus(): string {'),
+      renderer.indexOf('get BlurPoolCensus(): string {') + 400)).toContain('pass.ChainCensus');
   });
 });
 

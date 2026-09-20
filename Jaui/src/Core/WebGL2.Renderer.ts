@@ -560,6 +560,71 @@ export class WebGL2Renderer implements Renderer {
     return pass;
   };
 
+  /** What `_blur` was actually CONSTRUCTED with. `BlurPass` reads its pool configuration into
+   *  readonly fields, so the numbers are frozen at construction -- and `_blur` is constructed in
+   *  `Init`, which in WORKER MODE runs BEFORE the URL is parsed at all. See `Worker/Worker.Boot.ts`:
+   *  it builds the renderer, hand-patches `DiagNoDepth` off the init message, `await`s `Init`, and
+   *  only THEN constructs the `Canvas` whose constructor runs `_initDebugFromUrl`. Every other diag
+   *  field is read per frame and survives that; these two are read once and did not.
+   *
+   *  The App always renders in the worker, so that is every perf-harness `canvas` column. `?blur-
+   *  chains=N` therefore never rotated anything there, and its gate could not see it: rotation is
+   *  pixel-identical, so "identical because it rotated" and "identical because it never ran" print
+   *  the same zero. `?blur-phased` is the first arm that DEPENDS on the rotation -- twenty fill
+   *  pyramids have to survive until their cards draw -- and at N=1 all twenty share one chain, so
+   *  nineteen were overwritten and every card drew the LAST build's pyramid through its OWN region
+   *  map. That is the 2,932,936-px arm in `Perf/BlurPhased.Finding.md`. */
+  private _blurPoolChains = 1;
+  private _blurPoolLimits: ChainLimits | null = null;
+  private _blurPoolDirty = false;
+
+  /** Rebuild `_blur` if the pool configuration changed after `Init` froze it. Called where the
+   *  pass is SELECTED, so it lands before the first build of the first frame and the pass it
+   *  replaces is still holding nothing.
+   *
+   *  A no-op on every unflagged path and on main-thread mode (where `_initDebugFromUrl` runs in the
+   *  `Canvas` constructor, ahead of `Start` and therefore ahead of `Init`): the dirty bit clears on
+   *  the first check and the configuration already matches. The rebuilt pass compiles its three
+   *  programs outside the Init batch -- one-time, on the flagged arm only, before the harness's
+   *  measurement window -- which is the price of leaving the cold-boot path exactly as it was. */
+  private _reconcileBlurPool = (): void => {
+    if (!this._blurPoolDirty) return;
+    // Init has not run yet: it reads the fields itself, which is main-thread mode's whole story.
+    if ((this._blur as BlurPass | undefined) === undefined) return;
+    this._blurPoolDirty = false;
+    const chains = this._diagBlurChains ?? 1;
+    const limits = this._diagChainLimits;
+    if (chains === this._blurPoolChains && limits === this._blurPoolLimits) return;
+    const was = this._blur.ChainCensus;
+    // Never mid-frame. The ceilings are read by the admission check AND the eviction loop, and a
+    // live chain admitted under one pair is not necessarily legal under the other -- so a config
+    // that arrives after the pool has built anything is a different experiment, and says so.
+    if (was.Resident > 0) {
+      JTrace(`jaui:blur-pool refused=live-chains resident=${was.Resident}`
+        + ` asked=${chains} running=${this._blurPoolChains}`);
+      return;
+    }
+    this._blur = this._tagBlur(
+      new BlurPass(this._gl, undefined, chains, limits ?? undefined), 'blur');
+    this._blurPoolChains = chains;
+    this._blurPoolLimits = limits;
+    this._lastBlur = null;
+    const now = this._blur.ChainCensus;
+    JTrace(`jaui:blur-pool rearmed chains=${now.Asked} max=${now.Max} budget=${now.BudgetMb}MB`
+      + ` was=chains=${was.Asked},max=${was.Max},budget=${was.BudgetMb}MB`
+      + ` phased=${this.DiagBlurPhased}`);
+  };
+
+  /** The per-surface pool as it ACTUALLY ran: asked / live / resident, plus any refusal. Read into
+   *  `?blur-phased`'s own gate line in `Core/Jaui.ts`, because the flag's pixels depend on the
+   *  rotation and a cell taken at `1/1/1` is the shipped pool wearing the flag's name. */
+  get BlurPoolCensus(): string {
+    const pass = this._blur as BlurPass | undefined;
+    if (pass === undefined) return 'none';
+    const c = pass.ChainCensus;
+    return `${c.Asked}/${c.Live}/${c.Resident}${c.Refused === null ? '' : `:refused=${c.Refused}`}`;
+  }
+
   // ── GL state cache (C4) ──
   // Skip the JS→GL crossing when the requested state equals the last state
   // we set. Driver-side this is already a no-op for identical values, but
@@ -623,7 +688,13 @@ export class WebGL2Renderer implements Renderer {
     // is issued is a millisecond the compiler pool sat idle at the front of the longest job in the
     // boot. Only the context and the state reset above have to come first.
     const batch = new ShaderBatch(gl);
-    this._blur = new BlurPass(gl, batch, this.DiagBlurChains ?? 1, this.DiagChainLimits ?? undefined);
+    // Remembered, not just passed: `BlurPass` freezes these, and in worker mode they are still
+    // null here because the URL has not been parsed yet. `_reconcileBlurPool` compares against
+    // what was frozen and rebuilds the pass if the flags arrive afterwards.
+    this._blurPoolChains = this._diagBlurChains ?? 1;
+    this._blurPoolLimits = this._diagChainLimits;
+    this._blurPoolDirty = false;
+    this._blur = new BlurPass(gl, batch, this._blurPoolChains, this._blurPoolLimits ?? undefined);
     this._compilePanelShader(batch);
     this._compileTextShader(batch);
     this._compileStrokeShader(batch);
@@ -1512,8 +1583,15 @@ export class WebGL2Renderer implements Renderer {
    *  `MAX_CHAINS` / `CHAIN_BUDGET_BYTES`. Only `?blur-phased` sets it, and only because twenty
    *  fill pyramids have to be alive at once. Handed in at construction and never mutated, so
    *  there is nothing to restore when the flag is off -- an unflagged process never builds a pass
-   *  that carries it. */
-  DiagChainLimits: ChainLimits | null = null;
+   *  that carries it.
+   *
+   *  An ACCESSOR, not a field, because of the ordering trap `_reconcileBlurPool` exists for. */
+  get DiagChainLimits(): ChainLimits | null { return this._diagChainLimits; }
+  set DiagChainLimits(limits: ChainLimits | null) {
+    this._diagChainLimits = limits;
+    this._blurPoolDirty = true;
+  }
+  private _diagChainLimits: ChainLimits | null = null;
 
   /** `?blur-chains=N` (MEASUREMENT ONLY - PIXEL-IDENTICAL). How many chains each `BlurPass` keeps
    *  per level-0 size, handed out round-robin per build so consecutive builds of a size never
@@ -1524,8 +1602,15 @@ export class WebGL2Renderer implements Renderer {
    *
    *  No `pixels=WRONG`. A chain's contents are per-build -- every level a consumer can reach is
    *  written by the build that hands the texture over -- so which chain a build lands on cannot
-   *  change a texel. See `BlurPass._useChain` and `tests/Blur.Chains.test.ts`. */
-  DiagBlurChains: number | null = null;
+   *  change a texel. See `BlurPass._useChain` and `tests/Blur.Chains.test.ts`.
+   *
+   *  An ACCESSOR, not a field, because of the ordering trap `_reconcileBlurPool` exists for. */
+  get DiagBlurChains(): number | null { return this._diagBlurChains; }
+  set DiagBlurChains(chains: number | null) {
+    this._diagBlurChains = chains;
+    this._blurPoolDirty = true;
+  }
+  private _diagBlurChains: number | null = null;
   private _blurChainsLine = '';
   private _blurSrcTex: WebGLTexture | null = null;
   private _blurSrcFbo: WebGLFramebuffer | null = null;
@@ -1849,6 +1934,9 @@ export class WebGL2Renderer implements Renderer {
     // glass draws a feedback loop; returning a foreign texture is what lets every draw land.
     if (this.DiagBlurDummy) return this._blurDummyTexture();
     if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
+    // Before the pass is picked, and a single boolean on every build after the first frame: the
+    // two pool flags are set after `Init` in worker mode, so this is where they take effect.
+    this._reconcileBlurPool();
     const pass = radius > 0
       ? this._blur
       : (this._rootBlur
