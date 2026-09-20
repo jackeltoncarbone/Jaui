@@ -80,6 +80,31 @@ export interface GpuBufferHandle {
 /** Time constant of the adaptive shadow's ease, in seconds: about 95% of a change lands within three. */
 export const SHADOW_EASE_SECONDS = 0.09;
 
+/** How many time constants the loop keeps rendering after the last adaptive-shadow change before it
+ *  snaps the state whole and parks. It does NOT decide the parked pixels -- the snap writes the
+ *  converged reading whatever the state held -- it decides how big the STEP at the snap is, and so
+ *  whether that step can be seen.
+ *
+ *  `AdaptiveShadowAlpha` is `authoredAlpha * mix(1, factor, adaptive)`, so the step in 8-bit levels
+ *  is `exp(-taus) * dFactor * authoredAlpha * adaptive * |ink - ground|`. The worst case the sheet
+ *  authors is a FULL swing of the factor (a surface that moves from over text to over flat white)
+ *  under the heaviest adaptive shadow in `Jwift.Glass.jss` -- JwiftThickGlass's 0.34 alpha at the
+ *  0.85 adaptive it inherits -- black on white: `exp(-taus) * 0.289 * 255`. Three taus, which is
+ *  what the loop used before the snap existed, is 3.7 levels; four is 1.35; five is 0.50. Five is
+ *  the smallest whole number of taus whose worst case is under HALF a level, so the snap cannot
+ *  round a pixel by more than one and in practice rounds almost none. It costs 0.18 s more of
+ *  rendering, once, on a page that has just stopped moving.
+ *
+ *  The ceiling of the STYLE SYSTEM is higher than the ceiling of the sheet: alpha 1 at adaptive 1
+ *  would want 6.5 taus. Nothing authors that -- an opaque black shadow is not a design here -- and
+ *  the number is chosen against what is authored, named so a theme that ever does author it knows
+ *  which line to move. */
+export const SHADOW_SETTLE_TAUS = 5;
+
+/** The window `?shadow-snap=off` restores: the un-snapped loop's 3 taus, whose 5% residual is the
+ *  thing this lane removes. Both arms live in one binary so the comparison is one build. */
+export const SHADOW_SETTLE_TAUS_UNSNAPPED = 3;
+
 /** The adaptive shadow for a single-surface panel draw: the state slot MeasureShadowBackdrop returned and
  *  how much that measurement drives the shadow (the surface's ShadowAdaptive). */
 export interface ShadowBackdrop {
