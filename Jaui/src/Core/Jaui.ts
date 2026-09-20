@@ -197,6 +197,47 @@ interface GlassBlurPlan {
   FrostCssPx: number;
 }
 
+/** WHAT A GLASS FILL LEFT BEHIND FOR ITS OWN RIM, under `?border-source=fill`.
+ *
+ *  Recorded for all three of the fill's backdrop sources -- the walk's own `ComputeBlur`,
+ *  `?blur-first`'s pre-built handle and `?pyramid-atlas=fills`'s atlas SLOT handle -- because all
+ *  three ARE this surface's blurred backdrop, and the rim's claim is about the picture and not
+ *  about who built it. The slot handle carries its slot's own `Region` (`u_BackdropXf` is read off
+ *  the handle in `PanelDrawBatch`), so the rim binding it maps into the slot with no arithmetic
+ *  of this lane's anywhere in the renderer.
+ *
+ *  Everything the admission rule compares is here rather than re-derived at the rim: a second
+ *  reading of the fill's plan is a second plan wearing the first one's name, which is the trap
+ *  `_glassFillBlurPlan` was factored out to close. */
+interface FillPyramid {
+  Handle: GpuTextureHandle;
+  /** `WebGL2Renderer.BackdropBuildSeq` at the instant the fill took the handle. The handle still
+   *  names the fill's texels exactly while this has not moved. */
+  Seq: number;
+  /** What the fill passed as `PanelDrawBatch`'s `baseFrostLod`, and what the rim must pass if it
+   *  binds this texture: the LOD the shader subtracts before it reads. */
+  BaseFrostLod: number;
+  /** The sigma the pyramid was BUILT at, and how deep a chain was generated on it. */
+  Radius: number;
+  MaxLod: number;
+  /** The screen rect it covers. The rim's own region must lie inside it, or a rim tap lands on a
+   *  clamped edge texel (a standalone pyramid) or on the neighbouring slot (an atlas). */
+  Region: { x: number; y: number; w: number; h: number };
+  /** The frame it was recorded in. See `_fillPyramids`. */
+  Frame: number;
+}
+
+/** Does `outer` contain `inner`? Both are device-px screen rects with y down, as
+ *  `GlassBlurPlan.Region` is. Closed on both edges: a region is a texel span, and an inner rect
+ *  whose right edge is the outer's right edge is fully inside it. */
+const _regionContains = (
+  outer: { x: number; y: number; w: number; h: number },
+  inner: { x: number; y: number; w: number; h: number },
+): boolean =>
+  inner.x >= outer.x && inner.y >= outer.y
+  && inner.x + inner.w <= outer.x + outer.w
+  && inner.y + inner.h <= outer.y + outer.h;
+
 /** `EndsByKey` as one readable token: `snapshot:1,blur:2`, or `none` on a frame that ended no
  *  encoder at all. Sorted, so two frames' lines can be diffed by eye, and `none` rather than an
  *  empty string, because an absence and a zero must not print the same. */
@@ -531,6 +572,42 @@ export class Canvas implements DirtyTracker {
   private _borderArm: BorderDirectArm = 'on';
   /** The last `jaui:border-direct` gate line, so it prints on a SHAPE change and not per frame. */
   private _borderDirectLastLine = '';
+  /** `?border-source=fill` -- A GLASS RIM READS THE PYRAMID ITS OWN FILL ALREADY BUILT.
+   *
+   *  A glass card builds TWO pyramids over the same region every frame. The fill's is a blur of the
+   *  scene as of BEFORE the card; the rim's is a blur of the scene as of AFTER the fill drew, which
+   *  is why the rim band shows a blur of the card's own frosted face. Twenty cards are forty builds
+   *  and 160 passes, and the M4's borderdirect3 cell priced what that buys: twenty one-blit COPIES
+   *  beat eighty pyramid passes by 0.98 ms, and a flat 64-tap gather cannot beat the pyramid's own
+   *  sampling (+1.30 ms for the band alone). The one blurred texture that already exists for every
+   *  card is its FILL's, and it costs nothing at all: no build, no copy, no second region.
+   *
+   *  IT IS A PICTURE FLAG, not a routing flag, and that is the whole of what this lane produces.
+   *  Under `fill` the band shows the blurred BACKDROP the fill itself sampled instead of a blur of
+   *  the frosted body over it, so the rim's tone comes from the bed rather than from the card's own
+   *  face and the body's grade and Tint are applied ONCE where today they are applied twice (see
+   *  the rim site in `descendChildren`, which measured that pair at 1.6-1.9x). Default `scene`: the
+   *  engine this lane inherited, byte for byte and counter for counter. Jack rules on the images. */
+  private _borderSourceFill: boolean = false;
+  /** The last `jaui:border-source` gate line, printed on a SHAPE change like the three above it. */
+  private _borderSourceLastLine = '';
+  /** What each glass FILL left for its own rim this frame, and the frame it left it in.
+   *
+   *  A WeakMap with a frame stamp rather than a Map cleared at a lifecycle hook: the walk has three
+   *  of those (the phased pre-pass, the phased driver and the plain frame) and a clear missing from
+   *  one of them is a rim reading LAST frame's texture, which is the exact failure the sequence
+   *  number below exists to make impossible. Stamped, it cannot happen from either direction. */
+  private _fillPyramids = new WeakMap<Jiv, FillPyramid>();
+  /** Bumped once per rendered frame, at `BeginScenePass`. The stamp on the records above. */
+  private _fillPyramidFrame = 0;
+  /** WHY a rim did not read its fill, one column per admission clause.
+   *
+   *  `FromFill = 0, RimBuilt = 20` is the vacuous shape this lane can fail into, and the two
+   *  totals alone cannot tell a scene with no glass fills apart from a guard that refuses
+   *  everything. Each clause is counted where it refuses, and all of them print on the gate. */
+  private _borderSourceStats = {
+    FromFill: 0, RimBuilt: 0, NoFill: 0, Stale: 0, Region: 0, Sigma: 0, Depth: 0, Snap: 0,
+  };
   /** `?atlas-instanced` -- ONE INSTANCED DRAW PER ATLAS LEVEL, and the question it asks.
    *
    *  The atlas collapsed 160 encoder-opening binds to 4 and 160 render passes to 8 and recovered
@@ -2061,6 +2138,15 @@ export class Canvas implements DirtyTracker {
     this._sharedPyramidValid = false;
     this._sceneDirtyRects.length = 0;
 
+    // `?border-source=fill`: the stamp every fill record carries and every rim checks. One bump per
+    // rendered frame, HERE rather than at a `.clear()`, because the walk has three entry points
+    // (the phased pre-pass, the phased driver, the plain frame) and a clear missing from one of
+    // them is a rim reading last frame's texture. The census is per-frame beside it, for the gate.
+    this._fillPyramidFrame++;
+    const bsf = this._borderSourceStats;
+    bsf.FromFill = 0; bsf.RimBuilt = 0; bsf.NoFill = 0; bsf.Stale = 0;
+    bsf.Region = 0; bsf.Sigma = 0; bsf.Depth = 0; bsf.Snap = 0;
+
     // ── Janvas pre-pass ──
     // Foreign WebGL2 renderers (a THREE.js scene, a custom shader app, etc.)
     // attached to <janvas> elements draw into the just-bound scene FBO at
@@ -2310,7 +2396,24 @@ export class Canvas implements DirtyTracker {
           // `_glassRimBlurPlan`, which `?blur-first`'s pre-pass calls too.
           const plan = this._glassRimBlurPlan(node, eff, effH, w, h);
           const region = plan.Region;
-          const lastBaseFrostLod = plan.BaseFrostLod;
+          // `?border-source=fill`: THE ONE BLURRED TEXTURE THIS CARD ALREADY HAS.
+          //
+          // Asked BEFORE the snapshot and before the build, because an admitted rim issues neither:
+          // it binds the handle its own fill drew through, and nothing about the scene target moves,
+          // so there is no `RebindSceneTarget` to make and no restart point to insert. Clause 4 of
+          // `_borderReadsFill` is the snapshot's own gate, so an admitted rim provably takes the
+          // `null` branch on the line below and the two cannot disagree.
+          const fromFill = this._borderReadsFill(node, plan);
+          if (fromFill === null && this._borderSourceFill) {
+            (r as WebGL2Renderer).NoteBorderRimBuilt();
+            this._borderSourceStats.RimBuilt++;
+          }
+          // The base the shader subtracts comes from the TEXTURE that is bound, never from a plan
+          // that describes a different one. `_borderReadsFill` admits only where the two are equal,
+          // so this is the same number on both arms -- written from the handle anyway, because the
+          // day they diverge the guard refuses and this line must not be the thing that was right
+          // by coincidence.
+          const lastBaseFrostLod = fromFill !== null ? fromFill.BaseFrostLod : plan.BaseFrostLod;
           const sceneSnap = plan.InstFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
           // A snapshot is a scene READ, so it stays where the walk puts it -- which under
           // `?blur-phased` means it is taken from a DIFFERENT scene state than this rim's own
@@ -2333,7 +2436,16 @@ export class Canvas implements DirtyTracker {
           const preRim = (this._blurFirst || this._phasedWalk) && !this._rimsInWalk
             ? this._blurFirstRim.get(node) : undefined;
           let lastBackdrop: GpuTextureHandle | null;
-          if (preRim !== undefined) {
+          if (fromFill !== null) {
+            // NO BUILD, NO COPY, NO REGION OF ITS OWN. The fill's pyramid is bound as it stands and
+            // the ordinary glass program samples it: `u_BackdropXf` is read off the HANDLE in
+            // `PanelDrawBatch`, so an atlas slot maps into its slot and a solo build into its rect
+            // with nothing here to keep in sync. What changes is the PICTURE in the band -- see
+            // the flag's own comment, and the gate line's `pixels=DIFFERENT`.
+            lastBackdrop = fromFill.Handle;
+            (r as WebGL2Renderer).NoteBorderFromFill();
+            this._borderSourceStats.FromFill++;
+          } else if (preRim !== undefined) {
             lastBackdrop = preRim;
             this._blurFirstStats.Used++;
           } else {
@@ -2895,6 +3007,34 @@ export class Canvas implements DirtyTracker {
           }
         }
 
+        // `?border-source=fill`: WHAT THIS FILL SAMPLED, LEFT WHERE ITS OWN RIM CAN FIND IT.
+        //
+        // One recording point for all three sources the brief names -- the walk's own `ComputeBlur`,
+        // `?blur-first`'s pre-built handle and `?pyramid-atlas=fills`'s atlas SLOT handle -- because
+        // the rim's question is "is this surface's blurred backdrop still here", not "who built
+        // it". The sequence number is taken HERE, after the build and after its mip chain, so a rim
+        // that finds it unmoved is reading the very texels this draw is about to.
+        //
+        // Nothing is recorded on the `scene` arm: the map, the stamp and the sequence read all sit
+        // behind the flag, so an unflagged frame does not carry this lane at all.
+        // `!_sharedBackdrop` for a reason worth the clause: that arm binds ONE canvas-wide
+        // quarter-res pyramid with a base LOD of 2 for every surface, so `plan.Radius`,
+        // `plan.MaxLod` and `region` below would describe a texture this surface never built. The
+        // flag refuses `?wkr-shared-backdrop` by name at arm time; this is the second lock, so a
+        // record that cannot be described honestly is never written in the first place.
+        if (this._borderSourceFill && !this._sharedBackdrop
+            && lastBackdrop !== null && r2 instanceof WebGL2Renderer) {
+          this._fillPyramids.set(node, {
+            Handle: lastBackdrop,
+            Seq: r2.BackdropBuildSeq,
+            BaseFrostLod: lastBaseFrostLod,
+            Radius: plan.Radius,
+            MaxLod: plan.MaxLod,
+            Region: region,
+            Frame: this._fillPyramidFrame,
+          });
+        }
+
         // Adaptive shadow: read the backdrop this surface just sampled, under its own footprint.
         // The sharp tap comes from the snapshot when one was taken, and otherwise straight from the
         // scene texture — this pass renders into its own 1x1 state target, so the scene FBO is not
@@ -3390,6 +3530,28 @@ export class Canvas implements DirtyTracker {
         + ` arm=${this._borderArm}`
         + (this._borderArm === 'on' ? ' pixels=WITHIN-ONE' : ' pixels=DIFFERENT-PROBE-ARM');
       if (line !== this._borderDirectLastLine) { this._borderDirectLastLine = line; JTrace(line); }
+    }
+
+    // `?border-source=fill`'s gate, on the same terms as the four above: a SHAPE change, not a
+    // frame.
+    //
+    // `rimBuilt=` is the one to read first, and the six refusal columns are printed beside it --
+    // ZEROS INCLUDED -- for the reason the restart probes print `skipped*=0`: `fromFill=0
+    // rimBuilt=20` is the unflagged engine wearing the flag's name, and WHICH clause produced it
+    // is the difference between "this scene has no glass fills" and "the guard refuses
+    // everything". `blur=` is the effect field the prediction names: 40 on `glass-grid` unflagged,
+    // 20 under `fill`, because half the frame's pyramids stop being built.
+    if (this._borderSourceFill && !this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+      const gl2 = this._renderer;
+      const st = this._borderSourceStats;
+      const line = `jaui:border-source source=fill`
+        + ` fromFill=${gl2.BordersFromFill} rimBuilt=${gl2.BordersRimBuilt}`
+        + ` blur=${gl2.SceneEndsByKey['blur'] ?? 0} switches=${gl2.SceneSwitches}`
+        + ` reads=${gl2.SceneReads} restarts=${gl2.SceneRestarts}`
+        + ` noFill=${st.NoFill} stale=${st.Stale} snap=${st.Snap}`
+        + ` sigma=${st.Sigma} depth=${st.Depth} region=${st.Region}`
+        + ' pixels=DIFFERENT';
+      if (line !== this._borderSourceLastLine) { this._borderSourceLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -4033,6 +4195,53 @@ export class Canvas implements DirtyTracker {
       AdaptiveShadow: false,
       FrostCssPx: frostCssPx,
     };
+  };
+
+  /** `?border-source=fill`: MAY THIS RIM READ ITS OWN FILL'S PYRAMID, and if not, which clause said
+   *  no? Returns the fill's record or null, and counts the refusal where it happens.
+   *
+   *  Seven clauses, each for its own reason, and every one of them fails toward TODAY'S ENGINE:
+   *
+   *  1. The flag, and a WebGL2 renderer -- the handle and its sequence number are that renderer's.
+   *  2. A fill pyramid recorded for THIS node THIS frame. A glass slab whose fill does not take the
+   *     pyramid path has none to read: `JwiftSolidGlass` authors `Refraction: 0` and no backdrop
+   *     filter, so `_glassFillTakesPyramid` is false for it and its rim keeps its own build. That
+   *     is not a miss, it is the right answer -- a solid card OCCLUDES what is behind it, and its
+   *     rim gathers from the card's own content by the `solidness` inset in `Jiv.Panel.frag`, which
+   *     a pyramid of the bed does not hold.
+   *  3. The handle is still the texture it named. See `WebGL2Renderer.BackdropBuildSeq`: any
+   *     pyramid built between the fill and the rim -- a nested glass child, a pblur, a shared
+   *     backdrop -- moves it, and the rim builds its own rather than sample a clobbered chain.
+   *  4. This rim never reads the RAW SCENE. `sampleBackdrop` falls through to `u_Scene` when the
+   *     instance authored no frost, and that sampler is fed by a snapshot taken at the rim's own
+   *     point in the walk -- a texture this lane does not hold and must not pretend to. The test is
+   *     the one the snapshot itself is gated on, so a rim that takes a snapshot is never admitted.
+   *  5 and 6. THE LOD, which is the brief's own question. The two plans build at the same sigma and
+   *     subtract the same base today (both read `BackdropFrostBlur` floored at 1pt), so a class
+   *     whose border blur agrees with its fill's frost passes; a class where they diverge is
+   *     REFUSED and builds, which is the cost difference rather than the picture difference. The
+   *     depth clause is `BorderFilter: Blur(n)`'s: a border asking for a deeper read than the fill
+   *     generated mips for would sample a level that does not exist.
+   *  7. Containment. A rim reads inside its OWN region by construction (`_glassRimBlurPlan`'s
+   *     `TapReach: 0` -- its one tap offsets INWARD along the normal), so "every tap is inside the
+   *     fill's region" is exactly "the rim's region is inside the fill's". Proved on the rects the
+   *     two plans actually produced, not argued from the margins: the fill's margin is the rim's
+   *     plus the refraction and CA footprint and both clamp to the canvas the same way, so this
+   *     holds for every glass class in the sheet -- and it is CHECKED, because a class whose
+   *     region clamped differently at a canvas edge would otherwise read a neighbouring slot. */
+  private _borderReadsFill = (node: Jiv, rim: GlassBlurPlan): FillPyramid | null => {
+    if (!this._borderSourceFill) return null;
+    const r = this._renderer;
+    if (!(r instanceof WebGL2Renderer)) return null;
+    const st = this._borderSourceStats;
+    const fill = this._fillPyramids.get(node);
+    if (fill === undefined || fill.Frame !== this._fillPyramidFrame) { st.NoFill++; return null; }
+    if (fill.Seq !== r.BackdropBuildSeq) { st.Stale++; return null; }
+    if (rim.InstFrostLod < SCENE_TAP_FROST_LOD) { st.Snap++; return null; }
+    if (fill.BaseFrostLod !== rim.BaseFrostLod || fill.Radius !== rim.Radius) { st.Sigma++; return null; }
+    if (fill.MaxLod < rim.MaxLod) { st.Depth++; return null; }
+    if (!_regionContains(fill.Region, rim.Region)) { st.Region++; return null; }
+    return fill;
   };
 
   // ── `?blur-phased`: the predicates the walk asks, and the two build phases ──────
@@ -6374,6 +6583,62 @@ export class Canvas implements DirtyTracker {
       + (this._borderDirect
         ? (this._borderArm === 'on' ? ' pixels=WITHIN-ONE' : ' pixels=DIFFERENT-PROBE-ARM')
         : ''));
+    // `?border-source=fill|scene` -- WHERE A GLASS RIM'S BLURRED BACKDROP COMES FROM.
+    //
+    // Parsed after `?border-direct` because the two own the same build site from opposite ends:
+    // the direct border REPLACES the rim's four passes with a blit and a gather, this one removes
+    // the build outright by binding a texture the frame already holds. Only one of them can own a
+    // rim, and `?border-direct` is the incumbent instrument, so this refuses beside it.
+    //
+    // `scene` is the default AND the name of today's engine: on that arm nothing in this lane is
+    // recorded, read or counted, and the frame is the one it inherited byte for byte. `fill` is a
+    // PICTURE CHANGE and says so on the mark -- Jack rules on it with images, not the lane.
+    // ANY OTHER VALUE THROWS, for the reason every flag in this block does: a value that was
+    // ignored would arm the default while reading as if it had not.
+    if (params.has('border-source')) {
+      const raw = (params.get('border-source') ?? '').trim();
+      if (raw !== '' && raw !== 'fill' && raw !== 'scene') {
+        throw new Error(`[Jaui] ?border-source takes 'fill' or 'scene', got '${raw}'`);
+      }
+      this._borderSourceFill = raw !== 'scene';
+    }
+    // Everything it cannot run beside, named one at a time and refused on the trace rather than
+    // silently disarmed. Each owns the rim's build site or the fill's handle from the other end:
+    // `?border-direct` substitutes AT the rim build, `?pyramid-atlas=all` and the two pre-pass
+    // flags build every rim in a PHASE (so the rims this arm would stop reading are built anyway
+    // and the atlas census would read members nobody consumed -- the vacuous shape), the shared
+    // backdrop binds one canvas-wide quarter-res pyramid whose plan is not this surface's, the
+    // two source diagnostics answer the build with a stand-in of their own, and the restart probes
+    // insert AT a rim build this arm does not make.
+    //
+    // `?pyramid-atlas=fills` is NOT on the list and is the arm this lane most wants measured: its
+    // fills are atlas SLOTS and its rims build in the walk, which is precisely the substitution.
+    if (this._borderSourceFill) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._borderDirect ? 'border-direct-already-owns-the-rim-build-site'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-answer-the-build-themselves'
+        : r.DiagBlurSrc !== null ? 'blur-src-swaps-the-sampled-texture-under-both-pyramids'
+        : this._sharedBackdrop ? 'shared-backdrop-binds-one-pyramid-that-is-no-surface-s-own'
+        : this._atlasRims ? 'pyramid-atlas-all-builds-every-rim-in-a-phase-and-they-would-go-unread'
+        : this._blurFirst ? 'blur-first-already-pre-built-every-rim'
+        : params.has('blur-phased') ? 'blur-phased-pre-builds-every-rim-in-pass-three'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-at-a-rim-build-this-arm-does-not-make'
+        : null;
+      if (why !== null) {
+        this._borderSourceFill = false;
+        JTrace(`jaui:border-source armed=scene reason=${why}`);
+      }
+    }
+    // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
+    // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
+    // parsed, so a mark taken there would print `scene` on every arm however the URL read.
+    JTrace(`jaui:border-source armed=${this._borderSourceFill ? 'fill' : 'scene'}`
+      + ` default=${params.has('border-source') ? 'false' : 'true'}`
+      + (this._borderSourceFill ? ' pixels=DIFFERENT' : ''));
+
     // `?atlas-instanced` -- how the atlas's hops are ISSUED, and nothing else. Parsed after the
     // atlas and its refusals so the mark can say whether there is an atlas to instance at all: it
     // is inert under `off`, which since Jack's fourth ruling is the unflagged engine. On/off by

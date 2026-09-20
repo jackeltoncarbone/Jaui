@@ -90,6 +90,21 @@ export class SceneReadLedger {
    *  and `EndsByKey.blur` down to the fills' atlas beside it. */
   BordersDirect = 0;
   BordersPyramid = 0;
+  /** THE BORDER-SOURCE CENSUS, per frame. `?border-source=fill` lets a glass rim sample the
+   *  pyramid its own FILL already built and sampled, instead of building a second one over the
+   *  same region out of the scene the fill has since drawn into.
+   *
+   *  Read `BordersRimBuilt` FIRST, for the reason the atlas census prints `solo` and the direct
+   *  census prints `pyramid`: `BordersFromFill = 0, BordersRimBuilt = 20` under the flag is the
+   *  unflagged engine wearing the flag's name - every rim refused by the admission rule, every
+   *  build and every encoder still in the frame, and a timing comparison that would pass by having
+   *  done nothing. On `glass-grid` at dpr 2 it must read `20 / 0`, with `EndsByKey.blur` at 20
+   *  against the unflagged 40 beside it.
+   *
+   *  Both stay 0 on the `scene` arm (the default), which is what makes that arm the engine this
+   *  lane inherited in its COUNTERS as well as in its pixels. */
+  BordersFromFill = 0;
+  BordersRimBuilt = 0;
   /** THE FRAGMENT COUNTS, estimated from the rim instances the direct program actually drew.
    *
    *  The M4's cell made eighty render passes and eighty draws leave the frame and the frame got
@@ -141,6 +156,8 @@ export class SceneReadLedger {
     this.AtlasBytes = 0;
     this.BordersDirect = 0;
     this.BordersPyramid = 0;
+    this.BordersFromFill = 0;
+    this.BordersRimBuilt = 0;
     this.BorderFragments = 0;
     this.BorderQuadFragments = 0;
     this.AtlasDraws = 0;
@@ -201,6 +218,14 @@ export class SceneReadLedger {
 
   /** One glass border built a pyramid: the flag is off, or the admission rule refused this build. */
   NoteBorderPyramid = (): void => { this.BordersPyramid++; };
+
+  /** One glass border took its own FILL's pyramid - no rim build, no copy, no second region. */
+  NoteBorderFromFill = (): void => { this.BordersFromFill++; };
+
+  /** One glass border built its own rim pyramid while `?border-source=fill` was armed: the
+   *  admission rule refused it. Never counted on the `scene` arm, where every rim builds one by
+   *  definition and a column reading 20 on both arms would say nothing. */
+  NoteBorderRimBuilt = (): void => { this.BordersRimBuilt++; };
 
   /** One direct rim DREW: `band` fragments inside its annulus, `quad` in its rasterised rect. */
   NoteBorderFragments = (band: number, quad: number): void => {
