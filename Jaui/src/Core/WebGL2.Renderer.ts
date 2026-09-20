@@ -18,7 +18,7 @@ import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur
 import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 import { SceneReadLedger } from './Scene.Ledger';
 import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
-import { PACE_FENCE_RING } from './Tick.Pace';
+import { PACE_FENCE_RING, type PaceFenceSample } from './Tick.Pace';
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
@@ -713,7 +713,9 @@ export class WebGL2Renderer implements Renderer {
     // one, and the gate reads zero in flight until it does -- which renders, and is correct: no
     // frame of ours is on the GPU.
     this._paceFences = [];
-    this._paceLastFenceMs = null;
+    this._paceLastSample = null;
+    this._paceLastPollAt = 0;
+    this._paceLastRetiredAt = 0;
 
     // ── One compile batch for every program the engine can draw with ──
     // Thirteen programs stand between a cold tab and its first pixel. Compiled one at a time —
@@ -1565,7 +1567,7 @@ export class WebGL2Renderer implements Renderer {
   DiagNoDepth = false;
 
   /** `?tick-pace` (MEASUREMENT ONLY - PIXEL-IDENTICAL BY CONSTRUCTION). Arm the frame-completion
-   *  fence this renderer answers `PaceReady` from. Set by `Jaui._initDebugFromUrl` AFTER `Init` has
+   *  fence this renderer answers `PaceInFlight` from. Set by `Jaui._initDebugFromUrl` AFTER `Init` has
    *  run in worker mode, which is fine and is why the fence is built per frame in `EndFrame` rather
    *  than once in `Init` -- the `?no-depth` problem (a flag that lands after the thing it configures
    *  was already built) cannot happen to it. See `Core/Tick.Pace.ts` for what the flag is for. */
@@ -1575,10 +1577,19 @@ export class WebGL2Renderer implements Renderer {
    *  DEPTH: `?tick-pace=fence:1` renders while one frame is still outstanding, so two fences can be
    *  in the air at once and the count of them IS the answer the gate wants. Capped at
    *  `PACE_FENCE_RING`, which is deeper than the deepest gate. */
-  private _paceFences: Array<{ Sync: WebGLSync; ArmedAt: number }> = [];
-  /** The latency of the fence most recently retired, in ms, waiting to be taken by the ledger.
-   *  Instrument only -- nothing in the decision reads it. */
-  private _paceLastFenceMs: number | null = null;
+  private _paceFences: Array<{ Sync: WebGLSync; ArmedAt: number; Solo: boolean }> = [];
+  /** The fence most recently retired, waiting to be taken by the ledger. Instrument only -- nothing
+   *  in the decision reads it. */
+  private _paceLastSample: PaceFenceSample | null = null;
+  /** When `PaceInFlight` last asked. The true completion of a fence retired by a poll lies in
+   *  (this, now], so the width of that interval is the quantization the reader has to correct for
+   *  -- and it is not the tick interval, because `EndFrame` polls as well. */
+  private _paceLastPollAt = 0;
+  /** When a fence was last observed retired. The gap between two of those, when the second frame
+   *  was QUEUED behind the first, is the GPU's per-frame cost with no queue wait in it -- the one
+   *  cost reading available while the loop is saturated, which is exactly when `?tick-pace=lock`
+   *  most needs to be told its cadence is too fast. */
+  private _paceLastRetiredAt = 0;
   /** The arm says itself ONCE, and says whether the driver actually gave us a sync object. A flag
    *  that silently answers "nothing in flight" every tick would publish the baseline under this
    *  flag's name. */
@@ -1605,25 +1616,36 @@ export class WebGL2Renderer implements Renderer {
     const gl = this._gl;
     const fences = this._paceFences;
     const now = performance.now();
+    const pollGap = this._paceLastPollAt === 0 ? 0 : now - this._paceLastPollAt;
+    this._paceLastPollAt = now;
     while (fences.length > 0) {
       const f = fences[0];
       const status = gl.clientWaitSync(f.Sync, gl.SYNC_FLUSH_COMMANDS_BIT, 0);
       if (status === gl.TIMEOUT_EXPIRED) break;
       gl.deleteSync(f.Sync);
       fences.shift();
-      if (status !== gl.WAIT_FAILED) this._paceLastFenceMs = now - f.ArmedAt;
+      if (status !== gl.WAIT_FAILED) {
+        this._paceLastSample = {
+          Ms: now - f.ArmedAt,
+          GapMs: this._paceLastRetiredAt === 0 ? 0 : now - this._paceLastRetiredAt,
+          Solo: f.Solo,
+          PollGapMs: pollGap,
+        };
+        this._paceLastRetiredAt = now;
+      }
     }
     return fences.length;
   };
 
-  /** How long the last retired fence took to signal, then cleared so each fence is sampled once.
-   *  THIS IS THE FIELD THAT SAYS WHERE A SLOW PACED FRAME WENT: a reading near `gpu/frm` means the
-   *  GPU was genuinely busy; a reading near zero with ticks still waiting means the loss is the
-   *  poll, not the work. */
-  PaceTakeFenceMs = (): number | null => {
-    const ms = this._paceLastFenceMs;
-    this._paceLastFenceMs = null;
-    return ms;
+  /** The last retired fence, then cleared so each fence is sampled once.
+   *  THIS IS THE FIELD THAT SAYS WHERE A SLOW PACED FRAME WENT: `Ms` near `gpu/frm` means the GPU
+   *  was genuinely busy; near zero with ticks still waiting means the loss is the poll, not the
+   *  work. `Solo`, `GapMs` and `PollGapMs` are what let `Tick.Pace` turn it into a cost ESTIMATE
+   *  rather than a latency -- see the period derivation in `Core/Tick.Pace.ts`. */
+  PaceTakeFence = (): PaceFenceSample | null => {
+    const s = this._paceLastSample;
+    this._paceLastSample = null;
+    return s;
   };
 
   /** Place a fence after this frame's last draw. Built on first use like the restart probe, for the
@@ -1632,7 +1654,12 @@ export class WebGL2Renderer implements Renderer {
     const gl = this._gl;
     const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
     if (fence !== null) {
-      this._paceFences.push({ Sync: fence, ArmedAt: performance.now() });
+      // Poll BEFORE pushing, so `Solo` is a fresh reading and not the queue as the last tick left
+      // it: a frame armed while the previous one has in fact already completed is a frame whose
+      // arm-to-signal is the GPU's own cost, and that is the clean cost sample the lock reads. The
+      // extra `clientWaitSync` is one per rendered frame, on the arm that already pays one a tick.
+      const inFlight = this.PaceInFlight();
+      this._paceFences.push({ Sync: fence, ArmedAt: performance.now(), Solo: inFlight === 0 });
       // A ring, not a leak. Only reachable if the gate stopped consulting us (the flag was armed on
       // a renderer nobody is gating) -- the oldest fence is then the least interesting one.
       while (this._paceFences.length > PACE_FENCE_RING) {

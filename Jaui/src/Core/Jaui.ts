@@ -1301,6 +1301,13 @@ export class Canvas implements DirtyTracker {
       `[Jaui.pace] ${c.Mode} rendered=${c.Rendered} skipped=${c.Skipped} forced=${c.Forced}`
       + ` waited=${c.WaitedTicks.join('/')} fenceMs=${allFenceMs}avg/${c.FenceMs.Max}max`
       + ` inflight<=${c.MaxInFlight}`
+      // The lock's own block, printed in every mode so one parser reads every arm: `lockN` is the
+      // cadence in vsyncs, `changes` says whether it is still settling, `period`/`vsync` are the two
+      // estimates it was chosen from (and `derived` says whether that vsync was measured or is
+      // still the 60 Hz fallback), and the two skip columns say WHICH gate refused. Under a lock
+      // that fits, `fskip` is ~0 and `lskip` is however many ticks the callback cadence brings early.
+      + ` lockN=${c.LockN} changes=${c.LockChanges} period=${c.PeriodMs} vsync=${c.VsyncMs}`
+      + ` derived=${c.VsyncDerived} lskip=${c.LockSkipped} fskip=${c.FenceSkipped}`
       + ` | last ${Math.round(span)}ms +${c.Rendered - m.Rendered} rendered`
       + ` +${c.Skipped - m.Skipped} skipped +${c.Forced - m.Forced} forced`
       + ` waited +${dWaited} fenceMs ${dFenceMs}avg`,
@@ -1357,6 +1364,12 @@ export class Canvas implements DirtyTracker {
 
     const dt = this._lastTime === 0 ? 0.016 : Math.min((time - this._lastTime) / 1000, 0.033);
     this._lastTime = time;
+
+    // `?tick-pace=lock` derives the display's vsync from the CALLBACK cadence, so it has to see
+    // every tick and not only the ones that want to render — a gate fed only on wants would be
+    // sampling its own output. One subtraction and a ring write, and it returns immediately when
+    // the flag is not armed.
+    this._tickPace.NoteTick(time);
 
     // Advance all springs SYNCHRONOUSLY, in THIS frame, before the render walk
     // below reads their values. JivStyleAnimator springs (Transform.Rotation,
@@ -1493,7 +1506,7 @@ export class Canvas implements DirtyTracker {
     // carries the want forward and the park predicate refuses to sleep while it is set. Unflagged,
     // `_paceOwed` is never set and `Decide` always says render, so this is the same loop it was.
     const wantsRender = this._renderHold > 0 || time < this._shadowSettleUntil || this._paceOwed;
-    const decision = wantsRender ? this._tickPace.Decide(this._paceGate) : 'skip';
+    const decision = wantsRender ? this._tickPace.Decide(this._paceGate, time) : 'skip';
     const shouldRender = wantsRender && decision !== 'skip';
     if (wantsRender) {
       this._paceOwed = !shouldRender;
@@ -1510,8 +1523,13 @@ export class Canvas implements DirtyTracker {
     if (shouldRender) {
       if (this._renderHold > 0) this._renderHold--;
       if (ff) JTrace('jaui:render:start');
-      const tRender = ff ? performance.now() : 0;
+      // Timed for the first-frame marks, and — under `?tick-pace=lock` — for the CPU half of the
+      // period the cadence is chosen from. Two `performance.now()` per RENDERED frame, paid only on
+      // the arm that reads them.
+      const wantsCost = this._tickPace.WantsRenderCost;
+      const tRender = ff || wantsCost ? performance.now() : 0;
       this._render(dt);
+      if (wantsCost) this._tickPace.NoteRenderCost(performance.now() - tRender);
       // The renderer's ledger reset in `BeginFrame` and has just been filled by the walk. Read it
       // here rather than in the HUD block so a parked frame keeps reporting 0 alongside the other
       // counts instead of the last rendered frame's.
@@ -5373,11 +5391,12 @@ export class Canvas implements DirtyTracker {
       if (why !== null) JTrace(`jaui:blur-chains armed=false reason=${why}`);
       else (r as WebGL2Renderer).DiagBlurChains = n;
     }
-    // `?tick-pace` / `?tick-pace=fence` / `?tick-pace=fence:D` / `?tick-pace=N` - MEASUREMENT ONLY,
-    // PIXEL-IDENTICAL BY CONSTRUCTION. Pace the render on the GPU instead of on the tick: render
-    // while the GPU is no more than D frames behind, D defaulting to 1. The whole argument, the
-    // measurement it comes from, why the depth is 1 and not 0, and what a skipped tick does is in
-    // `Core/Tick.Pace.ts`; what belongs here is the gate and its refusals.
+    // `?tick-pace` / `=lock:V` / `=fence` / `=fence:D` / `=N` - MEASUREMENT ONLY, PIXEL-IDENTICAL BY
+    // CONSTRUCTION. The flag's meaning is now the VSYNC LOCK: release a render only on a whole
+    // number of vsyncs, N = ceil(frame cost / vsync), re-chosen slowly with hysteresis - adaptive
+    // AND even, where the fence gate was adaptive and trimodal and the ratio clamp even and fixed.
+    // The whole argument, the measurement it comes from, how the two estimates are taken and what a
+    // skipped tick does is in `Core/Tick.Pace.ts`; what belongs here is the gate and its refusals.
     //
     // NOT PARSED IN `Worker.Boot` the way `?no-depth` is, and that is a reading rather than an
     // oversight: `?no-depth` had to land ahead of `Init` because `Init` BUILDS the scene FBO it
@@ -5391,19 +5410,29 @@ export class Canvas implements DirtyTracker {
       const r = this._renderer;
       const why =
         'Why' in parsed ? parsed.Why
-        // Fence mode polls `PaceInFlight`, which is WebGL2's `clientWaitSync`. The ratio control
-        // needs no GL at all, so it is allowed on any backend.
-        : parsed.Mode.Kind === 'fence' && !(r instanceof WebGL2Renderer) ? 'fence-mode-needs-webgl2-clientwaitsync'
+        // The lock and the fence gate both poll `PaceInFlight`, which is WebGL2's `clientWaitSync`
+        // - the lock reads the GPU's cost off the same fences it guards itself with. The ratio
+        // control needs no GL at all, so it is allowed on any backend.
+        : parsed.Mode.Kind !== 'ratio' && !(r instanceof WebGL2Renderer) ? 'fence-mode-needs-webgl2-clientwaitsync'
         : null;
       if (why !== null) {
         JTrace(`jaui:tick-pace armed=false reason=${why}`);
       } else if (!('Why' in parsed)) {
         this._tickPace = new TickPace(parsed.Mode);
-        if (parsed.Mode.Kind === 'fence') {
+        if (parsed.Mode.Kind !== 'ratio') {
           const gl2 = r as WebGL2Renderer;
           gl2.DiagTickPace = true;
           this._paceGate = gl2;
         }
+        // Every N change, named on the trace with the two estimates that moved it - so an
+        // oscillation is READABLE rather than something a report has to infer from a frame
+        // histogram. A healthy run prints one of these (the seed) and then goes quiet.
+        // One decimal, not `JMs`: that rounds anything over 10 ms to a whole number and would print
+        // a 16.67 ms vsync as "17", which is the one digit that says whether the grid was read as
+        // the display's or as half of it.
+        const ms1 = (v: number): string => (Math.round(v * 10) / 10).toFixed(1);
+        this._tickPace.OnLockChange = (n, periodMs, vsyncMs) => JTrace(
+          `jaui:tick-pace lock N=${n} period=${ms1(periodMs)} vsync=${ms1(vsyncMs)}`);
         JTrace(`jaui:tick-pace armed=${TickPaceText(parsed.Mode)}`);
         // The cumulative ledger, out to a reader that must not reach into the engine - the same
         // channel `__jauiPassProfile` and `__jauiSceneLedger` use, and for the same reason. The
