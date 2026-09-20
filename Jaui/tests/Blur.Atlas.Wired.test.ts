@@ -321,7 +321,7 @@ describe("the consumer map is the member's own map, composed with its slot", () 
   });
 
   it('is AFFINE, so `Jiv.Panel.frag` is untouched', () => {
-    const frag = readFileSync(join(__dirname, '../src/Jiv/Shaders/Jiv.Panel.frag'), 'utf8');
+    const frag = readFileSync(join(__dirname, '../src/Jiv/Shaders/Jiv.Panel.frag'), 'utf8').replace(/\r\n/g, '\n');
     expect(frag).toContain('vec2 backdropUv = uv * u_BackdropXf.xy + u_BackdropXf.zw;');
   });
 });
@@ -474,7 +474,7 @@ describe('the storage, and what happens when it does not fit', () => {
 });
 
 describe('the shipping kernel is textually what it was', () => {
-  const SRC = readFileSync(join(__dirname, '../src/Core/BlurPass.ts'), 'utf8');
+  const SRC = readFileSync(join(__dirname, '../src/Core/BlurPass.ts'), 'utf8').replace(/\r\n/g, '\n');
 
   it("expands TAP to today's `textureLod(u_Tex, p, 0.0)` when no slot is involved", () => {
     // A MACRO and not a function, so the preprocessed source a driver compiles for the unflagged
@@ -501,7 +501,7 @@ describe('the shipping kernel is textually what it was', () => {
 });
 
 describe('the walk, and the flag', () => {
-  const JAUI = readFileSync(join(__dirname, '../src/Core/Jaui.ts'), 'utf8');
+  const JAUI = readFileSync(join(__dirname, '../src/Core/Jaui.ts'), 'utf8').replace(/\r\n/g, '\n');
 
   it('is ON by default, the default arm is `fills`, and the three values are the only ones', () => {
     expect(JAUI).toContain('private _pyramidAtlas: boolean = true;');
@@ -591,7 +591,7 @@ describe('the walk, and the flag', () => {
     // And it names the ARM, not just on/off: with two armed compositions in one binary, a mark
     // that said `on` would leave a cell unable to say which of them it measured.
     expect(JAUI).toContain("jaui:pyramid-atlas armed=${this._pyramidAtlas ? (this._atlasRims ? 'all' : 'fills') : 'off'}");
-    const renderer = readFileSync(join(__dirname, '../src/Core/WebGL2.Renderer.ts'), 'utf8');
+    const renderer = readFileSync(join(__dirname, '../src/Core/WebGL2.Renderer.ts'), 'utf8').replace(/\r\n/g, '\n');
     const init = renderer.slice(renderer.indexOf('  Init = async ('));
     expect(init.slice(0, 4000)).not.toContain('JTrace(`jaui:pyramid-atlas');
   });
@@ -613,7 +613,7 @@ describe('the walk, and the flag', () => {
   });
 
   it('carries the atlas census on the ledger, per frame', () => {
-    const ledger = readFileSync(join(__dirname, '../src/Core/Scene.Ledger.ts'), 'utf8');
+    const ledger = readFileSync(join(__dirname, '../src/Core/Scene.Ledger.ts'), 'utf8').replace(/\r\n/g, '\n');
     for (const f of ['Atlases = 0;', 'AtlasMembers = 0;', 'AtlasSolo = 0;', 'AtlasBytes = 0;']) {
       expect(ledger).toContain(f);
     }
