@@ -172,6 +172,23 @@ const K_MAX = 8;
 export const CHAIN_BUDGET_BYTES = 48 * 1024 * 1024;
 export const MAX_CHAINS = 6;
 
+/** The two ceilings above, per PASS rather than per module, so a measurement flag can raise them
+ *  for the pass it arms and nothing else in the process moves.
+ *
+ *  `?blur-phased` is the reason this exists. A phased frame builds every fill pyramid BEFORE it
+ *  draws any fill, so twenty of them have to be alive at once — and `_useChain` keys a chain on
+ *  its level-0 size, so twenty consecutive builds of one size share ONE chain unless the rotation
+ *  hands out twenty. Twenty 568x436 fill chains at 1.65 MB plus twenty 480x348 rim chains at
+ *  1.11 MB is 40 chains and 55.3 MB, against a shipped `MAX_CHAINS` of 6 and a 48 MB budget. The
+ *  flag hands in its own pair and says so on the trace; every unflagged pass keeps the constants.
+ *  Never mutated: an instance field cannot be forgotten on the way back out. */
+export interface ChainLimits {
+  /** Distinct resident chains this pass will hold before it evicts. */
+  MaxChains: number;
+  /** Total `ChainBytes` this pass will hold before it evicts. */
+  BudgetBytes: number;
+}
+
 /** Upper bound on the storage ONE chain holds: the down chain sums to 4/3 of level 0 and its
  *  mip slots add another 1/3. Used only to bound residency, never to address memory. The
  *  admission check and the chain it admits have to agree on this number, so it is one function
@@ -428,6 +445,12 @@ export class BlurPass {
   /** Builds so far per level-0 size, keyed `WxH`. The round-robin phase; only written when
    *  rotating. */
   private _chainSeq = new Map<string, number>();
+  /** This pass's residency ceilings. `MAX_CHAINS` / `CHAIN_BUDGET_BYTES` unless a caller handed in
+   *  `ChainLimits` — which today is `?blur-phased` and nothing else. Read everywhere the two module
+   *  constants used to be read, so raising them raises the admission check and the eviction loop
+   *  together and the two cannot disagree. */
+  private readonly _maxChains: number;
+  private readonly _budgetBytes: number;
   /** Why the rotation stopped, or null. Set once, traced once. */
   private _chainRefusal: string | null = null;
   private _lastDepth: number = 0;
@@ -473,15 +496,27 @@ export class BlurPass {
 
   /** What the pool holds per level-0 size, what it actually ran at, and why those differ.
    *  Read by the renderer's trace line; the flag's whole claim is that this stays honest. */
-  get ChainCensus(): { Asked: number; Live: number; Resident: number; Sizes: string; Refused: string | null } {
+  get ChainCensus(): {
+    Asked: number; Live: number; Resident: number; Sizes: string; Refused: string | null;
+    Max: number; BudgetMb: number; ResidentMb: number;
+  } {
     const sizes = new Map<string, number>();
-    for (const c of this._chains) sizes.set(`${c.W}x${c.H}`, (sizes.get(`${c.W}x${c.H}`) ?? 0) + 1);
+    let bytes = 0;
+    for (const c of this._chains) {
+      sizes.set(`${c.W}x${c.H}`, (sizes.get(`${c.W}x${c.H}`) ?? 0) + 1);
+      bytes += c.Bytes;
+    }
     return {
       Asked: this._chainCount,
       Live: this._chainsLive,
       Resident: this._chains.length,
       Sizes: [...sizes].map(([k, n]) => `${k}#${n}`).join('+'),
       Refused: this._chainRefusal,
+      // The ceilings this pass actually ran under, and what it actually holds. A raised ceiling
+      // that nobody can read from the trace is a raised ceiling nobody can check.
+      Max: this._maxChains,
+      BudgetMb: Math.round(this._budgetBytes / (1024 * 1024)),
+      ResidentMb: Math.round(bytes / (1024 * 1024) * 10) / 10,
     };
   }
 
@@ -490,10 +525,13 @@ export class BlurPass {
    *  every shipping path) is the pool exactly as it was. Out of range is a throw rather than a
    *  clamp: a measurement flag that quietly measured something else is the failure mode the whole
    *  instrument exists to avoid. */
-  constructor(gl: WebGL2RenderingContext, batch?: ShaderBatch, chains: number = 1) {
-    if (!Number.isInteger(chains) || chains < 1 || chains > MAX_CHAINS) {
-      throw new Error(`[Jaui] BlurPass chains must be an integer in 1..${MAX_CHAINS}, got ${chains}`);
+  constructor(gl: WebGL2RenderingContext, batch?: ShaderBatch, chains: number = 1, limits?: ChainLimits) {
+    const maxChains = limits?.MaxChains ?? MAX_CHAINS;
+    if (!Number.isInteger(chains) || chains < 1 || chains > maxChains) {
+      throw new Error(`[Jaui] BlurPass chains must be an integer in 1..${maxChains}, got ${chains}`);
     }
+    this._maxChains = maxChains;
+    this._budgetBytes = limits?.BudgetBytes ?? CHAIN_BUDGET_BYTES;
     this._chainCount = chains;
     this._chainsLive = chains;
     this._gl = gl;
@@ -951,7 +989,7 @@ export class BlurPass {
    *  could hold — restarting the phase costs a reading nothing, and an unbounded map on a
    *  resizing canvas would outlive the flag. */
   private _nextSlot = (w: number, h: number): number => {
-    if (this._chainSeq.size > MAX_CHAINS * 16) this._chainSeq.clear();
+    if (this._chainSeq.size > this._maxChains * 16) this._chainSeq.clear();
     const key = `${w}x${h}`;
     const seq = this._chainSeq.get(key) ?? 0;
     this._chainSeq.set(key, seq + 1);
@@ -962,10 +1000,10 @@ export class BlurPass {
    *  chains a rotation introduces; slot 0 is the shipped pool and still evicts as it always
    *  did, because a pass with no chain at all cannot draw. */
   private _chainFits = (w: number, h: number): boolean => {
-    if (this._chains.length + 1 > MAX_CHAINS) return false;
+    if (this._chains.length + 1 > this._maxChains) return false;
     let total = ChainBytes(w, h);
     for (const c of this._chains) total += c.Bytes;
-    return total <= CHAIN_BUDGET_BYTES;
+    return total <= this._budgetBytes;
   };
 
   /** Stop rotating, and name it on the trace. A reading taken under a refused N is a reading of
@@ -978,7 +1016,7 @@ export class BlurPass {
     const running = this._chainsLive;
     this._chainsLive = 1;
     JTrace(`jaui:blur-chains tag=${this.TimerTag} armed=${this._chainCount} running=${running}`
-      + ` effective=1 refused=${why} resident=${this._chains.length} max=${MAX_CHAINS}`);
+      + ` effective=1 refused=${why} resident=${this._chains.length} max=${this._maxChains}`);
   };
 
   /** Drop least-recently-used chains until residency is back inside its ceiling. Never drops
@@ -987,7 +1025,7 @@ export class BlurPass {
     let total = 0;
     for (const c of this._chains) total += c.Bytes;
     while (this._chains.length > 1
-           && (this._chains.length > MAX_CHAINS || total > CHAIN_BUDGET_BYTES)) {
+           && (this._chains.length > this._maxChains || total > this._budgetBytes)) {
       let lru: LevelChain | null = null;
       for (const c of this._chains) {
         if (c === keep) continue;
