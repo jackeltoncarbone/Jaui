@@ -128,7 +128,7 @@ void main() {
 // 9 levels: covers LOD 0..8 with dual-filter quality. Progressive blur
 // samples up to LOD ~6 for heavy BackdropFrostBlur settings; extra headroom
 // keeps the smooth mipmap chain populated deeper than we'll typically read.
-const MAX_LEVELS = 9;
+export const MAX_LEVELS = 9;
 
 /** Keep ≥ this much σ in base space for the σ-adaptive downsample (k ≤ σ/4 ≪ σ/2 → invisible). */
 const BASE_SIGMA = 4;
