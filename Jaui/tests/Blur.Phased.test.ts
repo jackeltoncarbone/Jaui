@@ -509,8 +509,8 @@ describe('the pool configuration must survive Init running before the flags', ()
     const body = arrowBody(renderer, '_reconcileBlurPool');
     // Unflagged: nothing assigns the two fields, so the dirty bit is never set — and even if it
     // were, the configuration matches what Init froze and the pass is left exactly alone.
-    expect(body).toContain('if (!this._blurPoolDirty) return;');
-    expect(body).toContain('if (chains === this._blurPoolChains && limits === this._blurPoolLimits) return;');
+    expect(body).toContain('if (!this._blurPoolDirty) return 0;');
+    expect(body).toContain('if (chains === this._blurPoolChains && limits === this._blurPoolLimits) return 0;');
     expect(body).toContain('refused=live-chains');
     // Init records what it froze, which is what makes the comparison possible at all.
     expect(renderer).toContain('this._blurPoolChains = this._diagBlurChains ?? 1;');

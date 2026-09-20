@@ -11,7 +11,10 @@ import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Re
 import { ShaderBatch, ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
-import { BlurPass, PyramidDepth, ChainBytes, type ChainLimits, type AtlasBuildMember, type BackdropRect } from './BlurPass';
+import {
+  BlurPass, PyramidDepth, ChainBytes, BLUR_PROGRAMS_BOOT,
+  type ChainLimits, type AtlasBuildMember, type BackdropRect,
+} from './BlurPass';
 import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
@@ -737,17 +740,19 @@ export class WebGL2Renderer implements Renderer {
    *
    *  A no-op on every unflagged path and on main-thread mode (where `_initDebugFromUrl` runs in the
    *  `Canvas` constructor, ahead of `Start` and therefore ahead of `Init`): the dirty bit clears on
-   *  the first check and the configuration already matches. The rebuilt pass compiles its three
-   *  programs outside the Init batch -- one-time, on the flagged arm only, before the harness's
-   *  measurement window -- which is the price of leaving the cold-boot path exactly as it was. */
-  private _reconcileBlurPool = (): void => {
-    if (!this._blurPoolDirty) return;
+   *  the first check and the configuration already matches. The rebuilt pass compiles its programs
+   *  outside the Init batch -- one-time, on the flagged arm only, before the harness's measurement
+   *  window -- which is the price of leaving the cold-boot path exactly as it was. Its own batch
+   *  carries `BLUR_PROGRAMS_BOOT`, plus `BLUR_PROGRAMS_ATLAS` when an atlas arm is live, and
+   *  returns the count so `ArmFlaggedPrograms` can book it to the flag that caused it. */
+  private _reconcileBlurPool = (): number => {
+    if (!this._blurPoolDirty) return 0;
     // Init has not run yet: it reads the fields itself, which is main-thread mode's whole story.
-    if ((this._blur as BlurPass | undefined) === undefined) return;
+    if ((this._blur as BlurPass | undefined) === undefined) return 0;
     this._blurPoolDirty = false;
     const chains = this._diagBlurChains ?? 1;
     const limits = this._diagChainLimits;
-    if (chains === this._blurPoolChains && limits === this._blurPoolLimits) return;
+    if (chains === this._blurPoolChains && limits === this._blurPoolLimits) return 0;
     const was = this._blur.ChainCensus;
     // Never mid-frame. The ceilings are read by the admission check AND the eviction loop, and a
     // live chain admitted under one pair is not necessarily legal under the other -- so a config
@@ -755,10 +760,18 @@ export class WebGL2Renderer implements Renderer {
     if (was.Resident > 0) {
       JTrace(`jaui:blur-pool refused=live-chains resident=${was.Resident}`
         + ` asked=${chains} running=${this._blurPoolChains}`);
-      return;
+      return 0;
     }
-    this._blur = this._tagBlur(
-      new BlurPass(this._gl, undefined, chains, limits ?? undefined), 'blur');
+    // ONE BATCH for the rebuilt pass's whole program set. The replacement compiles the three
+    // programs every pass has, and -- when an atlas arm is live -- the five that arm binds, in the
+    // same batch: issued together, collected once, which is what `ShaderBatch` exists for. An
+    // unflagged page never reaches this line at all (nothing sets the two pool fields).
+    const batch = new ShaderBatch(this._gl);
+    const pass = this._tagBlur(new BlurPass(this._gl, batch, chains, limits ?? undefined), 'blur');
+    const atlas = this.DiagPyramidAtlas ? pass.EnsureAtlasPrograms(batch) : 0;
+    batch.Resolve();
+    pass.WireLocations();
+    this._blur = pass;
     this._blurPoolChains = chains;
     this._blurPoolLimits = limits;
     this._lastBlur = null;
@@ -766,6 +779,48 @@ export class WebGL2Renderer implements Renderer {
     JTrace(`jaui:blur-pool rearmed chains=${now.Asked} max=${now.Max} budget=${now.BudgetMb}MB`
       + ` was=chains=${was.Asked},max=${was.Max},budget=${was.BudgetMb}MB`
       + ` phased=${this.DiagBlurPhased}`);
+    return BLUR_PROGRAMS_BOOT + atlas;
+  };
+
+  /** How many programs `Init`'s batch carried -- the BOOT SET, and on an unflagged page the whole
+   *  set. The late mark prints it so `n=<boot> +<late>` is readable without a second trace line. */
+  private _bootShaderCount = 0;
+
+  /**
+   * Compile every program a URL ARM needs, and nothing a flagless page would not have compiled.
+   *
+   * WHERE IT LANDS IN THE BOOT SEQUENCE, which is the whole of why this method exists. On the
+   * worker path (`Worker/Worker.Boot.ts`) the order is: construct the renderer, `await Init` (:138)
+   * -- which issues the boot batch and returns WITHOUT collecting it -- then construct the `Canvas`
+   * (:143), whose constructor runs `_initDebugFromUrl`. That parse is the FIRST moment any `?...`
+   * arm is known, and it is still ahead of the first rAF tick: the tick loop is started by `Start`,
+   * which the bridge calls after the constructor returns, and the first `BeginFrame` (where
+   * `_ensureShaders` collects the boot batch) is inside it. So a compile issued from the end of
+   * that parse is before the first frame and after the flags -- the third place, neither boot nor
+   * a frame, that the atlas kernels were missing.
+   *
+   * Programs a page never arms are never compiled. The arms' cost is booked to the arm, and says
+   * so on `jaui:shaders:issued n=<boot> +<late> reason=<flag>`.
+   *
+   * A no-op in main-thread mode, where the parse runs BEFORE Init: `_blur` does not exist yet and
+   * Init reads `DiagPyramidAtlas` itself, so the same programs land in the boot batch there.
+   */
+  ArmFlaggedPrograms = (): void => {
+    if ((this._blur as BlurPass | undefined) === undefined) return;
+    const t0 = performance.now();
+    // The pool flags (`?blur-chains`, and the ceilings `?pyramid-atlas` and `?blur-phased` hand it)
+    // arrive with the same parse, and a rebuilt pass is what compiles the atlas kernels. Reconcile
+    // FIRST so the arming lands on the pass that will actually run, not on one about to be dropped.
+    const pool = this._reconcileBlurPool();
+    const atlas = this.DiagPyramidAtlas ? this._blur.EnsureAtlasPrograms() : 0;
+    const late = pool + atlas;
+    if (late === 0) return;
+    const reason = [
+      pool > 0 ? 'blur-pool' : null,
+      this.DiagPyramidAtlas ? 'pyramid-atlas' : null,
+    ].filter((r) => r !== null).join('+');
+    JTrace(`jaui:shaders:issued n=${this._bootShaderCount} +${late}`
+      + ` reason=${reason} ${JMs(performance.now() - t0)}ms`);
   };
 
   /** The per-surface pool as it ACTUALLY ran: asked / live / resident, plus any refusal. Read into
@@ -808,6 +863,14 @@ export class WebGL2Renderer implements Renderer {
     // A restored context re-runs Init: the adaptive shadow state belonged to the lost one. The
     // batch below rebuilds the program; these clear what the dead context owned.
     this._pendingShaders = null;
+    // The two LAZY blur passes belonged to the dead context as well -- their programs, their level
+    // FBOs and their chains. `_blur` is rebuilt by the batch below; these two are built on first
+    // use, so dropping the references is what rebuilds them, and keeping them is what would hand
+    // the restored context a `useProgram` on a handle from a context that no longer exists.
+    // (Pre-existing: they were never cleared here. Named in `WorkerReports/build-bootcompile.md`.)
+    this._rootBlur = null;
+    this._sharedBlur = null;
+    this._lastBlur = null;
     this._shadowShader = null;
     this._shadowLocs = null;
     this._shadowStateTex = null;
@@ -838,8 +901,11 @@ export class WebGL2Renderer implements Renderer {
     this._paceLastPollAt = 0;
     this._paceLastRetiredAt = 0;
 
-    // ── One compile batch for every program the engine can draw with ──
-    // Thirteen programs stand between a cold tab and its first pixel. Compiled one at a time —
+    // ── One compile batch for every program an UNFLAGGED page can draw with ──
+    // SEVENTEEN programs stand between a cold tab and its first pixel: the six panel variants, the
+    // text, stroke, two SVG, blit, clip-mask, progressive-blur and adaptive-shadow singles, and the
+    // three kernels every `BlurPass` has. The five a `BlurPass` binds only under an atlas arm are
+    // NOT here -- see `ArmFlaggedPrograms` and `BlurPass._atlas`. Compiled one at a time —
     // compile, ask, link, ask — they run the driver's compiler pool one deep and the waits add up
     // in a line; issued together they overlap, and the whole set costs about what its slowest
     // member costs. See `ShaderBatch` for the named source (KHR_parallel_shader_compile). Nothing
@@ -863,6 +929,12 @@ export class WebGL2Renderer implements Renderer {
     this._blurPoolLimits = this._diagChainLimits;
     this._blurPoolDirty = false;
     this._blur = new BlurPass(gl, batch, this._blurPoolChains, this._blurPoolLimits ?? undefined);
+    // MAIN-THREAD ORDER ONLY. `_initDebugFromUrl` runs in the `Canvas` constructor, which is ahead
+    // of `Start` and therefore ahead of Init -- so on that path the atlas flag is already here and
+    // its five kernels join the boot batch for free. On the WORKER path (the app's and the
+    // harness's) this is false however the URL read, and `ArmFlaggedPrograms` issues them after the
+    // parse instead. Either way an unflagged page never issues them. See `BlurPass._atlas`.
+    if (this.DiagPyramidAtlas) this._blur.EnsureAtlasPrograms(batch);
     this._compilePanelShader(batch);
     this._compileTextShader(batch);
     this._compileStrokeShader(batch);
@@ -873,6 +945,9 @@ export class WebGL2Renderer implements Renderer {
     this._compileProgBlurShader(batch);
     this._compileShadowBackdropShader(batch);
     this._pendingShaders = batch;
+    // THE BOOT SET, and on an unflagged page it is the whole set. Remembered so the late mark can
+    // print `n=<boot> +<late>` and a reader can tell a boot compile from a flag's.
+    this._bootShaderCount = batch.Count;
     JTrace(`jaui:shaders:issued n=${batch.Count} ${JMs(batch.IssueMs)}ms`);
 
     this._quad = new QuadGeometry(gl);

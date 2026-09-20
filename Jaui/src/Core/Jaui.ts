@@ -6421,6 +6421,17 @@ export class Canvas implements DirtyTracker {
         }
       }
     }
+    // ── THE PROGRAMS THE ARMS ABOVE NEED, COMPILED HERE ──────────────────────────────────────
+    // LAST in this method, after every flag has been read and every refusal taken, because what a
+    // page compiles is decided by the arms that actually survived -- a `?pyramid-atlas` refused for
+    // `card-composite-builds-from-the-card-target` must not leave five atlas kernels behind it.
+    //
+    // And HERE rather than in `Init`, for the ordering lane restarts2 wrote down: on the worker
+    // path Init is awaited BEFORE this method exists to run, so a flag-gated compile there would be
+    // dead on every arm. This line is the far side of that trap and still ahead of the first tick
+    // (`Start` runs after this constructor returns), so a program an arm needs is compiled off the
+    // frame and a program no arm needs is never compiled at all.
+    if (this._renderer instanceof WebGL2Renderer) this._renderer.ArmFlaggedPrograms();
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────
