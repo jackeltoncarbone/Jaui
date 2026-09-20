@@ -754,6 +754,10 @@ export class WebGL2Renderer implements Renderer {
    *  `0 / 20` under the flag is the unflagged engine wearing the flag's name. */
   get BordersDirect(): number { return this._sceneLedger.BordersDirect; }
   get BordersPyramid(): number { return this._sceneLedger.BordersPyramid; }
+  /** Glass borders on the frame just walked, split by whether the rim read its own FILL's pyramid
+   *  or built a second one. `?border-source=fill`'s effect field; `BordersRimBuilt` first. */
+  get BordersFromFill(): number { return this._sceneLedger.BordersFromFill; }
+  get BordersRimBuilt(): number { return this._sceneLedger.BordersRimBuilt; }
   /** Fragments the frame's direct rims covered: `BorderFragments` the band the gather runs on,
    *  `BorderQuadFragments` the quad the PROGRAM runs on. Estimated off the packed instances at the
    *  draw -- `Border.Direct.EstimateBorderFragments` is the arithmetic and the test. */
@@ -2791,6 +2795,9 @@ export class WebGL2Renderer implements Renderer {
     radius: number, minDepth?: number,
     region?: { x: number; y: number; w: number; h: number },
   ): GpuTextureHandle => {
+    // Bumped FIRST, before the two diagnostics return their stand-ins, so that a handle held across
+    // this call reads as stale on every arm and not only on the arms that reach a `BlurPass`.
+    this._backdropBuildSeq++;
     // The diagnostic hands back the canvas-sized scene, which screen UV addresses directly —
     // so it comes back with no region, and every consumer's transform is the identity.
     //
@@ -2891,6 +2898,7 @@ export class WebGL2Renderer implements Renderer {
     input: GpuTextureHandle, width: number, height: number, radius: number,
     members: readonly AtlasBuildMember[], atlasW: number, atlasH: number,
   ): GpuTextureHandle[] => {
+    this._backdropBuildSeq++;
     if (this.DiagNoBlur) return members.map(() => input);
     if (this.DiagBlurDummy) {
       const dummy = this._blurDummyTexture();
@@ -2945,6 +2953,26 @@ export class WebGL2Renderer implements Renderer {
   private _borderScratchHandle: GpuTextureHandle | null = null;
   private _borderTapOffset = 0.7;
 
+  // -- IS A BACKDROP HANDLE STILL THE TEXTURE IT WAS? -------------------------------------------
+  //
+  // `?border-source=fill` hands a glass rim the handle its own FILL took, and the walk descends the
+  // card's whole subtree between those two points. A `BlurPass` chain is keyed on its level-0 SIZE,
+  // so the very next same-sized build draws over the texels the first handle names, and a rim that
+  // held one across a nested glass child would sample the CHILD's backdrop and call it the card's.
+  //
+  // The guard is a counter, not a per-texture map, and that is a deliberate choice of the failure
+  // it can have. A map keyed on the GL texture is exact and refuses nothing it needs not refuse --
+  // and it is wrong the moment a writer is added that forgets to stamp, which is a WRONG PICTURE
+  // with nothing to notice it. A monotonic counter bumped at every entry point that can write into
+  // a pyramid can only be PESSIMISTIC: a handle taken before any later build reads as stale and
+  // its rim builds its own, exactly as it does today. On the measured scenes nothing builds between
+  // a card's fill and that card's rim, so the pessimism costs zero there and the refusals it does
+  // make are counted and printed rather than assumed away.
+  private _backdropBuildSeq = 0;
+  /** The number of pyramid-writing calls this renderer has served. A handle is still the texture it
+   *  named exactly while this has not moved since the handle was taken. */
+  get BackdropBuildSeq(): number { return this._backdropBuildSeq; }
+
   /** Copy this border's source rect out of the scene, or `null` when the direct path cannot
    *  reproduce this build's kernel and the caller must take today's pyramid.
    *
@@ -2958,6 +2986,7 @@ export class WebGL2Renderer implements Renderer {
     region: BackdropRect, width: number, height: number, radius: number, maxLod: number,
     refraction: number,
   ): GpuTextureHandle | null => {
+    this._backdropBuildSeq++;
     if (!this.DiagBorderDirect) return null;
     if (this.DiagNoBlur || this.DiagBlurDummy || this.DiagBlurSrc !== null) return null;
     if (this._activeCard !== null) return null;
@@ -3015,6 +3044,13 @@ export class WebGL2Renderer implements Renderer {
   /** The rim built a pyramid after all - the direct path refused, or the flag is off. Booked by
    *  the walk, beside `NoteAtlasSolo`, because only the walk knows which branch it took. */
   NoteBorderPyramid = (): void => { this._sceneLedger.NoteBorderPyramid(); };
+
+  /** `?border-source=fill`: the rim read its own FILL's pyramid, or the admission rule refused it
+   *  and the rim built one. Booked by the walk, beside `NoteAtlasSolo` and `NoteBorderPyramid`, for
+   *  the same reason: only the walk knows which branch it took, and a renderer that inferred it from
+   *  a handle would be guessing. */
+  NoteBorderFromFill = (): void => { this._sceneLedger.NoteBorderFromFill(); };
+  NoteBorderRimBuilt = (): void => { this._sceneLedger.NoteBorderRimBuilt(); };
 
   /**
    * Book this rim's fragment counts, off the instance that is about to draw.
@@ -3113,6 +3149,7 @@ export class WebGL2Renderer implements Renderer {
    *  many"). Level 0 is the raw scene, so the same texture doubles as the
    *  no-frost LOD-0 fallback. Restores the scene FBO before returning. */
   BuildSharedBackdrop = (width: number, height: number, maxLod: number): GpuTextureHandle => {
+    this._backdropBuildSeq++;
     const pass = this._sharedBlur
       ?? (this._sharedBlur = this._tagBlur(
         new BlurPass(this._gl, undefined, this.DiagBlurChains ?? 1, this.DiagChainLimits ?? undefined), 'shared'));
