@@ -8,7 +8,7 @@
  */
 
 import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop } from './Renderer';
-import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
+import { ShaderBatch, ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
 import { BlurPass, PyramidDepth, type ChainLimits } from './BlurPass';
@@ -596,6 +596,12 @@ export class WebGL2Renderer implements Renderer {
     this._shadowStateFbo = null;
     this._shadowSlots.clear();
     this._shadowFreeSlots.length = 0;
+    // The restart probe's program and its two 1x1 targets belonged to the dead context too. Dropped
+    // rather than rebuilt here: the probe is built ON FIRST USE (`_ensureRestartProbe`), so a
+    // restore re-arms it at the next `BeginFrame` without Init needing to know the flags at all.
+    this._restartProbeShader = null;
+    this._restartProbeFbos[0] = null;
+    this._restartProbeFbos[1] = null;
     // Same reason, for the GPU timers: every query object belongs to the context that is gone, and
     // polling one of them after a restore asks a dead handle for a result. The rings are dropped
     // and both timers rebuild themselves on the next frame -- `_passArmed` survives, so a restore
@@ -633,7 +639,6 @@ export class WebGL2Renderer implements Renderer {
     this._compileClipMaskShader(batch);
     this._compileProgBlurShader(batch);
     this._compileShadowBackdropShader(batch);
-    this._compileRestartProbeShader(batch);
     this._pendingShaders = batch;
     JTrace(`jaui:shaders:issued n=${batch.Count} ${JMs(batch.IssueMs)}ms`);
 
@@ -669,12 +674,15 @@ export class WebGL2Renderer implements Renderer {
     // No `pixels=WRONG` on this one, and the omission is the claim: the rotation is
     // pixel-identical by construction, so the two-arm `glassshot` diff must read exactly 0.
     if (this.DiagBlurChains !== null) JTrace(`jaui:blur-chains armed=${this.DiagBlurChains}`);
-    // No `pixels=WRONG` on these two either, and for a stronger reason than `?blur-chains`': every
-    // probe draw is alpha 0 through source-over, so the destination is unchanged by ARITHMETIC and
-    // not by an argument about what a pass reads. See `DiagSceneRestarts`.
-    this._initRestartProbeTargets(gl);
-    if (this.DiagSceneRestarts !== null) JTrace(`jaui:scene-restarts armed=${this.DiagSceneRestarts}`);
-    if (this.DiagSmallRestarts !== null) JTrace(`jaui:small-restarts armed=${this.DiagSmallRestarts}`);
+    // `?scene-restarts` / `?small-restarts` ARE NOT READ HERE, and that absence is the whole of
+    // lane restarts2. On the WORKER path -- the one the app and the harness take -- `Worker.Boot`
+    // constructs the renderer and awaits this method BEFORE it constructs the `Canvas` whose
+    // constructor runs `_initDebugFromUrl`, so at this line both flags are still null however the
+    // URL read. Init-time arming therefore builds nothing, the probe has no shader, and every
+    // probe is skipped: `probes=0 skipped=40`, which is exactly what the M4 measured. Their mark
+    // and their resources moved to `_ensureRestartProbe`, on first use, which is the idiom this
+    // file already uses for the per-pass timers (`_beginPassFrame`: "Init may not have run when
+    // the flag was parsed") -- and which is why `?trace` armed in the worker and these did not.
     // The card composite is OFF by default and `?cardcomposite` turns it on, so the mark carries
     // the same contract as the three above it: a reading of the composite walk WITHOUT this line is
     // a reading of the wrong build. No `pixels=WRONG` -- this one is pixel-identical by
@@ -843,7 +851,11 @@ export class WebGL2Renderer implements Renderer {
     this._smallRestartSpread.BeginFrame();
     this._restartStats.Scene = 0;
     this._restartStats.Small = 0;
-    this._restartStats.Skipped = 0;
+    this._restartStats.Unarmed = 0;
+    this._restartStats.NoShader = 0;
+    this._restartStats.NoTarget = 0;
+    this._restartStats.NotScene = 0;
+    this._restartNotSceneKeys = {};
     this._snapOnceTaken = false;
     // Same reason the ledger resets here rather than below: a split frame returns early, and a card
     // target left over from the previous frame would be seeded from a snapshot of a frame that no
@@ -860,6 +872,12 @@ export class WebGL2Renderer implements Renderer {
     // Before the GPU timer starts: collecting the boot batch is CPU spent waiting on the driver,
     // and folding it into the frame's GPU reading would make the first frame lie about itself.
     this._ensureShaders();
+    // Same place and the same reason: building the probe is a compile and two allocations, and
+    // folding them into the GPU timer below would make the first flagged frame lie about itself.
+    // AFTER `_ensureShaders` so the boot batch is already collected, and BEFORE `BeginScenePass`
+    // rebinds the scene -- this leaves the default framebuffer bound and `_boundTarget` is set by
+    // that rebind on the very next call, so no bookkeeping drifts.
+    this._ensureRestartProbe();
     this._clipLastFloatsUploaded = 0;
     // Start a fresh GPU timer query for this frame. If the extension
     // isn't available or query creation fails silently, _timerActive stays
@@ -1672,25 +1690,67 @@ export class WebGL2Renderer implements Renderer {
    *  `SceneEndsByKey`, and the omission is the point: that column is a breakdown of `SceneSwitches`,
    *  which counts SCENE-encoder ends, and the small arm's whole claim is that it adds none. Putting
    *  them there would break the ledger's one invariant (the breakdown sums to the total) for every
-   *  other arm that reads it. They are reported on the trace gate instead. */
-  private _restartStats = { Scene: 0, Small: 0, Skipped: 0 };
+   *  other arm that reads it. They are reported on the trace gate instead.
+   *
+   *  EVERY WAY A PROBE CAN NOT HAPPEN, EACH WITH ITS OWN NAME. The first run of this lane reported
+   *  one `skipped=40` for two different branches and the gate line could not say which fired, so a
+   *  whole M4 pass bought one bit of information. A skip without a name is a void cell that looks
+   *  like a finding; these four are printed on the gate whatever their value, zeros included.
+   *
+   *  `Unarmed`  — a point was taken on an instance where NEITHER flag is set. Cannot happen through
+   *               `Jaui.ts` (the walk drives `_restartRenderer`, which IS `_renderer`), and that is
+   *               precisely why it is counted: it is the "two renderer instances" hypothesis, and
+   *               this counter is the line that would prove or kill it in one read.
+   *  `NoShader` — the flag is set but the probe program does not exist. THE BUG THIS LANE FIXED: on
+   *               the worker path `Init` ran before `_initDebugFromUrl`, so the Init-time compile
+   *               saw two nulls and built nothing.
+   *  `NoTarget` — the program exists but a 1x1 target does not, i.e. the build half-failed.
+   *  `NotScene` — `_boundTarget` was not the scene at the insertion point, broken down by the key
+   *               that was bound instead, because "which target" is the whole of the diagnosis. */
+  private _restartStats = { Scene: 0, Small: 0, Unarmed: 0, NoShader: 0, NoTarget: 0, NotScene: 0 };
+  private _restartNotSceneKeys: Record<string, number> = {};
   private _restartLine = '';
 
-  /** Whether the probe can run at all. Null until `Init` has built it, which it does only when one
-   *  of the two flags is armed — so an unarmed binary compiles the same shaders and allocates the
-   *  same textures it always did. */
-  private _restartArmed = (): boolean =>
-    this._restartProbeShader !== null && this._restartProbeFbos[0] !== null && this._restartProbeFbos[1] !== null;
-
-  /** Armed-only, both halves: an unarmed binary issues the same shader batch and allocates the same
-   *  textures it always did, so the baseline arm of every pair is the shipped boot. */
-  private _compileRestartProbeShader = (batch: ShaderBatch): void => {
+  /** Build the probe ON FIRST USE, from `BeginFrame`, and never from `Init`.
+   *
+   *  THE ORDER THAT VOIDED THE FIRST RUN. `Worker/Worker.Boot.ts` does `new WebGL2Renderer()`,
+   *  `await renderer.Init(m.Canvas)`, and only THEN `new Canvas(...)`, whose constructor runs
+   *  `Jaui._initDebugFromUrl` — where these two flags are parsed. So on the worker path, which is
+   *  the path the app and the perf harness take, every flag Init CONSUMES reads null no matter what
+   *  the URL said. `?no-depth` solved that by being applied in `Worker.Boot` ahead of Init; these
+   *  two cannot, because their refusals interrogate `?cardcomposite`, `?no-blur`, `?blur-dummy` and
+   *  `?blur-first`, which are parsed in `_initDebugFromUrl` and not there. So the build moves to
+   *  where the flag is certainly known — the first frame after arming — exactly as the per-pass
+   *  timers do in `_beginPassFrame`, which is why `?trace` armed in the worker and this did not.
+   *
+   *  ARMED-ONLY, still: an unarmed binary issues the same thirteen-program batch and allocates the
+   *  same textures it always did, so the baseline arm of every pair is the shipped boot. Under the
+   *  flag the compile is one program, once, on the first flagged frame — frame 1 is already the
+   *  odd frame out (the spread pays its whole balance at that frame's end; see `RestartSpread`),
+   *  and the harness reads p50 over hundreds of frames. */
+  private _ensureRestartProbe = (): void => {
+    if (this._restartProbeShader !== null) return;
     if (this.DiagSceneRestarts === null && this.DiagSmallRestarts === null) return;
-    this._restartProbeShader = batch.Add(BLIT_VERT, RESTART_PROBE_FRAG);
+    const gl = this._gl;
+    // One-off compile rather than the boot batch: the batch is issued and collected inside `Init`,
+    // which by then is over. `ShaderCompiler.Compile` is that same batch with one job in it.
+    this._restartProbeShader = ShaderCompiler.Compile(gl, BLIT_VERT, RESTART_PROBE_FRAG);
+    this._initRestartProbeTargets(gl);
+    // The mark says the instrument exists ON THE INSTANCE THAT DRAWS, which is more than the old
+    // Init-time line said: this one cannot print unless a real program and two real targets were
+    // built by the renderer whose `BeginFrame` just ran. No `pixels=WRONG` — every probe draw is
+    // alpha 0 through source-over, so the destination is unchanged by ARITHMETIC and not by an
+    // argument about what a pass reads. See `DiagSceneRestarts`.
+    if (this.DiagSceneRestarts !== null) JTrace(`jaui:scene-restarts armed=${this.DiagSceneRestarts}`);
+    if (this.DiagSmallRestarts !== null) JTrace(`jaui:small-restarts armed=${this.DiagSmallRestarts}`);
   };
 
   private _initRestartProbeTargets = (gl: WebGL2RenderingContext): void => {
     if (this._restartProbeShader === null) return;
+    // The active unit is whatever the last frame's draws left it on; pin it so the scratch bind
+    // below is deterministic. Every draw path sets `activeTexture` before it binds, so nothing
+    // downstream inherits a stale unit from here.
+    gl.activeTexture(gl.TEXTURE0);
     for (let i = 0; i < 2; i++) {
       const tex = gl.createTexture();
       const fbo = gl.createFramebuffer();
@@ -1721,8 +1781,13 @@ export class WebGL2Renderer implements Renderer {
    *  scene and reads exactly what it reads alone. */
   DiagRestartPoint = (): void => {
     const small = this.DiagSmallRestarts;
-    if (small !== null) this._emitRestarts(this._smallRestartSpread.At(small), false);
     const scene = this.DiagSceneRestarts;
+    // A point taken on an instance neither flag reached. The walk only calls this through
+    // `_restartRenderer`, which is the same object it draws with, so this is unreachable through
+    // `Jaui.ts` — and it is counted anyway because "two renderer instances" was the standing
+    // hypothesis for `probes=0` and a counter settles it where an argument did not.
+    if (small === null && scene === null) { this._restartStats.Unarmed++; return; }
+    if (small !== null) this._emitRestarts(this._smallRestartSpread.At(small), false);
     if (scene !== null) this._emitRestarts(this._sceneRestartSpread.At(scene), true);
   };
 
@@ -1734,7 +1799,10 @@ export class WebGL2Renderer implements Renderer {
     if (small !== null) this._emitRestarts(this._smallRestartSpread.FrameEnd(small), false);
     const scene = this.DiagSceneRestarts;
     if (scene !== null) this._emitRestarts(this._sceneRestartSpread.FrameEnd(scene), true);
-    if ((small !== null || scene !== null) && JauiTracing()) this._restartGate();
+    // `Unarmed` opens the gate too: a renderer the flags never reached would otherwise take forty
+    // points and print nothing at all, which is the silence this lane was sent to end.
+    const armed = small !== null || scene !== null;
+    if ((armed || this._restartStats.Unarmed > 0) && JauiTracing()) this._restartGate();
   };
 
   private _emitRestarts = (count: number, intoScene: boolean): void => {
@@ -1743,13 +1811,24 @@ export class WebGL2Renderer implements Renderer {
 
   private _restartProbe = (intoScene: boolean): void => {
     const gl = this._gl;
+    // THREE SKIPS, THREE NAMES, ONE PER LINE. They are not interchangeable: `NoShader` is a boot
+    // ORDER fault (the flag arrived after the build), `NoTarget` is a failed allocation, and
+    // `NotScene` is the walk standing somewhere the probe must not draw. The first run of this
+    // lane reported all of them as one `skipped=40` and could not tell them apart.
     const shader = this._restartProbeShader;
-    if (!this._restartArmed() || shader === null) { this._restartStats.Skipped++; return; }
+    if (shader === null) { this._restartStats.NoShader++; return; }
+    if (this._restartProbeFbos[0] === null || this._restartProbeFbos[1] === null) { this._restartStats.NoTarget++; return; }
     // A card composite would put these draws in the CARD target, where `_noteSceneDraw` marks the
     // card dirty and changes which source a later backdrop read takes -- which is a pixel change,
     // not an encoder count. The flag refuses `?cardcomposite` at parse time; this is the same
-    // refusal at the only instant that can still see it, counted rather than silent.
-    if (this._boundTarget !== 'scene') { this._restartStats.Skipped++; return; }
+    // refusal at the only instant that can still see it, counted rather than silent, and carrying
+    // the key that was bound instead so the trace names the target rather than just the refusal.
+    if (this._boundTarget !== 'scene') {
+      this._restartStats.NotScene++;
+      const k = this._boundTarget;
+      this._restartNotSceneKeys[k] = (this._restartNotSceneKeys[k] ?? 0) + 1;
+      return;
+    }
     // The scissor is the walk's, set for whatever surface it is mid-way through, and a probe draw
     // it happens to exclude would be culled -- no encoder, no restart, and a reading of the
     // baseline under the flag's name. Drop it for the probe and put it back, the same idiom the
@@ -1799,10 +1878,13 @@ export class WebGL2Renderer implements Renderer {
   };
 
   /** The flags' gate, on the trace channel, printed when the SHAPE changes rather than every frame.
-   *  The line a reading depends on: `armed=40 emitted=40 points=40 switches=80` is the arm that was
-   *  actually taken, and `skipped` above zero is a frame where the probe could not run and the cell
-   *  is void. `?small-restarts`'s encoders are reported HERE and not in `endsByKey`, for the reason
-   *  on `_restartStats`.
+   *  The line a reading depends on: `armed=40 emitted=40 points=40 probes=40 switches=80` is the
+   *  arm that was actually taken, and ANY of the four `skipped*` columns above zero is a frame
+   *  where the probe could not run and the cell is void. Each of the four names a different fault
+   *  and they are printed whatever their value — see `_restartStats`, and read `probes` against
+   *  `emitted`: equal is the whole gate, and `emitted=40 probes=0` is what the first run reported.
+   *  `?small-restarts`'s encoders are reported HERE and not in `endsByKey`, for the reason on
+   *  `_restartStats`.
    *
    *  `switches` and `endsByKey` are also how the SMALL arm proves its own precondition, so no
    *  separate assertion is needed: its probe runs at an instant when the scene encoder has already
@@ -1822,9 +1904,20 @@ export class WebGL2Renderer implements Renderer {
         + ` emitted=${this._smallRestartSpread.Emitted} points=${this._smallRestartSpread.Points}`
         + ` encoders=${this._restartStats.Small}`;
     }
+    // Neither flag on this instance, yet the walk took points on it: the renderer that DRAWS is not
+    // the renderer the URL reached. Named in full rather than left as a bare counter, because a
+    // reader who sees this line is looking at a different bug from every other shape here.
+    if (line === '') line = 'jaui:restarts armed=none instance=not-the-one-the-flag-reached';
+    const s = this._restartStats;
+    const notSceneKeys = Object.keys(this._restartNotSceneKeys).sort()
+      .map((k) => `${k}:${this._restartNotSceneKeys[k]}`).join(',');
     line += ` switches=${l.Switches} restarts=${l.Restarts} reads=${l.Reads}`
       + ` endsByKey=${Object.keys(l.EndsByKey).sort().map((k) => `${k}:${l.EndsByKey[k]}`).join(',')}`
-      + (this._restartStats.Skipped === 0 ? '' : ` skipped=${this._restartStats.Skipped}`);
+      // ALWAYS PRINTED, ZEROS INCLUDED. `skipped*=0` across the four is half of what makes a cell
+      // readable, and the absence of a line is not the same statement as a zero on one.
+      + ` skippedUnarmed=${s.Unarmed} skippedNoShader=${s.NoShader}`
+      + ` skippedNoTarget=${s.NoTarget} skippedNotScene=${s.NotScene}`
+      + (notSceneKeys === '' ? '' : ` notSceneKeys=${notSceneKeys}`);
     if (line === this._restartLine) return;
     this._restartLine = line;
     JTrace(line);

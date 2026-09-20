@@ -230,7 +230,8 @@ describe('the insertion points and the draw budget', () => {
     expect(RENDERER).toContain("const RESTART_PROBE_KEY = 'restart-probe';");
     const probe = member(RENDERER, '_restartProbe');
     expect(probe).toContain('this._tgt(RESTART_PROBE_KEY);');
-    expect(probe).toContain("if (this._boundTarget !== 'scene') { this._restartStats.Skipped++; return; }");
+    expect(probe).toContain("if (this._boundTarget !== 'scene') {");
+    expect(probe).toContain('this._restartStats.NotScene++;');
   });
 });
 
@@ -260,17 +261,200 @@ describe('the flag gate', () => {
     expect(JAUI.indexOf('this._blurFirst = true;')).toBeLessThan(JAUI.indexOf("for (const flag of ['scene-restarts'"));
   });
 
-  it('marks itself armed at init, with no `pixels=WRONG` — these two are identical by construction', () => {
-    expect(RENDERER).toContain('JTrace(`jaui:scene-restarts armed=${this.DiagSceneRestarts}`)');
-    expect(RENDERER).toContain('JTrace(`jaui:small-restarts armed=${this.DiagSmallRestarts}`)');
+  it('marks itself armed where the probe is BUILT, with no `pixels=WRONG` — identical by construction', () => {
+    // Not at init any more, and that is the fix: see section 5. The mark rides the build, so it
+    // cannot print unless a real program and two real targets exist on the instance that draws.
+    const ensure = member(RENDERER, '_ensureRestartProbe');
+    expect(ensure).toContain('JTrace(`jaui:scene-restarts armed=${this.DiagSceneRestarts}`)');
+    expect(ensure).toContain('JTrace(`jaui:small-restarts armed=${this.DiagSmallRestarts}`)');
     const marks = RENDERER.match(/jaui:(scene|small)-restarts armed=\$\{this\.Diag\w+\}`\);/g) ?? [];
     expect(marks.every((m) => !m.includes('pixels=WRONG'))).toBe(true);
   });
 
   it('builds nothing at all when neither flag is armed', () => {
-    const compile = member(RENDERER, '_compileRestartProbeShader');
-    expect(compile).toContain('if (this.DiagSceneRestarts === null && this.DiagSmallRestarts === null) return;');
+    const ensure = member(RENDERER, '_ensureRestartProbe');
+    expect(ensure).toContain('if (this.DiagSceneRestarts === null && this.DiagSmallRestarts === null) return;');
     const init = member(RENDERER, '_initRestartProbeTargets');
     expect(init).toContain('if (this._restartProbeShader === null) return;');
+  });
+});
+
+// ── 5. The boot order, which voided the first run ─────────────────────────────────────────────
+
+/**
+ * `probes=0 skipped=40` on all five M4 arms, with the flag armed and all forty insertion points
+ * reached. The cause is an ORDER, and it is visible only across three files:
+ *
+ *   `Worker/Worker.Boot.ts`   `new WebGL2Renderer()` -> `await renderer.Init(...)` -> `new Canvas(...)`
+ *   `Core/Jaui.ts`            the `Canvas` constructor runs `_initDebugFromUrl`, which parses the flags
+ *   `Core/WebGL2.Renderer.ts` `Init` used to be where the probe was built
+ *
+ * So on the worker path — the path the app and the perf harness take — the build ran before the
+ * flag existed, saw two nulls, built nothing, and every probe was skipped. The main-thread path
+ * (`Canvas` constructed first, `Init` at `Start`) has the opposite order, which is why source
+ * review and a main-thread eye both found the code perfectly correct.
+ *
+ * These tests take the two orders out of the real files and run a model of the arming lifecycle
+ * whose ONE parameter — where the build happens — is read out of the renderer. Against the shipped
+ * source both orders arm; against an `Init`-time build the worker order reports zero probes, which
+ * is the M4's reading reproduced from source in a millisecond.
+ */
+
+const WORKER_BOOT = src('Worker', 'Worker.Boot.ts');
+
+/** Comment text can name anything; only executable lines are evidence. */
+const stripComments = (s: string): string =>
+  s.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+
+/** Where the probe's program and targets are built, read from the renderer rather than assumed. */
+type BuildSite = 'init' | 'begin-frame' | 'nowhere';
+const buildSite = (): BuildSite => {
+  const BUILD = /ShaderCompiler\.Compile\(gl, BLIT_VERT, RESTART_PROBE_FRAG\)|batch\.Add\(BLIT_VERT, RESTART_PROBE_FRAG\)/;
+  const init = stripComments(member(RENDERER, 'Init'));
+  if (BUILD.test(init) || /_compileRestartProbeShader\(|_initRestartProbeTargets\(/.test(init)) return 'init';
+  const ensure = stripComments(member(RENDERER, '_ensureRestartProbe'));
+  const begin = stripComments(member(RENDERER, 'BeginFrame'));
+  if (BUILD.test(ensure) && begin.includes('this._ensureRestartProbe();')) return 'begin-frame';
+  return 'nowhere';
+};
+
+/** The arming lifecycle and nothing else: a flag, a probe that may or may not exist, and insertion
+ *  points that either draw or name why they did not. The skip name is the renderer's. */
+class ArmingModel {
+  constructor(private readonly Site: BuildSite) {}
+  DiagSceneRestarts: number | null = null;
+  DiagSmallRestarts: number | null = null;
+  private _probe: object | null = null;
+  Probes = 0;
+  SkippedNoShader = 0;
+  Init = (): void => { if (this.Site === 'init') this._build(); };
+  BeginFrame = (): void => { if (this.Site === 'begin-frame') this._build(); };
+  Point = (): void => {
+    if (this._probe === null) { this.SkippedNoShader++; return; }
+    this.Probes++;
+  };
+  private _build = (): void => {
+    if (this.DiagSceneRestarts === null && this.DiagSmallRestarts === null) return;
+    this._probe = {};
+  };
+}
+
+/** `Jaui._initDebugFromUrl`'s parse, to the letter: `?scene-restarts=N` sets the field. */
+const armFromUrl = (r: ArmingModel, url: string): void => {
+  const params = new URLSearchParams(url);
+  for (const flag of ['scene-restarts', 'small-restarts'] as const) {
+    const raw = params.get(flag);
+    if (raw === null) continue;
+    const n = Number(raw);
+    if (raw.trim() === '' || !Number.isInteger(n) || n < 1) continue;
+    if (flag === 'scene-restarts') r.DiagSceneRestarts = n;
+    else r.DiagSmallRestarts = n;
+  }
+};
+
+/** One frame of a walk with two pyramid builds: `BeginFrame`, then the two insertion points. */
+const runOneFrame = (r: ArmingModel): void => { r.BeginFrame(); r.Point(); r.Point(); };
+
+describe('the boot order the flag has to survive', () => {
+  it('the WORKER boots Init BEFORE the Canvas whose constructor parses the flag', () => {
+    const boot = stripComments(WORKER_BOOT);
+    const init = boot.indexOf('await renderer.Init(m.Canvas);');
+    const canvas = boot.indexOf('const canvas = new Canvas(');
+    expect(init, 'worker Init call').toBeGreaterThan(-1);
+    expect(canvas, 'worker Canvas construction').toBeGreaterThan(-1);
+    expect(init).toBeLessThan(canvas);
+    // And the flag is parsed inside that Canvas constructor, not before it.
+    const ctor = JAUI.slice(JAUI.indexOf('constructor(canvas: HTMLCanvasElement, renderer: Renderer'));
+    expect(ctor.slice(0, ctor.indexOf('\n  }')).includes('this._initDebugFromUrl();')).toBe(true);
+    expect(JAUI.indexOf("for (const flag of ['scene-restarts'"))
+      .toBeGreaterThan(JAUI.indexOf('private _initDebugFromUrl = ()'));
+  });
+
+  it('arms on the WORKER order — Init, then the flag, then the first frame', () => {
+    const r = new ArmingModel(buildSite());
+    r.Init();
+    armFromUrl(r, '?scene-restarts=40');
+    runOneFrame(r);
+    expect(r.SkippedNoShader, 'the probe did not exist at the insertion points').toBe(0);
+    expect(r.Probes).toBeGreaterThan(0);
+  });
+
+  it('arms on the MAIN-THREAD order too — the flag, then Init, then the first frame', () => {
+    const r = new ArmingModel(buildSite());
+    armFromUrl(r, '?small-restarts=40');
+    r.Init();
+    runOneFrame(r);
+    expect(r.SkippedNoShader).toBe(0);
+    expect(r.Probes).toBeGreaterThan(0);
+  });
+
+  it('is not vacuous: an Init-time build reproduces the M4 reading on the worker order', () => {
+    // The shipped source scores 2/2 above. This is the same model with the OLD build site, and it
+    // is the first run's cell: every point reached, every probe skipped, nothing drawn.
+    const r = new ArmingModel('init');
+    r.Init();
+    armFromUrl(r, '?scene-restarts=40');
+    runOneFrame(r);
+    expect(r.Probes).toBe(0);
+    expect(r.SkippedNoShader).toBe(2);
+  });
+
+  it('builds somewhere — "nowhere" is a failure, not a pass', () => {
+    expect(buildSite()).toBe('begin-frame');
+  });
+
+  it('a context restore drops the probe so the next frame rebuilds it against the live context', () => {
+    const init = stripComments(member(RENDERER, 'Init'));
+    expect(init).toContain('this._restartProbeShader = null;');
+    expect(init).toContain('this._restartProbeFbos[0] = null;');
+    expect(init).toContain('this._restartProbeFbos[1] = null;');
+  });
+
+  it('the armed binary now issues exactly the shipped boot batch, same as the unarmed one', () => {
+    // The probe is compiled one-off, outside the batch, so `jaui:shaders:issued n=` no longer
+    // moves under the flag — the two arms of every pair share one boot.
+    const init = stripComments(member(RENDERER, 'Init'));
+    expect(init).not.toContain('RESTART_PROBE_FRAG');
+    const ensure = member(RENDERER, '_ensureRestartProbe');
+    expect(ensure).toContain('ShaderCompiler.Compile(gl, BLIT_VERT, RESTART_PROBE_FRAG)');
+  });
+});
+
+// ── 6. Every skip has a name ──────────────────────────────────────────────────────────────────
+
+describe('the skip counters', () => {
+  it('split into four branches, each incrementing its own counter', () => {
+    const probe = member(RENDERER, '_restartProbe');
+    expect(probe).toContain('this._restartStats.NoShader++;');
+    expect(probe).toContain('this._restartStats.NoTarget++;');
+    expect(probe).toContain('this._restartStats.NotScene++;');
+    // The fourth is upstream of the probe: a point taken on an instance neither flag reached.
+    const point = member(RENDERER, 'DiagRestartPoint');
+    expect(point).toContain('this._restartStats.Unarmed++;');
+    // And no branch may share a counter with another — that is the whole of this lane's step 1.
+    expect(RENDERER).not.toContain('this._restartStats.Skipped++');
+  });
+
+  it('are printed on the gate line whatever their value, zeros included', () => {
+    const gate = member(RENDERER, '_restartGate');
+    for (const name of ['skippedUnarmed', 'skippedNoShader', 'skippedNoTarget', 'skippedNotScene']) {
+      expect(gate).toContain(name);
+    }
+    // The target that was bound instead is named, because "which target" IS the diagnosis.
+    expect(gate).toContain('notSceneKeys=');
+  });
+
+  it('let an instance the flag never reached print a line, naming itself', () => {
+    const end = member(RENDERER, 'DiagRestartFrameEnd');
+    expect(end).toContain('this._restartStats.Unarmed > 0');
+    expect(member(RENDERER, '_restartGate')).toContain('instance=not-the-one-the-flag-reached');
+  });
+
+  it('reset at the top of the frame they report', () => {
+    const begin = member(RENDERER, 'BeginFrame');
+    for (const f of ['Scene', 'Small', 'Unarmed', 'NoShader', 'NoTarget', 'NotScene']) {
+      expect(begin).toContain(`this._restartStats.${f} = 0;`);
+    }
+    expect(begin).toContain('this._restartNotSceneKeys = {};');
   });
 });
