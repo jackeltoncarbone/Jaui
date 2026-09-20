@@ -174,7 +174,7 @@ describe('?blur-first — ONE piece of arithmetic, not two copies of it', () => 
     // and this assertion follows the calls rather than the name, because what it protects is that
     // a pre-pass build is the walk's two calls and nothing else, wherever they are written.
     const issue = arrowBody(jaui, '_prepassIssue');
-    expect(issue).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region)');
+    expect(issue).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region,');
     expect(issue).toContain('r.GenerateBlurMipmap(plan.MaxLod)');
     // And the decision in front of them is a decision and nothing more: record, or issue.
     const build = arrowBody(jaui, '_blurFirstBuild');

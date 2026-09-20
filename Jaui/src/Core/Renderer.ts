@@ -354,7 +354,15 @@ export interface Renderer {
    *  device px with y=0 at the TOP. The pyramid is ALLOCATED to it: level 0 comes back
    *  `region`-sized, at the same device density, and the returned handle carries the
    *  `BackdropRegion` that maps screen UV into it. Callers pass their surface's footprint
-   *  plus its sample margin. Omit it for a pyramid that covers the whole input. */
+   *  plus its sample margin. Omit it for a pyramid that covers the whole input.
+   *
+   *  `presample` (optional, `?glass-presample`) says THIS surface may re-base its pyramid onto a
+   *  source pre-downsampled by the sigma-adaptive factor even though its region is under the
+   *  15%-of-canvas gate. It is a request, not an instruction: the backend ANDs it with its own
+   *  arm and with an admission rule (see `PresamplePlanFor` in `Core/BlurPass.ts`), and a backend
+   *  that does not implement the lever ignores it. The caller's own clause, and the only one the
+   *  pass cannot ask for itself, is `MaxLod == 0` -- a half-resolution level 0 shifts every mip
+   *  built on it by one LOD. Omit it and nothing changes. */
   ComputeBlur(
     input: GpuTextureHandle,
     width: number,
@@ -362,6 +370,7 @@ export interface Renderer {
     radius: number,
     minDepth?: number,
     region?: { x: number; y: number; w: number; h: number },
+    presample?: boolean,
   ): GpuTextureHandle;
 
   /** Generate mipmaps on the blur output so glass + progressive blur can

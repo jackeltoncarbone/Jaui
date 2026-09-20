@@ -27,7 +27,7 @@ import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, 
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
 // copy of the rule would be a count that can silently disagree with the pass it is counting.
 import {
-  BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, MAX_CHAINS, CHAIN_BUDGET_BYTES,
+  BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, MAX_CHAINS, CHAIN_BUDGET_BYTES,
   type AtlasBuildMember,
 } from './BlurPass';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
@@ -190,6 +190,21 @@ export interface EmptyPanelCensus {
   Panels: number;
   /** Device pixels of those quads, clipped to the drawing buffer. THE effect field. */
   Px: number;
+  /** Empty unless a flag refused the lever outright, in which case it names which. */
+  Refused: string;
+}
+
+/** `?glass-presample`, per rendered frame. Read `Builds` first: the arm can only be judged on
+ *  whether the plan actually admitted anything, and 0 under the flag is the unflagged engine. */
+export interface GlassPresampleCensus {
+  Armed: boolean;
+  /** Builds this frame that re-based onto a pre-downsampled source. THE effect field. */
+  Builds: number;
+  /** The `k` the last of them took. 1 when nothing re-based. */
+  K: number;
+  /** `EndsByKey.blur` beside it -- the control invariant. The arm removes no BUILD, so this must
+   *  read exactly what the off arm reads; a number that moved means something else moved too. */
+  Blur: number;
   /** Empty unless a flag refused the lever outright, in which case it names which. */
   Refused: string;
 }
@@ -698,6 +713,34 @@ export class Canvas implements DirtyTracker {
   private _borderSourceStats = {
     FromFill: 0, RimBuilt: 0, NoFill: 0, Stale: 0, Region: 0, Sigma: 0, Depth: 0, Snap: 0,
   };
+  /** `?glass-presample` -- THE PER-SURFACE PYRAMID BUILT FROM A HALF-RESOLUTION BASE.
+   *
+   *  The engine already pre-downsamples a backdrop by `k ~ sigma / BASE_SIGMA` before running
+   *  the pyramid on it -- the band-limit argument: a Gaussian of sigma is band-limited far below
+   *  the Nyquist of a `sigma/4` grid, so the pre-downsample discards nothing the blur would have
+   *  kept -- but `BaseDownsampleFactor` gates it on the region being at least 15% of the canvas.
+   *  A `glass-grid` card's fill region is 568x436 of 2560x1600, 6%, so it is pinned to k=1 while
+   *  its own sigma (8 device px at dpr 2, against `BASE_SIGMA` 4) earns k=2.
+   *
+   *  Under `on` the gate is lifted for per-surface glass builds with `MaxLod == 0` -- the fills
+   *  and the rims; the shared backdrop and pblur pass the gate already and are untouched -- and
+   *  each pyramid runs over a QUARTER of the texels from a base the pre-pass halves. It is the
+   *  only lever the phase has left on the pyramids: passes, encoders and draws have each been
+   *  removed and measured and the cost did not follow any of them (the atlas, the instanced
+   *  draws, the direct-gather border), so what is left is the SAMPLING WORK, and the way to
+   *  spend less of it is fewer texels.
+   *
+   *  DEFAULT OFF, and the reason is a picture: see `PresamplePlanFor` in `Core/BlurPass.ts`. The
+   *  arm's first three hops are the unflagged arm's own first three hops -- same program, same
+   *  rect, same tap offset, bit for bit -- and the whole difference is that level 0 comes back at
+   *  half resolution, so the final 2x reconstruction is the consumer's hardware bilinear instead
+   *  of the pyramid's 8-tap tent hop. The lane does not decide that; Jack does, with images. */
+  private _glassPresample: boolean = false;
+  /** The last `jaui:glass-presample` gate line, printed on a SHAPE change rather than per frame. */
+  private _glassPresampleLastLine = '';
+  /** Empty unless a flag refused the arm outright, in which case it names which -- so a control
+   *  shot can be told from an arm that quietly disarmed. Published on the census. */
+  private _glassPresampleRefused = '';
   /** `?emptypanels` -- A PANEL THAT PAINTS NOTHING IS NOT PUSHED. Default ON.
    *
    *  A fully transparent background with no painted border and no shadow shades its whole quad to
@@ -2590,7 +2633,8 @@ export class Canvas implements DirtyTracker {
             } else {
               if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }
               if (this._borderDirect) (r as WebGL2Renderer).NoteBorderPyramid();
-              lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
+              lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,
+                this._mayPresample(plan));
               r.GenerateBlurMipmap(plan.MaxLod);
               r.RebindSceneTarget();
               // `?scene-restarts` / `?small-restarts`: the RIM build's insertion point, taken HERE
@@ -3109,7 +3153,8 @@ export class Canvas implements DirtyTracker {
           } else {
             if (this._blurFirst || this._phasedWalk) this._blurFirstStats.Missed++;
             const _tBlur = performance.now();
-            lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
+            lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,
+              this._mayPresample(plan));
             const _tMip = performance.now();
             this._opMs.Blur += _tMip - _tBlur;
             r.GenerateBlurMipmap(plan.MaxLod);
@@ -3746,6 +3791,22 @@ export class Canvas implements DirtyTracker {
       const line = `jaui:emptypanels panels=${this._emptyPanelStats.Panels}`
         + ` px=${(this._emptyPanelStats.Px / 1e6).toFixed(1)}M`;
       if (line !== this._emptyPanelLastLine) { this._emptyPanelLastLine = line; JTrace(line); }
+    }
+
+    // `?glass-presample`'s gate, on the same terms: a SHAPE change, not a frame.
+    //
+    // `builds=` FIRST, and `k=` beside it. `builds=0` under the flag is the unflagged engine
+    // wearing the flag's name -- the plan refused every surface -- and it is the reading that a
+    // timing cell would otherwise pass by having done nothing. `blur=` is the control invariant:
+    // the arm removes no BUILD, so it must read exactly what the off arm reads (40 on
+    // `glass-grid`); a number that moved means this arm is measuring something else as well.
+    if (this._glassPresample && !this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+      const gl2 = this._renderer;
+      const line = `jaui:glass-presample builds=${gl2.PresampledBuilds} k=${gl2.LastPresampleK}`
+        + ` blur=${gl2.SceneEndsByKey['blur'] ?? 0} switches=${gl2.SceneSwitches}`
+        + ` reads=${gl2.SceneReads} restarts=${gl2.SceneRestarts}`
+        + ' pixels=DIFFERENT';
+      if (line !== this._glassPresampleLastLine) { this._glassPresampleLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -4692,14 +4753,14 @@ export class Canvas implements DirtyTracker {
     for (const c of collected) {
       // The admission rule is the PLANNER's, not a private copy here: a walk with its own idea
       // of what an atlas can hold is a walk that can hand over a member the atlas cannot build.
-      if (!AtlasAdmitsMember(c.Plan, w, h)) { a.Refused++; solo.push(c); continue; }
+      if (!AtlasAdmitsMember(c.Plan, w, h, this._glassPresample)) { a.Refused++; solo.push(c); continue; }
       const cls = byRadius.get(c.Plan.Radius);
       if (cls === undefined) byRadius.set(c.Plan.Radius, [c]); else cls.push(c);
     }
     for (const [radius, cls] of byRadius) {
       const plan = cls.length < 2 ? null : PlanBackdropAtlas(
         cls.map((c) => ({ Region: c.Plan.Region, Paint: c.Plan.Region })), w, h, radius,
-        { IgnoreSeparation: true, Limits: ATLAS_LIMITS_WIRED, MaxLod: 0 },
+        { IgnoreSeparation: true, Limits: ATLAS_LIMITS_WIRED, MaxLod: 0, Presample: this._glassPresample },
       );
       // `K !== 1` is the pre-downsample ping-pong, which is NOT slotted and which this lane did
       // not design. Refused loudly and wholesale rather than slotting only the pyramid, which
@@ -5107,6 +5168,21 @@ export class Canvas implements DirtyTracker {
     return this._prepassIssue(into, node, plan, w, h);
   };
 
+  /** `?glass-presample`: may THIS surface's build re-base onto a pre-downsampled source?
+   *
+   *  One clause, and it is the one `BlurPass` cannot ask for itself. A re-based build returns a
+   *  level 0 at `1/k` of device resolution, so every mip `GenerateBlurMipmap` then builds on it
+   *  stands for a LOD one step deeper than the consumer's `baseFrostLod` subtraction assumes --
+   *  a real change of picture for a mip consumer, not the sub-level reconstruction difference
+   *  the flag is about. `MaxLod == 0` is the case where `GenerateBlurMipmap` only ever calls
+   *  `DisableMipmap` and the consumer's `textureLod` resolves to level 0 whatever LOD it works
+   *  out, which is the same clause `PlanBorderDirect` and `AtlasAdmitsMember` open with.
+   *
+   *  Everything else -- the sigma, the region, the depth's room for the factor -- is
+   *  `PresamplePlanFor`'s, asked inside the pass so there is one answer and not two. */
+  private _mayPresample = (plan: GlassBlurPlan): boolean =>
+    this._glassPresample && plan.MaxLod === 0;
+
   /** Issue ONE per-surface build: the walk's two calls, and the pool bookkeeping. This is the
    *  path `?blur-first`, `?blur-phased` and every atlas REFUSAL take, and it is the engine as it
    *  ships -- which is why a refusal is safe rather than a degradation. */
@@ -5116,7 +5192,8 @@ export class Canvas implements DirtyTracker {
     const r = this._renderer;
     const st = this._blurFirstStats;
     const t0 = performance.now();
-    const handle = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region);
+    const handle = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region,
+      this._mayPresample(plan));
     const t1 = performance.now();
     r.GenerateBlurMipmap(plan.MaxLod);
     this._opMs.Blur += t1 - t0;
@@ -5129,9 +5206,17 @@ export class Canvas implements DirtyTracker {
     // The pool's own chain key, from the pool's own functions. `_useChain` keys on the resolved
     // level-0 size, so this is the number that says how many sets of level textures forty builds
     // resolve to — and therefore how many of them can be held at once.
-    const k = BaseDownsampleFactor(plan.Radius, w, h, plan.Region);
+    // `?glass-presample` re-bases this build, so the pool's key is the PRE-DOWNSAMPLED size and
+    // this arithmetic has to take the same branch `Blur` took or `_blurFirstKeys` names chains
+    // that were never asked for. The phase is the same either way -- `k * 2^(D - log2 k)` is
+    // `2^D` -- so only the rect's DIVISOR moves, which is exactly what the pool keys on.
+    const presampled = this._mayPresample(plan)
+      ? PresamplePlanFor(plan.Radius, w, h, plan.Region, 0) : null;
+    const k = presampled !== null
+      ? presampled.K : BaseDownsampleFactor(plan.Radius, w, h, plan.Region);
     if (k > 1) st.Coarse++;
-    const depth = plan.Radius > 0 ? PyramidDepth(plan.Radius / k, 0) : 0;
+    const depth = plan.Radius > 0
+      ? (presampled !== null ? presampled.Depth : PyramidDepth(plan.Radius / k, 0)) : 0;
     const rect = ResolveRegionRect(plan.Region, w, h, k * (1 << depth));
     this._blurFirstKeys.add(`${rect.W}x${rect.H}`);
     return true;
@@ -7156,6 +7241,57 @@ export class Canvas implements DirtyTracker {
       + ` default=${params.has('border-source') ? 'false' : 'true'}`
       + (this._borderSourceFill ? ' pixels=DIFFERENT' : ''));
 
+    // `?glass-presample=on|off` -- LIFT THE AREA GATE FOR A PER-SURFACE GLASS BUILD.
+    //
+    // DEFAULT OFF. Every other flag in this block that changes a picture defaults to the engine
+    // it inherited, and this one changes a picture: the last 2x reconstruction moves from the
+    // pyramid's 8-tap tent hop to the consumer's hardware bilinear. Jack has not seen it.
+    //
+    // Parsed after `?border-direct`, `?pyramid-atlas` and `?border-source` because it interacts
+    // with all three at the same build sites, and refused beside each of them by NAME rather
+    // than left to the per-member clauses in `PlanBorderDirect` / `AtlasAdmitsMember`. Those
+    // clauses exist and are tested -- they are what stops a future caller combining the two in
+    // code -- but a flag arm in which every member of the other flag's plan refuses is the
+    // vacuous shape this ledger keeps being bitten by: an atlas with `members=0 solo=40` wearing
+    // the atlas's name, priced as though it had atlased something.
+    if (params.has('glass-presample')) {
+      const raw = (params.get('glass-presample') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?glass-presample takes 'on' or 'off', got '${raw}'`);
+      }
+      this._glassPresample = raw !== 'off';
+    }
+    if (this._glassPresample) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-build-no-pyramid-to-re-base'
+        : r.DiagBlurSrc !== null ? 'blur-src-swaps-the-sampled-texture-under-both-arms'
+        : this._sharedBackdrop ? 'shared-backdrop-builds-one-full-canvas-pyramid-the-gate-already-admits'
+        : r.CardCompositeEnabled ? 'card-composite-pins-the-build-to-the-canvas-sized-snapshot-s-own-k'
+        : this._borderDirect ? 'border-direct-reproduces-a-k1-chain-and-refuses-every-re-based-rim'
+        : this._pyramidAtlas ? 'pyramid-atlas-cannot-slot-the-pre-downsample-ping-pong'
+        : this._borderSourceFill ? 'border-source-fill-hands-the-rim-a-handle-whose-k-is-the-fill-s'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-at-a-build-whose-pass-count-this-arm-moves'
+        : null;
+      if (why !== null) {
+        this._glassPresample = false;
+        this._glassPresampleRefused = why;
+        JTrace(`jaui:glass-presample armed=off reason=${why}`);
+      }
+    }
+    if (this._renderer instanceof WebGL2Renderer) {
+      this._renderer.DiagGlassPresample = this._glassPresample;
+    }
+    // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`,
+    // for the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL
+    // is parsed, so a mark taken there would print `off` on every arm however the URL read.
+    JTrace(`jaui:glass-presample armed=${this._glassPresample ? 'on' : 'off'}`
+      + ` default=${params.has('glass-presample') ? 'false' : 'true'}`
+      + (this._glassPresample ? ' pixels=DIFFERENT' : '')
+      + (this._glassPresampleRefused !== '' ? ` reason=${this._glassPresampleRefused}` : ''));
+
     // `?atlas-instanced` -- how the atlas's hops are ISSUED, and nothing else. Parsed after the
     // atlas and its refusals so the mark can say whether there is an atlas to instance at all: it
     // is inert under `off`, which since Jack's fourth ruling is the unflagged engine. On/off by
@@ -7315,6 +7451,20 @@ export class Canvas implements DirtyTracker {
     {
       const g = globalThis as unknown as { __jauiEmptyPanels?: () => EmptyPanelCensus };
       g.__jauiEmptyPanels = () => ({ Armed: this._emptyPanelCull, ...this._emptyPanelStats });
+    }
+    {
+      const g = globalThis as unknown as { __jauiGlassPresample?: () => GlassPresampleCensus };
+      g.__jauiGlassPresample = () => {
+        const r = this._renderer;
+        const on = r instanceof WebGL2Renderer;
+        return {
+          Armed: this._glassPresample,
+          Builds: on ? r.PresampledBuilds : 0,
+          K: on ? r.LastPresampleK : 1,
+          Blur: on ? (r.SceneEndsByKey['blur'] ?? 0) : 0,
+          Refused: this._glassPresampleRefused,
+        };
+      };
     }
     // ── THE PROGRAMS THE ARMS ABOVE NEED, COMPILED HERE ──────────────────────────────────────
     // LAST in this method, after every flag has been read and every refusal taken, because what a

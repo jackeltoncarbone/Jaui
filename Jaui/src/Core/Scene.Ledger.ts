@@ -130,6 +130,17 @@ export class SceneReadLedger {
    *  passes are not in here, and neither are the twenty per-card rim builds the `fills` arm runs
    *  in the walk. */
   AtlasDraws = 0;
+  /** `?glass-presample`: builds this frame whose pyramid was re-based onto a pre-downsampled
+   *  source because the flag lifted `BaseDownsampleFactor`'s 15%-of-canvas gate.
+   *
+   *  It counts builds that ACTUALLY re-based, booked off `BlurPass.LastPresampled` after the
+   *  call rather than off the flag, so the vacuous shape -- the flag armed and every build
+   *  refused by the plan -- reads 0 here instead of reading like a win. 0 unflagged by
+   *  construction: the plan is not consulted at all unless the arm asked for it. On `glass-grid`
+   *  at dpr 2 under `on` it is 40 (twenty fills and twenty rims: both build at the same
+   *  `max(1, BackdropFrostBlur) * dpr` = 8 device px, both at `MaxLod` 0, and both regions --
+   *  568x436 and 480x348 -- are far under the canvas's 15%). */
+  PresampledBuilds = 0;
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -161,6 +172,7 @@ export class SceneReadLedger {
     this.BorderFragments = 0;
     this.BorderQuadFragments = 0;
     this.AtlasDraws = 0;
+    this.PresampledBuilds = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -234,5 +246,8 @@ export class SceneReadLedger {
   };
   /** `n` draws one atlas build issued -- `2 x depth` instanced, or `2 x depth x members`. */
   NoteAtlasDraws = (n: number): void => { this.AtlasDraws += n; };
+
+  /** One build re-based onto a pre-downsampled source under `?glass-presample`. */
+  NotePresampled = (): void => { this.PresampledBuilds++; };
 }
 
