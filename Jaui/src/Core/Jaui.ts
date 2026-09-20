@@ -31,7 +31,9 @@ import {
   type AtlasBuildMember,
 } from './BlurPass';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
-import { BORDER_DIRECT_L2_WINDOW, BORDER_DIRECT_PHASE } from './Border.Direct';
+import {
+  BORDER_DIRECT_L2_WINDOW, BORDER_DIRECT_PHASE, type BorderDirectArm,
+} from './Border.Direct';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited, type TickPaceMode } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
@@ -522,6 +524,11 @@ export class Canvas implements DirtyTracker {
    *  today's path, unchanged. Default FALSE since the M4 measured the gather +2.59 ms at dpr 2 (2026-09-20); `?border-direct` arms it in
    *  the same binary. */
   private _borderDirect: boolean = false;
+  /** WHICH ARM the flag armed. `'on'` draws; `'skipgather'` and `'nogather'` are the two timing
+   *  probes lane borderdirect3 added to decompose the M4's +2.59 ms into the three things the
+   *  direct path changed at once (the blits, the sixth program, the band's taps). Both probes draw
+   *  a SHARP rim and say so on the mark. `Core/Border.Direct.ts` holds the decomposition. */
+  private _borderArm: BorderDirectArm = 'on';
   /** The last `jaui:border-direct` gate line, so it prints on a SHAPE change and not per frame. */
   private _borderDirectLastLine = '';
   /** `?atlas-instanced` -- ONE INSTANCED DRAW PER ATLAS LEVEL, and the question it asks.
@@ -3375,7 +3382,13 @@ export class Canvas implements DirtyTracker {
       const line = `jaui:border-direct direct=${gl2.BordersDirect} pyramid=${gl2.BordersPyramid}`
         + ` copies=${gl2.SceneEndsByKey['border-copy'] ?? 0}`
         + ` blur=${gl2.SceneEndsByKey['blur'] ?? 0} switches=${gl2.SceneSwitches}`
-        + ' pixels=WITHIN-ONE';
+        // WHERE THE GATHER RAN, and where the program ran. The ratio is the answer to "does the
+        // 64-tap gather cover the whole card quad?" -- it does not, and this is the run saying so
+        // rather than a reading of the shader saying so.
+        + ` bandPx=${Math.round(gl2.BorderFragments)}`
+        + ` quadPx=${Math.round(gl2.BorderQuadFragments)}`
+        + ` arm=${this._borderArm}`
+        + (this._borderArm === 'on' ? ' pixels=WITHIN-ONE' : ' pixels=DIFFERENT-PROBE-ARM');
       if (line !== this._borderDirectLastLine) { this._borderDirectLastLine = line; JTrace(line); }
     }
 
@@ -6302,12 +6315,19 @@ export class Canvas implements DirtyTracker {
     // carries the lesson of.
     if (params.has('border-direct')) {
       const raw = (params.get('border-direct') ?? '').trim();
-      if (raw !== '' && raw !== 'on' && raw !== 'off') {
-        throw new Error(`[Jaui] ?border-direct takes 'on' or 'off', got '${raw}'`);
+      if (raw !== '' && raw !== 'on' && raw !== 'off'
+        && raw !== 'skipgather' && raw !== 'nogather') {
+        throw new Error(
+          `[Jaui] ?border-direct takes 'on', 'off', 'skipgather' or 'nogather', got '${raw}'`);
       }
       this._borderDirect = raw !== 'off';
+      // The two probes ARM the path -- same blits, same routing, same removed pyramids -- and
+      // change only what the rim's own fragments do. `nogather` is still `_borderDirect`, or the
+      // blit would not happen and the arm would be measuring `off` under another name.
+      this._borderArm = raw === 'skipgather' ? 'skipgather' : raw === 'nogather' ? 'nogather' : 'on';
     } else {
       this._borderDirect = false;
+      this._borderArm = 'on';
     }
     // Everything it cannot run beside, named one at a time and refused on the trace rather than
     // silently disarmed. Each owns the same machinery from the other end: the two source
@@ -6332,7 +6352,10 @@ export class Canvas implements DirtyTracker {
         this._borderDirect = false;
         JTrace(`jaui:border-direct armed=false reason=${why}`);
       }
-      if (r instanceof WebGL2Renderer) r.DiagBorderDirect = this._borderDirect;
+      if (r instanceof WebGL2Renderer) {
+        r.DiagBorderDirect = this._borderDirect;
+        r.DiagBorderArm = this._borderArm;
+      }
     }
     // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
     // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
@@ -6340,8 +6363,17 @@ export class Canvas implements DirtyTracker {
     // `footprint=` is the direct gather's own reach in SOURCE texels per axis, which is the number
     // a reader needs to know how far a differing pixel could have come from.
     JTrace(`jaui:border-direct armed=${this._borderDirect ? 'on' : 'off'}`
+      + ` arm=${this._borderDirect ? this._borderArm : 'off'}`
+      // The rim instance's geometry, and it is on the mark because it is the number the
+      // whole-quad hypothesis turns on: the rim draws as ONE QUAD covering the card plus its
+      // shadow margin, and the gather runs on the band inside it. A `ring` value would mean the
+      // rasterised geometry had been narrowed to the band; it has not been, and lane
+      // borderdirect3's report says why.
+      + ' geometry=quad'
       + ` footprint=${BORDER_DIRECT_L2_WINDOW * BORDER_DIRECT_PHASE}px`
-      + (this._borderDirect ? ' pixels=WITHIN-ONE' : ''));
+      + (this._borderDirect
+        ? (this._borderArm === 'on' ? ' pixels=WITHIN-ONE' : ' pixels=DIFFERENT-PROBE-ARM')
+        : ''));
     // `?atlas-instanced` -- how the atlas's hops are ISSUED, and nothing else. Parsed after the
     // atlas and its refusals so the mark can say whether there is an atlas to instance at all: it
     // is inert under `off`, which since Jack's fourth ruling is the unflagged engine. On/off by

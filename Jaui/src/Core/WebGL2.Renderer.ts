@@ -19,7 +19,10 @@ import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 import { SceneReadLedger } from './Scene.Ledger';
 import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
 import { PACE_FENCE_RING, type PaceFenceSample } from './Tick.Pace';
-import { PlanBorderDirect, type BorderDirectPlan } from './Border.Direct';
+import {
+  EstimateBorderFragments, PlanBorderDirect,
+  type BorderDirectArm, type BorderDirectPlan,
+} from './Border.Direct';
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
@@ -104,6 +107,7 @@ interface _PanelLocs {
   // unconditionally beside the rest (a null location is a specified no-op).
   borderTexels:   WebGLUniformLocation | null;
   borderTap:      WebGLUniformLocation | null;
+  borderGather:   WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -130,6 +134,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   shadowBackdrop: gl.getUniformLocation(p, 'u_ShadowBackdrop'),
   borderTexels:   gl.getUniformLocation(p, 'u_BorderTexels'),
   borderTap:      gl.getUniformLocation(p, 'u_BorderTap'),
+  borderGather:   gl.getUniformLocation(p, 'u_BorderGather'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -279,6 +284,15 @@ const PANEL_OFF_REFRACTION = 38;
  *  life of its own: `tests/Border.Direct.test.ts` reads the shader and asserts the literal. */
 const BORDER_STRAIGHT_GATHER_REFRACTION = 4;
 const PANEL_OFF_SMOOTH_PACKED = 29;
+// ── The fragment estimate's own five offsets ───────────────────────────────
+// `a_Rect.zw` (the rasterised quad), `a_Radii`'s four corners, and `a_Specular.w`, whose high half
+// carries the border's inward fade in quarter-px units. `Jiv.InstanceBuffer.Push` writes every one
+// of them; `tests/Border.Arms.test.ts` reads that file and asserts each still carries what it is
+// named after, the way the borderless program's four offsets are held in place.
+const PANEL_OFF_QUAD_W = 2;
+const PANEL_OFF_QUAD_H = 3;
+const PANEL_OFF_RADII = 8;
+const PANEL_OFF_SPECULAR_PACKED = 47;
 // `Jiv.Panel.frag`'s `CornerParams`, constant for constant. Rounded to float32 because the
 // fragment evaluates them in `highp float` off the same float32 instance data.
 const CORNER_SAT_FRAC = Math.fround(0.12);
@@ -501,6 +515,11 @@ export class WebGL2Renderer implements Renderer {
    *  binary - today's engine, byte for byte. Default ON. Set by `Jaui._initDebugFromUrl`, which
    *  owns the flag and every refusal. */
   DiagBorderDirect = true;
+  /** WHICH ARM of `?border-direct` -- `'on'` is the one that draws; `'skipgather'` and `'nogather'`
+   *  are the two timing probes that decompose the M4's +2.59 ms and draw a sharp rim. See
+   *  `Border.Direct.BorderDirectArm`, which is where the decomposition is written down. Set by
+   *  `Jaui._initDebugFromUrl` beside `DiagBorderDirect`; inert while that is false. */
+  DiagBorderArm: BorderDirectArm = 'on';
   /** `?flat-program=off` sends every panel back through the full program. Default ON: the flat
    *  program is pixel-identical by construction, so the only reason to hold the old routing is to
    *  measure the two arms against each other in ONE binary. Set by `Jaui._initDebugFromUrl`. */
@@ -697,6 +716,11 @@ export class WebGL2Renderer implements Renderer {
    *  `0 / 20` under the flag is the unflagged engine wearing the flag's name. */
   get BordersDirect(): number { return this._sceneLedger.BordersDirect; }
   get BordersPyramid(): number { return this._sceneLedger.BordersPyramid; }
+  /** Fragments the frame's direct rims covered: `BorderFragments` the band the gather runs on,
+   *  `BorderQuadFragments` the quad the PROGRAM runs on. Estimated off the packed instances at the
+   *  draw -- `Border.Direct.EstimateBorderFragments` is the arithmetic and the test. */
+  get BorderFragments(): number { return this._sceneLedger.BorderFragments; }
+  get BorderQuadFragments(): number { return this._sceneLedger.BorderQuadFragments; }
   /** DRAWS the frame's atlas builds issued. `?atlas-instanced`'s effect field: 8 under
    *  `?pyramid-atlas=all` and 160 with `=off`, on a frame whose `drawCalls` does not move. */
   get SceneAtlasDraws(): number { return this._sceneLedger.AtlasDraws; }
@@ -1382,8 +1406,8 @@ export class WebGL2Renderer implements Renderer {
     // parameter: it is minted fresh per copy, so identity says both "this is a scratch of the
     // scene, not a pyramid" and "it is THIS draw's scratch" with nothing to keep in sync.
     const isGlass = useGlassShader;
-    const isBorderDirect = isGlass && backdrop !== null && backdrop === this._borderScratchHandle;
-    if (isBorderDirect && !this._batchTakesBorderDirectProgram()) {
+    const hasBorderScratch = isGlass && backdrop !== null && backdrop === this._borderScratchHandle;
+    if (hasBorderScratch && !this._batchTakesBorderDirectProgram()) {
       // The walk hands this handle to exactly one draw: the rim's, one instance, border-only, with
       // the rim gathering straight down. Anything else would shade the card's INTERIOR through a
       // raw scene copy the shader is about to treat as a pyramid, and a wrong picture says so.
@@ -1395,6 +1419,14 @@ export class WebGL2Renderer implements Renderer {
       && this._batchTakesFlatProgram(baseFrostLod);
     const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
     const isTwoStop = isBorderless && this.DiagTwoStopGradient && _paintFitsTwoStops(bgPaint);
+    // `?border-direct=nogather` keeps the blit, keeps the removed pyramids and keeps every draw,
+    // and sends the rim through the ORDINARY glass program instead: `sampleBackdrop` then reads the
+    // raw copy at level 0 in one tap. The picture is a sharp rim and the arm is a timing probe, but
+    // it is the only way to price the SIXTH PROGRAM itself - same fragments, same blits, different
+    // compiled shader - against `skipgather`, which is the same program with the band work gone.
+    // It is decided HERE, one line above the pick, so the five-way ladder below is the same text it
+    // has been since the two-stop program joined it.
+    const isBorderDirect = hasBorderScratch && this.DiagBorderArm !== 'nogather';
     const program = isBorderDirect ? this._panelShaderBorderDirect
       : isGlass ? this._panelShaderGlass
       : isTwoStop ? this._panelShaderTwoStop
@@ -1427,6 +1459,16 @@ export class WebGL2Renderer implements Renderer {
     // `TexelsX/Y` is level 0's own size, which for a direct border IS the copied rect.
     gl.uniform2f(locs.borderTexels, backdropRegion.TexelsX, backdropRegion.TexelsY);
     gl.uniform1f(locs.borderTap, this._borderTapOffset);
+    // The gather's own switch. `skipgather` is the ONLY arm that sets it to 0, and it is a uniform
+    // rather than a define so that the program's compiled shape - its registers, and the stack its
+    // dynamically-indexed gather windows live on - is the same on both arms. That identity is the
+    // whole measurement: what differs between `on` and `skipgather` is the band work and nothing
+    // else in the frame.
+    gl.uniform1f(locs.borderGather, this.DiagBorderArm === 'skipgather' ? 0 : 1);
+    // On EVERY armed arm, `nogather` included: the fragment counts are a property of the rim's
+    // geometry and not of which program shades it, and two arms whose census disagreed could not be
+    // compared at all.
+    if (hasBorderScratch) this._noteBorderFragments();
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, backdrop ? _unwrap(backdrop) : this._dummyTex);
@@ -2832,6 +2874,41 @@ export class WebGL2Renderer implements Renderer {
   /** The rim built a pyramid after all - the direct path refused, or the flag is off. Booked by
    *  the walk, beside `NoteAtlasSolo`, because only the walk knows which branch it took. */
   NoteBorderPyramid = (): void => { this._sceneLedger.NoteBorderPyramid(); };
+
+  /**
+   * Book this rim's fragment counts, off the instance that is about to draw.
+   *
+   * WHY IT IS HERE and not at the copy: the copy knows the region rect, which is neither number.
+   * The band is a function of the stroke's own width chain and the quad is `a_Rect.zw`, and both
+   * of those live in the packed instance -- so the count is taken from what the GPU is actually
+   * handed. `EstimateBorderFragments` is the arithmetic, in `Border.Direct` where the rest of this
+   * lane's reasoning is, and unit-tested there rather than believed here.
+   *
+   * It reads a 2D rim. A PROJECTIVE instance (`xformIndex >= 0`) carries its NATURAL box in
+   * `a_Rect` instead of a device AABB, so its quad would come back in the wrong units -- named
+   * because it is wrong rather than guarded, since a projected glass rim cannot reach here at all:
+   * the walk only hands a direct backdrop to a rim whose region `PlanBorderDirect` admitted.
+   *
+   * One batch is one rim (`_batchTakesBorderDirectProgram`'s note says why), but the loop is over
+   * the batch anyway: a count that silently read instance 0 of a batch of twenty would be the
+   * vacuous-success shape this ledger keeps getting bitten by.
+   */
+  private _noteBorderFragments = (): void => {
+    const d = this._panelInstanceData;
+    for (let i = 0; i < this._panelInstanceCount; i++) {
+      const b = i * PANEL_FLOATS_PER_INSTANCE;
+      const radius = (d[b + PANEL_OFF_RADII] + d[b + PANEL_OFF_RADII + 1]
+        + d[b + PANEL_OFF_RADII + 2] + d[b + PANEL_OFF_RADII + 3]) * 0.25;
+      // `a_Specular.w` packs the inward fade in quarter-px units above InnerBlur in thousandths --
+      // `Jiv.InstanceBuffer._packInnerBlurFade`, reversed exactly as `Jiv.Panel.frag` reverses it.
+      const fade = Math.floor(d[b + PANEL_OFF_SPECULAR_PACKED] / 1024) / 4;
+      const e = EstimateBorderFragments(
+        d[b + PANEL_OFF_QUAD_W], d[b + PANEL_OFF_QUAD_H],
+        d[b + PANEL_OFF_HALF_W], d[b + PANEL_OFF_HALF_H], radius,
+        d[b + PANEL_OFF_BORDER_WIDTH], d[b + PANEL_OFF_BORDER_EDGE_AA], fade);
+      this._sceneLedger.NoteBorderFragments(e.Band, e.Quad);
+    }
+  };
 
   /**
    * Can every instance in the pending batch be shaded by the BORDER_DIRECT program?

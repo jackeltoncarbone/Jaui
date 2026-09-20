@@ -128,3 +128,87 @@ export const PlanBorderDirect = (
   if (rect.Full) return { Ok: false, Why: 'full-rect' };
   return { Ok: true, Rect: rect, TapOffset: tapOffset };
 };
+
+/**
+ * ── HOW MANY FRAGMENTS THE GATHER ACTUALLY RUNS ON ─────────────────────────────────────────────
+ *
+ * The M4 measured `?border-direct` 2.59 ms SLOWER at dpr 2 with eighty render passes and eighty
+ * draws removed from the frame, and the first hypothesis for that was geometric: that the 64-tap
+ * gather runs on every fragment of the rim instance's QUAD rather than on the band. The quad is
+ * the card's rect expanded by `max(ShadowBlur + |ShadowOffset|, BorderWidth + BorderBlur)`
+ * (`Jiv.InstanceBuffer.Push`) -- the whole card and then some -- while the band the border paints
+ * is a few device px wide. The two numbers differ by a factor of thirty-odd, so a report that says
+ * "the gather is band-only" should be able to say how many fragments that IS, from the instance it
+ * was drawn from rather than from an estimate carried in prose.
+ *
+ * `Band` is the annulus `borderBase > 0.001` admits, which `Jiv.Panel.frag` builds out of
+ * `dist`: it opens at `-(drawnBorderWidth + fadeIn)` and closes at `+aa`, so its width is
+ * `drawnBorderWidth + fadeIn + aa` and its length is the rounded rect's perimeter. Taken at
+ * `widthScale == 1` -- BorderVariance swings the stroke either side of its authored width around
+ * the perimeter and integrates to very near the same band.
+ *
+ * `Quad` is the rasterised rectangle, exactly: `a_Rect.zw`, the number of fragments the program is
+ * invoked on whatever the branch then does.
+ */
+/**
+ * WHICH ARM OF `?border-direct` IS RUNNING, and the three of them exist to DECOMPOSE one number.
+ *
+ * The M4 measured the direct path 2.59 ms slower at dpr 2 (26.79 vs 24.19, unpaced, n=3, no
+ * overlap) with eighty render passes and eighty draws gone from the frame. Three things changed at
+ * once, and no single-flag pair can say which of them cost: the twenty pyramids became twenty
+ * blits, the rim draws moved onto a SIXTH program whose gather carries dynamically-indexed windows
+ * (`_bdL2[16]`, `_bdL1[9]`), and the band fragments started running 64 taps each. So:
+ *
+ *   `on`          blits + the sixth program + the gather executes   (the arm that draws)
+ *   `skipgather`  blits + the sixth program, gather NOT executed    (uniform-gated, same program)
+ *   `nogather`    blits, the rim on the ORDINARY glass program      (routing only, one flat tap)
+ *   `off`         today's engine: twenty pyramids, eighty passes
+ *
+ * `on - skipgather` is what EXECUTING the gather costs over the band. `skipgather - nogather` is
+ * what the program itself costs over the whole quad -- the same draws, the same blits, the same
+ * fragments, differing only in which compiled program shades them, and therefore in the occupancy
+ * the gather's stack allocation leaves. `nogather - off` is twenty blits against eighty passes.
+ * The three differences sum to the 2.59 ms, and whichever one holds it names the fix.
+ *
+ * `skipgather` and `nogather` DO NOT DRAW A CORRECT PICTURE -- the rim gathers one flat tap of the
+ * scene instead of a blurred one, so its stroke is sharp. They are timing probes, they are named
+ * on the mark, and neither is shippable.
+ */
+export type BorderDirectArm = 'on' | 'skipgather' | 'nogather';
+
+export interface BorderFragmentEstimate {
+  /** Fragments inside the border annulus -- where the gather runs. */
+  Band: number;
+  /** Fragments in the instance's quad -- where the PROGRAM runs. */
+  Quad: number;
+}
+
+/** `Jiv.Panel.frag`'s `BORDER_MIN_DEVICE_PX`: the hairline floor a stroke is drawn at, with the
+ *  width it lost carried as coverage. The band is as wide as what is DRAWN, not as what was
+ *  authored, which is why the floor is part of this estimate. */
+export const BORDER_DRAWN_MIN_DEVICE_PX = 1;
+
+/**
+ * The band and quad fragment counts for one packed rim instance, in device px.
+ *
+ * Every argument comes off `Jiv.InstanceBuffer`'s own floats: `quadW/quadH` are `a_Rect.zw`,
+ * `halfW/halfH` are `a_PanelGeom.zw`, `radius` is the mean of `a_Radii`, `borderWidth` is
+ * `a_ShadowParams.w`, `borderEdgeAa` is `a_StyleParams.x` (NEGATED on a rim instance, so the
+ * magnitude is what the feather is) and `borderFade` is the high half of `a_Specular.w`.
+ */
+export const EstimateBorderFragments = (
+  quadW: number, quadH: number, halfW: number, halfH: number, radius: number,
+  borderWidth: number, borderEdgeAa: number, borderFade: number,
+): BorderFragmentEstimate => {
+  const quad = Math.max(0, quadW) * Math.max(0, quadH);
+  const aa = Math.max(Math.abs(borderEdgeAa), 1e-4);
+  const drawn = Math.max(Math.max(borderWidth, 0), BORDER_DRAWN_MIN_DEVICE_PX);
+  const fadeIn = Math.max(borderFade, aa);
+  const band = drawn + fadeIn + aa;
+  const w = Math.max(0, halfW) * 2;
+  const h = Math.max(0, halfH) * 2;
+  const r = Math.min(Math.max(radius, 0), Math.min(w, h) * 0.5);
+  // A rounded rect's perimeter: the four straight runs plus one full circle of the corner radius.
+  const perimeter = 2 * (w - 2 * r) + 2 * (h - 2 * r) + 2 * Math.PI * r;
+  return { Band: Math.max(0, perimeter) * band, Quad: quad };
+};

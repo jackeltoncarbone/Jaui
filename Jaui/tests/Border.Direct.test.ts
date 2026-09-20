@@ -221,7 +221,8 @@ describe('border-direct > the wiring, read off the source', () => {
 
   it('the flag throws on a value it cannot run, and names every refusal on the trace', () => {
     expect(JAUI).toContain("if (params.has('border-direct')) {");
-    expect(JAUI).toContain("[Jaui] ?border-direct takes 'on' or 'off', got '${raw}'");
+    expect(JAUI).toContain(
+      "[Jaui] ?border-direct takes 'on', 'off', 'skipgather' or 'nogather', got '${raw}'");
     expect(JAUI).toContain('jaui:border-direct armed=false reason=${why}');
     for (const reason of [
       'webgl2-only',
@@ -264,7 +265,11 @@ describe('border-direct > the wiring, read off the source', () => {
   });
 
   it('the border arm is the ONLY tap that changes, and the pyramid arm is untouched', () => {
-    expect(FRAG).toContain('vec3 bSample = sampleBackdropDirect(bUv, bLod, frostLod);');
+    // The call is UNIFORM-GATED since lane borderdirect3: `u_BorderGather` is 1 on the arm that
+    // draws, and `=skipgather` takes the same program with the band work removed.
+    // `Border.Arms.test.ts` is where that gate is pinned.
+    expect(FRAG).toContain(
+      'if (u_BorderGather > 0.5) bSample = sampleBackdropDirect(bUv, bLod, frostLod);');
     expect(FRAG).toContain('vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);');
     // Four other `sampleBackdrop` call sites, all on the fill path, all unchanged and none of them
     // behind the define -- they are dead on a border-only instance and live on every other.
@@ -334,8 +339,13 @@ describe('border-direct > the SIXTH program, cut from the one source', () => {
     const missing = glass.filter((l) => !directLines.has(l.N));
     expect(missing.length).toBe(1);
     expect(missing[0].Text).toBe('vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);');
-    // And the direct twin is what replaced it.
-    expect(direct.some((l) => l.Text === 'vec3 bSample = sampleBackdropDirect(bUv, bLod, frostLod);'))
+    // And the direct twin is what replaced it -- behind the arm gate, whose `else` is the same
+    // `sampleBackdrop` call with a different statement shape, which is why the line above is
+    // MISSING from the direct program rather than shared with it.
+    expect(direct.some((l) =>
+      l.Text === 'if (u_BorderGather > 0.5) bSample = sampleBackdropDirect(bUv, bLod, frostLod);'))
+      .toBe(true);
+    expect(direct.some((l) => l.Text === 'else bSample = sampleBackdrop(bUv, bLod, frostLod);'))
       .toBe(true);
   });
 
@@ -345,6 +355,7 @@ describe('border-direct > the SIXTH program, cut from the one source', () => {
       expect(code, set.join('+')).not.toContain('sampleBackdropDirect');
       expect(code, set.join('+')).not.toContain('u_BorderTexels');
       expect(code, set.join('+')).not.toContain('_bdL2');
+      expect(code, set.join('+')).not.toContain('u_BorderGather');
     }
   });
 });

@@ -788,6 +788,15 @@ vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
 // truer one.
 uniform vec2 u_BorderTexels;   // level 0 (= the copied region) in texels
 uniform float u_BorderTap;     // the pyramid's own tapOffset for this build
+// 1.0 = gather (the arm above, and the only one that draws a correct picture); 0.0 = take the one
+// flat tap instead and leave everything else in the frame identical. A UNIFORM rather than a
+// define, and that is the whole point of it: the compiler cannot fold a uniform, so the gather
+// below stays COMPILED and its dynamically-indexed `_bdL2` / `_bdL1` windows stay allocated on
+// every thread of this program's draws whichever value it holds. `?border-direct=skipgather` is
+// therefore this program at this program's occupancy with the band work removed, which is the one
+// arm that can separate "the taps cost" from "the program costs" -- see the M4's borderdirect
+// cell, where 80 removed passes and 80 removed draws made the frame 2.59 ms SLOWER.
+uniform float u_BorderGather;
 
 // The level-2 window (4x4 boxes of the source) and the level-1 window (3x3) one level-0 texel
 // reads. File scope rather than function parameters: GLSL ES 3.00 sized-array parameters are
@@ -1620,7 +1629,12 @@ void main() {
             // pyramid of its own. Under BORDER_DIRECT it is computed from a blit of the scene with
             // the pyramid's own kernel; the pyramid arm's arithmetic below is untouched.
 #if defined(BORDER_DIRECT)
-            vec3 bSample = sampleBackdropDirect(bUv, bLod, frostLod);
+            // The branch is on a UNIFORM, so it is coherent across every wavefront and costs one
+            // compare; `u_BorderGather` is 1.0 on the arm that draws, and the `else` exists only so
+            // that `=skipgather` can take the program's cost without the gather's.
+            vec3 bSample;
+            if (u_BorderGather > 0.5) bSample = sampleBackdropDirect(bUv, bLod, frostLod);
+            else bSample = sampleBackdrop(bUv, bLod, frostLod);
 #else
             vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);
 #endif
