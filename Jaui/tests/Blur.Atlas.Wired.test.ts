@@ -604,7 +604,11 @@ describe('the walk, and the flag', () => {
     expect(JAUI).toContain('private _phasedWalk: boolean = false;');
     expect(JAUI).toContain('if (this._phasedWalk && !this._diagNoUi) {');
     expect((JAUI.match(/this\._blurPhasedBuild\(/g) ?? []).length).toBe(2);
-    expect((JAUI.match(/_blurFirstNode\(this\.Root, MAT_IDENTITY/g) ?? []).length).toBe(2);
+    // THREE callers now, and the count is the point rather than the number: `?blur-first`'s
+    // pre-pass, `_blurPhasedBuild`, and `?occlusion`'s pre-pass, which rides the same traversal
+    // for the same reason (one answer to "which nodes paint, in what order"). A FOURTH ordering
+    // is what this test refuses, not a fourth caller of this one.
+    expect((JAUI.match(/_blurFirstNode\(this\.Root, MAT_IDENTITY/g) ?? []).length).toBe(3);
   });
 
   it('refuses every flag it cannot run beside, by name, on the trace', () => {
