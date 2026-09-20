@@ -26,7 +26,9 @@ import { SHADOW_EASE_SECONDS, type Renderer, type GpuTextureHandle, type BgPaint
 // forty builds actually resolve to. These three are the exact functions `BlurPass.Blur` uses to
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
 // copy of the rule would be a count that can silently disagree with the pass it is counting.
-import { BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, MAX_CHAINS } from './BlurPass';
+import {
+  BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, MAX_CHAINS, CHAIN_BUDGET_BYTES,
+} from './BlurPass';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
@@ -61,6 +63,19 @@ const _instanceFrostLod = (frostBlurPt: number, dpr: number): number =>
  *  to the u_Scene sampler with no snapshot bound would paint the dummy texture. Every real class is
  *  either 0 frost or a whole point of it, so the widened band costs nothing. */
 const SCENE_TAP_FROST_LOD = 0.05;
+
+/** How many pyramid chains per level-0 size `?blur-phased` asks the pool to rotate through.
+ *
+ *  A phased frame builds every fill pyramid BEFORE it draws any fill, so every one of them has to
+ *  be alive at once -- and `BlurPass._useChain` keys a chain on its level-0 size, so without a
+ *  rotation twenty same-sized builds share one set of level textures and nineteen of them are gone
+ *  by the time their card draws. Twenty is the `glass-grid` / `idle` grid, which is what this
+ *  instrument is pointed at; `?blur-chains=N` given alongside overrides it, so a bigger scene is
+ *  measured by SAYING it is bigger rather than by reading a quietly wrong picture.
+ *
+ *  It is not a ceiling on surfaces, only on how many of one SIZE can be in flight. A page of
+ *  twenty differently-sized surfaces needs one chain each and gets them from the size key. */
+const PHASED_CHAINS = 20;
 
 /** The deepest mip LOD a panel can read out of the pyramid built for it — the number that decides how
  *  much of a mip chain is worth building.
@@ -302,6 +317,13 @@ export class Canvas implements DirtyTracker {
    *  rim pyramid are different regions at different sizes and must not collide in one map. */
   private _blurFirstFill = new Map<Jiv, GpuTextureHandle>();
   private _blurFirstRim = new Map<Jiv, GpuTextureHandle>();
+  /** Which of the two build sites the pre-pass traversal issues a build at. `'both'` is
+   *  `?blur-first`, which moves every pyramid in the frame ahead of the bed in one pass.
+   *  `?blur-phased` runs the SAME traversal twice with `'fill'` and then `'rim'`, because its
+   *  whole point is that the rim pyramids are built from a scene the fills have already been
+   *  drawn into. Nothing else about the traversal changes, which is what keeps one answer to
+   *  "which surfaces build" rather than two. */
+  private _prepassSites: 'both' | 'fill' | 'rim' = 'both';
   /** The flag's own gate, reported once per shape change on the trace channel.
    *
    *  `Used` + `Missed` must equal `Fill` + `Rim`, and `Missed` must be 0: a MISS is the walk
@@ -318,6 +340,79 @@ export class Canvas implements DirtyTracker {
   private _blurFirstStats = { Fill: 0, Rim: 0, Used: 0, Missed: 0, Dup: 0, Coarse: 0, Chains: 0, Keys: '' };
   private _blurFirstKeys = new Set<string>();
   private _blurFirstLastLine: string = '';
+
+  // ── `?blur-phased` — MEASUREMENT ONLY, DIFFERENT PIXELS ──────────────────────────
+  /** The frame in THREE scene encoders instead of forty-odd.
+   *
+   *  The join (`Perf/XcTrace.Finding.md`) priced `baseline - blur-dummy` on `glass-grid` at
+   *  33.45 ms per frame = 25.47 ms more GPU WORK + 7.98 ms GPU IDLE, and the work is COUNT, not
+   *  per-pass cost: +2 full-canvas-class fragment passes at an unchanged ~5.7 ms each, and +38-44
+   *  mid-band (~300 us) fragment intervals that are NOT pyramid passes — the same forty builds are
+   *  present under `?no-panels` at 34.9 mid-band intervals per frame. H5: every scene-encoder
+   *  restart with real content in the target costs its tile load+store (~300 us for 16 MB) plus a
+   *  fixed bubble, and a CLEARED target's load/store is free. Its test is any change that removes
+   *  ENCODERS with pixels held constant, which is this.
+   *
+   *  Today's walk restarts the scene encoder twice per card: fill build, fill draw, rim build, rim
+   *  draw. Phased, the frame runs in five passes over the same tree and three scene encoders:
+   *
+   *    1. the bed, and every node ahead of the FIRST surface that builds a pyramid   — encoder A
+   *    2. ALL the fill pyramids, from the scene as of (1)      — the first read ends A, rest free
+   *    3. ALL the fills and their children, in walk order                            — encoder B
+   *    4. ALL the rim pyramids, from the scene as of (3)       — the first read ends B, rest free
+   *    5. ALL the glass rim overlays, in walk order                                  — encoder C
+   *
+   *  Same forty builds (same regions, sigma, depth, `k`, same DOWN/UP passes), same draws, same
+   *  draws per tick. The ledger counts an END, and the frame's last encoder ends at the present,
+   *  which `NoteFrameEndDrain` deliberately does not count — so three encoders read as
+   *  `SceneSwitches` **2**, not 3.
+   *
+   *  THE PIXEL CHANGE, STATED. Today fill N's pyramid is built from the scene AFTER fills 0..N-1
+   *  were drawn, so its refraction taps (fill margin 64.75 px at dpr 2, against a 40 px gutter)
+   *  reach ~25 px into an earlier neighbour's box and see that neighbour's GLASS. Phased, every
+   *  fill pyramid sees the bed only. Rims change in the same direction: today rim N sees fills
+   *  0..N, phased it sees fills 0..19 — a superset, and on a grid whose cards do not overlap, a
+   *  superset of nothing. So the difference is confined to the sample-margin overlap between
+   *  adjacent surfaces. `pixels=DIFFERENT`, not WRONG: it is a legitimate composition and whether
+   *  it is acceptable is Jack's call, with pictures. Under `?blur-src-clear` / `-static` every
+   *  build reads the same stand-in and the difference vanishes, which makes that pairing the
+   *  cleanest H5 cell of all — a pure count test whose two-arm diff must read exactly 0. */
+  private _blurPhased: boolean = false;
+  /** Which pass of the phased walk is running. 0 is every unflagged frame, and every predicate
+   *  below answers the walk's own answer at 0, so an unflagged frame takes the branches it always
+   *  did. 1 = the bed; 2 = the fills and their children; 3 = the glass rim overlays. */
+  private _phasedPass: 0 | 1 | 2 | 3 = 0;
+  /** Pass 1 has reached the first surface that builds a pyramid, and paints nothing further. */
+  private _phasedStop: boolean = false;
+  /** Pass 2 has reached that same surface, and paints from there on. The two flags flip at the
+   *  SAME node in the same walk order, which is what makes passes 1 and 2 a PARTITION of the walk
+   *  rather than two overlapping subsets: no node paints twice and none is dropped, so z-order is
+   *  the walk's exactly — the glass rim overlays, which move to pass 3, are the one exception and
+   *  the one the flag is about. */
+  private _phasedStarted: boolean = false;
+  /** The adaptive-shadow probe, measured in phase 2 beside its own fill build rather than in the
+   *  walk. It has to move: in pass 3 the scene target is bound and a draw has landed since the
+   *  last end, so the probe's `shadow-state` bind would END the scene encoder once per card and
+   *  take the count from 2 back to 21. Beside the build it rides the end the build already paid,
+   *  exactly as it does at baseline. It is also PIXEL-NEUTRAL on `glass-grid`: the probe samples
+   *  strictly inside the surface's OWN box (its taps are `u_Rect.xy + cell * u_Rect.zw`), nothing
+   *  else has painted there in either arm, so it reads the same bed. On a page whose surfaces
+   *  overlap it changes by the same rule the fill does. */
+  private _phasedShadow = new Map<Jiv, ShadowBackdrop>();
+  /** What a build phase built, in build order, so the probe pass can run over it without a third
+   *  walk. A rim plan carries `AdaptiveShadow: false`, so the probe pass skips rims without
+   *  asking. */
+  private _phasedBuilt: { Node: Jiv; Plan: GlassBlurPlan; Handle: GpuTextureHandle }[] = [];
+  /** The two things a phased arm is NOT comparable across. `Snaps` counts surfaces that took a raw
+   *  scene snapshot: the snapshot stays where the walk puts it (a scene READ is not a build), so
+   *  each one is an extra encoder end AND is taken from a different scene state than its own
+   *  pyramid. `Pblur` counts ProgressiveBlur surfaces, which seed from a snapshot at their own
+   *  point in the walk and are neither pre-built nor moved. Both read 0 on `glass-grid` and on
+   *  `idle` — every glass class there authors frost, so `instFrostLod` never falls under the
+   *  scene-tap threshold and no snapshot is taken — and a reading with either non-zero should be
+   *  discarded rather than reported. */
+  private _phasedStrays = { Snaps: 0, Pblur: 0 };
+  private _phasedLastLine: string = '';
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -1760,6 +1855,13 @@ export class Canvas implements DirtyTracker {
       let borderEmitted = !borderSuppressed;
       const emitBorderOverlay = (): void => {
         if (borderEmitted) return;
+        const overlayGlass = _isGlass(node.RenderStyle.Material);
+        // `?blur-phased`: a GLASS rim builds a pyramid and moves to pass 3 with every other rim in
+        // the frame; a FLAT one builds nothing and stays in the pass its node painted in. Asked
+        // BEFORE the flushes and the buffer encodes, so a refused emit issues no GL and touches no
+        // buffer -- and `borderEmitted` stays false, so the pass that DOES own this overlay still
+        // finds it pending at its BorderLayer slot.
+        if (!this._phasedEmitsRim(overlayGlass)) return;
         borderEmitted = true;
         flushPanels();
         flushText();
@@ -1768,7 +1870,6 @@ export class Canvas implements DirtyTracker {
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
 
-        const overlayGlass = _isGlass(node.RenderStyle.Material);
         if (overlayGlass) {
           // ── Glass border overlay ──
           // Re-emit the node's FULL glass rim ON TOP of its children. We can't
@@ -1802,17 +1903,24 @@ export class Canvas implements DirtyTracker {
           const region = plan.Region;
           const lastBaseFrostLod = plan.BaseFrostLod;
           const sceneSnap = plan.InstFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
+          // A snapshot is a scene READ, so it stays where the walk puts it -- which under
+          // `?blur-phased` means it is taken from a DIFFERENT scene state than this rim's own
+          // pyramid, and it ends the scene encoder where the baseline's build had already ended
+          // it. Counted rather than moved or refused: `glass-grid` and `idle` never take one
+          // (every glass class there authors frost), and an arm where this is non-zero is not
+          // comparable and should be discarded.
+          if (sceneSnap !== null && this._blurPhased) this._phasedStrays.Snaps++;
           // `?blur-first`: this surface's rim pyramid was built before the bed's first draw, so
           // the build is a lookup. Nothing else about the pass moves — the snapshot above still
           // runs where it ran, and the draw below is the baseline draw. A MISS builds here, which
           // is how a pre-pass that failed to reach this node reports itself instead of hiding.
-          const preRim = this._blurFirst ? this._blurFirstRim.get(node) : undefined;
+          const preRim = this._blurFirst || this._blurPhased ? this._blurFirstRim.get(node) : undefined;
           let lastBackdrop: GpuTextureHandle | null;
           if (preRim !== undefined) {
             lastBackdrop = preRim;
             this._blurFirstStats.Used++;
           } else {
-            if (this._blurFirst) this._blurFirstStats.Missed++;
+            if (this._blurFirst || this._blurPhased) this._blurFirstStats.Missed++;
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
             r.GenerateBlurMipmap(plan.MaxLod);
             r.RebindSceneTarget();
@@ -1887,6 +1995,11 @@ export class Canvas implements DirtyTracker {
     // VisualScale on an ancestor composes into the effective tuple so
     // descendants ride along, just like CSS transform on a parent.
     const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
+      // `?blur-phased` pass 1 paints the bed and stops at the FIRST surface that would build a
+      // pyramid. Once it has, nothing further in the tree paints in this pass -- the stop is here,
+      // at the top, rather than at the paint site, because the stopping node's own children have
+      // to be held back too and `descendChildren` is already running by then.
+      if (this._phasedPass === 1 && this._phasedStop) return;
       // Compose own's transform onto the inherited matrix. `_composeTransform` returns the affine
       // and leaves the homography and the descendants' perspective context in `_xfH` / `_xfPersp`,
       // which is why they are read on the very next two lines and nowhere else.
@@ -1995,7 +2108,16 @@ export class Canvas implements DirtyTracker {
       const ownBorderMode: 'Normal' | 'Suppress' =
         (node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)) ? 'Suppress' : 'Normal';
 
-      if (material === 'ProgressiveBlur' && !this._diagNoPblur) {
+      // `?blur-phased`: does this node paint its OWN content in the pass that is running? Asked
+      // exactly once per node and only under the flag, because the ANSWER is also what detects the
+      // pass-1/pass-2 boundary -- see `_phasedPaints`. Its children are walked either way.
+      const phasedPaints = this._phasedPass === 0 || this._phasedPaints(node);
+
+      if (!phasedPaints) {
+        // This node's panel, text and vector belong to another pass. Nothing here, deliberately:
+        // the counters, the buffers and the ledger must see exactly one paint of this node per
+        // frame, in exactly one of the three passes.
+      } else if (material === 'ProgressiveBlur' && !this._diagNoPblur) {
         // Flush both pending batches: the pblur snapshots the scene and
         // samples it — so the scene must contain everything drawn so
         // far. Deferred panels AND text in the buffers haven't hit the
@@ -2284,6 +2406,10 @@ export class Canvas implements DirtyTracker {
           const _tSnap = performance.now();
           sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
           this._opMs.Snap += performance.now() - _tSnap;
+          // See the rim site: a snapshot is a scene READ and stays in the walk, so under
+          // `?blur-phased` it is an extra encoder end AND a different scene state than this
+          // surface's own pyramid. 0 on `glass-grid` and `idle`; non-zero voids the arm.
+          if (sceneSnap !== null && this._blurPhased) this._phasedStrays.Snaps++;
           // Pyramid is built AT this panel's frost sigma, so the base LOD is the panel's own
           // frostLod: the shader's main sample (lod = frostLod - u_BaseFrostLod) lands on LOD 0
           // (full res). Only the subtle glass rim/inner boost (≲ 2 LODs) climbs into the now
@@ -2293,12 +2419,12 @@ export class Canvas implements DirtyTracker {
           // `?blur-first`: this surface's fill pyramid was built before the bed's first draw, so
           // the build is a lookup and the scene target was never unbound here — which is why the
           // `RebindSceneTarget` below stays inside the branch that actually left it.
-          const preFill = this._blurFirst ? this._blurFirstFill.get(node) : undefined;
+          const preFill = this._blurFirst || this._blurPhased ? this._blurFirstFill.get(node) : undefined;
           if (preFill !== undefined) {
             lastBackdrop = preFill;
             this._blurFirstStats.Used++;
           } else {
-            if (this._blurFirst) this._blurFirstStats.Missed++;
+            if (this._blurFirst || this._blurPhased) this._blurFirstStats.Missed++;
             const _tBlur = performance.now();
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
             const _tMip = performance.now();
@@ -2316,7 +2442,16 @@ export class Canvas implements DirtyTracker {
         let shadowBackdrop: ShadowBackdrop | undefined;
         const _rs = node.RenderStyle;
         const _shadowScene = sceneSnap ?? r.SceneTexture;
-        if (_rsAdaptiveShadow && lastBackdrop) {
+        const preShadow = this._blurPhased ? this._phasedShadow.get(node) : undefined;
+        if (preShadow !== undefined) {
+          // `?blur-phased`: measured in phase 2, beside this surface's own build, where the probe's
+          // `shadow-state` bind rides the end the build already paid. Here, in pass 3, the scene is
+          // bound and a draw has landed since the last end, so probing would END the scene encoder
+          // once per card -- the exact count the flag exists to remove. Same rect, same detail LOD,
+          // same pyramid, same sharp tap; see `_phasedShadow` for why that is pixel-neutral here.
+          shadowBackdrop = preShadow;
+          this._adaptiveShadowsDrawn = true;
+        } else if (_rsAdaptiveShadow && lastBackdrop) {
           const detailLod = Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod;
           const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt);
           if (slot >= 0) {
@@ -2418,7 +2553,7 @@ export class Canvas implements DirtyTracker {
       // Z-order: before accumulating text, flush any pending panels so
       // panels earlier in tree order end up BEHIND this text.
       const anim = this._textAnimators.get(node);
-      if (anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
+      if (phasedPaints && anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
         this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
       }
@@ -2427,7 +2562,7 @@ export class Canvas implements DirtyTracker {
       // glass/image, it flushes the pending panel + text batches first so z-order
       // stays coherent (prior siblings behind, later siblings in front).
       const svgVec = node.SvgVector;
-      if (svgVec && (svgVec.Fills.length > 0 || svgVec.Strokes.length > 0)
+      if (phasedPaints && svgVec && (svgVec.Fills.length > 0 || svgVec.Strokes.length > 0)
           && node.Visible && node.Width > 0 && node.Height > 0 && node.EffectiveOpacity > 0.001) {
         flushPanels();
         flushText();
@@ -2446,7 +2581,7 @@ export class Canvas implements DirtyTracker {
       // (the build snapshots the scene-so-far), so pushing THEIR footprints
       // forced a near-per-surface rebuild for nothing — the documented dirty
       // bug. Push only the surfaces whose result lands after the build.
-      if (this._sharedBackdrop
+      if (phasedPaints && this._sharedBackdrop
           && (_isGlass(material) || material === 'ProgressiveBlur' || _hasBackdropFilter(node))) {
         const dab = this._nodeAabb(node, eff, effH);
         const dpr = this._dpr;
@@ -2464,7 +2599,7 @@ export class Canvas implements DirtyTracker {
       // Tight, because a container with a transparent background covers the page and would make
       // every surface on it fall back for nothing: only a node that can actually put ink down
       // counts -- a visible background, a painted border, or a shadow.
-      if (!this._capturing && r2 instanceof WebGL2Renderer && !r2.CardActive) {
+      if (phasedPaints && !this._capturing && r2 instanceof WebGL2Renderer && !r2.CardActive) {
         const _fs = node.RenderStyle;
         const _fbg = _fs.Background;
         const _inked = node.EffectiveOpacity > 0.001 && (
@@ -2602,7 +2737,53 @@ export class Canvas implements DirtyTracker {
     // after it — and no scene in the perf harness has one.
     if (this._blurFirst && !this._diagNoUi) this._blurFirstPrepass(w, h);
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
-    if (!this._diagNoUi) renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
+    if (this._blurPhased && !this._diagNoUi) {
+      // `?blur-phased` (MEASUREMENT ONLY - DIFFERENT PIXELS). The same tree, five passes, THREE
+      // scene encoders instead of one per build and one per draw. See `_blurPhased` for the shape
+      // and for the pixel change it makes; the encoder arithmetic, on the ledger's own rules:
+      //
+      //   pass 1        the bed draws            -> the scene holds tiles nothing has resolved
+      //   build fills   read 1 ENDS encoder A    -> reads 2..20 find the flag already clear: free
+      //   probes        `shadow-state` binds     -> free, the build's end is still uncleared
+      //   rebind        `'scene'` is not a switch by definition                       -> encoder B
+      //   pass 2        fills + children draw
+      //   build rims    read 1 ENDS encoder B    -> reads 2..20 free
+      //   rebind                                                                      -> encoder C
+      //   pass 3        the glass rim overlays draw
+      //   present       ends C, and `NoteFrameEndDrain` does not count it
+      //
+      // So `SceneSwitches` reads 2 with `EndsByKey { blur: 2 }`, against 40 and { blur: 40 } at
+      // baseline, while `Reads` stays at 60 and the forty builds all still happen.
+      this._blurFirstFill.clear();
+      this._blurFirstRim.clear();
+      this._blurFirstKeys.clear();
+      this._phasedShadow.clear();
+      this._phasedStrays.Snaps = 0;
+      this._phasedStrays.Pblur = 0;
+      const pst = this._blurFirstStats;
+      pst.Fill = 0; pst.Rim = 0; pst.Used = 0; pst.Missed = 0; pst.Dup = 0; pst.Coarse = 0;
+      const phase = (pass: 1 | 2 | 3): void => {
+        this._phasedPass = pass;
+        rootScope.Deferred = [];
+        renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
+        replayScope(rootScope);
+        // Drain before the next phase: a batch still pending when the next phase starts drawing
+        // would land in that phase's z-order instead of this one's.
+        flushPanels();
+        flushText();
+      };
+      this._phasedStop = false;
+      this._phasedStarted = false;
+      phase(1);
+      this._blurPhasedBuild('fill', w, h);
+      this._phasedShadowProbes(dt);
+      r.RebindSceneTarget();
+      phase(2);
+      this._blurPhasedBuild('rim', w, h);
+      r.RebindSceneTarget();
+      phase(3);
+      this._phasedPass = 0;
+    } else if (!this._diagNoUi) renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
     // In-flight teleports with no layered ancestor paint last at root level.
     replayScope(rootScope);
     // Trailing flushes — catch anything deferred since the last category
@@ -2621,6 +2802,27 @@ export class Canvas implements DirtyTracker {
         + ` used=${st.Used} missed=${st.Missed} dup=${st.Dup}`
         + ` chains=${st.Chains} sizes=${st.Keys} coarse=${st.Coarse} pixels=WRONG`;
       if (line !== this._blurFirstLastLine) { this._blurFirstLastLine = line; JTrace(line); }
+    }
+
+    // `?blur-phased`'s gate, on the same terms as `?blur-first`'s: printed on a SHAPE CHANGE, and
+    // `missed` is the one that must read 0. `switches` is read HERE rather than taken on faith,
+    // because it is the whole claim of the flag and it is available before the present that would
+    // otherwise be the frame's last word on it. `snaps` and `pblur` are the two things that make an
+    // arm incomparable -- both 0 on `glass-grid` and `idle` -- and a non-zero one is an instruction
+    // to discard the cell, not a warning to weigh.
+    if (this._blurPhased) {
+      const st = this._blurFirstStats;
+      // The ledger lives on the WebGL2 renderer, not on the `Renderer` interface, and it is read
+      // HERE rather than after the present because the present ends the frame's last encoder and
+      // this line is about the ones the WALK ended.
+      const sw = this._renderer instanceof WebGL2Renderer ? this._renderer.SceneSwitches : -1;
+      const line = `jaui:blur-phased built=${st.Fill + st.Rim} fill=${st.Fill} rim=${st.Rim}`
+        + ` used=${st.Used} missed=${st.Missed} dup=${st.Dup}`
+        + ` chains=${st.Chains} sizes=${st.Keys} coarse=${st.Coarse}`
+        + ` shadows=${this._phasedShadow.size} snaps=${this._phasedStrays.Snaps}`
+        + ` pblur=${this._phasedStrays.Pblur}`
+        + ` switches=${sw} pixels=DIFFERENT`;
+      if (line !== this._phasedLastLine) { this._phasedLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -3246,6 +3448,117 @@ export class Canvas implements DirtyTracker {
     };
   };
 
+  // ── `?blur-phased`: the predicates the walk asks, and the two build phases ──────
+  //
+  // Everything the phased walk does to `renderNode` / `descendChildren` goes through the three
+  // predicates below, and every one of them answers the walk's own answer when `_phasedPass` is 0.
+  // That is deliberate: an unflagged frame must take the branches it took before this lane, and a
+  // reader has three functions to check rather than a scatter of `if (this._blurPhased)` through a
+  // 770-line walk.
+
+  /** A node the phased walk has to hold back: one that BUILDS A PYRAMID at either site. Pass 1
+   *  stops at the first of them and pass 2 starts there, so every pyramid in the frame is built in
+   *  one of the two build phases and the bed is the only thing under the first of them.
+   *
+   *  It asks the style, not the cull: `_rimEmits`'s extra clause can only make this FALSE, and
+   *  stopping pass 1 earlier than strictly necessary is safe (pass 2 picks the node up, in order)
+   *  while stopping later is not. A ProgressiveBlur surface is not one of these -- its pyramid is
+   *  seeded from a snapshot at its own point in the walk, so it is neither pre-built nor moved, and
+   *  `_phasedStrays.Pblur` counts it. */
+  private _phasedHoldsBack = (node: Jiv): boolean => {
+    if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return false;
+    if (node.RenderStyle.Material === 'ProgressiveBlur' && !this._diagNoPblur) return false;
+    if (this._glassFillTakesPyramid(node)) return true;
+    return node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)
+      && _isGlass(node.RenderStyle.Material);
+  };
+
+  /** Does this node paint its OWN panel, text and vector in the pass that is running? Called once
+   *  per node, at the point `renderNode` has finished culling and is about to choose a material
+   *  branch -- which is also where the pass-1/pass-2 boundary is DETECTED, because the boundary IS
+   *  the first node that would build a pyramid.
+   *
+   *  Pass 3 paints no node's own content at all: it exists to carry the glass rim overlays, which
+   *  are emitted from `descendChildren` and gated by `_phasedEmitsRim` instead. */
+  private _phasedPaints = (node: Jiv): boolean => {
+    switch (this._phasedPass) {
+      case 1:
+        if (this._phasedStop) return false;
+        if (!this._phasedHoldsBack(node)) return true;
+        this._phasedStop = true;
+        return false;
+      case 2:
+        if (!this._phasedStarted && this._phasedHoldsBack(node)) this._phasedStarted = true;
+        return this._phasedStarted;
+      case 3:
+        return false;
+      default:
+        return true;
+    }
+  };
+
+  /** Does a BorderLayer overlay emit in the pass that is running?
+   *
+   *  A GLASS rim builds a pyramid, so it moves to pass 3 with every other rim in the frame. A FLAT
+   *  one is a solid stroke that builds nothing, so moving it would change z-order for no reading:
+   *  it emits in whichever pass its node's own content was painted in, which is exactly what the
+   *  live `_phasedStop` / `_phasedStarted` state says at the moment the overlay reaches its
+   *  BorderLayer slot. That is why this reads the flags rather than taking the answer from the
+   *  node: a container's flat rim whose BorderLayer sits ABOVE its first glass child belongs in
+   *  pass 2, one that sits below belongs in pass 1, and the slot is where that is known. */
+  private _phasedEmitsRim = (overlayGlass: boolean): boolean => {
+    switch (this._phasedPass) {
+      case 1: return !overlayGlass && !this._phasedStop;
+      case 2: return !overlayGlass && this._phasedStarted;
+      case 3: return overlayGlass;
+      default: return true;
+    }
+  };
+
+  /** One build phase: every pyramid at ONE of the two sites, from the scene as it stands, in the
+   *  walk's own order. It reuses `?blur-first`'s pre-pass traversal wholesale -- same functions,
+   *  same culls, same ordering, same two plan resolvers -- with `_prepassSites` choosing which of
+   *  the two sites issues a build. A second copy of that traversal would be a second answer to
+   *  "which surfaces build", and the whole claim of this flag is that the answer did not move.
+   *
+   *  No `RebindSceneTarget` here: the caller decides when the scene comes back, because a rebind
+   *  between the builds and the probe pass would put a scene bind where the baseline has none. */
+  private _blurPhasedBuild = (site: 'fill' | 'rim', w: number, h: number): void => {
+    this._phasedBuilt.length = 0;
+    this._prepassSites = site;
+    const scope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
+    this._blurFirstNode(this.Root, MAT_IDENTITY, EmptyClipStack, scope, null, null, w, h);
+    this._blurFirstReplay(scope, w, h);
+    this._prepassSites = 'both';
+    const st = this._blurFirstStats;
+    st.Chains = this._blurFirstKeys.size;
+    st.Keys = [...this._blurFirstKeys].join('+');
+  };
+
+  /** The adaptive-shadow probes for the fills just built, in build order.
+   *
+   *  It runs HERE and not in the walk for one reason, and it is a counting reason rather than a
+   *  pixel one: see `_phasedShadow`. Its arguments are the walk's, taken from the same
+   *  `GlassBlurPlan` the fill site reads, so the probe measures the rect, the LOD and the pyramid
+   *  the walk would have handed it. The sharp tap is the live scene texture, which is what the
+   *  walk hands it on every frosted class (those take no snapshot), and `?blur-src-*` substitutes
+   *  it inside `MeasureShadowBackdrop` exactly as it does in the walk. */
+  private _phasedShadowProbes = (dt: number): void => {
+    const r = this._renderer;
+    const d = this._dpr;
+    for (const b of this._phasedBuilt) {
+      if (!b.Plan.AdaptiveShadow) continue;
+      const detailLod = Math.log2(Math.max(b.Plan.FrostCssPx, SHADOW_DETAIL_MIN_PT) * d) - b.Plan.BaseFrostLod;
+      const slot = r.MeasureShadowBackdrop(
+        b.Node, { x: b.Plan.Px, y: b.Plan.Py, w: b.Plan.Pw, h: b.Plan.Ph },
+        detailLod, b.Handle, r.SceneTexture, dt,
+      );
+      if (slot < 0) continue;
+      this._phasedShadow.set(b.Node, { Slot: slot, Adaptive: b.Node.RenderStyle.ShadowAdaptive });
+      this._adaptiveShadowsDrawn = true;
+    }
+  };
+
   // ── `?blur-first`: the pre-pass ───────────────────────────────────────────────────────────
   // A second walk of the same tree that issues, for every glass surface the normal walk would
   // build a pyramid for, exactly the `ComputeBlur` + `GenerateBlurMipmap` pair it would issue —
@@ -3312,7 +3625,11 @@ export class Canvas implements DirtyTracker {
     // the scene-so-far, so moving it in front of the bed would change what it samples rather than
     // only when it is built. Those stay in the walk and the report says how many did.
     const isPblur = node.RenderStyle.Material === 'ProgressiveBlur' && !this._diagNoPblur;
-    if (!isPblur && this._glassFillTakesPyramid(node)
+    // Counted on the FILL phase only: `?blur-phased` runs this traversal twice a frame, once per
+    // site, and a surface counted in both would report double the number of surfaces the flag
+    // could not move.
+    if (isPblur && this._blurPhased && this._prepassSites === 'fill') this._phasedStrays.Pblur++;
+    if (!isPblur && this._prepassSites !== 'rim' && this._glassFillTakesPyramid(node)
         && this._blurFirstBuild(this._blurFirstFill, node, this._glassFillBlurPlan(node, eff, effH, w, h), w, h)) {
       this._blurFirstStats.Fill++;
     }
@@ -3336,6 +3653,7 @@ export class Canvas implements DirtyTracker {
       rimPending = false;
       // Only a GLASS rim builds a pyramid; a flat one is a solid stroke.
       if (!_isGlass(node.RenderStyle.Material)) return;
+      if (this._prepassSites === 'fill') return;
       if (this._blurFirstBuild(this._blurFirstRim, node, this._glassRimBlurPlan(node, eff, effH, w, h), w, h)) {
         this._blurFirstStats.Rim++;
       }
@@ -3379,6 +3697,10 @@ export class Canvas implements DirtyTracker {
     this._opMs.Blur += t1 - t0;
     this._opMs.Mip += performance.now() - t1;
     into.set(node, handle);
+    // `?blur-phased` runs the adaptive-shadow probes over this list after the phase, so the probe
+    // rides the end the build already paid. Recorded here rather than re-derived, because the
+    // probe's rect and detail LOD come out of the SAME plan this build was issued from.
+    if (this._blurPhased) this._phasedBuilt.push({ Node: node, Plan: plan, Handle: handle });
     // The pool's own chain key, from the pool's own functions. `_useChain` keys on the resolved
     // level-0 size, so this is the number that says how many sets of level textures forty builds
     // resolve to — and therefore how many of them can be held at once.
@@ -4927,6 +5249,65 @@ export class Canvas implements DirtyTracker {
         // `static` in the URL must not be left thinking it still held frame 1.
         if ((r as WebGL2Renderer).DiagBlurSrc === 'static') {
           JTrace('jaui:blur-first note=static-source-fills-from-an-undrawn-scene-so-it-reads-as-clear');
+        }
+      }
+    }
+    // `?blur-phased` -- MEASUREMENT ONLY, DIFFERENT PIXELS. See `_blurPhased`. Parsed LAST, after
+    // `?blur-first`, because it has to see every flag it interrogates AND because the two are
+    // mutually exclusive: both move pyramid builds, and an arm running both would be measuring
+    // neither. Each refusal names itself on the trace channel; an instrument that quietly did
+    // nothing would publish the baseline under the flag's name.
+    if (params.has('blur-phased')) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-build-nothing-to-phase'
+        : this._blurFirst ? 'blur-first-already-moved-every-build-ahead-of-the-bed'
+        : r.CardCompositeEnabled ? 'card-composite-builds-from-the-card-target'
+        : this._sharedBackdrop ? 'shared-backdrop-builds-one-pyramid-lazily'
+        : this._layerCacheEnabled ? 'layer-cache-skips-subtrees-the-phased-walk-would-paint'
+        : null;
+      if (why !== null) {
+        JTrace(`jaui:blur-phased armed=false reason=${why}`);
+      } else {
+        this._blurPhased = true;
+        const gl2 = r as WebGL2Renderer;
+        gl2.DiagBlurPhased = true;
+        // THE POOL, WHICH IS THE ONE THING THIS FLAG CANNOT LEAVE ALONE.
+        //
+        // `BlurPass._useChain` keys a chain on its LEVEL-0 SIZE, so twenty consecutive fill builds
+        // of a twenty-card grid land on ONE chain and each overwrites the level textures the
+        // previous build wrote. At baseline that is harmless, because each card's DRAW happens
+        // between its build and the next; phase 2 draws nothing, so it is not. The fix is the
+        // rotation `?blur-chains=N` already folded: N chains per size handed out round-robin per
+        // build, so twenty consecutive builds of a size get twenty distinct chains.
+        //
+        // N defaults to PHASED_CHAINS and an explicit `?blur-chains=N` alongside wins, so a scene
+        // with more than twenty surfaces of one size can be measured by saying so rather than by
+        // reading a quietly wrong picture. If a scene DOES exceed N, builds N apart share a chain
+        // and the gate's `chains`/`sizes` and the pool's own census are where that shows.
+        //
+        // The ceilings have to come up with it, and by how much is arithmetic rather than taste:
+        // twenty 568x436 fill chains at 1.65 MB plus twenty 480x348 rim chains at 1.11 MB is 40
+        // chains and 55.3 MB, against a shipped MAX_CHAINS of 6 and a 48 MB budget. So the flag
+        // hands the pool `MAX_CHAINS * PHASED_CHAINS` chains and twice the budget -- 120 and
+        // 96 MB, comfortably over the 55.3 MB the arm actually holds, so an eviction under this
+        // flag means the SCENE is bigger than the flag was sized for and the pool's refusal line
+        // says so rather than thrashing quietly. Handed in at construction and never mutated:
+        // there is nothing to restore when the flag is off, because an unflagged process never
+        // builds a pass that carries them. The `jaui:blur-phased armed=true` mark prints both.
+        if (gl2.DiagBlurChains === null) gl2.DiagBlurChains = PHASED_CHAINS;
+        gl2.DiagChainLimits = {
+          MaxChains: MAX_CHAINS * PHASED_CHAINS,
+          BudgetBytes: CHAIN_BUDGET_BYTES * 2,
+        };
+        // Under `?blur-src-clear` / `-static` every build reads the same stand-in, so the pixel
+        // change this flag makes -- a fill pyramid seeing the bed instead of its earlier
+        // neighbours' glass -- cannot exist. That pairing is a PURE COUNT test and its two-arm
+        // diff against `?blur-src-*` alone must read exactly 0. Said out loud, because the mark
+        // still prints `pixels=DIFFERENT` and a reader is entitled to know when it does not.
+        if (gl2.DiagBlurSrc !== null) {
+          JTrace('jaui:blur-phased note=blur-src-holds-the-source-constant-so-this-arm-is-a-pure-count-test');
         }
       }
     }

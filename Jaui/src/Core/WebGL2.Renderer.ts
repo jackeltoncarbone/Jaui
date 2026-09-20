@@ -11,7 +11,7 @@ import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Re
 import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
-import { BlurPass, PyramidDepth } from './BlurPass';
+import { BlurPass, PyramidDepth, type ChainLimits } from './BlurPass';
 import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
@@ -598,7 +598,7 @@ export class WebGL2Renderer implements Renderer {
     // is issued is a millisecond the compiler pool sat idle at the front of the longest job in the
     // boot. Only the context and the state reset above have to come first.
     const batch = new ShaderBatch(gl);
-    this._blur = new BlurPass(gl, batch, this.DiagBlurChains ?? 1);
+    this._blur = new BlurPass(gl, batch, this.DiagBlurChains ?? 1, this.DiagChainLimits ?? undefined);
     this._compilePanelShader(batch);
     this._compileTextShader(batch);
     this._compileStrokeShader(batch);
@@ -630,6 +630,16 @@ export class WebGL2Renderer implements Renderer {
     if (this.DiagBlurDummy) JTrace('jaui:blur-dummy armed=true pixels=WRONG');
     if (this.DiagBlurSrc !== null) JTrace(`jaui:blur-src armed=${this.DiagBlurSrc} pixels=WRONG`);
     if (this.DiagBlurFirst) JTrace('jaui:blur-first armed=true pixels=WRONG');
+    // `pixels=DIFFERENT` and not `WRONG`: see `DiagBlurPhased`. The ceilings ride the same line,
+    // because a phased arm read under the SHIPPED pool is twenty builds sharing one chain -- a
+    // different experiment wearing this flag's name.
+    if (this.DiagBlurPhased) {
+      const lim = this.DiagChainLimits;
+      JTrace('jaui:blur-phased armed=true pixels=DIFFERENT'
+        + ` chains=${this.DiagBlurChains ?? 1}`
+        + ` max=${lim === null ? 'default' : lim.MaxChains}`
+        + ` budget=${lim === null ? 'default' : Math.round(lim.BudgetBytes / (1024 * 1024)) + 'MB'}`);
+    }
     // No `pixels=WRONG` on this one, and the omission is the claim: the rotation is
     // pixel-identical by construction, so the two-arm `glassshot` diff must read exactly 0.
     if (this.DiagBlurChains !== null) JTrace(`jaui:blur-chains armed=${this.DiagBlurChains}`);
@@ -885,13 +895,15 @@ export class WebGL2Renderer implements Renderer {
     const c = pass.ChainCensus;
     const sizes = c.Sizes === '' ? 'none' : c.Sizes;
     const refused = c.Refused === null ? '' : ` ${tag}-refused=${c.Refused}`;
-    return ` ${tag}=${c.Resident}@${c.Live}:${sizes}${refused}`;
+    // `max`/`mb` are what makes a RAISED ceiling checkable: a phased arm that quietly ran under
+    // the shipped six would print `max=6` here and the cell would be void.
+    return ` ${tag}=${c.Resident}@${c.Live}/${c.Max}:${sizes}:${c.ResidentMb}of${c.BudgetMb}MB${refused}`;
   };
 
   /** Close the per-pass frame and harvest. Also drains the whole-frame ring, because the reference
    *  half of the reading is those queries and nothing else polls them unless the HUD is on. */
   private _endPassFrame = (): void => {
-    if (this.DiagBlurChains !== null && JauiTracing()) this._blurChainsGate();
+    if ((this.DiagBlurChains !== null || this.DiagBlurPhased) && JauiTracing()) this._blurChainsGate();
     const pass = this._pass;
     if (pass === null) return;
     this.GetFrameGpuMs();
@@ -1444,6 +1456,26 @@ export class WebGL2Renderer implements Renderer {
    *  mark a reader had to go looking for. */
   DiagBlurFirst = false;
 
+  /** `?blur-phased` (MEASUREMENT ONLY - DIFFERENT PIXELS). The COUNT test. Set by `Core/Jaui.ts`,
+   *  which owns the flag, the phased walk and every refusal; this renderer's part is to SAY the
+   *  flag arrived, in `Init`, beside the other measurement marks, and to hand the pool the raised
+   *  ceilings a phased frame needs (`DiagChainLimits`).
+   *
+   *  `pixels=DIFFERENT`, not `WRONG`. Phasing the walk is a legitimate composition that every fill
+   *  pyramid is built from the bed alone instead of from the bed plus its earlier neighbours'
+   *  glass; the difference is confined to the sample-margin overlap along each card's inner edges
+   *  and it is Jack's call whether it is acceptable. Under `?blur-src-clear` / `-static` the
+   *  difference vanishes entirely (every build reads the same stand-in) and the arm is a pure
+   *  count test. */
+  DiagBlurPhased = false;
+
+  /** Per-pass residency ceilings for the three `BlurPass` instances, or `null` for the shipped
+   *  `MAX_CHAINS` / `CHAIN_BUDGET_BYTES`. Only `?blur-phased` sets it, and only because twenty
+   *  fill pyramids have to be alive at once. Handed in at construction and never mutated, so
+   *  there is nothing to restore when the flag is off -- an unflagged process never builds a pass
+   *  that carries it. */
+  DiagChainLimits: ChainLimits | null = null;
+
   /** `?blur-chains=N` (MEASUREMENT ONLY - PIXEL-IDENTICAL). How many chains each `BlurPass` keeps
    *  per level-0 size, handed out round-robin per build so consecutive builds of a size never
    *  share one. `null` is the flag ABSENT and 1 is the flag given as 1; both run the shipped pool,
@@ -1573,7 +1605,8 @@ export class WebGL2Renderer implements Renderer {
     const pass = radius > 0
       ? this._blur
       : (this._rootBlur
-        ?? (this._rootBlur = this._tagBlur(new BlurPass(this._gl, undefined, this.DiagBlurChains ?? 1), 'root')));
+        ?? (this._rootBlur = this._tagBlur(
+          new BlurPass(this._gl, undefined, this.DiagBlurChains ?? 1, this.DiagChainLimits ?? undefined), 'root')));
     this._lastBlur = pass;
     // BlurPass binds its own level FBOs and draws into them, and it does it with raw GL that never
     // passes through `_tgt`. So the switch is noted HERE, once per build: the encoder ends at the
@@ -1657,7 +1690,8 @@ export class WebGL2Renderer implements Renderer {
    *  no-frost LOD-0 fallback. Restores the scene FBO before returning. */
   BuildSharedBackdrop = (width: number, height: number, maxLod: number): GpuTextureHandle => {
     const pass = this._sharedBlur
-      ?? (this._sharedBlur = this._tagBlur(new BlurPass(this._gl, undefined, this.DiagBlurChains ?? 1), 'shared'));
+      ?? (this._sharedBlur = this._tagBlur(
+        new BlurPass(this._gl, undefined, this.DiagBlurChains ?? 1, this.DiagChainLimits ?? undefined), 'shared'));
     // radius 0 → level 0 is the raw scene (1-tap copy, no dual-filter pre-blur);
     // GenerateOutputMipmap then builds the Gaussian stack from that sharp root.
     // Quarter-res build: blur is low-frequency, so a 1/4-res pyramid upsamples to
