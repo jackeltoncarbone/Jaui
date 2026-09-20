@@ -39,6 +39,30 @@ flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lod
 // the flat path's arithmetic is moved, duplicated or rewritten — the flat program is a strict
 // DELETION from the same source, which is what makes its output bit-identical by construction
 // and what `tests/Flat.Program.test.ts` asserts (flat ⊂ none, as a subsequence).
+//
+// ── NO_SHAPE_GRADIENT: a BORDERLESS flat panel must not compute the SDF normal it throws away ──
+//
+// Defined only TOGETHER with MATERIAL_FLAT, and only for a batch every one of whose instances has
+// `BorderWidth == 0.0` exactly AND sits on the superellipse leg of the corner field (`pillW == 0`).
+// `WebGL2Renderer._batchTakesBorderlessProgram` decides both, off the same packed instance floats,
+// with the same expressions.
+//
+// Under MATERIAL_FLAT the normal returned by `ShapeEval` feeds exactly ONE chain — the border's
+// `keyAlign`/`widthScale`/`borderCoverage` — and at BorderWidth 0 that chain's output is the
+// EXACT float 0, so the two blends it drives are `x * 1.0 + c * 0.0`: a no-op in IEEE for finite
+// x and c. This is the one place in the lane's two exclusions that removes instructions whose
+// RESULT is provably zero rather than instructions that are unreachable. The arithmetic is
+// written out in `tests/Borderless.Program.test.ts` and in `Perf/Borderless.Finding.md`.
+//
+// With that chain gone the only surviving consumer of the corner field is its DISTANCE, and
+// `CornerDist` (below, already used by the clip stack and the shadow pass) returns it without
+// `ShapeGrad_inner` — "two pow() calls, a length and a normalize" by this file's own comment —
+// and without `SS_PillEval`'s closest-point tracking. The routing's `pillW == 0` term is what
+// makes the substitution bit-identical BY INSPECTION: on that leg both functions return
+// `ShapeSDF_inner(p, halfSize, vec2(rCorner), n)` off the same `CornerParams`. The pill leg is
+// NOT admitted — `SS_PillSDF` and `SS_PillEval` are different function bodies, and a CPU port
+// proving their distances bit-equal cannot speak for a GPU compiler's freedom to contract
+// `a + t*ab` differently in a loop that also tracks a closest point.
 #if !defined(MATERIAL_FLAT)
 // Dual-filter blurred backdrop pyramid (base sigma = u_BaseFrostLod equivalent).
 // Mipmapped — each integer LOD above the base ≈ doubles the effective sigma.
@@ -353,6 +377,7 @@ const float SS_PILL_MAXEXTENT = 1.5400; // SS pill max horizontal extent / halfY
 // Single-pass loop: tracks min-distance, closest point, AND bracketing segment
 // for inside test in one scan. Bit-exact equivalent to the old two-pass form
 // (proven in tests/Pill.SDF.MergedLoop.test.ts across ~715k samples).
+#if !defined(NO_SHAPE_GRADIENT)
 void SS_PillEval(vec2 p, vec2 halfSize, out float distOut, out vec2 gradOut) {
     bool horiz = halfSize.x >= halfSize.y;
     vec2 q = horiz ? abs(p) : abs(p.yx);
@@ -418,6 +443,7 @@ void SS_PillEval(vec2 p, vec2 halfSize, out float distOut, out vec2 gradOut) {
     g.y *= sign(p.y);
     gradOut = horiz ? g : g.yx;
 }
+#endif
 
 // SDF-only entry point — used by shadow pass (no gradient needed).
 // Single-pass merged loop like SS_PillEval, minus the closest-point tracking.
@@ -462,12 +488,14 @@ float SS_PillSDF(vec2 p, vec2 halfSize) {
 // Gradient-only wrapper over SS_PillEval. Kept for API compatibility with
 // ShapeGrad dispatch; callers that need both dist and grad should use
 // ShapeEval to avoid recomputing the polyline scan.
+#if !defined(NO_SHAPE_GRADIENT)
 vec2 SS_PillGrad(vec2 p, vec2 halfSize) {
     float d;
     vec2 g;
     SS_PillEval(p, halfSize, d, g);
     return g;
 }
+#endif
 
 // Master SDF — operates on a shape defined by halfSize + cornerBox (rx, ry) + exponent n.
 // qc is the corner-offset vector (positive in the corner region, zero in the flat zone).
@@ -509,6 +537,7 @@ float ShapeSDF_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
 // Analytic gradient (outward unit normal) of the corner superellipse.
 // Direction of ∇F = (uv.x^(n−1)/rx, uv.y^(n−1)/ry), sign from p.
 // Magnitude falls out when normalized.
+#if !defined(NO_SHAPE_GRADIENT)
 vec2 ShapeGrad_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
     rAxis = max(rAxis, vec2(1e-3));
     vec2 q = abs(p) - halfSize + rAxis;
@@ -536,6 +565,7 @@ vec2 ShapeGrad_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {
     }
     return g / gLen;
 }
+#endif
 
 // ─── Unified dispatch: classify, then evaluate ───
 //   mode 0: Rect    — per-corner scalar radius, superellipse exponent from smoothness
@@ -619,6 +649,7 @@ float CornerDist(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
     return mix(dSuper, SS_PillSDF(p, halfSize), pillW);
 }
 
+#if !defined(NO_SHAPE_GRADIENT)
 void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
                 out float distOut, out vec2 gradOut) {
     float pillW, n, rCorner;
@@ -643,6 +674,7 @@ void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
     distOut = mix(dSuper, dPill, pillW);
     gradOut = normalize(mix(gSuper, gPill, pillW));
 }
+#endif
 
 // Thin wrappers — the discrete `mode` arg is retained for call-site
 // compatibility but is no longer used; CornerEval derives the blend from
@@ -651,6 +683,7 @@ float ShapeSDF(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
     return CornerDist(p, halfSize, radii, smoothness);
 }
 
+#if !defined(NO_SHAPE_GRADIENT)
 vec2 ShapeGrad(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode) {
     float d; vec2 g;
     CornerEval(p, halfSize, radii, smoothness, d, g);
@@ -663,6 +696,7 @@ void ShapeEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness, int mode,
                out float distOut, out vec2 gradOut) {
     CornerEval(p, halfSize, radii, smoothness, distOut, gradOut);
 }
+#endif
 
 // Rec. 709 luma
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
@@ -795,7 +829,11 @@ void main() {
     }
     vec2 shadowOffset = v_ShadowParams.xy;
     float shadowBlur = v_ShadowParams.z;
+#if !defined(NO_SHAPE_GRADIENT)
+    // The borderless program is routed only where this is exactly 0.0 for every instance, and
+    // the one chain that reads it is excluded below, so the read has no consumer there.
     float borderWidth = v_ShadowParams.w;
+#endif
     // Border-only flag: BorderLayer's glass overlay encodes "paint ONLY the
     // glass border, skip fill/shadow" as a NEGATIVE borderEdgeAa (the feather
     // is otherwise always >= 0). The frag still needs the magnitude for the
@@ -864,8 +902,19 @@ void main() {
     // separate scans (SDF + Grad). Rect/circle still uses the cheap
     // closed-form pair.
     float dist;
+    // The ONE substitution in the NO_SHAPE_GRADIENT variant, and the only place this lane writes a
+    // line rather than deleting one. `CornerDist` is the same function the clip stack and the
+    // shadow pass already call; the routing guarantees `pillW == 0` for every instance in the
+    // batch, and on that leg CornerDist and CornerEval both return
+    // `ShapeSDF_inner(p, halfSize, vec2(rCorner), n)` off the same `CornerParams` — the same
+    // expression, in the same order, in the same function. `normal` is not declared, because
+    // nothing that survives the exclusions below reads it.
+#if defined(NO_SHAPE_GRADIENT)
+    dist = CornerDist(p, panelHalfSize, v_Radii, effectiveSmooth);
+#else
     vec2 normal;
     ShapeEval(p, panelHalfSize, v_Radii, effectiveSmooth, mode, dist, normal);
+#endif
     float edgeDist = max(-dist, 0.0);                 // positive inside
 
     // ── Bezel hump (pincushion profile) ──
@@ -1079,6 +1128,18 @@ void main() {
     }
 
     // ── Variable border width along perimeter ──
+    //
+    // THE CHAIN NO_SHAPE_GRADIENT REMOVES, and the whole reason the normal is computed at all on
+    // a flat panel. At `borderWidth == 0` — which the borderless program's routing guarantees for
+    // every instance in the batch — every number below is exactly 0 or exactly 1, whatever the
+    // normal was:
+    //     localBorderWidth  = 0 * widthScale                   = ±0    (widthScale is finite)
+    //     variedBorderWidth = max(±0, 0.0)                     =  0
+    //     drawnBorderWidth  = max(0, BORDER_MIN_DEVICE_PX)     =  1
+    //     borderCoverage    = 0 / 1                            =  0
+    // and every later consumer multiplies by borderCoverage, so the stroke composites
+    // `x * 1.0 + c * 0.0` — exact, for finite x and c.
+#if !defined(NO_SHAPE_GRADIENT)
     // Thicker where the rim's outward normal aligns with the light direction.
     // Two lights, as the iPhone's environment has them: the key light along lightDir and a bounce from
     // the opposite side nearly as bright (measured on a round button over black: 68 at the top left, 58
@@ -1108,6 +1169,7 @@ void main() {
     float variedBorderWidth = max(localBorderWidth, 0.0);
     float drawnBorderWidth = max(variedBorderWidth, BORDER_MIN_DEVICE_PX);
     float borderCoverage = variedBorderWidth / drawnBorderWidth;
+#endif
 
     // ── Edge lighting (Apple Liquid Glass) ──────────────────────────────
     // Two bands stacked:
@@ -1478,6 +1540,11 @@ void main() {
         }
     } else
 #endif
+    // The plain stroke. Under NO_SHAPE_GRADIENT the whole compound statement goes: every
+    // assignment in it is `result.<c> * (1 - 0) + <c> * 0`, because `borderCoverage` is exactly 0
+    // (see the chain above). It mutates nothing else — `borderOuter`, `fadeIn`, `borderInner`,
+    // `borderBase` and `borderAlpha` are locals that die here.
+#if !defined(NO_SHAPE_GRADIENT)
     {
         float borderOuter = smoothstep(-aa, aa, dist);
         // The inner edge eases over BorderFade (scaled with the width) past the stroke; with no fade it
@@ -1490,6 +1557,7 @@ void main() {
         result.rgb = result.rgb * (1.0 - borderAlpha) + v_BorderColor.rgb * borderAlpha;
         result.a = result.a * (1.0 - borderAlpha) + borderAlpha;
     }
+#endif
 
     result.a *= opacity * clipAlpha;
 

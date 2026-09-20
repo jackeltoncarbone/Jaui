@@ -23,9 +23,25 @@ export const readRenderer = (): string => src('Core', 'WebGL2.Renderer.ts');
 export const readJaui = (): string => src('Core', 'Jaui.ts');
 export const readInstanceBuffer = (): string => src('Jiv', 'Jiv.InstanceBuffer.ts');
 
-/** The three defines `_compilePanelShader` builds the panel program from. */
+/** The three SINGLE defines `_compilePanelShader` builds a panel program from. */
 export const VARIANTS = ['MATERIAL_GLASS', 'MATERIAL_NONE', 'MATERIAL_FLAT'] as const;
 export type Variant = (typeof VARIANTS)[number];
+
+/**
+ * Every panel program the boot compiles, by the define SET it is cut with.
+ *
+ * `NO_SHAPE_GRADIENT` is the first variant that needs more than one define, and it is never
+ * issued alone: it is sound only under `MATERIAL_FLAT`, whose exclusions are what leave the
+ * border chain as the SDF gradient's only consumer. The set is the unit, so a test cannot
+ * accidentally reason about a combination the renderer does not build.
+ */
+export const PROGRAMS = {
+  MATERIAL_GLASS: ['MATERIAL_GLASS'],
+  MATERIAL_NONE: ['MATERIAL_NONE'],
+  MATERIAL_FLAT: ['MATERIAL_FLAT'],
+  BORDERLESS: ['MATERIAL_FLAT', 'NO_SHAPE_GRADIENT'],
+} as const satisfies Record<string, readonly string[]>;
+export type ProgramName = keyof typeof PROGRAMS;
 
 // ── A minimal C preprocessor, over exactly the constructs this shader uses ────────────────────
 //
@@ -136,6 +152,10 @@ export const braceBalance = (lines: ReadonlyArray<{ N: number; Text: string }>):
 /** The compiled text of one variant, comments and blanks removed. */
 export const variantCode = (variant: Variant): Array<{ N: number; Text: string }> =>
   codeLines(preprocess(readPanelFrag(), [variant]));
+
+/** The compiled text of one PROGRAM (a define set), comments and blanks removed. */
+export const programCode = (name: ProgramName): Array<{ N: number; Text: string }> =>
+  codeLines(preprocess(readPanelFrag(), PROGRAMS[name]));
 
 /**
  * Every line of `sub` that is NOT in `sup` at the same original line number, in order.

@@ -5439,6 +5439,25 @@ export class Canvas implements DirtyTracker {
       if (webgl2) (r as WebGL2Renderer).DiagFlatProgram = armed;
       const why = !webgl2 ? ' reason=webgl2-only' : bad ? ` reason=only-on-and-off-are-values-got-${flatProgram}` : '';
       JTrace(`jaui:flat-program armed=${armed ? 'on' : 'off'} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}${why}`);
+
+      // `?borderless-program=off` — PIXEL-IDENTICAL BY CONSTRUCTION, and DEFAULT ON.
+      //
+      // The fourth panel variant (MATERIAL_FLAT + NO_SHAPE_GRADIENT) drops the SDF gradient and
+      // the border chain that is its only consumer on a flat panel. `=off` sends borderless
+      // batches back to MATERIAL_FLAT — flatprogram's routing — so both arms live in one binary
+      // and differ by a program bind.
+      //
+      // `?flat-program=off` IMPLIES this one off, and says so in the mark rather than printing
+      // `armed=on` for a program no batch can reach: with the flat routing gone there is no flat
+      // batch to narrow. Read the two lines together; the second never claims more than the first.
+      const borderless = params.get('borderless-program');
+      const blBad = borderless !== null && borderless !== '' && borderless !== 'on' && borderless !== 'off';
+      const blArmed = armed && (blBad || borderless !== 'off');
+      if (webgl2) (r as WebGL2Renderer).DiagBorderlessProgram = blArmed;
+      const blWhy = !webgl2 ? ' reason=webgl2-only'
+        : !armed ? ' reason=flat-program-off'
+        : blBad ? ` reason=only-on-and-off-are-values-got-${borderless}` : '';
+      JTrace(`jaui:borderless-program armed=${blArmed ? 'on' : 'off'} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}${blWhy}`);
     }
     if (params.has('no-panels')) this._diagNoPanels = true;
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }

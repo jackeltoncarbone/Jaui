@@ -162,15 +162,15 @@ describe('what the flat program keeps, byte for byte', () => {
     // The flat fragment needs no varying the others do not produce, so there is nothing to cut
     // that a pixel gate could see — and the adaptive-shadow texel fetch is per VERTEX anyway.
     expect(RENDERER).toContain('batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT:  true })');
-    expect((RENDERER.match(/panelVertSrc/g) ?? []).length).toBe(1 + 3); // the import + three Adds
+    expect((RENDERER.match(/panelVertSrc/g) ?? []).length).toBe(1 + 4); // the import + four Adds
   });
 });
 
 describe('routing: which batches take the flat program', () => {
   it('compiles exactly PANEL_PROGRAM_COUNT panel variants, and the constant says so', () => {
-    expect(RENDERER).toContain('export const PANEL_PROGRAM_COUNT = 3;');
+    expect(RENDERER).toContain('export const PANEL_PROGRAM_COUNT = 4;');
     const adds = RENDERER.match(/batch\.Add\(panelVertSrc, panelFragSrc/g) ?? [];
-    expect(adds.length).toBe(3);
+    expect(adds.length).toBe(4);
   });
 
   it('issues the flat program unconditionally, so both arms are one binary', () => {

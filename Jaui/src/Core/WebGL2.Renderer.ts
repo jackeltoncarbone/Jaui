@@ -194,10 +194,11 @@ interface _CardTarget {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/** Panel program variants compiled from the ONE `Jiv.Panel.frag`: glass, non-glass, flat.
- *  Exported so `?flat-program`'s init mark cannot claim a count the boot does not build;
- *  `tests/Flat.Program.test.ts` asserts `_compilePanelShader` issues exactly this many. */
-export const PANEL_PROGRAM_COUNT = 3;
+/** Panel program variants compiled from the ONE `Jiv.Panel.frag`: glass, non-glass, flat, and
+ *  flat-and-borderless. Exported so `?flat-program` / `?borderless-program`'s init marks cannot
+ *  claim a count the boot does not build; `tests/Flat.Program.test.ts` asserts
+ *  `_compilePanelShader` issues exactly this many. */
+export const PANEL_PROGRAM_COUNT = 4;
 
 const PANEL_FLOATS_PER_INSTANCE = 60;
 // Offsets INTO one packed panel instance of the five numbers the fragment's `hasBackdropFilter`
@@ -212,6 +213,31 @@ const PANEL_OFF_FROST_LOD = 35;
 const PANEL_OFF_BODY_TINT = 41;
 /** The fragment's own epsilon, `Jiv.Panel.frag`'s `hasBackdropFilter`. One number, both sides. */
 const PANEL_BACKDROP_FILTER_EPSILON = 0.001;
+
+// ── The borderless program's own four offsets ───────────────────────────────
+// `NO_SHAPE_GRADIENT` removes the SDF gradient and the border chain it feeds. That is sound on
+// two conditions, both PER INSTANCE and both decided here off the same packed floats the
+// fragment's varyings are fed from:
+//
+//   1. `borderWidth == 0.0` EXACTLY. Not an epsilon: the removed chain's output is the exact
+//      float 0 only at zero, and at any other width it paints. `Jiv.InstanceBuffer.Push` writes
+//      `style.BorderWidth * avgScale * d` here, and its 'Suppress' arm writes a literal 0.
+//   2. `pillW == 0.0` EXACTLY — the corner field's superellipse leg. There `CornerDist` and
+//      `CornerEval` both return `ShapeSDF_inner(p, halfSize, vec2(rCorner), n)` from the same
+//      `CornerParams`, so the substitution is bit-identical by inspection. `pillW` is a function
+//      of the instance's half-size and packed smoothness ALONE (see `CornerParams` — `rCorner` is
+//      the only per-fragment term and it does not reach `pillW`), which is what makes a per-batch
+//      answer exact rather than conservative.
+const PANEL_OFF_HALF_W = 6;
+const PANEL_OFF_HALF_H = 7;
+const PANEL_OFF_BORDER_WIDTH = 27;
+const PANEL_OFF_SMOOTH_PACKED = 29;
+// `Jiv.Panel.frag`'s `CornerParams`, constant for constant. Rounded to float32 because the
+// fragment evaluates them in `highp float` off the same float32 instance data.
+const CORNER_SAT_FRAC = Math.fround(0.12);
+const CORNER_ASPECT_LO = Math.fround(1.02);
+/** `CornerParams`' own `max(minHalf, 0.0001)` divide guard, as the float32 the shader sees. */
+const CORNER_MIN_HALF = Math.fround(0.0001);
 const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
 const PANEL_ATTR_COUNT = 15; // locations 1..15 — clip_meta is packed into a_Outline.zw
 const BYTES_PER_VEC4 = 16;
@@ -392,15 +418,30 @@ export class WebGL2Renderer implements Renderer {
   // touches). MATERIAL_FLAT strips that path at compile time from the SAME source — two samplers
   // gone, `sampleBackdrop` gone, the glass dither gone, 698 -> 529 lines of GLSL.
   private _panelShaderFlat!: ShaderProgram;
+  // MATERIAL_FLAT + NO_SHAPE_GRADIENT. MATERIAL_FLAT still calls `ShapeEval`, which returns the
+  // SDF's outward normal, and on a flat panel that normal feeds exactly one chain — the border's
+  // `keyAlign` → `widthScale` → `borderCoverage`. At `borderWidth == 0` that chain's output is the
+  // exact float 0, so the stroke it drives is `x * 1.0 + c * 0.0`: computed, then thrown away. This
+  // variant takes the distance from `CornerDist` (the same function the clip stack and the shadow
+  // pass already call) and drops the gradient — two `pow()`, a `length` and a `normalize` per
+  // fragment — along with the whole chain. It is the ONE exclusion in this pair that removes
+  // instructions whose RESULT is provably zero rather than instructions that are unreachable.
+  private _panelShaderBorderless!: ShaderProgram;
   // Uniform location bundles per variant — each program has its own
   // location IDs even when the uniform names match.
   private _panelLocsGlass!: _PanelLocs;
   private _panelLocsNone!: _PanelLocs;
   private _panelLocsFlat!: _PanelLocs;
+  private _panelLocsBorderless!: _PanelLocs;
   /** `?flat-program=off` sends every panel back through the full program. Default ON: the flat
    *  program is pixel-identical by construction, so the only reason to hold the old routing is to
    *  measure the two arms against each other in ONE binary. Set by `Jaui._initDebugFromUrl`. */
   DiagFlatProgram = true;
+  /** `?borderless-program=off` sends borderless flat batches back to MATERIAL_FLAT — i.e. to
+   *  flatprogram's routing — in the same binary. `?flat-program=off` sends everything back to the
+   *  full program and therefore implies this one off, which `Jaui._initDebugFromUrl` enforces at
+   *  the flag rather than here, so this field means exactly one thing. Default ON. */
+  DiagBorderlessProgram = true;
   // Retained-mode capture view-offset (device px). (0,0) for the normal pass;
   // compositeOrCapture sets it to the subtree AABB origin so panel/text draws
   // project into the capture FBO while v_PixelPos stays screen-space (clips
@@ -1237,13 +1278,25 @@ export class WebGL2Renderer implements Renderer {
     // the shader to sample, and with no pyramid bound that instance reads the dummy texture, which
     // is today's behaviour and has to stay today's behaviour. So the batch is classified on the
     // same five numbers the fragment would have read; see `_batchTakesFlatProgram`.
+    //
+    // And a flat batch whose every instance is BORDERLESS and sits on the corner field's
+    // superellipse leg takes the borderless program on top of that: nothing in it reads the SDF's
+    // gradient, so nothing in it computes one. The extra scan is over the same instance floats the
+    // flat scan just walked, on batches that have already been classified flat.
     const isGlass = useGlassShader;
     const isFlat = !isGlass
       && this.DiagFlatProgram
       && backdrop === null
       && this._batchTakesFlatProgram(baseFrostLod);
-    const program = isGlass ? this._panelShaderGlass : isFlat ? this._panelShaderFlat : this._panelShaderNone;
-    const locs    = isGlass ? this._panelLocsGlass   : isFlat ? this._panelLocsFlat   : this._panelLocsNone;
+    const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
+    const program = isGlass ? this._panelShaderGlass
+      : isBorderless ? this._panelShaderBorderless
+      : isFlat ? this._panelShaderFlat
+      : this._panelShaderNone;
+    const locs = isGlass ? this._panelLocsGlass
+      : isBorderless ? this._panelLocsBorderless
+      : isFlat ? this._panelLocsFlat
+      : this._panelLocsNone;
 
     this._useProgram(program.Program);
     gl.uniform2f(locs.resolution, canvasWidth, canvasHeight);
@@ -1330,6 +1383,53 @@ export class WebGL2Renderer implements Renderer {
       if (Math.abs(d[b + PANEL_OFF_BACKDROP_CONTRAST] - 1) > e) return false;
       if (d[b + PANEL_OFF_FROST_LOD] > frostCeiling) return false;
       if (Math.abs(d[b + PANEL_OFF_BODY_TINT]) > e) return false;
+    }
+    return true;
+  };
+
+  /**
+   * Can every instance in the pending batch be shaded by the BORDERLESS program?
+   *
+   * Two questions per instance, both exact, both off the same packed floats the fragment reads.
+   *
+   * 1. **Is the border exactly absent?** `borderWidth === 0` covers both signed zeros, which is
+   *    right: `borderWidth * widthScale` is ±0 for either, `max(±0, 0.0)` is 0, and
+   *    `borderCoverage` is 0 / 1 = 0 in both cases. Not an epsilon — a 0.001 px border still
+   *    paints, at the hairline floor, at 0.001 coverage, and the removed chain is what paints it.
+   *
+   * 2. **Is the corner on the superellipse leg?** `pillW = sat * elong` in `CornerParams`, and
+   *    neither factor depends on the fragment, so one answer serves the whole instance. It is
+   *    exactly 0 when either factor is exactly 0, and `smoothstep` returns exactly 0 below its
+   *    low edge. A DEGENERATE band (`minHalf - satBand === minHalf - 1`, i.e. a panel under
+   *    ~8.33 device px on its short half-axis) makes the fragment's `smoothstep` divide by zero,
+   *    and this refuses rather than reasoning about what that produced — those batches keep
+   *    MATERIAL_FLAT.
+   *
+   * One instance answering no sends the whole batch back to MATERIAL_FLAT. Only reached on
+   * batches `_batchTakesFlatProgram` has already admitted.
+   */
+  private _batchTakesBorderlessProgram = (): boolean => {
+    const d = this._panelInstanceData;
+    const fr = Math.fround;
+    for (let i = 0; i < this._panelInstanceCount; i++) {
+      const b = i * PANEL_FLOATS_PER_INSTANCE;
+      if (d[b + PANEL_OFF_BORDER_WIDTH] !== 0) return false;
+      // `CornerParams`, term for term, in float32.
+      const halfW = d[b + PANEL_OFF_HALF_W];
+      const halfH = d[b + PANEL_OFF_HALF_H];
+      const minHalf = Math.min(halfW, halfH);
+      const maxHalf = Math.max(halfW, halfH);
+      const satBand = Math.max(fr(minHalf * CORNER_SAT_FRAC), 1);
+      const satE0 = fr(minHalf - satBand);
+      const satE1 = fr(minHalf - 1);
+      if (!(satE0 < satE1)) return false;
+      // `authoredR = floor(smoothness * 0.5) / 16.0` — the authored corner radius rides above the
+      // 0..1 smoothness in the same float, in sixteenths of a device pixel.
+      const authoredR = Math.floor(d[b + PANEL_OFF_SMOOTH_PACKED] * 0.5) / 16;
+      if (authoredR <= satE0) continue;                       // sat === 0
+      const aspect = fr(maxHalf / Math.max(minHalf, CORNER_MIN_HALF));
+      if (aspect <= CORNER_ASPECT_LO) continue;               // elong === 0, and sat is finite
+      return false;
     }
     return true;
   };
@@ -3449,9 +3549,17 @@ export class WebGL2Renderer implements Renderer {
     // produce, so a cut-down vertex shader would change nothing a pixel gate can see while
     // doubling what can drift — and the adaptive-shadow texel fetch is PER VERTEX (four per
     // instance), not the per-pixel tax this lane is about.
+    //
+    // A FOURTH, MATERIAL_FLAT + NO_SHAPE_GRADIENT, goes one further and removes the SDF gradient
+    // the flat fragment computes and throws away on a borderless panel. NO_SHAPE_GRADIENT is
+    // never issued alone: it is only sound under MATERIAL_FLAT, whose exclusions are what leave
+    // the border chain as the gradient's only consumer. Issued unconditionally too, for the same
+    // reason — `?borderless-program` changes routing and not the boot.
     this._panelShaderGlass = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_GLASS: true });
     this._panelShaderNone  = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_NONE:  true });
     this._panelShaderFlat  = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT:  true });
+    this._panelShaderBorderless =
+      batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true });
   };
 
   private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
@@ -3462,6 +3570,7 @@ export class WebGL2Renderer implements Renderer {
     // silently ignored, so `PanelDrawBatch` sets the same uniforms for every variant and only the
     // ones the bound program actually declares land.
     this._panelLocsFlat  = _extractPanelLocs(gl, this._panelShaderFlat.Program);
+    this._panelLocsBorderless = _extractPanelLocs(gl, this._panelShaderBorderless.Program);
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jaui] Failed to create panel instance buffer');
