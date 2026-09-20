@@ -629,6 +629,7 @@ export class WebGL2Renderer implements Renderer {
     if (this.DiagSnapOnce) JTrace('jaui:snap-once armed=true pixels=WRONG');
     if (this.DiagBlurDummy) JTrace('jaui:blur-dummy armed=true pixels=WRONG');
     if (this.DiagBlurSrc !== null) JTrace(`jaui:blur-src armed=${this.DiagBlurSrc} pixels=WRONG`);
+    if (this.DiagBlurFirst) JTrace('jaui:blur-first armed=true pixels=WRONG');
     // The card composite is OFF by default and `?cardcomposite` turns it on, so the mark carries
     // the same contract as the three above it: a reading of the composite walk WITHOUT this line is
     // a reading of the wrong build. No `pixels=WRONG` -- this one is pixel-identical by
@@ -1406,6 +1407,16 @@ export class WebGL2Renderer implements Renderer {
    *  Checked AFTER `?no-blur` and `?blur-dummy` at every site, because every table in the perf
    *  ledger is read under those two flags' current meaning and neither may shift by a line. */
   DiagBlurSrc: 'static' | 'clear' | null = null;
+
+  /** `?blur-first` (MEASUREMENT ONLY - WRONG PIXELS). The ORDER test. Set by `Core/Jaui.ts`, which
+   *  owns the flag, the pre-pass and every decision about whether the flag may arm at all; this
+   *  renderer's only part in it is to SAY the flag arrived, in `Init`, beside the other three
+   *  measurement marks. A reading taken with this mark absent is a reading of the wrong build.
+   *
+   *  Nothing in this file reads it. It is here rather than left on `Jaui` because the marks are
+   *  emitted where the scene FBO is built, and a mark that lived somewhere else would be the one
+   *  mark a reader had to go looking for. */
+  DiagBlurFirst = false;
   private _blurSrcTex: WebGLTexture | null = null;
   private _blurSrcFbo: WebGLFramebuffer | null = null;
   private _blurSrcW = 0;

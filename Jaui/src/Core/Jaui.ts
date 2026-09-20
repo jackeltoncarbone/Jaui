@@ -22,6 +22,11 @@ import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
 import { XformBuffer } from '../Transform/Xform.Buffer';
 import { SHADOW_EASE_SECONDS, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop } from './Renderer';
+// `?blur-first` names the pyramid pool's own chain key so the report can say how many chains
+// forty builds actually resolve to. These three are the exact functions `BlurPass.Blur` uses to
+// pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
+// copy of the rule would be a count that can silently disagree with the pass it is counting.
+import { BaseDownsampleFactor, PyramidDepth, ResolveRegionRect } from './BlurPass';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
@@ -115,6 +120,41 @@ import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
 import { FocusManager } from './Focus/FocusManager';
 import { InputRouter } from './Input/InputRouter';
+
+/** A perspective viewing context established by an ancestor (CSS `perspective`).
+ *  D = viewing distance, (Ox, Oy) = vanishing point — both in CANVAS px (the same frame as the
+ *  affine `eff`); the GPU stage scales by dpr. Null = no perspective in scope (the 2D fast path).
+ *
+ *  Module scope rather than local to `_render` because `?blur-first`'s pre-pass walks the same tree
+ *  with the same transforms and has to speak the same types. */
+interface PerspCtx { D: number; Ox: number; Oy: number }
+/** A subtree deferred by a live teleport, with the frame it was deferred FROM. */
+interface TeleportDefer { N: Jiv; M: Mat2x3; MH: Mat3x3 | null; P: PerspCtx | null }
+interface TeleportScope { Deferred: TeleportDefer[]; Stack: ClipStack }
+
+/** Everything one glass surface's pyramid build needs, resolved from the node's world transform
+ *  and the clip stack. The two sites that build one (the glass FILL and the glass rim OVERLAY)
+ *  each have a resolver below, and `?blur-first`'s pre-pass calls the SAME resolver — a pre-pass
+ *  with its own copy of the region arithmetic is a pre-pass that can silently build a different
+ *  pyramid and hand it over as if it were the same one. */
+interface GlassBlurPlan {
+  /** The sample region in device px, y=0 at the top — `ComputeBlur`'s `region`. */
+  Region: { x: number; y: number; w: number; h: number };
+  /** `ComputeBlur`'s `radius`: this surface's frost sigma in device px. */
+  Radius: number;
+  /** `GenerateBlurMipmap`'s argument: how deep a chain this surface can actually read. */
+  MaxLod: number;
+  /** The base the shader subtracts from its frost LOD, i.e. the walk's `lastBaseFrostLod`. */
+  BaseFrostLod: number;
+  /** This instance's own frost expressed as a LOD — the gate on the raw-scene snapshot. */
+  InstFrostLod: number;
+  /** The node's device-px AABB, and the margin the region added around it. */
+  Px: number; Py: number; Pw: number; Ph: number; Margin: number;
+  /** Whether the adaptive-shadow probe will run for this surface (it deepens `MaxLod`). */
+  AdaptiveShadow: boolean;
+  /** `BackdropFrostBlur` floored at 1pt — what the margin and the radius are built from. */
+  FrostCssPx: number;
+}
 
 /** `EndsByKey` as one readable token: `snapshot:1,blur:2`, or `none` on a frame that ended no
  *  encoder at all. Sorted, so two frames' lines can be diffed by eye, and `none` rather than an
@@ -239,6 +279,45 @@ export class Canvas implements DirtyTracker {
   private _diagNoPanels: boolean = false;   // [diag ?no-panels] skip non-glass panel fill (SDF+shadow+border) → panel share
   private _diagNoShadow: boolean = false;   // [diag ?no-shadow] zero panel drop-shadow → shadow overdraw share
   private _diagNoGlassDraw: boolean = false; // [diag ?no-glass-draw] skip glass refraction draw (keep blur) → glass-draw share
+
+  /** `?blur-first` — MEASUREMENT ONLY, WRONG PIXELS. Every pyramid the walk would build is built
+   *  BEFORE the bed's first draw, in the order the walk would have built them; the walk then takes
+   *  the recorded handle instead of building. Same builds, same regions, same radii, same depths,
+   *  same source — different ORDER.
+   *
+   *  It is the one-line test of H3. `?blur-src-clear` and `?blur-src-static` both read the baseline
+   *  to within 1%, which kills the read's own bandwidth (H1) and a write→sample hazard (H2) at
+   *  once, and `gpuMs` is top-level task time in the GPU PROCESS rather than hardware time — so
+   *  what is left is a CPU↔GPU synchronisation stall inside the pyramid path whose wait lasts as
+   *  long as the GPU's backlog, and the backlog is large only when the bed's fill is queued ahead
+   *  of it. Move every wait point in FRONT of the bed and H3 says the interaction term goes with
+   *  it; a per-pass cost story says nothing moves. See ShowStudio.Documentation/Perf/README.md,
+   *  "blur-src: BOTH HYPOTHESES DIE TOGETHER".
+   *
+   *  Armed only alongside `?blur-src-clear` / `?blur-src-static`: without one, the pyramids would
+   *  sample a scene nothing has drawn into yet, which is a DIFFERENT experiment (the
+   *  `?no-panels`-shaped one) wearing this flag's name. */
+  private _blurFirst: boolean = false;
+  /** Pre-built pyramid handle per glass surface, one map per SITE — a node's fill pyramid and its
+   *  rim pyramid are different regions at different sizes and must not collide in one map. */
+  private _blurFirstFill = new Map<Jiv, GpuTextureHandle>();
+  private _blurFirstRim = new Map<Jiv, GpuTextureHandle>();
+  /** The flag's own gate, reported once per shape change on the trace channel.
+   *
+   *  `Used` + `Missed` must equal `Fill` + `Rim`, and `Missed` must be 0: a MISS is the walk
+   *  reaching a build site the pre-pass never reached, i.e. the pre-pass and the walk disagreeing
+   *  about which surfaces build. A lane that reported a number without this line would be
+   *  reporting "the builds moved" when some of them had not.
+   *
+   *  `Chains` is the count of DISTINCT pyramid-pool chain keys the pre-pass's builds resolve to,
+   *  computed with BlurPass's own `ResolveRegionRect` rather than a second copy of the rule. The
+   *  pool holds one chain per LEVEL-0 SIZE, not one per build, so N builds of equal-sized surfaces
+   *  share one set of level textures and each overwrites the last — which is why this flag's pixels
+   *  are wrong, and the number that says by how much. `Coarse` counts builds whose σ-adaptive base
+   *  factor k > 1, where the chain key is the pre-downsampled size and this count is a lower bound. */
+  private _blurFirstStats = { Fill: 0, Rim: 0, Used: 0, Missed: 0, Dup: 0, Coarse: 0, Chains: 0, Keys: '' };
+  private _blurFirstKeys = new Set<string>();
+  private _blurFirstLastLine: string = '';
 
   // Per-frame phase timings (ms) and GPU-work counts, rolling over the last
   // N frames so the HUD reports a stable average rather than jittery samples.
@@ -1623,19 +1702,6 @@ export class Canvas implements DirtyTracker {
       this._textBuffer.Begin();
     };
 
-    // Order children by Layer (stable — tree order breaks ties). Fast-path
-    // when every child has Layer 0 (the common case): return the original
-    // array so we don't allocate or sort. Sort is only triggered when an
-    // author actually used Layer.
-    const orderedChildren = (node: Jiv): Jiv[] => {
-      const children = node.Children as Jiv[];
-      let needsSort = false;
-      for (let i = 0; i < children.length; i++) {
-        if (children[i].RenderStyle.Layer !== 0) { needsSort = true; break; }
-      }
-      if (!needsSort) return children;
-      return [...children].sort((a, b) => a.RenderStyle.Layer - b.RenderStyle.Layer);
-    };
 
     // ── Teleport elevation ──
     // A subtree mid-teleport (Element.TeleportSeq != 0 — live-reparented, rect
@@ -1646,12 +1712,8 @@ export class Canvas implements DirtyTracker {
     // scroll container it is returning into, while still staying under
     // higher-Layer chrome (the scope replays before the next layered sibling
     // paints). Zero-cost when nothing is in flight (one int check per child).
-    // A perspective viewing context established by an ancestor (CSS `perspective`).
-    // D = viewing distance, (Ox, Oy) = vanishing point — both in CANVAS px (the
-    // same frame as the affine `eff`); the GPU stage scales by dpr. Null = no
-    // perspective in scope (the 2D fast path).
-    interface PerspCtx { D: number; Ox: number; Oy: number }
-    interface TeleportScope { Deferred: { N: Jiv; M: Mat2x3; MH: Mat3x3 | null; P: PerspCtx | null }[]; Stack: ClipStack }
+    // `PerspCtx` and `TeleportScope` are module scope now — `?blur-first`'s pre-pass walks the
+    // same tree and has to speak the same types.
 
     const replayScope = (scope: TeleportScope): void => {
       while (scope.Deferred.length > 0) {
@@ -1693,16 +1755,7 @@ export class Canvas implements DirtyTracker {
       // it comes out 1.6-1.9x brighter (Jiv.Panel.frag, `borderBackdrop`). Choosing
       // between those with a cheap predicate chooses a different picture and calls it
       // the same one. The rim always gathers the true scene beneath it.
-      let borderSuppressed =
-        node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)
-        && node.Visible && node.Width > 0 && node.Height > 0;
-      // The node's own panel was culled (off-screen, or outside the damage rect) and
-      // never drew — so its rim is not a rim floating over children, it is a pass that
-      // paints nothing. A glass one still cost a full SnapshotScreen + ComputeBlur +
-      // mipmap + draw. Drop it once even the stroke's reach past the box is out.
-      if (borderSuppressed && ownPanelCulled && this._rimOutsidePaintedArea(node, eff, stack, effH)) {
-        borderSuppressed = false;
-      }
+      const borderSuppressed = this._rimEmits(node, eff, stack, effH, ownPanelCulled);
       const borderLayer = node.RenderStyle.BorderLayer;
       let borderEmitted = !borderSuppressed;
       const emitBorderOverlay = (): void => {
@@ -1727,11 +1780,6 @@ export class Canvas implements DirtyTracker {
           // zone, so the rim samples the REAL backdrop (the children at the
           // edge) with its BorderFilter grading. Mirror of the glass panel
           // draw at ~Jaui.ts:1466-1489 — self-contained at the overlay point.
-          const d = this._dpr;
-          const frostCssPx = Math.max(1, node.RenderStyle.BackdropFrostBlur);
-          const _gsx = matScaleX(eff), _gsy = matScaleY(eff);
-          const _gAvgScale = (_gsx + _gsy) * 0.5;
-          const _gThicknessDev = node.RenderStyle.Thickness * _gAvgScale * d;
           // ── What a BORDER-ONLY pass can actually reach ──
           // This margin used to be the glass FILL path's, copied whole: frost + the
           // refraction footprint (|Thickness x Refraction|, plus the Fillet bulge) +
@@ -1742,35 +1790,33 @@ export class Canvas implements DirtyTracker {
           // `borderOnly` (they only fed a fill this pass throws away). So the reach is the
           // frost blur's own spatial spread plus a pixel pad. On a JwiftGlass card at dpr 2
           // that is 24 px instead of 65, and the blur + snapshot shrink with it.
-          const margin = frostCssPx * d + 8 * d;
-          const _ab = this._nodeAabb(node, eff, effH);
-          const px = _ab.minX * d, py = _ab.minY * d;
-          const pw = (_ab.maxX - _ab.minX) * d, ph = (_ab.maxY - _ab.minY) * d;
-          const region = {
-            x: Math.max(0, Math.floor(px - margin)),
-            y: Math.max(0, Math.floor(py - margin)),
-            w: Math.min(w, Math.ceil(pw + margin * 2)),
-            h: Math.min(h, Math.ceil(ph + margin * 2)),
-          };
+          //
           // Same three economies as the glass FILL path: the pyramid is built at the size of
-          // the region above (so its attachments are the card's, not the canvas's, and the
-          // handle carries the screen-UV map the shader needs), the raw-scene snapshot is only
-          // read where the panel authored no frost (sampleBackdrop's u_Scene fallback), and the
-          // mip chain is only built as deep as this rim can sample — `BorderFilter: Blur(n)` is
-          // the one thing that takes a border-only pass off LOD 0. The last two bounds come
-          // from _backdropMaxLod / _instanceFrostLod above.
-          const _boFrostLod = _instanceFrostLod(node.RenderStyle.BackdropFrostBlur, d);
-          const lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
-          const sceneSnap = _boFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
-          const lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, region);
-          r.GenerateBlurMipmap(_backdropMaxLod(
-            _boFrostLod,
-            lastBaseFrostLod,
-            _gThicknessDev,
-            node.RenderStyle.InnerBlur,
-            node.RenderStyle.BorderBackdropBlur,
-          ));
-          r.RebindSceneTarget();
+          // the region (so its attachments are the card's, not the canvas's, and the handle
+          // carries the screen-UV map the shader needs), the raw-scene snapshot is only read
+          // where the panel authored no frost (sampleBackdrop's u_Scene fallback), and the mip
+          // chain is only built as deep as this rim can sample — `BorderFilter: Blur(n)` is the
+          // one thing that takes a border-only pass off LOD 0. All of it is resolved by
+          // `_glassRimBlurPlan`, which `?blur-first`'s pre-pass calls too.
+          const plan = this._glassRimBlurPlan(node, eff, effH, w, h);
+          const region = plan.Region;
+          const lastBaseFrostLod = plan.BaseFrostLod;
+          const sceneSnap = plan.InstFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
+          // `?blur-first`: this surface's rim pyramid was built before the bed's first draw, so
+          // the build is a lookup. Nothing else about the pass moves — the snapshot above still
+          // runs where it ran, and the draw below is the baseline draw. A MISS builds here, which
+          // is how a pre-pass that failed to reach this node reports itself instead of hiding.
+          const preRim = this._blurFirst ? this._blurFirstRim.get(node) : undefined;
+          let lastBackdrop: GpuTextureHandle | null;
+          if (preRim !== undefined) {
+            lastBackdrop = preRim;
+            this._blurFirstStats.Used++;
+          } else {
+            if (this._blurFirst) this._blurFirstStats.Missed++;
+            lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
+            r.GenerateBlurMipmap(plan.MaxLod);
+            r.RebindSceneTarget();
+          }
 
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, ownClip.Offset, ownClip.Count, ownXform, 'GlassBorderOnly');
@@ -1797,7 +1843,7 @@ export class Canvas implements DirtyTracker {
         }
       };
 
-      for (const child of orderedChildren(node)) {
+      for (const child of this._orderedChildren(node)) {
         // Drop the border in at its layer slot, just before the first child
         // that sits at or above BorderLayer (children are Layer-sorted asc).
         if (!borderEmitted && child.RenderStyle.Layer >= borderLayer) emitBorderOverlay();
@@ -1841,68 +1887,12 @@ export class Canvas implements DirtyTracker {
     // VisualScale on an ancestor composes into the effective tuple so
     // descendants ride along, just like CSS transform on a parent.
     const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
-      // Compose own's transform onto the inherited matrix. Order: rotation
-      // (outermost, about Transform.Origin) then VisualScale/Translate (about
-      // VisualOrigin). Both ride the inherited matrix so they CASCADE to
-      // descendants — rotation now flows to children exactly like scale/translate.
-      // Pivots are in NATURAL coords (jiv.X/Y as the layout solver assigned).
-      //
-      // `effH` is the parallel 3D homography — null on the 2D fast path (then this
-      // function is byte-identical to before). Once an ancestor (or this node)
-      // introduces perspective, the affine deltas mirror onto `effH` so the
-      // tilted plane keeps cascading; STEP C below folds in the actual tilt.
-      let eff: Mat2x3 = m;
-      let effH: Mat3x3 | null = mH;
-      // STEP A — rotation about Transform.Origin (the new cascading behavior).
-      const rotDeg = node.RenderStyle.Transform.Rotation;
-      if (rotDeg !== 0) {
-        const th = rotDeg * (Math.PI / 180);
-        const rc = Math.cos(th), rs = Math.sin(th);
-        const rpx = node.X + node.Width * node.RenderStyle.Transform.OriginX;
-        const rpy = node.Y + node.Height * node.RenderStyle.Transform.OriginY;
-        const rMat: Mat2x3 = [rc, rs, -rs, rc, rpx * (1 - rc) + rpy * rs, rpy * (1 - rc) - rpx * rs];
-        eff = matMul(eff, rMat);
-        if (effH !== null) effH = mat3Mul(effH, mat3FromAffine(rMat));
-      }
-      // STEP B — VisualScale/Translate about VisualOrigin (matches the legacy
-      // formula exactly when rotation is absent; now stacks onto rotation).
-      const sx = node.RenderStyle.VisualScaleX;
-      const sy = node.RenderStyle.VisualScaleY;
-      const tx = node.RenderStyle.VisualTranslateX;
-      const ty = node.RenderStyle.VisualTranslateY;
-      if (sx !== 1 || sy !== 1 || tx !== 0 || ty !== 0) {
-        const pivotX = node.X + node.Width * node.RenderStyle.VisualOriginX;
-        const pivotY = node.Y + node.Height * node.RenderStyle.VisualOriginY;
-        const vMat: Mat2x3 = [sx, 0, 0, sy, pivotX * (1 - sx) + tx, pivotY * (1 - sy) + ty];
-        eff = matMul(eff, vMat);
-        if (effH !== null) effH = mat3Mul(effH, mat3FromAffine(vMat));
-      }
-      // STEP C — 3D: fold this node's RotateX/RotateY/TranslateZ into a homography
-      // (projecting toward the inherited perspective's vanishing point), and
-      // establish a perspective context for THIS node's descendants if it sets
-      // `Perspective`. Pure no-op on the 2D fast path (no 3D transform, no
-      // ancestor/own perspective → effH stays null, childPersp stays persp).
-      let childPersp: PerspCtx | null = persp;
-      {
-        const tf = node.RenderStyle.Transform;
-        if ((tf.RotateX !== 0 || tf.RotateY !== 0 || tf.TranslateZ !== 0) && persp !== null) {
-          const o3x = node.X + node.Width * tf.OriginX;
-          const o3y = node.Y + node.Height * tf.OriginY;
-          const base: Mat3x3 = effH ?? mat3FromAffine(eff);
-          const tilt = mat3Project3D({
-            RotateXDeg: tf.RotateX, RotateYDeg: tf.RotateY, TranslateZ: tf.TranslateZ,
-            PivotX: matApplyX(eff, o3x, o3y), PivotY: matApplyY(eff, o3x, o3y),
-            Perspective: persp.D, OriginX: persp.Ox, OriginY: persp.Oy,
-          });
-          effH = mat3Mul(tilt, base);
-        }
-        const pv = node.RenderStyle.Perspective;
-        if (pv > 0) {
-          const pgx = node.X + node.Width * node.RenderStyle.PerspectiveOriginX;
-          const pgy = node.Y + node.Height * node.RenderStyle.PerspectiveOriginY;
-          childPersp = { D: pv, Ox: matApplyX(eff, pgx, pgy), Oy: matApplyY(eff, pgx, pgy) };
-        }
-      }
+      // Compose own's transform onto the inherited matrix. `_composeTransform` returns the affine
+      // and leaves the homography and the descendants' perspective context in `_xfH` / `_xfPersp`,
+      // which is why they are read on the very next two lines and nowhere else.
+      const eff: Mat2x3 = this._composeTransform(node, m, mH, persp);
+      const effH: Mat3x3 | null = this._xfH;
+      const childPersp: PerspCtx | null = this._xfPersp;
       if (!this._isInsideClipStack(node, eff, stack, effH)) {
         // This node's OWN box is outside the clip. If it CLIPS its children
         // (Overflow: Hidden/Scroll), they're bounded by that box and can't be
@@ -1927,14 +1917,10 @@ export class Canvas implements DirtyTracker {
       // panel/glass/blur draw never runs, so the GPU fill it would have cost
       // is saved. Mirrors the clip-cull above (clipping subtree → skip whole;
       // overflow-visible → recurse so overflowing children self-cull).
-      if (this._damageRectCss) {
-        const _dab = this._nodeAabb(node, eff, effH);
-        const _dr = this._damageRectCss;
-        if (_dab.maxX <= _dr.x || _dab.minX >= _dr.x + _dr.w || _dab.maxY <= _dr.y || _dab.minY >= _dr.y + _dr.h) {
-          if (node.ClipsChildren) return;
-          descendChildren(node, eff, stack, scope, effH, childPersp, true);
-          return;
-        }
+      if (this._damageCulls(node, eff, effH)) {
+        if (node.ClipsChildren) return;
+        descendChildren(node, eff, stack, scope, effH, childPersp, true);
+        return;
       }
 
       // ── Retained-mode layer cache hook ──
@@ -2188,6 +2174,10 @@ export class Canvas implements DirtyTracker {
         // and store however tight the scissor is. Sizing the attachment to the region is what
         // takes that away — and it is the larger half. Same texels, same device density.
         const d = this._dpr;
+        // Everything this surface's pyramid needs — region, radius, depth, base LOD — comes from
+        // ONE resolver, because `?blur-first`'s pre-pass builds the same pyramid from the same
+        // numbers and a second copy of them is a second pyramid wearing this one's name.
+        //
         // Build the backdrop blur at THIS panel's actual frost sigma so the
         // panel can sample LOD 0 (full resolution). Previously level 0 held
         // only a ~1px Gaussian and a panel reached its real frost by sampling
@@ -2195,7 +2185,7 @@ export class Canvas implements DirtyTracker {
         // backdrops read as a low-res texture upscaled. The dual filter still
         // downsamples internally for speed then upsamples back to full res,
         // and the pyramid is only as large as the panel's region, so cost stays bounded.
-        const frostCssPx = Math.max(1, node.RenderStyle.BackdropFrostBlur);
+        //
         // Margin must cover the FULL reach of the glass shader's backdrop
         // sampling (Jiv.Panel.frag), or a displaced sample lands past the
         // blurred region and reads unblurred/stale scene — the "no blur on the
@@ -2209,34 +2199,18 @@ export class Canvas implements DirtyTracker {
         // blurred pixels. The region is still canvas-clamped below, so a heavy
         // panel just falls back toward a full-canvas pyramid (correct, bounded) — and a
         // full-canvas region resolves to the identity map, i.e. exactly the old behaviour.
-        const _gsx = matScaleX(eff), _gsy = matScaleY(eff);
-        const _gAvgScale = (_gsx + _gsy) * 0.5;
-        const _gMinHalf = Math.min(node.Width * _gsx, node.Height * _gsy) * d * 0.5;
-        const _gThicknessDev = node.RenderStyle.Thickness * _gAvgScale * d;
-        const _gBulgeMax = node.RenderStyle.Fillet * _gMinHalf * 0.25 * 0.7;
-        const _gRefractMax = (_gThicknessDev + _gBulgeMax) * node.RenderStyle.Refraction;
-        const _gCaMax = node.RenderStyle.ChromaticAberration * 3.0;
-        const margin = frostCssPx * d + _gRefractMax + _gCaMax + 8 * d;
-        const _ab = this._nodeAabb(node, eff, effH);
-        const px = _ab.minX * d;
-        const py = _ab.minY * d;
-        const pw = (_ab.maxX - _ab.minX) * d;
-        const ph = (_ab.maxY - _ab.minY) * d;
-        const region = {
-          x: Math.max(0, Math.floor(px - margin)),
-          y: Math.max(0, Math.floor(py - margin)),
-          w: Math.min(w, Math.ceil(pw + margin * 2)),
-          h: Math.min(h, Math.ceil(ph + margin * 2)),
-        };
+        const plan = this._glassFillBlurPlan(node, eff, effH, w, h);
+        const frostCssPx = plan.FrostCssPx;
+        const margin = plan.Margin;
+        const px = plan.Px, py = plan.Py, pw = plan.Pw, ph = plan.Ph;
+        const region = plan.Region;
         if (this._consoleProfilingEnabled && this._surfFrame === 90) {
           // eslint-disable-next-line no-console
           console.log(`[Jaui.surf] GLASS rect=${Math.round(pw)}x${Math.round(ph)} region=${region.w}x${region.h} (${(region.w * region.h / 1e6).toFixed(2)}Mpx) frost=${frostCssPx}pt margin=${Math.round(margin)}`);
         }
-        // Hoisted: the mip depth below has to know whether the adaptive shadow will read the
-        // pyramid at its own detail LOD, and the measure pass runs after the pyramid is built.
-        const _rsAdaptiveShadow = node.RenderStyle.ShadowAdaptive > 0
-          && node.RenderStyle.ShadowColor.A > 0.001
-          && !JivInstanceBuffer.DiagNoShadow;
+        // The mip depth has to know whether the adaptive shadow will read the pyramid at its own
+        // detail LOD, and the measure pass runs after the pyramid is built — so the plan resolves it.
+        const _rsAdaptiveShadow = plan.AdaptiveShadow;
         // ── Card composite (Perf/SceneRaw.Finding.md 4(c)) ──
         // Everything from here to the end of this node's subtree -- the pyramid, the fill, the
         // children, the rim overlay -- paints into a region-sized target seeded with the frame
@@ -2306,43 +2280,33 @@ export class Canvas implements DirtyTracker {
           // blit was a region-sized copy of the scene made for nobody. The adaptive
           // shadow DOES need a sharp read, but it runs with its own 1x1 target bound,
           // so it can sample the live scene texture directly — same pixels, no copy.
-          const instFrostLod = _instanceFrostLod(node.RenderStyle.BackdropFrostBlur, d);
+          const instFrostLod = plan.InstFrostLod;
           const _tSnap = performance.now();
           sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
-          const _tBlur = performance.now();
-          this._opMs.Snap += _tBlur - _tSnap;
-          lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, frostCssPx * d, undefined, region);
-          this._opMs.Blur += performance.now() - _tBlur;
-          // Pyramid is built AT this panel's frost sigma, so set the base LOD to
-          // the panel's frostLod: the shader's main sample (lod = frostLod -
-          // u_BaseFrostLod) lands on LOD 0 (full res). Only the subtle glass
-          // rim/inner boost (≲ 2 LODs) climbs into the now full-sigma mip chain.
-          lastBaseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
-          // How deep a chain this panel can actually read. It used to be a flat 5 —
-          // headroom for the refraction-footprint LOD — but that boost is gated by
-          // `frostReq`, which is identically 0 whenever the pyramid is built at the
-          // panel's own frost sigma, which is what the line above just did. So a
-          // frosted glass panel samples LOD 0 and nothing else, and the six DOWN
-          // passes, six mip blits and the driver's own full-chain generateMipmap
-          // were building, at CANVAS size, a pyramid no fragment ever opened.
-          // _backdropMaxLod is the shader's own formula; when a class does ask for a
-          // deeper read (`BorderFilter: Blur(n)`, or any future non-zero frostReq)
-          // the chain comes back on its own.
-          const glassMaxLod = Math.max(
-            _backdropMaxLod(
-              instFrostLod,
-              lastBaseFrostLod,
-              _gThicknessDev,
-              node.RenderStyle.InnerBlur,
-              node.RenderStyle.BorderBackdropBlur,
-            ),
-            // The adaptive shadow reads the pyramid at its own detail LOD.
-            _rsAdaptiveShadow ? Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod : 0,
-          );
-          const _tMip = performance.now();
-          r.GenerateBlurMipmap(glassMaxLod);
-          this._opMs.Mip += performance.now() - _tMip;
-          r.RebindSceneTarget();
+          this._opMs.Snap += performance.now() - _tSnap;
+          // Pyramid is built AT this panel's frost sigma, so the base LOD is the panel's own
+          // frostLod: the shader's main sample (lod = frostLod - u_BaseFrostLod) lands on LOD 0
+          // (full res). Only the subtle glass rim/inner boost (≲ 2 LODs) climbs into the now
+          // full-sigma mip chain. `plan.MaxLod` is how deep a chain this panel can actually read
+          // — `_backdropMaxLod`, floored by the adaptive shadow's own detail LOD.
+          lastBaseFrostLod = plan.BaseFrostLod;
+          // `?blur-first`: this surface's fill pyramid was built before the bed's first draw, so
+          // the build is a lookup and the scene target was never unbound here — which is why the
+          // `RebindSceneTarget` below stays inside the branch that actually left it.
+          const preFill = this._blurFirst ? this._blurFirstFill.get(node) : undefined;
+          if (preFill !== undefined) {
+            lastBackdrop = preFill;
+            this._blurFirstStats.Used++;
+          } else {
+            if (this._blurFirst) this._blurFirstStats.Missed++;
+            const _tBlur = performance.now();
+            lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
+            const _tMip = performance.now();
+            this._opMs.Blur += _tMip - _tBlur;
+            r.GenerateBlurMipmap(plan.MaxLod);
+            this._opMs.Mip += performance.now() - _tMip;
+            r.RebindSceneTarget();
+          }
         }
 
         // Adaptive shadow: read the backdrop this surface just sampled, under its own footprint.
@@ -2631,6 +2595,12 @@ export class Canvas implements DirtyTracker {
     if (this._renderer instanceof WebGL2Renderer) {
       this._renderer.SetCardGrid(this._renderer.CardGridPhaseFor(Math.max(1, this._maxFrostBlur) * this._dpr));
     }
+    // `?blur-first` (MEASUREMENT ONLY - WRONG PIXELS). Every pyramid the walk below would build,
+    // built HERE instead: the last point in the frame that is still ahead of every panel draw.
+    // Ahead of the janvas pre-pass would be ahead of a foreign renderer's draws too, but a janvas
+    // draws into the scene through raw GL that this ledger cannot see, so the honest place is
+    // after it — and no scene in the perf harness has one.
+    if (this._blurFirst && !this._diagNoUi) this._blurFirstPrepass(w, h);
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
     if (!this._diagNoUi) renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
     // In-flight teleports with no layered ancestor paint last at root level.
@@ -2640,6 +2610,18 @@ export class Canvas implements DirtyTracker {
     // order than the trailing text, if any).
     flushPanels();
     flushText();
+
+    // `?blur-first`'s gate, on the trace channel. Printed when the SHAPE changes rather than every
+    // frame: a line per frame would drown the channel, and a line only on the first frame would
+    // miss a walk that starts disagreeing with the pre-pass once something animates. `missed` is
+    // the one that must read 0 — see `_blurFirstStats`.
+    if (this._blurFirst) {
+      const st = this._blurFirstStats;
+      const line = `jaui:blur-first prebuilt=${st.Fill + st.Rim} fill=${st.Fill} rim=${st.Rim}`
+        + ` used=${st.Used} missed=${st.Missed} dup=${st.Dup}`
+        + ` chains=${st.Chains} sizes=${st.Keys} coarse=${st.Coarse} pixels=WRONG`;
+      if (line !== this._blurFirstLastLine) { this._blurFirstLastLine = line; JTrace(line); }
+    }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
     // blits, in walk order, each a blend-disabled replace of exactly the bytes the scene would have
@@ -3033,6 +3015,379 @@ export class Canvas implements DirtyTracker {
     return parent.ClipsChildren
       ? [...parentIncomingStack, parentBoxClip]
       : parentIncomingStack;
+  };
+
+  // ── The walk's own arithmetic, named so a second walk can reuse it ─────────────────────────
+  // Everything from here to `_glassRimBlurPlan` was inline in `renderNode` / `descendChildren`
+  // and still runs there and only there on an unflagged build. It is out here because
+  // `?blur-first` walks the same tree to build the same pyramids ahead of the bed, and a pre-pass
+  // that re-derives a transform, a cull or a sample region is a pre-pass that can silently build a
+  // DIFFERENT pyramid and hand it over as if it were the same one. Reuse, do not copy.
+
+  /** The homography `_composeTransform` produced, and the perspective context it established for
+   *  the node's DESCENDANTS. Fields rather than a returned tuple because that function runs for
+   *  every node in the tree every frame and an object per node is an allocation the walk does not
+   *  make today. Both are read on the line after the call and nowhere else. */
+  private _xfH: Mat3x3 | null = null;
+  private _xfPersp: PerspCtx | null = null;
+
+  /** Compose a node's own transform onto the inherited matrix, and return the affine.
+   *
+   *  Order: rotation (outermost, about Transform.Origin) then VisualScale/Translate (about
+   *  VisualOrigin). Both ride the inherited matrix so they CASCADE to descendants — rotation flows
+   *  to children exactly like scale/translate. Pivots are in NATURAL coords (jiv.X/Y as the layout
+   *  solver assigned).
+   *
+   *  `_xfH` is the parallel 3D homography — null on the 2D fast path (then this is byte-identical
+   *  to the affine-only path). Once an ancestor (or this node) introduces perspective, the affine
+   *  deltas mirror onto it so the tilted plane keeps cascading; STEP C folds in the actual tilt. */
+  private _composeTransform = (
+    node: Jiv, m: Mat2x3, mH: Mat3x3 | null, persp: PerspCtx | null,
+  ): Mat2x3 => {
+    let eff: Mat2x3 = m;
+    let effH: Mat3x3 | null = mH;
+    // STEP A — rotation about Transform.Origin (the cascading behavior).
+    const rotDeg = node.RenderStyle.Transform.Rotation;
+    if (rotDeg !== 0) {
+      const th = rotDeg * (Math.PI / 180);
+      const rc = Math.cos(th), rs = Math.sin(th);
+      const rpx = node.X + node.Width * node.RenderStyle.Transform.OriginX;
+      const rpy = node.Y + node.Height * node.RenderStyle.Transform.OriginY;
+      const rMat: Mat2x3 = [rc, rs, -rs, rc, rpx * (1 - rc) + rpy * rs, rpy * (1 - rc) - rpx * rs];
+      eff = matMul(eff, rMat);
+      if (effH !== null) effH = mat3Mul(effH, mat3FromAffine(rMat));
+    }
+    // STEP B — VisualScale/Translate about VisualOrigin (matches the legacy formula exactly when
+    // rotation is absent; stacks onto rotation when it is not).
+    const sx = node.RenderStyle.VisualScaleX;
+    const sy = node.RenderStyle.VisualScaleY;
+    const tx = node.RenderStyle.VisualTranslateX;
+    const ty = node.RenderStyle.VisualTranslateY;
+    if (sx !== 1 || sy !== 1 || tx !== 0 || ty !== 0) {
+      const pivotX = node.X + node.Width * node.RenderStyle.VisualOriginX;
+      const pivotY = node.Y + node.Height * node.RenderStyle.VisualOriginY;
+      const vMat: Mat2x3 = [sx, 0, 0, sy, pivotX * (1 - sx) + tx, pivotY * (1 - sy) + ty];
+      eff = matMul(eff, vMat);
+      if (effH !== null) effH = mat3Mul(effH, mat3FromAffine(vMat));
+    }
+    // STEP C — 3D: fold this node's RotateX/RotateY/TranslateZ into a homography (projecting
+    // toward the inherited perspective's vanishing point), and establish a perspective context for
+    // THIS node's descendants if it sets `Perspective`. Pure no-op on the 2D fast path (no 3D
+    // transform, no ancestor/own perspective → effH stays null, childPersp stays persp).
+    let childPersp: PerspCtx | null = persp;
+    const tf = node.RenderStyle.Transform;
+    if ((tf.RotateX !== 0 || tf.RotateY !== 0 || tf.TranslateZ !== 0) && persp !== null) {
+      const o3x = node.X + node.Width * tf.OriginX;
+      const o3y = node.Y + node.Height * tf.OriginY;
+      const base: Mat3x3 = effH ?? mat3FromAffine(eff);
+      const tilt = mat3Project3D({
+        RotateXDeg: tf.RotateX, RotateYDeg: tf.RotateY, TranslateZ: tf.TranslateZ,
+        PivotX: matApplyX(eff, o3x, o3y), PivotY: matApplyY(eff, o3x, o3y),
+        Perspective: persp.D, OriginX: persp.Ox, OriginY: persp.Oy,
+      });
+      effH = mat3Mul(tilt, base);
+    }
+    const pv = node.RenderStyle.Perspective;
+    if (pv > 0) {
+      const pgx = node.X + node.Width * node.RenderStyle.PerspectiveOriginX;
+      const pgy = node.Y + node.Height * node.RenderStyle.PerspectiveOriginY;
+      childPersp = { D: pv, Ox: matApplyX(eff, pgx, pgy), Oy: matApplyY(eff, pgx, pgy) };
+    }
+    this._xfH = effH;
+    this._xfPersp = childPersp;
+    return eff;
+  };
+
+  /** Order children by Layer (stable — tree order breaks ties). Fast-path when every child has
+   *  Layer 0 (the common case): return the original array so we don't allocate or sort. Sort is
+   *  only triggered when an author actually used Layer. */
+  private _orderedChildren = (node: Jiv): Jiv[] => {
+    const children = node.Children as Jiv[];
+    let needsSort = false;
+    for (let i = 0; i < children.length; i++) {
+      if (children[i].RenderStyle.Layer !== 0) { needsSort = true; break; }
+    }
+    if (!needsSort) return children;
+    return [...children].sort((a, b) => a.RenderStyle.Layer - b.RenderStyle.Layer);
+  };
+
+  /** [damage] Phase A: this node's AABB doesn't intersect the dirty rect, so its panel/glass/blur
+   *  draw never runs and the GPU fill it would have cost is saved. Always false when no damage
+   *  rect is armed, which is every unflagged frame. */
+  private _damageCulls = (node: Jiv, eff: Mat2x3, effH: Mat3x3 | null): boolean => {
+    const dr = this._damageRectCss;
+    if (dr === null) return false;
+    const ab = this._nodeAabb(node, eff, effH);
+    return ab.maxX <= dr.x || ab.minX >= dr.x + dr.w || ab.maxY <= dr.y || ab.minY >= dr.y + dr.h;
+  };
+
+  /** True when this node re-emits its border as a standalone overlay among its children — a
+   *  non-zero BorderLayer on a node that actually paints a border and actually paints at all.
+   *
+   *  The second clause: the node's own panel was culled (off-screen, or outside the damage rect)
+   *  and never drew, so its rim is not a rim floating over children, it is a pass that paints
+   *  nothing. A glass one still cost a full SnapshotScreen + ComputeBlur + mipmap + draw. Drop it
+   *  once even the stroke's reach past the box is out. */
+  private _rimEmits = (
+    node: Jiv, eff: Mat2x3, stack: ClipStack, effH: Mat3x3 | null, ownPanelCulled: boolean,
+  ): boolean => {
+    if (!(node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)
+          && node.Visible && node.Width > 0 && node.Height > 0)) return false;
+    return !(ownPanelCulled && this._rimOutsidePaintedArea(node, eff, stack, effH));
+  };
+
+  /** True when this node takes the glass FILL pipeline — the branch that builds a pyramid.
+   *
+   *  A glass slab (Thickness > 0 → Material LiquidGlass) only takes it when it actually has a
+   *  glass-fill effect to show: a non-zero Refraction, or a backdrop frost/grade. A slab with
+   *  Refraction 0 and no backdrop has nothing to refract or frost, so its FILL renders as a plain
+   *  panel — while its beveled, fresnel-lit glass BORDER still renders via the BorderLayer
+   *  overlay. That is what lets ANY jiv carry a glass OUTLINE without its fill becoming glass. */
+  private _glassFillTakesPyramid = (node: Jiv): boolean => {
+    const material = node.RenderStyle.Material;
+    return ((_isGlass(material) && node.RenderStyle.Refraction !== 0) || _hasBackdropFilter(node))
+      && material !== 'ProgressiveBlur' && !this._diagNoGlass;
+  };
+
+  /** The glass FILL pyramid's plan: the region it is built over, the sigma it is built at, and how
+   *  deep a chain the surface can read.
+   *
+   *  The margin covers the FULL reach of the glass shader's backdrop sampling (Jiv.Panel.frag), or
+   *  a displaced sample lands past the blurred region and reads unblurred/stale scene — the "no
+   *  blur on the outer refraction" rim. The shader displaces by, at worst:
+   *    edge refraction: Thickness·avgScale·d · Refraction   (hump ≤ 1)
+   *    surface bulge:   Fillet · minHalf · 0.25·0.7 · Refraction  (domeProfile ≤ 0.7)
+   *    chromatic aberr: ChromaticAberration · 3
+   *  plus the frost blur's own spatial spread. The region is canvas-clamped, so a heavy panel just
+   *  falls back toward a full-canvas pyramid (correct, bounded) — and a full-canvas region resolves
+   *  to the identity map, i.e. exactly the old behaviour. */
+  private _glassFillBlurPlan = (
+    node: Jiv, eff: Mat2x3, effH: Mat3x3 | null, w: number, h: number,
+  ): GlassBlurPlan => {
+    const d = this._dpr;
+    const rs = node.RenderStyle;
+    const frostCssPx = Math.max(1, rs.BackdropFrostBlur);
+    const gsx = matScaleX(eff), gsy = matScaleY(eff);
+    const avgScale = (gsx + gsy) * 0.5;
+    const minHalf = Math.min(node.Width * gsx, node.Height * gsy) * d * 0.5;
+    const thicknessDev = rs.Thickness * avgScale * d;
+    const bulgeMax = rs.Fillet * minHalf * 0.25 * 0.7;
+    const refractMax = (thicknessDev + bulgeMax) * rs.Refraction;
+    const caMax = rs.ChromaticAberration * 3.0;
+    const margin = frostCssPx * d + refractMax + caMax + 8 * d;
+    const ab = this._nodeAabb(node, eff, effH);
+    const px = ab.minX * d, py = ab.minY * d;
+    const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
+    const adaptiveShadow = rs.ShadowAdaptive > 0 && rs.ShadowColor.A > 0.001
+      && !JivInstanceBuffer.DiagNoShadow;
+    const instFrostLod = _instanceFrostLod(rs.BackdropFrostBlur, d);
+    const baseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
+    return {
+      Region: {
+        x: Math.max(0, Math.floor(px - margin)),
+        y: Math.max(0, Math.floor(py - margin)),
+        w: Math.min(w, Math.ceil(pw + margin * 2)),
+        h: Math.min(h, Math.ceil(ph + margin * 2)),
+      },
+      Radius: frostCssPx * d,
+      // How deep a chain this panel can actually read. It used to be a flat 5 — headroom for the
+      // refraction-footprint LOD — but that boost is gated by `frostReq`, which is identically 0
+      // whenever the pyramid is built at the panel's own frost sigma, which is what `Radius` above
+      // does. So a frosted glass panel samples LOD 0 and nothing else, and the six DOWN passes, six
+      // mip blits and the driver's own full-chain generateMipmap were building, at CANVAS size, a
+      // pyramid no fragment ever opened. `_backdropMaxLod` is the shader's own formula; when a class
+      // does ask for a deeper read (`BorderFilter: Blur(n)`, or any future non-zero frostReq) the
+      // chain comes back on its own. The adaptive shadow reads the pyramid at its own detail LOD,
+      // so it floors the depth.
+      MaxLod: Math.max(
+        _backdropMaxLod(instFrostLod, baseFrostLod, thicknessDev, rs.InnerBlur, rs.BorderBackdropBlur),
+        adaptiveShadow ? Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - baseFrostLod : 0,
+      ),
+      BaseFrostLod: baseFrostLod,
+      InstFrostLod: instFrostLod,
+      Px: px, Py: py, Pw: pw, Ph: ph, Margin: margin,
+      AdaptiveShadow: adaptiveShadow,
+      FrostCssPx: frostCssPx,
+    };
+  };
+
+  /** The glass RIM overlay's pyramid plan. Same shape as the fill's and a strictly smaller margin:
+   *  a border-only fragment makes exactly ONE backdrop tap — the border zone's `bUv`, which offsets
+   *  INWARD along the normal — so the reach is the frost blur's own spatial spread plus a pixel
+   *  pad. `AdaptiveShadow` is always false here: a border-only pass draws no shadow. */
+  private _glassRimBlurPlan = (
+    node: Jiv, eff: Mat2x3, effH: Mat3x3 | null, w: number, h: number,
+  ): GlassBlurPlan => {
+    const d = this._dpr;
+    const rs = node.RenderStyle;
+    const frostCssPx = Math.max(1, rs.BackdropFrostBlur);
+    const avgScale = (matScaleX(eff) + matScaleY(eff)) * 0.5;
+    const thicknessDev = rs.Thickness * avgScale * d;
+    const margin = frostCssPx * d + 8 * d;
+    const ab = this._nodeAabb(node, eff, effH);
+    const px = ab.minX * d, py = ab.minY * d;
+    const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
+    const instFrostLod = _instanceFrostLod(rs.BackdropFrostBlur, d);
+    const baseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
+    return {
+      Region: {
+        x: Math.max(0, Math.floor(px - margin)),
+        y: Math.max(0, Math.floor(py - margin)),
+        w: Math.min(w, Math.ceil(pw + margin * 2)),
+        h: Math.min(h, Math.ceil(ph + margin * 2)),
+      },
+      Radius: frostCssPx * d,
+      MaxLod: _backdropMaxLod(instFrostLod, baseFrostLod, thicknessDev, rs.InnerBlur, rs.BorderBackdropBlur),
+      BaseFrostLod: baseFrostLod,
+      InstFrostLod: instFrostLod,
+      Px: px, Py: py, Pw: pw, Ph: ph, Margin: margin,
+      AdaptiveShadow: false,
+      FrostCssPx: frostCssPx,
+    };
+  };
+
+  // ── `?blur-first`: the pre-pass ───────────────────────────────────────────────────────────
+  // A second walk of the same tree that issues, for every glass surface the normal walk would
+  // build a pyramid for, exactly the `ComputeBlur` + `GenerateBlurMipmap` pair it would issue —
+  // same region, same radius, same depth — and nothing else. No snapshot (that is not a build),
+  // no shadow probe, no draw, no buffer encode, no counter. It runs immediately before the walk
+  // and therefore before the bed's first draw.
+  //
+  // It descends through the SAME functions the walk descends through, so its build SET and its
+  // build ORDER are the walk's by construction rather than by resemblance: `_composeTransform`,
+  // `_isInsideClipStack`, `_damageCulls`, `_orderedChildren`, `_boxClip`, `_childClip`,
+  // `_descendOffset`, `_rimEmits`, `_glassFillTakesPyramid`, `_glassFillBlurPlan`,
+  // `_glassRimBlurPlan`. Where it CAN still disagree — a node the walk reaches and it did not —
+  // the walk counts a MISS and builds, so the disagreement is a number in the report rather than
+  // a silently different experiment.
+
+  /** Build every pyramid the coming walk would build, in the order it would build them. */
+  private _blurFirstPrepass = (w: number, h: number): void => {
+    this._blurFirstFill.clear();
+    this._blurFirstRim.clear();
+    this._blurFirstKeys.clear();
+    const st = this._blurFirstStats;
+    st.Fill = 0; st.Rim = 0; st.Used = 0; st.Missed = 0; st.Dup = 0; st.Coarse = 0;
+    const scope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
+    this._blurFirstNode(this.Root, MAT_IDENTITY, EmptyClipStack, scope, null, null, w, h);
+    this._blurFirstReplay(scope, w, h);
+    st.Chains = this._blurFirstKeys.size;
+    st.Keys = [...this._blurFirstKeys].join('+');
+    // BlurPass leaves its own level FBO bound; the walk's first draw expects the scene. `'scene'`
+    // is not an encoder end by definition, so this bind is silent in the ledger.
+    this._renderer.RebindSceneTarget();
+  };
+
+  private _blurFirstReplay = (scope: TeleportScope, w: number, h: number): void => {
+    while (scope.Deferred.length > 0) {
+      const items = scope.Deferred.sort((a, b) => a.N.TeleportSeq - b.N.TeleportSeq);
+      scope.Deferred = [];
+      for (const d of items) this._blurFirstNode(d.N, d.M, scope.Stack, scope, d.MH, d.P, w, h);
+    }
+  };
+
+  private _blurFirstNode = (
+    node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope,
+    mH: Mat3x3 | null, persp: PerspCtx | null, w: number, h: number,
+  ): void => {
+    const eff = this._composeTransform(node, m, mH, persp);
+    const effH = this._xfH;
+    const childPersp = this._xfPersp;
+    if (!this._isInsideClipStack(node, eff, stack, effH)) {
+      if (node.ClipsChildren) return;
+      this._blurFirstDescend(node, eff, stack, scope, effH, childPersp, true, w, h);
+      return;
+    }
+    if (this._damageCulls(node, eff, effH)) {
+      if (node.ClipsChildren) return;
+      this._blurFirstDescend(node, eff, stack, scope, effH, childPersp, true, w, h);
+      return;
+    }
+    if (node.Width <= 0 || node.Height <= 0 || !node.Visible) {
+      this._blurFirstDescend(node, eff, stack, scope, effH, childPersp, false, w, h);
+      return;
+    }
+    // The pblur branch is tested FIRST in the walk and wins, so a ProgressiveBlur surface never
+    // reaches the glass fill. Its own pyramid is NOT pre-built: it is seeded from a snapshot of
+    // the scene-so-far, so moving it in front of the bed would change what it samples rather than
+    // only when it is built. Those stay in the walk and the report says how many did.
+    const isPblur = node.RenderStyle.Material === 'ProgressiveBlur' && !this._diagNoPblur;
+    if (!isPblur && this._glassFillTakesPyramid(node)
+        && this._blurFirstBuild(this._blurFirstFill, node, this._glassFillBlurPlan(node, eff, effH, w, h), w, h)) {
+      this._blurFirstStats.Fill++;
+    }
+    this._blurFirstDescend(node, eff, stack, scope, effH, childPersp, false, w, h);
+  };
+
+  private _blurFirstDescend = (
+    node: Jiv, eff: Mat2x3, stack: ClipStack, scope: TeleportScope,
+    effH: Mat3x3 | null, persp: PerspCtx | null, ownPanelCulled: boolean, w: number, h: number,
+  ): void => {
+    const boxClip = this._boxClip(node, eff);
+    const childM = this._descendOffset(node, eff);
+    let childMH = effH;
+    if (effH !== null && node.Overflow === 'Scroll') {
+      childMH = mat3Mul(effH, mat3FromAffine([1, 0, 0, 1, -node.ScrollX, -node.ScrollY]));
+    }
+    let rimPending = this._rimEmits(node, eff, stack, effH, ownPanelCulled);
+    const borderLayer = node.RenderStyle.BorderLayer;
+    const emitRim = (): void => {
+      if (!rimPending) return;
+      rimPending = false;
+      // Only a GLASS rim builds a pyramid; a flat one is a solid stroke.
+      if (!_isGlass(node.RenderStyle.Material)) return;
+      if (this._blurFirstBuild(this._blurFirstRim, node, this._glassRimBlurPlan(node, eff, effH, w, h), w, h)) {
+        this._blurFirstStats.Rim++;
+      }
+    };
+    for (const child of this._orderedChildren(node)) {
+      if (rimPending && child.RenderStyle.Layer >= borderLayer) emitRim();
+      const clip = this._childClip(node, stack, boxClip, child);
+      const pin = child.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll';
+      const cM = pin ? eff : childM;
+      const cMH = pin ? effH : childMH;
+      if (child.TeleportSeq !== 0) {
+        scope.Deferred.push({ N: child, M: cM, MH: cMH, P: persp });
+        continue;
+      }
+      if (child.RenderStyle.Layer !== 0) {
+        const childScope: TeleportScope = { Deferred: [], Stack: clip };
+        this._blurFirstNode(child, cM, clip, childScope, cMH, persp, w, h);
+        this._blurFirstReplay(childScope, w, h);
+        continue;
+      }
+      this._blurFirstNode(child, cM, clip, scope, cMH, persp, w, h);
+    }
+    emitRim();
+  };
+
+  /** One pre-pass build: the walk's two calls, and the pool bookkeeping that says what the pool
+   *  actually did with them. False when the build was refused, so the caller's count stays a count
+   *  of pyramids the walk can actually collect. */
+  private _blurFirstBuild = (
+    into: Map<Jiv, GpuTextureHandle>, node: Jiv, plan: GlassBlurPlan, w: number, h: number,
+  ): boolean => {
+    const r = this._renderer;
+    const st = this._blurFirstStats;
+    // One instance per node per site. A second build for the same key would overwrite the handle
+    // and leave the first consumer reading someone else's map, so it is refused and counted.
+    if (into.has(node)) { st.Dup++; return false; }
+    const t0 = performance.now();
+    const handle = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region);
+    const t1 = performance.now();
+    r.GenerateBlurMipmap(plan.MaxLod);
+    this._opMs.Blur += t1 - t0;
+    this._opMs.Mip += performance.now() - t1;
+    into.set(node, handle);
+    // The pool's own chain key, from the pool's own functions. `_useChain` keys on the resolved
+    // level-0 size, so this is the number that says how many sets of level textures forty builds
+    // resolve to — and therefore how many of them can be held at once.
+    const k = BaseDownsampleFactor(plan.Radius, w, h, plan.Region);
+    if (k > 1) st.Coarse++;
+    const depth = plan.Radius > 0 ? PyramidDepth(plan.Radius / k, 0) : 0;
+    const rect = ResolveRegionRect(plan.Region, w, h, k * (1 << depth));
+    this._blurFirstKeys.add(`${rect.W}x${rect.H}`);
+    return true;
   };
 
   /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px).
@@ -4509,6 +4864,37 @@ export class Canvas implements DirtyTracker {
     if (params.has('layer-cache') || hash.includes('layer-cache')) this._layerCacheEnabled = true;
     if (params.has('cache-force') || hash.includes('cache-force')) { this._layerCacheEnabled = true; this._cacheForce = true; }
     if (params.has('damage-test') || hash.includes('damage-test')) this._damageTest = true;
+    // `?blur-first` — MEASUREMENT ONLY, WRONG PIXELS. See `_blurFirst`. Parsed LAST of the toggles
+    // rather than beside `?blur-src-*`, because arming it is a decision about the OTHER flags: it
+    // needs a blur source that does not depend on the scene, and it needs every other path that
+    // changes which pyramids get built to be off. Each refusal names itself on the trace channel;
+    // an instrument that quietly did nothing would publish the baseline under the flag's name.
+    if (params.has('blur-first')) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : r.DiagBlurSrc === null ? 'needs-blur-src-clear-or-blur-src-static'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-build-nothing'
+        : r.CardCompositeEnabled ? 'card-composite-builds-from-the-card-target'
+        : this._sharedBackdrop ? 'shared-backdrop-builds-one-pyramid-lazily'
+        : this._layerCacheEnabled ? 'layer-cache-skips-subtrees-the-prepass-would-walk'
+        : null;
+      if (why !== null) {
+        JTrace(`jaui:blur-first armed=false reason=${why}`);
+      } else {
+        this._blurFirst = true;
+        (r as WebGL2Renderer).DiagBlurFirst = true;
+        // `?blur-src-static` fills its stand-in from the scene on FIRST USE, and under this flag
+        // the first use is now the pre-pass — i.e. before anything has been drawn. The static
+        // texture therefore captures a cleared scene and the two source arms collapse into one.
+        // Said out loud rather than refused: the two arms already measure within 1% of each other
+        // and of the baseline, so the collapse costs the experiment nothing and a reader who sees
+        // `static` in the URL must not be left thinking it still held frame 1.
+        if ((r as WebGL2Renderer).DiagBlurSrc === 'static') {
+          JTrace('jaui:blur-first note=static-source-fills-from-an-undrawn-scene-so-it-reads-as-clear');
+        }
+      }
+    }
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────
