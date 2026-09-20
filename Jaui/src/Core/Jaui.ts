@@ -460,6 +460,44 @@ export class Canvas implements DirtyTracker {
    *  `?pyramid-atlas=off` restores the per-card, per-draw composition in the same binary. That is
    *  the engine this lane inherited, and it is the "before" every gate reads against. */
   private _pyramidAtlas: boolean = true;
+  /** `?pyramid-atlas=all` -- the atlas takes BOTH phases, which is the composition pyramidatlas2
+   *  shipped: every glass rim's pyramid hoisted with the fills' and every rim DRAW moved to pass 3,
+   *  after all other content. The full lever (152 encoders, ~-10.5 ms at dpr 2) and the only arm
+   *  that can deliver it, because a rim's pyramid must see its own card's fill and so the rim
+   *  builds cannot be hoisted unless the rim draws move past every fill.
+   *
+   *  It is NOT the default, and the reason is a z-order change the ruling does not cover: Jack
+   *  approved the BACKDROP change (a card stops refracting earlier-drawn neighbours' glass) and
+   *  nothing else, and on a page where later content overlaps a glass rim -- a dropdown, a drawer,
+   *  a popover, a modal over a glass panel -- a pass-3 rim paints ON TOP of it. The three harness
+   *  scenes cannot see it (their cards do not overlap, which is why the ruling's 34,830 px is the
+   *  whole difference there), so a measurement cannot decide it. `all` stays as the measurement arm
+   *  for the full lever. See `Perf/PyramidAtlas2.Finding.md` section 7. */
+  private _atlasRims: boolean = false;
+  /** Glass RIM pyramids build per-card IN THE WALK and their overlays stay in walk order -- the
+   *  `fills` arm, and the default.
+   *
+   *  This is the ONE term that separates `fills` from `all`, and it is read in one predicate, at
+   *  the rim site, and in the frame driver: `_phasedEmitsRim` (a glass rim is held for pass 3 only
+   *  if its build was hoisted); the three lines at the rim site that look up a pre-built handle,
+   *  count a MISS when they do not find one, and count the snapshot beside it as a stray -- under
+   *  `fills` there is nothing to find, by design, so the lookup is skipped rather than missed and
+   *  the snapshot is the baseline's; and the driver, which then issues no rim phase and does not
+   *  walk pass 3 at all. `_phasedHoldsBack` and `_phasedPaints` are UNCHANGED, deliberately: the
+   *  pass-1/pass-2 boundary must land on the same node under both arms or the fill pyramids see a
+   *  different bed, and then `fills` against `all` would no longer be a test of the rims alone.
+   *
+   *  What the rim then sees is the BASELINE's scene -- its own card's fill plus whatever earlier
+   *  walk content lies in its region -- because the build is the baseline's build, at the baseline's
+   *  point in the walk, from the live scene texture. So under `fills` both the rim's Z-ORDER and
+   *  the rim's PIXELS are the engine's as it shipped before this phase, and the only change left in
+   *  the frame is the approved one. Default false: an unflagged pre-lane frame, `?blur-first` and
+   *  `?blur-phased` all pre-build their rims and must keep taking the branches they took. */
+  private _rimsInWalk: boolean = false;
+  /** Rim pyramids the WALK built solo this frame under `fills`. They never reach `_atlasPhase`, so
+   *  they are folded into the census after the passes rather than at the rim site: one ledger call
+   *  per frame, and `members + solo == built` still holds on the gate line. */
+  private _atlasWalkSolo: number = 0;
   /** `_blurPhased || _pyramidAtlas` -- does the WALK run in phases this frame?
    *
    *  One field rather than two tests at six sites, and read by every site that used to read
@@ -2201,18 +2239,27 @@ export class Canvas implements DirtyTracker {
           // it. Counted rather than moved or refused: `glass-grid` and `idle` never take one
           // (every glass class there authors frost), and an arm where this is non-zero is not
           // comparable and should be discarded.
-          if (sceneSnap !== null && this._phasedWalk) this._phasedStrays.Snaps++;
+          // Under `?pyramid-atlas=fills` this snapshot is the BASELINE's again -- it sits in the
+          // walk beside a rim pyramid that is also built in the walk, from the same scene state --
+          // so it is not a stray and is not counted. It is one only when the rim's build moved.
+          if (sceneSnap !== null && this._phasedWalk && !this._rimsInWalk) this._phasedStrays.Snaps++;
           // `?blur-first`: this surface's rim pyramid was built before the bed's first draw, so
           // the build is a lookup. Nothing else about the pass moves — the snapshot above still
           // runs where it ran, and the draw below is the baseline draw. A MISS builds here, which
           // is how a pre-pass that failed to reach this node reports itself instead of hiding.
-          const preRim = this._blurFirst || this._phasedWalk ? this._blurFirstRim.get(node) : undefined;
+          //
+          // `?pyramid-atlas=fills` never pre-builds a rim, so it does not look one up and a build
+          // here is not a miss: it is the arm's whole point. It is counted as a SOLO build instead,
+          // beside the fills' atlas members, so `members + solo == built` still reads on the gate.
+          const preRim = (this._blurFirst || this._phasedWalk) && !this._rimsInWalk
+            ? this._blurFirstRim.get(node) : undefined;
           let lastBackdrop: GpuTextureHandle | null;
           if (preRim !== undefined) {
             lastBackdrop = preRim;
             this._blurFirstStats.Used++;
           } else {
-            if (this._blurFirst || this._phasedWalk) this._blurFirstStats.Missed++;
+            if ((this._blurFirst || this._phasedWalk) && !this._rimsInWalk) this._blurFirstStats.Missed++;
+            else if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);
             r.GenerateBlurMipmap(plan.MaxLod);
             r.RebindSceneTarget();
@@ -3093,6 +3140,7 @@ export class Canvas implements DirtyTracker {
       const ast = this._atlasStats;
       ast.Atlases = 0; ast.Members = 0; ast.Solo = 0; ast.Refused = 0; ast.Bytes = 0; ast.Sizes = '';
       this._atlasSizes.clear();
+      this._atlasWalkSolo = 0;
       const pst = this._blurFirstStats;
       pst.Fill = 0; pst.Rim = 0; pst.Used = 0; pst.Missed = 0; pst.Dup = 0; pst.Coarse = 0;
       const phase = (pass: 1 | 2 | 3): void => {
@@ -3112,10 +3160,23 @@ export class Canvas implements DirtyTracker {
       this._phasedShadowProbes(dt);
       r.RebindSceneTarget();
       phase(2);
-      this._blurPhasedBuild('rim', w, h);
-      r.RebindSceneTarget();
-      phase(3);
+      // `?pyramid-atlas=fills` stops here. Its rims were built and drawn inside pass 2, at each
+      // glass node's own BorderLayer slot, from the live scene -- the baseline's rim path, running
+      // inside the phased FILL composition. So there is no rim phase to issue and pass 3 would walk
+      // the whole tree to emit nothing; skipping it is not an optimisation but the arm's shape.
+      if (!this._rimsInWalk) {
+        this._blurPhasedBuild('rim', w, h);
+        r.RebindSceneTarget();
+        phase(3);
+      }
       this._phasedPass = 0;
+      // The walk's own solo rim builds, folded into the census now that the passes are done. See
+      // `_atlasWalkSolo`: `members + solo` must equal `built` or the gate line cannot tell an atlas
+      // that carried twenty members from one that carried none.
+      if (this._atlasWalkSolo > 0) {
+        ast.Solo += this._atlasWalkSolo;
+        if (r instanceof WebGL2Renderer) r.NoteAtlasSolo(this._atlasWalkSolo);
+      }
     } else if (!this._diagNoUi) renderNode(this.Root, MAT_IDENTITY, EmptyClipStack, rootScope);
     // In-flight teleports with no layered ancestor paint last at root level.
     replayScope(rootScope);
@@ -3173,11 +3234,19 @@ export class Canvas implements DirtyTracker {
     // are printed together and `members + solo` must equal `built`. `refused` is the subset of
     // `solo` the ADMISSION test turned away (a mip consumer, a k > 1 surface, or a region that
     // does not contain its own draw's taps) as against members a full atlas could not take.
+    //
+    // `arm=` comes first because it decides how the rest reads. Under `all`, `rim=` counts pyramids
+    // the RIM PHASE pre-built and `used` counts them being taken in pass 3 (two atlases of twenty,
+    // `solo=0`). Under `fills`, `rim=` counts pyramids the WALK built per-card and every one of
+    // them is also in `solo` -- so `glass-grid` reads `built=40 fill=20 rim=20 used=20 missed=0
+    // atlases=1 members=20 solo=20`, and `used` no longer accounts for `built` because half the
+    // builds are consumed on the line that made them. `missed` must still read 0 on both arms.
     if (this._pyramidAtlas && !this._diagNoUi) {
       const st = this._blurFirstStats;
       const a = this._atlasStats;
       const sw = this._renderer instanceof WebGL2Renderer ? this._renderer.SceneSwitches : -1;
-      const line = `jaui:pyramid-atlas built=${st.Fill + st.Rim} fill=${st.Fill} rim=${st.Rim}`
+      const line = `jaui:pyramid-atlas arm=${this._atlasRims ? 'all' : 'fills'}`
+        + ` built=${st.Fill + st.Rim} fill=${st.Fill} rim=${st.Rim}`
         + ` used=${st.Used} missed=${st.Missed}`
         + ` atlases=${a.Atlases} members=${a.Members} solo=${a.Solo} refused=${a.Refused}`
         + ` bytes=${Math.round(a.Bytes / (1024 * 1024) * 10) / 10}MB sizes=${a.Sizes === '' ? 'none' : a.Sizes}`
@@ -3842,6 +3911,13 @@ export class Canvas implements DirtyTracker {
    *  stops at the first of them and pass 2 starts there, so every pyramid in the frame is built in
    *  one of the two build phases and the bed is the only thing under the first of them.
    *
+   *  IT ASKS ABOUT BOTH SITES UNDER `?pyramid-atlas=fills` TOO, though that arm hoists only the
+   *  fills. The boundary this predicate sets is what the fill pyramids SEE, and `fills` against
+   *  `all` is a test of the rims: move the boundary and the two arms' fill pyramids would be built
+   *  from different beds, which is a second difference and the one that would dominate. So a
+   *  rim-only glass node still stops pass 1 under `fills` -- it simply paints its own rim, in walk
+   *  order, in pass 2 instead of pass 3.
+   *
    *  It asks the style, not the cull: `_rimEmits`'s extra clause can only make this FALSE, and
    *  stopping pass 1 earlier than strictly necessary is safe (pass 2 picks the node up, in order)
    *  while stopping later is not. A ProgressiveBlur surface is not one of these -- its pyramid is
@@ -3889,10 +3965,16 @@ export class Canvas implements DirtyTracker {
    *  node: a container's flat rim whose BorderLayer sits ABOVE its first glass child belongs in
    *  pass 2, one that sits below belongs in pass 1, and the slot is where that is known. */
   private _phasedEmitsRim = (overlayGlass: boolean): boolean => {
+    // A glass rim is held for pass 3 because its BUILD was hoisted, not because it is glass. Under
+    // `?pyramid-atlas=fills` the rim builds per-card in the walk, so there is nothing to wait for
+    // and it emits exactly where a flat rim emits -- in the pass its node's own content painted in.
+    // Pass 3 then carries nothing and the driver does not run it. This one term is the whole
+    // z-order difference between the two arms.
+    const held = overlayGlass && !this._rimsInWalk;
     switch (this._phasedPass) {
-      case 1: return !overlayGlass && !this._phasedStop;
-      case 2: return !overlayGlass && this._phasedStarted;
-      case 3: return overlayGlass;
+      case 1: return !held && !this._phasedStop;
+      case 2: return !held && this._phasedStarted;
+      case 3: return held;
       default: return true;
     }
   };
@@ -5964,15 +6046,28 @@ export class Canvas implements DirtyTracker {
     // combined arm by name: both run the phased composition, and an arm running the atlas AND the
     // measurement flag would be reading the atlas under the measurement flag's pool.
     //
-    // The VALUE is `off` and nothing else. A flag whose value was ignored would let
+    // THREE ARMS IN ONE BINARY, and the bare flag is the default one:
+    //
+    //   fills  the DEFAULT. The fills' atlas, and every glass rim building per-card in the walk
+    //          exactly as it does today. Z-order is the baseline's, the rim pixels are the
+    //          baseline's, and the only change left in the frame is the one Jack approved.
+    //          Half the lever: 76 encoders, `EndsByKey.blur` 40 -> 21.
+    //   all    pyramidatlas2's composition as shipped -- both phases atlased, every rim drawing in
+    //          pass 3 after all other content. The full lever and the measurement arm for it; see
+    //          `_atlasRims` for the z-order exposure that keeps it off the default.
+    //   off    today's per-card, per-draw composition, byte for byte. The "before" for every gate.
+    //
+    // The VALUE is one of those three and nothing else. A flag whose value was ignored would let
     // `?pyramid-atlas=0`, `=false`, `=no` all arm the default while reading as if they had turned
-    // it off, which is the failure mode a measurement instrument exists to avoid.
+    // it off, which is the failure mode a measurement instrument exists to avoid -- and now that
+    // there are two ARMED arms, a typo'd `=fill` or `=rims` would silently publish the wrong one.
     if (params.has('pyramid-atlas')) {
       const raw = (params.get('pyramid-atlas') ?? '').trim();
-      if (raw !== '' && raw !== 'off' && raw !== 'on') {
-        throw new Error(`[Jaui] ?pyramid-atlas takes 'on' or 'off', got '${raw}'`);
+      if (raw !== '' && raw !== 'all' && raw !== 'fills' && raw !== 'off') {
+        throw new Error(`[Jaui] ?pyramid-atlas takes 'all', 'fills' or 'off', got '${raw}'`);
       }
       if (raw === 'off') this._pyramidAtlas = false;
+      this._atlasRims = raw === 'all';
     }
     // Everything the atlas cannot run beside, named one at a time and refused on the trace rather
     // than silently disarmed. Each of these owns the same machinery from the other end: the two
@@ -6008,6 +6103,16 @@ export class Canvas implements DirtyTracker {
         // twenty-way rotation `?blur-phased` needs exists only because twenty same-sized per-card
         // chains would otherwise be one. `MaxChains` is 8 for the two atlases plus the solo builds
         // a refusal can put beside them.
+        //
+        // UNDER `fills` THE SAME CEILING BUYS LESS AND IS STILL THE RIGHT ONE. The resident bytes
+        // are the fills' atlas (33.06 MB) plus ONE rim chain (1.06 MB): the twenty rim builds are
+        // the same size so `_useChain` hands them one chain, and each draws before the next builds,
+        // which is exactly why the baseline needs no rotation either. 34.1 MB is inside the shipped
+        // 48 MB, so `fills` on `glass-grid` at dpr 2 does not NEED the atlas's own ceiling -- but it
+        // is handed the same one anyway, for two reasons. At dpr 3 the fills' atlas alone is 74 MB
+        // and the planner returns SEVERAL groups of different sizes, which is several chains and
+        // needs the `MaxChains` headroom; and making the pool differ between the arms would make
+        // `fills` against `all` a test of two things at once instead of a test of the rims.
         gl2.DiagChainLimits = { MaxChains: 8, BudgetBytes: ATLAS_BUDGET_BYTES };
       }
     }
@@ -6016,10 +6121,13 @@ export class Canvas implements DirtyTracker {
     // worker mode `Init` is awaited BEFORE the URL is parsed at all, so a mark taken there would
     // print `off` on every arm however the URL read. A reading taken without this line is a
     // reading of a build that predates the lever.
-    JTrace(`jaui:pyramid-atlas armed=${this._pyramidAtlas ? 'on' : 'off'}`
+    JTrace(`jaui:pyramid-atlas armed=${this._pyramidAtlas ? (this._atlasRims ? 'all' : 'fills') : 'off'}`
       + ` budget=${Math.round(ATLAS_BUDGET_BYTES / (1024 * 1024))}MB`
       + (this._pyramidAtlas ? ' pixels=DIFFERENT' : ''));
     this._phasedWalk = this._pyramidAtlas;
+    // The rim routing, decided once, off the flag and its refusals -- never recomputed in the walk.
+    // A refused arm leaves it false, so `?blur-first` and `?blur-phased` keep pre-building rims.
+    this._rimsInWalk = this._pyramidAtlas && !this._atlasRims;
     // `?blur-phased` -- MEASUREMENT ONLY, DIFFERENT PIXELS. See `_blurPhased`. Parsed LAST, after
     // `?blur-first`, because it has to see every flag it interrogates AND because the two are
     // mutually exclusive: both move pyramid builds, and an arm running both would be measuring

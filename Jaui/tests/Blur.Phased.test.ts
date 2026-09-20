@@ -196,7 +196,13 @@ describe('?blur-phased — the walk\'s own functions, and the pre-pass\'s own bu
     // which of the two asked for it. One field, read at every site that used to read the flag.
     expect(jaui).toContain('private _phasedWalk: boolean = false;');
     expect(jaui).toContain('const preFill = this._blurFirst || this._phasedWalk ? this._blurFirstFill.get(node) : undefined;');
-    expect(jaui).toContain('const preRim = this._blurFirst || this._phasedWalk ? this._blurFirstRim.get(node) : undefined;');
+    // The RIM lookup carries one more term since lane pyramidatlas3: `?pyramid-atlas=fills` never
+    // pre-builds a rim, so it must not look one up and must not count a MISS when it fails to find
+    // one. Intent preserved -- `?blur-phased` and `?blur-first` still take the recorded handle at
+    // both sites, and a real disagreement is still counted at both.
+    expect(jaui).toContain('const preRim = (this._blurFirst || this._phasedWalk) && !this._rimsInWalk');
+    expect(jaui).toContain('? this._blurFirstRim.get(node) : undefined;');
+    expect(jaui).toContain('private _rimsInWalk: boolean = false;');
   });
 
   it('gates the walk through THREE predicates and nothing else', () => {
@@ -233,6 +239,14 @@ describe('?blur-phased — the walk\'s own functions, and the pre-pass\'s own bu
     }
     // And it restores the unflagged pass before anything after the walk runs.
     expect(block.indexOf('this._phasedPass = 0;')).toBeGreaterThan(block.indexOf('phase(3);'));
+    // `?pyramid-atlas=fills` skips the rim phase and pass 3, and THIS flag must not: it is the
+    // measurement arm for the five-pass composition, so it leaves `_rimsInWalk` false and takes
+    // the guard's true branch. Pinned here rather than in the atlas file because the thing at risk
+    // is `?blur-phased`'s own shape.
+    expect(jaui).toContain('this._rimsInWalk = this._pyramidAtlas && !this._atlasRims;');
+    expect(block).toContain('if (!this._rimsInWalk) {');
+    const phasedArm = jaui.slice(jaui.indexOf("if (params.has('blur-phased')) {"));
+    expect(phasedArm.slice(0, 2000)).not.toContain('_rimsInWalk');
   });
 
   it('the adaptive-shadow probe MOVES, and the walk site it leaves behind is untouched', () => {

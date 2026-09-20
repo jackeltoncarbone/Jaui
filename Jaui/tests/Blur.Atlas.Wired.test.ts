@@ -9,6 +9,7 @@ import {
   PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES,
 } from '../src/Core/Blur.Atlas';
 import { FakeGl } from './Blur.Chains.Source';
+import { arrowBody } from './Scene.ReadAfterWrite.Source';
 
 /**
  * THE WIRED ATLAS: `?pyramid-atlas`, which is the DEFAULT.
@@ -502,12 +503,64 @@ describe('the shipping kernel is textually what it was', () => {
 describe('the walk, and the flag', () => {
   const JAUI = readFileSync(join(__dirname, '../src/Core/Jaui.ts'), 'utf8');
 
-  it('is ON by default and `off` is the only value that turns it off', () => {
+  it('is ON by default, the default arm is `fills`, and the three values are the only ones', () => {
     expect(JAUI).toContain('private _pyramidAtlas: boolean = true;');
     expect(JAUI).toContain("if (raw === 'off') this._pyramidAtlas = false;");
+    // `fills` is the DEFAULT arm: the fills' atlas with every rim still building per-card in the
+    // walk, so z-order is the baseline's. `all` is pyramidatlas2's composition, which moves every
+    // rim draw to pass 3 -- the full lever, and a z-order change Jack's ruling does not cover.
+    expect(JAUI).toContain('private _atlasRims: boolean = false;');
+    expect(JAUI).toContain('private _rimsInWalk: boolean = false;');
+    expect(JAUI).toContain("this._atlasRims = raw === 'all';");
+    expect(JAUI).toContain('this._rimsInWalk = this._pyramidAtlas && !this._atlasRims;');
     // A flag whose value was ignored would let `=false` and `=no` arm the default while reading
-    // as if they had turned it off, which is what an instrument exists to prevent.
-    expect(JAUI).toContain("?pyramid-atlas takes 'on' or 'off'");
+    // as if they had turned it off, which is what an instrument exists to prevent. With TWO armed
+    // arms it is sharper still: a typo'd `=fill` would silently publish the other composition.
+    expect(JAUI).toContain("?pyramid-atlas takes 'all', 'fills' or 'off'");
+    expect(JAUI).toContain("raw !== '' && raw !== 'all' && raw !== 'fills' && raw !== 'off'");
+  });
+
+  it('routes the RIMS, and nothing else, off the arm -- at exactly three sites', () => {
+    // The `fills` arm is one term in one predicate plus the two lines that look a pre-built rim
+    // handle up. `_phasedHoldsBack` and `_phasedPaints` are NOT among them, deliberately: the
+    // pass-1/pass-2 boundary has to land on the same node under both arms or the fill pyramids
+    // would be built from a different bed and `fills` against `all` would stop being a test of
+    // the rims alone.
+    const emits = arrowBody(JAUI, '_phasedEmitsRim');
+    expect(emits).toContain('const held = overlayGlass && !this._rimsInWalk;');
+    expect(emits).toContain('case 3: return held;');
+    expect(arrowBody(JAUI, '_phasedHoldsBack')).not.toContain('_rimsInWalk');
+    expect(arrowBody(JAUI, '_phasedPaints')).not.toContain('_rimsInWalk');
+    // The rim's build under `fills` is the BASELINE's build, on the baseline's line: from the live
+    // scene texture, at this node's own point in the walk. That is why the rim PIXELS as well as
+    // the rim z-order are the engine's as it shipped.
+    const render = arrowBody(JAUI, '_render');
+    expect(render).toContain('const preRim = (this._blurFirst || this._phasedWalk) && !this._rimsInWalk');
+    expect(render).toContain('else if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }');
+    expect(render).toContain('lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region);');
+  });
+
+  it('does not issue a rim phase or walk pass 3 under `fills`', () => {
+    const render = arrowBody(JAUI, '_render');
+    const block = render.slice(render.indexOf('if (this._phasedWalk && !this._diagNoUi)'));
+    const guard = block.indexOf('if (!this._rimsInWalk) {');
+    expect(guard).toBeGreaterThan(block.indexOf('phase(2);'));
+    // Both the rim build AND pass 3 are inside the guard -- a pass 3 that still ran would walk the
+    // whole tree to emit nothing, and a rim phase that still ran would pre-build twenty pyramids
+    // the walk is about to build again.
+    const guarded = block.slice(guard, block.indexOf('this._phasedPass = 0;', guard));
+    expect(guarded).toContain("this._blurPhasedBuild('rim', w, h);");
+    expect(guarded).toContain('phase(3);');
+  });
+
+  it('counts the walk-built rims as SOLO, so `members + solo` still equals `built`', () => {
+    // Twenty per-card rim builds beside an atlas of twenty fills. If they went uncounted the gate
+    // would read `built=20 members=20 solo=0` and a reader could not tell this arm from `all`.
+    const render = arrowBody(JAUI, '_render');
+    expect(render).toContain('this._atlasWalkSolo = 0;');
+    expect(render).toContain('ast.Solo += this._atlasWalkSolo;');
+    expect(render).toContain('if (r instanceof WebGL2Renderer) r.NoteAtlasSolo(this._atlasWalkSolo);');
+    expect(render).toContain("arm=${this._atlasRims ? 'all' : 'fills'}");
   });
 
   it("reuses `?blur-phased`'s traversal rather than inventing a fourth ordering", () => {
@@ -535,7 +588,9 @@ describe('the walk, and the flag', () => {
 
   it("marks the arm where the flag is DECIDED, not in the renderer's Init", () => {
     // Worker mode awaits `Init` before the URL is parsed, so a mark there says `off` on every arm.
-    expect(JAUI).toContain("jaui:pyramid-atlas armed=${this._pyramidAtlas ? 'on' : 'off'}");
+    // And it names the ARM, not just on/off: with two armed compositions in one binary, a mark
+    // that said `on` would leave a cell unable to say which of them it measured.
+    expect(JAUI).toContain("jaui:pyramid-atlas armed=${this._pyramidAtlas ? (this._atlasRims ? 'all' : 'fills') : 'off'}");
     const renderer = readFileSync(join(__dirname, '../src/Core/WebGL2.Renderer.ts'), 'utf8');
     const init = renderer.slice(renderer.indexOf('  Init = async ('));
     expect(init.slice(0, 4000)).not.toContain('JTrace(`jaui:pyramid-atlas');
@@ -543,7 +598,7 @@ describe('the walk, and the flag', () => {
 
   it('prints solo and refused beside members, so a vacuous arm cannot pass', () => {
     // `atlases=0 members=0 solo=40` is the unflagged engine wearing the flag's name.
-    const render = JAUI.slice(JAUI.indexOf('jaui:pyramid-atlas built='));
+    const render = JAUI.slice(JAUI.indexOf('jaui:pyramid-atlas arm='));
     for (const col of ['atlases=${a.Atlases}', 'members=${a.Members}', 'solo=${a.Solo}',
                        'refused=${a.Refused}', 'missed=${st.Missed}', 'switches=${sw}']) {
       expect(render.slice(0, 900), col).toContain(col);
