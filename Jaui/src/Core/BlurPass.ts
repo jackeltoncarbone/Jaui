@@ -4,6 +4,12 @@ import { Framebuffer } from './Framebuffer';
 import { BACKDROP_REGION_FULL, type BackdropRegion } from './Renderer';
 import type { PassTimers } from './Pass.Timers';
 import { JTrace } from '../Diagnostics/Jaui.Trace';
+import {
+  GAUSS_MAX_FETCHES, GaussianKernelWith, RadiusForFetches, PlanSeparable, PlanSeparableTargets,
+  ChainCost, type GaussianKernel, type SeparablePlan, type SeparableRequest,
+} from './Blur.Separable';
+
+export { GAUSS_MAX_FETCHES, type GaussianKernel };
 
 /**
  * Dual Filter blur (Marius Bjørge, ARM, "Bandwidth-Efficient Rendering",
@@ -25,6 +31,14 @@ import { JTrace } from '../Diagnostics/Jaui.Trace';
  *   N = 4: σ ≈ 60 px      (heavy backdrop)
  *
  * Reference: https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf
+ *
+ * The sigma table above is the chain's DESIGN, not what it delivers: measured on its own operator
+ * the chain runs at 2.80 / 5.74 / 11.54 / 23.11 device px at depth 2 / 3 / 4 / 5 (tap offset 0.7),
+ * as a staircase that beats with period `2^depth` (`Perf/BlurGaussian.Finding.md`,
+ * `Blur.Separable.ChainDeliveredSigma`). SINCE LANE BLURFAST THE CHAIN IS NOT THE PER-SURFACE GLASS
+ * BUILD: that is `_blurSeparable` (`Blur.Separable.ts`) at the chain's delivered width. The chain
+ * still builds the progressive blur's mips, the shared backdrop, the sharp root, and every build
+ * under `?blur-chain=on`, the control arm.
  */
 
 // Every pass draws the same unit quad over its WHOLE destination. `u_SrcRect` says which
@@ -276,79 +290,18 @@ void main() {
 }
 `;
 
-/** Fetches ONE 1D Gaussian pass may issue, and therefore the size of the two uniform arrays.
- *
- *  64 fetches is `ceil(3 * sigma) <= 62`, i.e. sigma up to 20.67 device px -- `Blur(10.3pt)` at
- *  dpr 2, well past the 4pt every glass class in this app authors. A kernel
- *  that needs more is REFUSED by name (`PlanGaussian`) and the build takes the chain, rather than
- *  silently running a truncated Gaussian: a clipped kernel is a different blur wearing this
- *  arm's number.
- *
- *  It is a ceiling on the ARRAY, not on the loop: the loop runs `u_Fetches` times, which at a
- *  card's sigma is 25. */
-export const GAUSS_MAX_FETCHES = 64;
-
-/** Programs only a `?glass-gaussian` arm compiles. One, and it serves both directions. */
+/** Programs only a `?glass-gaussian` arm compiled -- and, since the separable plan became the
+ *  default, the one program every per-surface pass compiles at boot. One, both directions. */
 export const BLUR_PROGRAMS_GAUSSIAN = 1;
 
-/** A 1D Gaussian reduced to bilinear fetches. `Offsets` and `Weights` are `GAUSS_MAX_FETCHES`
- *  long whatever `Fetches` says, because they are uploaded whole and the shader reads the live
- *  prefix -- a shorter array would leave the driver's copy holding the previous build's tail. */
-export interface GaussianKernel {
-  /** The sigma the kernel was built at, in SOURCE texels. */
-  Sigma: number;
-  /** `ceil(3 * sigma)` -- the furthest texel the kernel reads, and the temp's vertical padding. */
-  Radius: number;
-  /** `2 * Radius + 1`: the DISCRETE taps a naive convolution would take. */
-  Taps: number;
-  /** `1 + 2 * ceil(Radius / 2)`: the bilinear fetches this kernel actually issues. */
-  Fetches: number;
-  Offsets: Float32Array;
-  Weights: Float32Array;
-}
-
 /**
- * The linear-sampled Gaussian for one sigma (Rakos, rastergrid 2010).
- *
- * The discrete kernel is `w(i) = exp(-i^2 / 2 sigma^2)` over `i = -R..R`, normalised to sum 1.
- * Texel 0 is fetched alone; texels are then PAIRED outward `(1,2), (3,4), ...`, and a pair is one
- * bilinear fetch at `o = (i*w_i + (i+1)*w_{i+1}) / (w_i + w_{i+1})` weighted by `w_i + w_{i+1}`,
- * because a bilinear fetch at `o` returns `(1 - (o - i)) * T[i] + (o - i) * T[i+1]` -- which at
- * that `o` is exactly the pair's weighted mean. An odd `R` leaves the outermost texel unpaired and
- * it is fetched on its own centre.
- *
- * The weights sum to 1 by construction (the fetch weights are a partition of the tap weights), so
- * the pass is a convex combination and cannot leave [0, 1] -- which is what makes an RGB10_A2
- * intermediate safe between the two passes.
- *
- * EXPORTED AND PURE because the CPU port in `tests/` has to model THIS table rather than a second
- * derivation of it: the picture prediction is only worth reading if the kernel it predicts for is
- * the kernel the GPU runs.
+ * The linear-sampled Gaussian for one sigma (Rakos, rastergrid 2010), truncated at `ceil(3 sigma)`.
+ * `Blur.Separable.GaussianKernelWith` carries the table and its argument; this is the
+ * `?glass-gaussian` arm's radius rule on top of it, numerically what it always was.
  */
 export const GaussianKernelFor = (sigma: number): GaussianKernel => {
   if (!(sigma > 0)) throw new Error(`[Jaui] GaussianKernelFor needs sigma > 0, got ${sigma}`);
-  const R = Math.ceil(3 * sigma);
-  const w: number[] = [];
-  let total = 0;
-  for (let i = 0; i <= R; i++) {
-    const v = Math.exp(-(i * i) / (2 * sigma * sigma));
-    w.push(v);
-    total += i === 0 ? v : 2 * v;
-  }
-  for (let i = 0; i <= R; i++) w[i] /= total;
-
-  const offsets = new Float32Array(GAUSS_MAX_FETCHES);
-  const weights = new Float32Array(GAUSS_MAX_FETCHES);
-  let n = 0;
-  offsets[n] = 0; weights[n] = w[0]; n++;
-  for (let i = 1; i <= R; i += 2) {
-    const pair = i + 1 <= R;
-    const wt = pair ? w[i] + w[i + 1] : w[i];
-    const off = pair ? (i * w[i] + (i + 1) * w[i + 1]) / wt : i;
-    offsets[n] = off; weights[n] = wt; n++;
-    offsets[n] = -off; weights[n] = wt; n++;
-  }
-  return { Sigma: sigma, Radius: R, Taps: 2 * R + 1, Fetches: n, Offsets: offsets, Weights: weights };
+  return GaussianKernelWith(sigma, Math.ceil(3 * sigma));
 };
 
 /** `?glass-gaussian`'s three arms. `match` is the DIAGNOSTIC one -- see `PlanGaussian`. */
@@ -399,9 +352,12 @@ export const GAUSS_MATCH_SIGMA = 2.798809271;
  *
  * `depth` and `tapOffset` are the chain's, and only `match` reads them: `on` runs the sigma the
  * sheet authored and does not care what the chain would have done with it.
+ *
+ * `forceFetches` is `?blur-fetches=<n>`: the same sigma, a kernel of exactly `n` fetches.
  */
 export const PlanGaussian = (
   radius: number, mode: GaussianMode, depth: number, tapOffset: number,
+  forceFetches: number | null = null,
 ): GaussianBuildPlan | GaussianRefusal => {
   if (mode === 'off') return { Ok: false, Why: 'mode-off' };
   if (!(radius > 0)) return { Ok: false, Why: 'sharp-root' };
@@ -412,6 +368,9 @@ export const PlanGaussian = (
     }
   }
   const sigma = mode === 'match' ? GAUSS_MATCH_SIGMA : radius;
+  if (forceFetches !== null) {
+    return { Ok: true, Sigma: sigma, Kernel: GaussianKernelWith(sigma, RadiusForFetches(forceFetches)) };
+  }
   const radiusPx = Math.ceil(3 * sigma);
   const fetches = 1 + 2 * Math.ceil(radiusPx / 2);
   if (fetches > GAUSS_MAX_FETCHES) {
@@ -441,6 +400,40 @@ export const GaussianCost = (
  *  `_prePairs` makes -- a shared temp would `Resize` (a full `texImage2D`) at every build. */
 export const GAUSS_TEMPS_MAX = 4;
 export const GAUSS_TEMP_BUDGET_BYTES = 8 * 1024 * 1024;
+
+/** ONE build, in the census's currency. `Plan` names which path ran it. */
+export interface BlurBuildRecord {
+  Plan: 'none' | 'chain' | 'separable' | 'gaussian' | 'root';
+  Passes: number;
+  K: number;
+  /** The chain's depth, or 0 for a single-level plan. */
+  Depth: number;
+  /** The radius the caller asked for, device px. */
+  SigmaAuthored: number;
+  /** What the build RAN at, device px: the separable plan's target; the Gaussian arm's sigma;
+   *  NaN on a chain build (its delivered sigma is `ChainDeliveredSigma(K, Depth, TapOffset)`,
+   *  computed where it is printed rather than on every build of every pass). */
+  SigmaTarget: number;
+  /** The separable plan's sigma on its base, in BASE texels; 0 otherwise. */
+  SigmaResidual: number;
+  /** Bilinear fetches per destination pixel of the Gaussian passes, or 0 on the chain. */
+  Fetches: number;
+  TapOffset: number;
+  /** Destination px written and bilinear fetches issued by the whole build. */
+  Fill: number;
+  Reads: number;
+}
+export const NO_BUILD: BlurBuildRecord = {
+  Plan: 'none', Passes: 0, K: 1, Depth: 0, SigmaAuthored: 0, SigmaTarget: 0, SigmaResidual: 0,
+  Fetches: 0, TapOffset: 0, Fill: 0, Reads: 0,
+};
+
+/** Distinct sizes the separable plan keeps a target for -- its down hops and its H-pass temp --
+ *  and the storage they may hold. Keyed on SIZE like `_gaussTemps`, because a target that changed
+ *  size would `Resize`, and `Resize` is a whole `texImage2D`. Higher than the Gaussian arm's four:
+ *  a k = 8 build holds three hop sizes and a temp, and a page has several glass classes. */
+export const SEPARABLE_TARGETS_MAX = 16;
+export const SEPARABLE_TARGET_BUDGET_BYTES = 32 * 1024 * 1024;
 
 /** What the Gaussian arm's temp pool holds, and the last build's `tempCover=` pair. */
 export interface GaussTempCensus {
@@ -1047,12 +1040,39 @@ export class BlurPass {
   private _lastGaussianCover: { Written: number; Readable: number } = { Written: 0, Readable: 0 };
   get LastGaussianCover(): { Written: number; Readable: number } { return this._lastGaussianCover; }
 
+  /** What the LAST `Blur` call built, whichever plan ran it -- the census's one record per build,
+   *  read by the renderer on the line after the call, so the separable plan and its chain control
+   *  are booked in the same currency: passes, k, sigma, fetches, destination px, bilinear reads. */
+  private _lastBuild: BlurBuildRecord = NO_BUILD;
+  get LastBuild(): BlurBuildRecord { return this._lastBuild; }
+  /** The clause that turned the last separable REQUEST down, or ''. The build took the chain. */
+  private _lastSeparableRefusal = '';
+  get LastSeparableRefusal(): string { return this._lastSeparableRefusal; }
+  /** Every draw this pass has issued, all plans, mips included; monotone. The renderer differences
+   *  it per frame, which is how a gate line says WHERE a frame's blur draws went. */
+  private _draws = 0;
+  get Draws(): number { return this._draws; }
+  /** Where and in which batch slot the separable kernel was compiled: `boot#<i>`, `pool#<i>` or
+   *  `arm#<i>`, `i` its index in that batch. Per-load compile ORDER is the third candidate for the
+   *  Metal defect, and this is its stamp on the mark. */
+  private _gaussCompileStamp = 'none';
+  get GaussianCompileStamp(): string { return this._gaussCompileStamp; }
+
   /** `?gauss-debug`, measurement only: CLEAR both Gaussian targets to magenta instead of leaving
    *  them to `DontCare`, so a texel either pass fails to write shows in ONE shot instead of one
    *  shot in four. A static because it is a URL arm with one reader and the renderer is not this
    *  lane's to plumb. When both passes write every texel the clear is overwritten whole and the
    *  picture is the `match` picture to the pixel; any magenta in the shot IS the unwritten texel. */
   static GaussDebugMagenta = false;
+  /** `?blur-fetches=<n>`, measurement only: EVERY separable build on every pass -- the default plan
+   *  and `?glass-gaussian` alike -- runs a kernel of exactly `n` fetches at its own sigma, so fetch
+   *  COUNT can be moved with sigma held. The Metal one-in-four defect tripped at 11 fetches and not
+   *  at 25, and those two arms also differed in sigma; this is the arm that separates the two. */
+  static ForceFetches: number | null = null;
+  /** `?gauss-upload=prefix`, measurement only: upload the LIVE PREFIX of `u_Off` / `u_Wt` the way
+   *  every build did before this lane. The default uploads all `GAUSS_MAX_FETCHES` entries, zero
+   *  past `u_Fetches` -- see `_uploadKernel`. */
+  static GaussUploadPrefix = false;
   private _gaussDebugClears = 0;
   /** Magenta clears `?gauss-debug` issued on this pass: 2 per Gaussian build, or the arm is vacuous. */
   get GaussDebugClears(): number { return this._gaussDebugClears; }
@@ -1086,6 +1106,9 @@ export class BlurPass {
    *  (`GAUSS_TEMPS_MAX`, `GAUSS_TEMP_BUDGET_BYTES`) and evicted least-recently-used, so an arm
    *  cannot grow storage the census cannot see. */
   private _gaussTemps = new Map<string, { Fb: Framebuffer; Bytes: number; Used: number }>();
+  /** The separable plan's down-hop targets and H-pass temps, one per SIZE. See
+   *  `_useSeparableTarget`; same argument as `_gaussTemps`, with room for a k = 8 build. */
+  private _sepTargets = new Map<string, { Fb: Framebuffer; Bytes: number; Used: number }>();
   /** Where the last pyramid's texels sit on screen. Consumers read it off the returned
    *  texture handle and map their screen UV through it before sampling. */
   private _lastRegion: BackdropRegion = BACKDROP_REGION_FULL;
@@ -1259,17 +1282,19 @@ export class BlurPass {
   get GaussianProgramCompiled(): boolean { return this._gauss !== null; }
 
   /**
-   * Compile the ONE kernel a `?glass-gaussian` arm binds, and return how many were issued (0 if
-   * this pass already has it, so the caller's mark cannot double-count).
+   * Compile the ONE separable kernel, and return how many were issued (0 if this pass already has
+   * it, so the caller's mark cannot double-count).
    *
-   * Same placement argument as `EnsureAtlasPrograms`, and for the same three reasons: not at boot
-   * (the flag is off by default and the program is dead on an unflagged page), not on first use
-   * (that lands on the first frame that has glass -- the frame every boot measurement reads), but
-   * at the moment the flag ARMS, from `WebGL2Renderer.ArmFlaggedPrograms`.
+   * AT BOOT on the per-surface pass, now that the separable plan is the default: `WebGL2Renderer`
+   * adds it to `Init`'s batch (and to a rebuilt pool's batch) whatever the URL says, because on the
+   * worker path `Init` runs before the URL is parsed and a default must not be a late compile on
+   * the first glass frame. `?blur-chain=on` pays for one program it never binds; that is the price
+   * of a control arm in the same binary. `where` is the stamp's first half.
    */
-  EnsureGaussianProgram = (batch?: ShaderBatch): number => {
+  EnsureGaussianProgram = (batch?: ShaderBatch, where: 'boot' | 'pool' | 'arm' = 'arm'): number => {
     if (this._gauss !== null) return 0;
     const b = batch ?? new ShaderBatch(this._gl);
+    this._gaussCompileStamp = `${where}#${b.Count}`;
     this._gauss = b.Add(VERT, GAUSS_FRAG(GAUSS_MAX_FETCHES));
     if (batch === undefined) { b.Resolve(); this._wireGaussianLocations(); }
     return BLUR_PROGRAMS_GAUSSIAN;
@@ -1414,6 +1439,13 @@ export class BlurPass {
    * below) with the build falling back to the chain, which is the shipped picture. The caller is
    * responsible for `MaxLod == 0`, which this method cannot see: a Gaussian build writes level 0
    * and nothing above it.
+   *
+   * `separable` is THE DEFAULT PLAN for a per-surface glass build (`Blur.Separable.ts`): k from the
+   * sigma, one separable pair at the residual sigma, level 0 at `1/k` for the consumer's bilinear.
+   * `null` is the dual-filter chain byte for byte -- `?blur-chain=on`, and every caller that is not
+   * a per-surface `MaxLod == 0` build (the shared backdrop, pblur, the sharp root). The rect is the
+   * CHAIN's, resolved on the chain's phase above, so `LastRegion` maps the same screen rect either
+   * way; the one clause this method cannot see, `MaxLod == 0`, is the walk's, as for `gaussian`.
    */
   Blur = (
     input: WebGLTexture,
@@ -1425,12 +1457,14 @@ export class BlurPass {
     baseFactor?: number,
     presample: boolean = false,
     gaussian: GaussianMode = 'off',
+    separable: SeparableRequest | null = null,
   ): WebGLTexture => {
     const gl = this._gl;
     this._lastGaussian = false;
     this._lastGaussianSigma = 0;
     this._lastGaussianFetches = 0;
     this._lastGaussianRefusal = '';
+    this._lastSeparableRefusal = '';
 
     // The σ-adaptive factor and the pyramid depth both have to be known BEFORE the region is
     // resolved: together they set the downsample grid the region's origin must land on.
@@ -1472,9 +1506,13 @@ export class BlurPass {
       this._setSrcRect(this._copySrcLoc, rect, width, height);
       gl.bindTexture(gl.TEXTURE_2D, input);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      this._draws++;
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       this._target('default');
       if (timedCopy) this.Timers!.End();
+      this._lastBuild = {
+        ...NO_BUILD, Plan: 'root', Passes: 1, Fill: rect.W * rect.H, Reads: rect.W * rect.H,
+      };
       this._lastDepth = 0;
       this._lastRegion = this._region(rect, scaleX, scaleY);
       return this._levels[0].Texture;
@@ -1524,7 +1562,7 @@ export class BlurPass {
     if (gaussian !== 'off') {
       const plan = k !== 1 ? { Ok: false as const, Why: `pre-downsample-k${k}` }
         : pre !== null ? { Ok: false as const, Why: `presample-k${pre.K}` }
-        : PlanGaussian(radius, gaussian, depth, tapOffset);
+        : PlanGaussian(radius, gaussian, depth, tapOffset, BlurPass.ForceFetches);
       if (plan.Ok) {
         const temp = PlanGaussianTemp(rect, plan.Kernel);
         if (temp.Ok) return this._blurGaussian(input, width, height, rect, scaleX, scaleY, plan, temp);
@@ -1533,6 +1571,37 @@ export class BlurPass {
         this._lastGaussianRefusal = plan.Why;
       }
     }
+
+    // ── THE SEPARABLE PLAN: k FROM THE SIGMA, ONE PAIR AT THE RESIDUAL ─────────────────────────
+    //
+    // Here for the same reason the Gaussian arm is: `k`, `depth` and `tapOffset` are the chain's,
+    // and the chain's delivered sigma -- which the plan matches by default -- is a function of those
+    // three. The rect above is the chain's too, so the region a consumer maps through is the chain's
+    // screen rect whichever plan builds it. `?glass-presample` re-bases a chain and is refused at
+    // the flag; the clause here is the belt.
+    if (separable !== null && gaussian === 'off') {
+      const why = region === undefined ? 'full-canvas'
+        : pre !== null ? `presample-k${pre.K}`
+        : null;
+      const plan = why !== null ? { Ok: false as const, Why: why }
+        : PlanSeparable(radius, k, depth, tapOffset, {
+          Sigma: separable.Sigma, Fetches: BlurPass.ForceFetches ?? separable.Fetches,
+          KRule: separable.KRule,
+        });
+      if (plan.Ok) {
+        const cover = PlanGaussianTemp({ YBottom: 0, W: Math.ceil(rect.W / plan.K), H: Math.ceil(rect.H / plan.K) },
+          plan.Kernel);
+        if (cover.Ok) return this._blurSeparable(input, width, height, rect, plan, cover);
+        this._lastSeparableRefusal = cover.Why;
+      } else {
+        this._lastSeparableRefusal = plan.Why;
+      }
+    }
+    const chainCost = ChainCost(rect.W, rect.H, k, depth);
+    this._lastBuild = {
+      ...NO_BUILD, Plan: 'chain', Passes: chainCost.Passes, K: k, Depth: depth, SigmaAuthored: radius,
+      SigmaTarget: NaN, TapOffset: tapOffset, Fill: chainCost.Fill, Reads: chainCost.Reads,
+    };
 
     // One bracket spans the pre-downsample AND the pyramid's down hops: they are one chain, and
     // splitting them would put a query boundary in the middle of a ping-pong whose tile work
@@ -1560,6 +1629,7 @@ export class BlurPass {
         gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
         gl.bindTexture(gl.TEXTURE_2D, srcTex);
         gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+        this._draws++;
         srcTex = fb.Texture; srcW = curW; srcH = curH;
       }
       // Re-base the pyramid onto the downsampled backdrop. The consumer samples level 0 +
@@ -1601,6 +1671,7 @@ export class BlurPass {
       // covered the canvas. The region changes the rect, never the kernel.
       gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      this._draws++;
       srcTex = dst.Texture;
       srcW = dst.Width;
       srcH = dst.Height;
@@ -1623,6 +1694,7 @@ export class BlurPass {
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.uniform2f(this._upHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      this._draws++;
       srcTex = dst.Texture;
       srcW = dst.Width;
       srcH = dst.Height;
@@ -1698,15 +1770,7 @@ export class BlurPass {
 
     gl.useProgram(prog.Program);
     gl.uniform1i(this._gTexLoc, 0);
-    gl.uniform1i(this._gFetchLoc, k.Fetches);
-    // THE LIVE PREFIX, as a view rather than a copy. Uploading all `GAUSS_MAX_FETCHES` would
-    // match the declared array size exactly and be legal -- but only while the linker keeps the
-    // array at its declared size, and a driver that shrank it to the elements it could prove were
-    // read would turn the call into an INVALID_OPERATION and leave the kernel holding the
-    // previous build's table. A count at or under the active size is legal under every reading of
-    // GL ES 3.0, and the loop runs `u_Fetches` times, so the tail is never read either way.
-    gl.uniform1fv(this._gOffLoc, k.Offsets.subarray(0, k.Fetches));
-    gl.uniform1fv(this._gWtLoc, k.Weights.subarray(0, k.Fetches));
+    this._uploadKernel(k);
 
     const timedH = this.Timers !== null && this.Timers.Begin('blur-down');
     this._bindTarget(temp, 'gauss-h');
@@ -1715,6 +1779,7 @@ export class BlurPass {
     gl.uniform2f(this._gStepLoc, 1 / width, 0);
     gl.bindTexture(gl.TEXTURE_2D, input);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    this._draws++;
     if (timedH) this.Timers!.End();
 
     const timedV = this.Timers !== null && this.Timers.Begin('blur-up');
@@ -1724,6 +1789,7 @@ export class BlurPass {
     gl.uniform2f(this._gStepLoc, 0, 1 / tempH);
     gl.bindTexture(gl.TEXTURE_2D, temp.Texture);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    this._draws++;
 
     if (clearWas !== null) gl.clearColor(clearWas[0], clearWas[1], clearWas[2], clearWas[3]);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1738,8 +1804,162 @@ export class BlurPass {
     this._lastGaussianSigma = plan.Sigma;
     this._lastGaussianFetches = k.Fetches;
     this._lastGaussianCover = { Written: tp.Written, Readable: tp.Readable };
+    const cost = GaussianCost(rect.W, rect.H, tempH, k.Fetches);
+    this._lastBuild = {
+      ...NO_BUILD, Plan: 'gaussian', Passes: GAUSS_PASSES, SigmaAuthored: plan.Sigma,
+      SigmaTarget: plan.Sigma, SigmaResidual: plan.Sigma, Fetches: k.Fetches,
+      Fill: cost.Fill, Reads: cost.Reads,
+    };
     this._lastRegion = this._region(rect, scaleX, scaleY);
     return this._levels[0].Texture;
+  };
+
+  /**
+   * ── THE SEPARABLE PLAN'S PASSES: `log2(k)` BOX HOPS, THEN ONE GAUSSIAN PAIR ──────────────────
+   *
+   *   k = 1   H  scene -> temp  W x (H + 2R)    V  temp -> level 0  W x H          (2 passes)
+   *   k > 1   hop 1 reads the scene over the PADDED region, each hop an exact 2x2 box
+   *           H  base -> temp  bw x (bh + 2R)   V  temp -> level 0  bw x bh        (log2 k + 2)
+   *
+   * At k = 1 this is `_blurGaussian`'s two draws with the plan's solved table, uniform for uniform.
+   *
+   * THE BOX HOPS ARE `DOWN_FRAG` AT `u_Offset` 1.0, which is an exact 2x2 box: the destination
+   * centre lands on a source texel CORNER (the centre tap is the 2x2 mean) and the four diagonal
+   * taps land on texel CENTRES (one texel each), `(4 * mean + sum) / 8 = mean`. The same program and
+   * offset the chain's own k > 1 pre-pass has always used.
+   *
+   * THE PADDING IS ON THE BASE, `R` base texels on every side, so every horizontal tap of H and
+   * every vertical tap of V reads real downsampled scene rather than a clamped edge. At a canvas
+   * edge the padded region leaves the canvas and the scene sampler's CLAMP_TO_EDGE replicates the
+   * edge row -- `PlanGaussianTemp`'s edge law, one level down. Every target is written whole
+   * before anything reads it (`cover.Written === cover.Readable`), so no invalidated texel exists.
+   *
+   * THERE IS NO UPSAMPLE PASS, and the consumer is unchanged: level 0 comes back at `bw x bh` and
+   * `LastRegion` maps the same screen rect onto it (`W` and `H` extended to multiples of k so the
+   * map lands on base texel centres exactly), so `Jiv.Panel.frag`'s one bilinear tap IS the
+   * reconstruction. The shipped full-canvas re-base has always been read that way (k up to 8). An
+   * explicit bilinear pass would compute the identical value at every pixel centre and then be
+   * interpolated AGAIN by every off-centre tap (refraction, CA, the rim's inward tap): one more
+   * pass for a strictly blurrier result. `TexelsX/Y` is read only by pblur and `BORDER_DIRECT`,
+   * neither of which takes this plan.
+   */
+  private _blurSeparable = (
+    input: WebGLTexture, width: number, height: number, rect: RegionRect, plan: SeparablePlan,
+    cover: GaussianTempPlan,
+  ): WebGLTexture => {
+    const gl = this._gl;
+    const prog = this._gaussianProgramOrThrow();
+    const kern = plan.Kernel;
+    const K = plan.K;
+    const R = kern.Radius;
+    const tg = PlanSeparableTargets(rect, K, kern);
+
+    // ALLOCATE EVERY TARGET BEFORE THE FIRST DRAW, for `_blurGaussian`'s reason; and inside ONE
+    // build tick, so the pool cannot evict a target this build is about to read.
+    const buildTick = this._tick + 1;
+    this._useChain(tg.Bw, tg.Bh);
+    this._levels[0].Resize(tg.Bw, tg.Bh);
+    const hops = tg.Hops.map((h) => this._useSeparableTarget(h.W, h.H, buildTick));
+    const temp = this._useSeparableTarget(tg.TempW, tg.TempH, buildTick);
+    const debug = BlurPass.GaussDebugMagenta;
+    const clearWas = debug ? gl.getParameter(gl.COLOR_CLEAR_VALUE) as Float32Array : null;
+
+    const timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
+    let src = input, srcW = width, srcH = height;
+    if (hops.length > 0) {
+      gl.useProgram(this._down.Program);
+      gl.uniform1i(this._downTexLoc, 0);
+      gl.uniform1f(this._downOffLoc, 1.0);
+      for (let s = 0; s < hops.length; s++) {
+        const fb = hops[s];
+        this._bindTarget(fb, `sep-hop${s + 1}`);
+        if (debug) this._gaussDebugClear();
+        if (s === 0) {
+          const pw = (tg.Bw + 2 * R) * K, ph = (tg.Bh + 2 * R) * K;
+          gl.uniform4f(this._downSrcLoc, tg.X0 / width, tg.Y0 / height, pw / width, ph / height);
+        } else {
+          this._setSrcRect(this._downSrcLoc, null, 1, 1);
+        }
+        gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
+        gl.bindTexture(gl.TEXTURE_2D, src);
+        gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+        this._draws++;
+        src = fb.Texture; srcW = fb.Width; srcH = fb.Height;
+      }
+    }
+
+    gl.useProgram(prog.Program);
+    gl.uniform1i(this._gTexLoc, 0);
+    this._uploadKernel(kern);
+
+    this._bindTarget(temp, 'sep-h');
+    if (debug) this._gaussDebugClear();
+    if (hops.length === 0) {
+      // The SCENE, through the rect: destination column i is scene texel `rect.X + i`, row j is
+      // `Y0 + j` -- identity plus an integer shift, which linear sampling requires.
+      gl.uniform4f(this._gSrcLoc, rect.X / width, tg.Y0 / height, tg.Bw / width, tg.TempH / height);
+      gl.uniform2f(this._gStepLoc, 1 / width, 0);
+    } else {
+      // The BASE, skipping its `R` padding columns: destination column i is base texel `R + i`.
+      gl.uniform4f(this._gSrcLoc, R / srcW, 0, tg.Bw / srcW, 1);
+      gl.uniform2f(this._gStepLoc, 1 / srcW, 0);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, src);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    this._draws++;
+    if (timedDown) this.Timers!.End();
+
+    const timedV = this.Timers !== null && this.Timers.Begin('blur-up');
+    this._bindTarget(this._levels[0], 'l0');
+    if (debug) this._gaussDebugClear();
+    gl.uniform4f(this._gSrcLoc, 0, R / tg.TempH, 1, tg.Bh / tg.TempH);
+    gl.uniform2f(this._gStepLoc, 0, 1 / tg.TempH);
+    gl.bindTexture(gl.TEXTURE_2D, temp.Texture);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    this._draws++;
+
+    if (clearWas !== null) gl.clearColor(clearWas[0], clearWas[1], clearWas[2], clearWas[3]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._target('default');
+    if (timedV) this.Timers!.End();
+
+    this._lastDepth = 0;
+    this._lastGaussianCover = { Written: cover.Written, Readable: cover.Readable };
+    this._lastBuild = {
+      Plan: 'separable', Passes: plan.Passes, K, Depth: 0, SigmaAuthored: plan.SigmaAuthored,
+      SigmaTarget: plan.SigmaTarget, SigmaResidual: plan.SigmaResidual, Fetches: kern.Fetches,
+      TapOffset: 0, Fill: tg.Fill, Reads: tg.Reads,
+    };
+    // The chain's screen rect, grown to `bw * k x bh * k` so the map lands on base texel centres.
+    const ext: RegionRect = { X: rect.X, YBottom: rect.YBottom, W: tg.Wk, H: tg.Hk, Full: false };
+    this._lastRegion = this._region(ext, width / tg.Wk, height / tg.Hk);
+    return this._levels[0].Texture;
+  };
+
+  /**
+   * The fetch table, uploaded WHOLE: all `GAUSS_MAX_FETCHES` entries, zero past `u_Fetches`.
+   *
+   * THIS IS THE FIRST FIX FOR THE METAL ONE-IN-FOUR DEFECT (`Perf/BlurGaussian2.Report.md`). The
+   * prefix upload left the array's tail to whatever the driver's copy held. GL ES 3.0 zeroes a
+   * default-block uniform at LINK, but ANGLE's Metal backend packs dynamically indexed uniform
+   * arrays into a buffer of its own, and a compiler that unrolls `i < u_Fetches` to the declared
+   * size with predication multiplies the tail by a masked weight -- where a NaN survives a multiply
+   * by zero. Uploading the whole table makes the tail ours on every build. Legal: GL ES 3.0 2.12.6
+   * ignores values past the highest ACTIVE element, so a driver that shrank the array takes the
+   * prefix and drops the rest rather than raising INVALID_OPERATION.
+   *
+   * `?gauss-upload=prefix` restores the old upload so the Mac can read the fix as a one-binary pair.
+   */
+  private _uploadKernel = (k: GaussianKernel): void => {
+    const gl = this._gl;
+    gl.uniform1i(this._gFetchLoc, k.Fetches);
+    if (BlurPass.GaussUploadPrefix) {
+      gl.uniform1fv(this._gOffLoc, k.Offsets.subarray(0, k.Fetches));
+      gl.uniform1fv(this._gWtLoc, k.Weights.subarray(0, k.Fetches));
+      return;
+    }
+    gl.uniform1fv(this._gOffLoc, k.Offsets);
+    gl.uniform1fv(this._gWtLoc, k.Weights);
   };
 
   /** `?gauss-debug`: fill the target just bound with magenta. The caller restores the clear colour. */
@@ -2265,6 +2485,7 @@ export class BlurPass {
       gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      this._draws++;
       srcTex = dst.Texture;
       srcW = newW;
       srcH = newH;
@@ -2409,6 +2630,40 @@ export class BlurPass {
       this._gaussTemps.delete(lruKey);
     }
   };
+
+  /** A separable-plan target of exactly `w x h`, allocated once per size and kept. LRU over
+   *  `SEPARABLE_TARGETS_MAX` / `SEPARABLE_TARGET_BUDGET_BYTES`, and NEVER an entry this build has
+   *  already taken (`Used >= buildTick`): a k = 8 build holds four targets at once. */
+  private _useSeparableTarget = (w: number, h: number, buildTick: number): Framebuffer => {
+    const key = `${w}x${h}`;
+    const tick = ++this._tick;
+    const hit = this._sepTargets.get(key);
+    if (hit !== undefined) { hit.Used = tick; hit.Fb.Resize(w, h); return hit.Fb; }
+    const fb = new Framebuffer(this._gl, { highPrecision: true });
+    fb.Resize(w, h);
+    this._sepTargets.set(key, { Fb: fb, Bytes: w * h * 4, Used: tick });
+    for (;;) {
+      let total = 0;
+      for (const t of this._sepTargets.values()) total += t.Bytes;
+      if (this._sepTargets.size <= SEPARABLE_TARGETS_MAX && total <= SEPARABLE_TARGET_BUDGET_BYTES) return fb;
+      let lruKey: string | null = null, lru = Infinity;
+      for (const [kk, t] of this._sepTargets) {
+        if (t.Used >= buildTick) continue;
+        if (t.Used < lru) { lru = t.Used; lruKey = kk; }
+      }
+      if (lruKey === null) return fb;
+      this._sepTargets.get(lruKey)!.Fb.Dispose();
+      this._sepTargets.delete(lruKey);
+    }
+  };
+
+  /** What the separable plan's target pool holds: `count:sizes:MB`, on the plan's gate line. */
+  get SeparableTargetCensus(): string {
+    let bytes = 0;
+    const sizes: string[] = [];
+    for (const [key, t] of this._sepTargets) { bytes += t.Bytes; sizes.push(key); }
+    return `${this._sepTargets.size}:${sizes.sort().join('+')}:${Math.round(bytes / (1024 * 1024) * 10) / 10}MB`;
+  }
 
   /** What the Gaussian arm's temp pool holds. Printed on the flag's gate line, because an arm
    *  that quietly grew a second megabyte of attachment per card is an arm whose timing cell is

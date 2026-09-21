@@ -13,9 +13,10 @@ import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
 import {
   BlurPass, PyramidDepth, ChainBytes, BLUR_PROGRAMS_BOOT, GAUSS_PASSES, type GaussianMode,
-  type GaussTempCensus,
+  type GaussTempCensus, type BlurBuildRecord,
   type ChainLimits, type AtlasBuildMember, type BackdropRect,
 } from './BlurPass';
+import { ChainDeliveredSigma, type SeparableKRule, type SeparableRequest, type SeparableSigma } from './Blur.Separable';
 import { PassTimers, type PassProfile } from './Pass.Timers';
 import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
@@ -946,7 +947,7 @@ export class WebGL2Renderer implements Renderer {
     // A REBUILT pass has no Gaussian kernel either, and `ArmFlaggedPrograms` reconciles the pool
     // BEFORE it arms -- so without this line the arm would compile onto a pass about to be
     // dropped and the first Gaussian build would throw.
-    const gauss = this.DiagGlassGaussian !== 'off' ? pass.EnsureGaussianProgram(batch) : 0;
+    const gauss = pass.EnsureGaussianProgram(batch, 'pool');
     batch.Resolve();
     pass.WireLocations();
     this._blur = pass;
@@ -1003,7 +1004,7 @@ export class WebGL2Renderer implements Renderer {
     // `_reconcileBlurPool` above compiles it onto a pass it REBUILT; this is the other case, a
     // pool that did not move. `EnsureGaussianProgram` returns 0 when the pass already has it, so
     // the two cannot double-count.
-    const gauss = this.DiagGlassGaussian !== 'off' ? this._blur.EnsureGaussianProgram() : 0;
+    const gauss = this._blur.EnsureGaussianProgram(undefined, 'arm');
     // `?glass-reg`'s family, off the SURVIVING arm (`_initDebugFromUrl` has already taken its
     // refusals), in its own batch. 0 when the flag is off, which is the unflagged page.
     const reg = this.DiagGlassReg !== 'off' ? this.EnsureGlassRegPrograms() : 0;
@@ -1015,7 +1016,7 @@ export class WebGL2Renderer implements Renderer {
       pool > 0 ? 'blur-pool' : null,
       this.DiagPyramidAtlas ? 'pyramid-atlas' : null,
       border > 0 ? 'border-direct' : null,
-      this.DiagGlassGaussian !== 'off' ? 'glass-gaussian' : null,
+      gauss > 0 ? 'glass-gaussian' : null,
       reg > 0 ? `glass-reg-${this.DiagGlassReg}` : null,
       gates > 0 ? `glass-gates-${this.DiagGlassGates?.Key}` : null,
     ].filter((r) => r !== null).join('+');
@@ -1155,8 +1156,9 @@ export class WebGL2Renderer implements Renderer {
     // harness's) this is false however the URL read, and `ArmFlaggedPrograms` issues them after the
     // parse instead. Either way an unflagged page never issues them. See `BlurPass._atlas`.
     if (this.DiagPyramidAtlas) this._blur.EnsureAtlasPrograms(batch);
-    // Same MAIN-THREAD-ORDER-ONLY story for `?glass-gaussian`'s single kernel.
-    if (this.DiagGlassGaussian !== 'off') this._blur.EnsureGaussianProgram(batch);
+    // The separable kernel is the DEFAULT per-surface plan's, so it is in the boot batch on every
+    // page and both paths, whatever the URL says -- `?glass-gaussian` binds the same program.
+    this._blur.EnsureGaussianProgram(batch, 'boot');
     this._compilePanelShader(batch);
     // Same MAIN-THREAD-ORDER-ONLY story, for the sixth panel variant: on that path the flag is
     // already parsed and the program joins the boot batch for free; on the worker path
@@ -1390,6 +1392,7 @@ export class WebGL2Renderer implements Renderer {
     // the scene ledger is not a timer and must reset on EVERY frame or a split frame would report
     // the previous frame's restarts.
     this._sceneLedger.BeginFrame();
+    this._blurPlanBeginFrame();
     // Same reason: these are per-frame counts, and the gate line at the end of the walk reports the
     // frame that just ran. Reset here rather than in `DiagRestartFrameEnd`, which the trace reads.
     this._sceneRestartSpread.BeginFrame();
@@ -2444,6 +2447,20 @@ export class WebGL2Renderer implements Renderer {
    *  Jack has not seen either. */
   DiagGlassGaussian: GaussianMode = 'off';
 
+  /** THE PER-SURFACE GLASS BUILD'S PLAN. `true` (the default) is the separable plan
+   *  (`Core/Blur.Separable.ts`): k from the sigma, one linear-sampled Gaussian pair at the residual,
+   *  `log2(k) + 2` passes. `false` is `?blur-chain=on`, the dual-filter chain byte for byte -- the
+   *  control arm. ANDed with the walk's `MaxLod == 0` clause at `ComputeBlur`, as the Gaussian arm
+   *  is, so a site can only under-arm. Default ON HERE as well as in `Core/Jaui.ts`: on the worker
+   *  path `Init` runs before the URL is parsed, and the kernel it compiles is the default's. */
+  DiagBlurSeparable = true;
+  /** `?blur-sigma=delivered|authored`: the width the separable plan runs at. */
+  DiagBlurSigma: SeparableSigma = 'delivered';
+  /** `?blur-fetches=<n>`, or null. Mirrored onto `BlurPass.ForceFetches` by the flag parse. */
+  DiagBlurFetches: number | null = null;
+  /** `?blur-k=round|floor`: how the plan turns sigma into k. */
+  DiagBlurKRule: SeparableKRule = 'round';
+
 
   /** Per-pass residency ceilings for the three `BlurPass` instances, or `null` for the shipped
    *  `MAX_CHAINS` / `CHAIN_BUDGET_BYTES`. Only `?blur-phased` sets it, and only because twenty
@@ -3006,6 +3023,11 @@ export class WebGL2Renderer implements Renderer {
     // over-arm, and `'off'` here is the unflagged call byte for byte. The walk owns the one
     // clause this method cannot see (`MaxLod == 0`), exactly as it does for `presample`.
     const gaussMode: GaussianMode = gaussian === true ? this.DiagGlassGaussian : 'off';
+    // THE DEFAULT PLAN, on the same terms: `gaussian` is the walk saying "this surface is a
+    // `MaxLod == 0` per-surface build", and the separable plan takes exactly those. The Gaussian arm
+    // wins where both are asked for; the flag parse refuses the two together anyway.
+    const sepReq: SeparableRequest | null = gaussian === true && gaussMode === 'off' && this.DiagBlurSeparable
+      ? { Sigma: this.DiagBlurSigma, Fetches: this.DiagBlurFetches, KRule: this.DiagBlurKRule } : null;
     // Bumped FIRST, before the two diagnostics return their stand-ins, so that a handle held across
     // this call reads as stale on every arm and not only on the arms that reach a `BlurPass`.
     this._backdropBuildSeq++;
@@ -3073,9 +3095,10 @@ export class WebGL2Renderer implements Renderer {
       // stays the byte-for-byte baseline call the card composite's own gates pin.
       src = this._blurSrcFor(src);
       const result = pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined,
-        rebase, gaussMode);
+        rebase, gaussMode, sepReq);
       this._notePresampled(pass);
       this._noteGaussian(pass);
+      if (radius > 0) this._noteSurfaceBuild(pass, sepReq !== null);
       this._lastProgram = null;
       return _wrap(result, pass.LastRegion);
     }
@@ -3084,9 +3107,10 @@ export class WebGL2Renderer implements Renderer {
     // call, so the region rides across unchanged and `pass.Blur` below is the baseline line.
     if (this.DiagBlurSrc !== null) input = _wrap(this._blurSrcFor(_unwrap(input)), _regionOf(input));
     const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined,
-      rebase, gaussMode);
+      rebase, gaussMode, sepReq);
     this._notePresampled(pass);
     this._noteGaussian(pass);
+    if (radius > 0 && region !== undefined) this._noteSurfaceBuild(pass, sepReq !== null);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
     // draw re-binds its program correctly.
@@ -3189,8 +3213,15 @@ export class WebGL2Renderer implements Renderer {
     const pass = this._blur;
     this._lastBlur = pass;
     this._sceneLedger.NoteTargetBind('blur');
-    const result = pass.Blur(_unwrap(input), width, height, radius, 0, region, baseFactor, false);
+    // The group's union is a per-surface build of every member at once -- the members are
+    // `MaxLod == 0` by the planner's own rule -- so it takes the default plan too. The pinned
+    // `baseFactor` is the CHAIN's k, which is what the delivered sigma is measured at.
+    const sepReq: SeparableRequest | null = this.DiagBlurSeparable
+      ? { Sigma: this.DiagBlurSigma, Fetches: this.DiagBlurFetches, KRule: this.DiagBlurKRule } : null;
+    const result = pass.Blur(_unwrap(input), width, height, radius, 0, region, baseFactor, false,
+      'off', sepReq);
     this._sceneLedger.NoteGroupBuild();
+    this._noteSurfaceBuild(pass, sepReq !== null);
     // BlurPass bound its own programs; invalidate the cache exactly as `ComputeBlur` does.
     this._lastProgram = null;
     return _wrap(result, pass.LastRegion);
@@ -3346,6 +3377,85 @@ export class WebGL2Renderer implements Renderer {
   private _lastGaussianSigma = 0;
   private _lastGaussianFetches = 0;
   private _lastGaussianRefusal = '';
+
+  // -- THE BLUR PLAN'S CENSUS: every per-surface build, whichever plan ran it -------------------
+  //
+  // Booked off `BlurPass.LastBuild` -- what the pass DID -- so the separable plan and its chain
+  // control are read side by side in one currency, and a separable request the plan refused shows
+  // up on the chain side with its reason rather than vanishing. `_blurClasses` keys each build's
+  // SHAPE (`sep:a<authored>>t<target>@k<k>r<residual>f<fetches>` or
+  // `chain:a<authored>@k<k>d<depth>t<tap>>s<delivered>`) so a page with several glass classes says
+  // which one costs what.
+  private _blurClasses = new Map<string, number>();
+  private _blurRefusals = new Map<string, number>();
+  private _blurDrawsAt = new Map<BlurPass, number>();
+
+  private _noteSurfaceBuild = (pass: BlurPass, asked: boolean): void => {
+    const b: BlurBuildRecord = pass.LastBuild;
+    if (b.Plan === 'separable' || b.Plan === 'chain') {
+      this._sceneLedger.NoteSurfaceBuild(b.Plan === 'separable', b.Passes, b.Fill, b.Reads);
+    }
+    const key = b.Plan === 'separable'
+      ? `sep:a${_r2(b.SigmaAuthored)}>t${_r2(b.SigmaTarget)}@k${b.K}r${_r2(b.SigmaResidual)}f${b.Fetches}`
+      : b.Plan === 'chain'
+        ? `chain:a${_r2(b.SigmaAuthored)}@k${b.K}d${b.Depth}t${_r2(b.TapOffset)}`
+          + `>s${_r2(ChainDeliveredSigma(b.K, b.Depth, b.TapOffset))}`
+      : `${b.Plan}:a${_r2(b.SigmaAuthored)}`;
+    this._blurClasses.set(key, (this._blurClasses.get(key) ?? 0) + 1);
+    if (asked && b.Plan !== 'separable') {
+      const why = pass.LastSeparableRefusal === '' ? 'unknown' : pass.LastSeparableRefusal;
+      this._blurRefusals.set(why, (this._blurRefusals.get(why) ?? 0) + 1);
+    }
+  };
+
+  private _blurPlanBeginFrame = (): void => {
+    this._blurClasses.clear();
+    this._blurRefusals.clear();
+    this._blurDrawsAt.clear();
+    for (const p of this._blurPasses()) this._blurDrawsAt.set(p, p.Draws);
+  };
+
+  private _blurPasses = (): BlurPass[] => {
+    const out: BlurPass[] = [];
+    const main = this._blur as BlurPass | undefined;
+    if (main !== undefined) out.push(main);
+    if (this._rootBlur !== null) out.push(this._rootBlur);
+    if (this._sharedBlur !== null) out.push(this._sharedBlur);
+    return out;
+  };
+
+  /** THE PLAN'S GATE-LINE FIELDS for the frame so far: builds, passes, destination px and bilinear
+   *  reads on each side, the shape of every class, the refusals, the separable target pool, and
+   *  WHERE the frame's blur draws went, per pass (`blur` = per-surface and group builds, `root` =
+   *  the sharp-root pblur seeds and their mip chains, `shared` = `?wkr-shared-backdrop`). */
+  get BlurPlanCensus(): {
+    SepBuilds: number; SepPasses: number; SepFill: number; SepReads: number;
+    ChainBuilds: number; ChainPasses: number; ChainFill: number; ChainReads: number;
+    Classes: string; Refused: string; Targets: string; Draws: string; DrawsTotal: number;
+    Compile: string;
+  } {
+    const l = this._sceneLedger;
+    const draws: string[] = [];
+    let total = 0;
+    for (const p of this._blurPasses()) {
+      const d = p.Draws - (this._blurDrawsAt.get(p) ?? 0);
+      total += d;
+      draws.push(`${p.TimerTag}:${d}`);
+    }
+    const map = (m: Map<string, number>): string =>
+      m.size === 0 ? 'none' : [...m].sort().map(([k, n]) => `${k}x${n}`).join(',');
+    const main = this._blur as BlurPass | undefined;
+    return {
+      SepBuilds: l.SeparableBuilds, SepPasses: l.SeparablePasses,
+      SepFill: l.SeparableFill, SepReads: l.SeparableReads,
+      ChainBuilds: l.SurfaceChainBuilds, ChainPasses: l.SurfaceChainPasses,
+      ChainFill: l.SurfaceChainFill, ChainReads: l.SurfaceChainReads,
+      Classes: map(this._blurClasses), Refused: map(this._blurRefusals),
+      Targets: main === undefined ? '0::0MB' : main.SeparableTargetCensus,
+      Draws: draws.join(','), DrawsTotal: total,
+      Compile: main === undefined ? 'none' : main.GaussianCompileStamp,
+    };
+  }
 
   /** The rim built a pyramid after all - the direct path refused, or the flag is off. Booked by
    *  the walk, beside `NoteAtlasSolo`, because only the walk knows which branch it took. */
@@ -4987,3 +5097,6 @@ export class WebGL2Renderer implements Renderer {
     };
   };
 }
+
+/** Two decimals, for a gate-line key. */
+const _r2 = (v: number): string => (Math.round(v * 100) / 100).toString();

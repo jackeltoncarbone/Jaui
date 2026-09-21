@@ -154,11 +154,9 @@ describe('WHEN each program is compiled, in source', () => {
     const body = arrowBody(RENDERER, '_reconcileBlurPool');
     expect(body).toContain('const batch = new ShaderBatch(this._gl);');
     expect(body).toContain('const atlas = this.DiagPyramidAtlas ? pass.EnsureAtlasPrograms(batch) : 0;');
-    // `?glass-gaussian`'s single kernel joins the SAME batch, for the same reason and with the
-    // same consequence: a rebuilt pass that had to compile it separately would be a second
-    // serial compile on the arm's own frame.
-    expect(body).toContain(
-      "const gauss = this.DiagGlassGaussian !== 'off' ? pass.EnsureGaussianProgram(batch) : 0;");
+    // The separable kernel joins the SAME batch, for the same reason and with the same
+    // consequence -- and unconditionally now, because it is the default per-surface plan's.
+    expect(body).toContain("const gauss = pass.EnsureGaussianProgram(batch, 'pool');");
     expect(body).toContain('batch.Resolve();');
     expect(body).toContain('pass.WireLocations();');
     expect(body).toContain('return BLUR_PROGRAMS_BOOT + atlas + gauss;');

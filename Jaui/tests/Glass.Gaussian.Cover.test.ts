@@ -225,13 +225,20 @@ describe('glass-gaussian cover > (c) one temp for twenty cards is safe in ONE co
 // ── 4. CANDIDATE (d): THE UNIFORM TABLE'S TAIL ─────────────────────────────────────────────────
 
 describe('glass-gaussian cover > (d) the loop never reads an entry the build did not upload', () => {
-  it('both tables are uploaded u_Fetches long, and the loop is bounded by u_Fetches', () => {
+  it('both tables are uploaded WHOLE by default (lane blurfast), u_Fetches long under ?gauss-upload=prefix; the loop is bounded by u_Fetches', () => {
     const g = Grid(2);
-    for (const mode of ['match', 'on'] as const) {
-      const r = Rig(g.W, g.H);
-      for (const d of Build(r, g.W, g.H, g.Radius, g.Fill[0], mode)) {
-        expect(d.OffLen).toBe(d.Fetches);
-        expect(d.WtLen).toBe(d.Fetches);
+    for (const prefix of [false, true]) {
+      BlurPass.GaussUploadPrefix = prefix;
+      try {
+        for (const mode of ['match', 'on'] as const) {
+          const r = Rig(g.W, g.H);
+          for (const d of Build(r, g.W, g.H, g.Radius, g.Fill[0], mode)) {
+            expect(d.OffLen).toBe(prefix ? d.Fetches : 64);
+            expect(d.WtLen).toBe(prefix ? d.Fetches : 64);
+          }
+        }
+      } finally {
+        BlurPass.GaussUploadPrefix = false;
       }
     }
     expect(PASS).toContain('for (int i = 0; i < u_Fetches; i++) {');
@@ -304,8 +311,8 @@ describe('glass-gaussian cover > ?gauss-debug: an unwritten texel would be MAGEN
 
   it('off by default, armed only beside the arm, and refused BY NAME without it', () => {
     expect(PASS).toContain('static GaussDebugMagenta = false;');
-    expect(JAUI).toContain('this._gaussDebug = this._glassGaussian !== \'off\';');
-    expect(JAUI).toContain("JTrace('jaui:gauss-debug armed=off reason=glass-gaussian-is-off');");
+    expect(JAUI).toContain("this._gaussDebug = this._glassGaussian !== 'off' || this._blurSeparable;");
+    expect(JAUI).toContain("JTrace('jaui:gauss-debug armed=off reason=no-separable-path-is-armed');");
     expect(JAUI).toContain('BlurPass.GaussDebugMagenta = this._gaussDebug;');
     expect(JAUI).toContain("+ (this._gaussDebug ? ' debug=magenta' : '')");
   });

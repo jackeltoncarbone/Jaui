@@ -32,6 +32,7 @@ import {
   GAUSS_PASSES, GAUSS_MATCH_SIGMA, type GaussianMode,
   type AtlasBuildMember, type BackdropUnionPlan,
 } from './BlurPass';
+import { RadiusForFetches, type SeparableKRule, type SeparableSigma } from './Blur.Separable';
 import { EmptyGlassFragCensus, GlassSkipNames, ParseGlassSkip, GLASS_SKIP_STAGES, type GlassFragCensus } from './Glass.Skip';
 import {
   GLASS_PROGRAMS_PREEMPT, ParseGlassPrograms, ParseGlassReg, ParseGlassGates,
@@ -246,6 +247,43 @@ export interface GlassGaussianCensus {
   /** The last clause inside `PlanGaussian` that turned a build down, or empty. */
   PlanRefused: string;
   /** Empty unless a FLAG refused the arm outright, in which case it names which. */
+  Refused: string;
+}
+
+/** THE BLUR PLAN, per rendered frame: every per-surface glass build on the side of the plan that
+ *  ran it. Read `SepBuilds` and `ChainBuilds` together -- under the default a `ChainBuilds` above 0
+ *  is a build the separable plan refused, and `PlanRefused` says why. `SepPasses + ChainPasses` is
+ *  the frame's per-surface blur passes, the number the blurfast lane exists to move. */
+export interface BlurPlanCensus {
+  /** `separable` (the default) or `chain` (`?blur-chain=on`, or a flag refused the plan). */
+  Armed: 'separable' | 'chain';
+  Sigma: SeparableSigma;
+  KRule: SeparableKRule;
+  /** `?blur-fetches=<n>`, or null. */
+  Fetches: number | null;
+  Upload: 'full' | 'prefix';
+  SepBuilds: number;
+  SepPasses: number;
+  SepFill: number;
+  SepReads: number;
+  ChainBuilds: number;
+  ChainPasses: number;
+  ChainFill: number;
+  ChainReads: number;
+  /** Every build shape this frame, `<shape>x<count>`: `sep:a<authored>>t<target>@k<k>r<residual>f<fetches>`
+   *  or `chain:a<authored>@k<k>d<depth>t<tap>>s<delivered sigma>`. */
+  Classes: string;
+  /** Blur draws this frame per BlurPass (`blur` per-surface + group, `root` pblur seeds and mips,
+   *  `shared` the shared backdrop), and their total. */
+  Draws: string;
+  DrawsTotal: number;
+  /** The separable target pool, `count:sizes:MB`. */
+  Targets: string;
+  /** Where the separable kernel compiled: `boot#<i>`, `pool#<i>` or `arm#<i>`. */
+  Compile: string;
+  /** Clauses inside the plan that sent a separable request to the chain, `<why>x<count>`. */
+  PlanRefused: string;
+  /** Empty unless a FLAG refused the plan outright, in which case it names which. */
   Refused: string;
 }
 
@@ -891,9 +929,25 @@ export class Canvas implements DirtyTracker {
   private _glassGaussianLastLine = '';
   /** Empty unless a flag refused the arm outright, in which case it names which. */
   private _glassGaussianRefused = '';
-  /** `?gauss-debug` beside an armed `?glass-gaussian`: both Gaussian targets are CLEARED to magenta
-   *  instead of invalidated, so a texel either pass leaves unwritten is visible in one shot. */
+  /** `?gauss-debug` beside an armed separable path (the default plan or `?glass-gaussian`): every
+   *  separable target is CLEARED to magenta instead of invalidated, so a texel a pass leaves
+   *  unwritten is visible in one shot. */
   private _gaussDebug = false;
+  /** THE PER-SURFACE GLASS BUILD'S PLAN. DEFAULT the separable plan (`Core/Blur.Separable.ts`):
+   *  downsample by sigma, one linear-sampled Gaussian pair at the residual, at today's DELIVERED
+   *  width. `?blur-chain=on` is the control: the dual-filter chain byte for byte. */
+  private _blurSeparable = true;
+  private _blurSeparableRefused = '';
+  /** `?blur-sigma=delivered|authored`. */
+  private _blurSigma: SeparableSigma = 'delivered';
+  /** `?blur-fetches=<n>`: every separable build runs exactly `n` fetches at its own sigma. */
+  private _blurFetches: number | null = null;
+  /** `?blur-k=round|floor`: `floor` keeps 4 base texels of sigma (the higher-quality arm). */
+  private _blurKRule: SeparableKRule = 'round';
+  /** `?gauss-upload=prefix`: the pre-lane uniform upload, as a control for the Metal fix. */
+  private _gaussUploadPrefix = false;
+  /** The last `jaui:blur-plan` gate line, printed on a SHAPE change rather than per frame. */
+  private _blurPlanLastLine = '';
   /** The last `jaui:glass-presample` gate line, printed on a SHAPE change rather than per frame. */
   private _glassPresampleLastLine = '';
   /** Empty unless a flag refused the arm outright, in which case it names which -- so a control
@@ -2890,7 +2944,7 @@ export class Canvas implements DirtyTracker {
               if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }
               if (this._borderDirect) (r as WebGL2Renderer).NoteBorderPyramid();
               lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,
-                this._mayPresample(plan), this._mayGaussian(plan));
+                this._mayPresample(plan), this._maySeparable(plan));
               r.GenerateBlurMipmap(plan.MaxLod);
               r.RebindSceneTarget();
               // `?scene-restarts` / `?small-restarts`: the RIM build's insertion point, taken HERE
@@ -3426,7 +3480,7 @@ export class Canvas implements DirtyTracker {
             if (this._blurFirst || this._phasedWalk) this._blurFirstStats.Missed++;
             const _tBlur = performance.now();
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,
-              this._mayPresample(plan), this._mayGaussian(plan));
+              this._mayPresample(plan), this._maySeparable(plan));
             const _tMip = performance.now();
             this._opMs.Blur += _tMip - _tBlur;
             r.GenerateBlurMipmap(plan.MaxLod);
@@ -4215,6 +4269,28 @@ export class Canvas implements DirtyTracker {
         + ` planRefused=${gl2.LastGaussianRefusal === '' ? 'none' : gl2.LastGaussianRefusal}`
         + ' pixels=DIFFERENT';
       if (line !== this._glassGaussianLastLine) { this._glassGaussianLastLine = line; JTrace(line); }
+    }
+
+    // THE BLUR PLAN'S GATE, on a SHAPE change. Both sides on one line, so a cell reads the default
+    // and its `?blur-chain=on` control in the same columns: builds, passes (per frame, and per
+    // build), destination px (`fill=`) and bilinear fetches (`texelsRead=`), then every class's
+    // shape (k, authored and target sigma, residual, fetches), the refusals, the target pool and
+    // WHERE the frame's blur draws went. `passesPerFrame=` is the number this lane moves.
+    if (!this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+      const c = this._renderer.BlurPlanCensus;
+      const per = (p: number, b: number): string => (b === 0 ? '0' : (Math.round(p / b * 100) / 100).toString());
+      const line = `jaui:blur-plan armed=${this._blurSeparable ? 'separable' : 'chain'}`
+        + ` passesPerFrame=${c.SepPasses + c.ChainPasses}`
+        + ` builds=${c.SepBuilds} passes=${c.SepPasses} passesPerBuild=${per(c.SepPasses, c.SepBuilds)}`
+        + ` texelsRead=${c.SepReads} fill=${c.SepFill}`
+        + ` chainBuilds=${c.ChainBuilds} chainPasses=${c.ChainPasses}`
+        + ` chainPassesPerBuild=${per(c.ChainPasses, c.ChainBuilds)}`
+        + ` chainTexelsRead=${c.ChainReads} chainFill=${c.ChainFill}`
+        + ` classes=${c.Classes}`
+        + ` blurDraws=${c.DrawsTotal}(${c.Draws})`
+        + ` targets=${c.Targets} tempCover=${this._renderer.GaussTempCensus.CoverWritten}/${this._renderer.GaussTempCensus.CoverReadable}`
+        + ` planRefused=${c.Refused}`;
+      if (line !== this._blurPlanLastLine) { this._blurPlanLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -5641,7 +5717,8 @@ export class Canvas implements DirtyTracker {
   private _mayPresample = (plan: GlassBlurPlan): boolean =>
     this._glassPresample && plan.MaxLod === 0;
 
-  /** `?glass-gaussian`: may THIS surface's backdrop be produced as a separable Gaussian?
+  /** May THIS surface's backdrop be produced by a separable path -- the default plan, or the
+   *  `?glass-gaussian` arm?
    *
    *  ONE clause, and it is the same one `_mayPresample` carries and for a stronger reason: a
    *  Gaussian build writes LEVEL 0 and nothing above it, so a consumer that samples a mip would
@@ -5651,8 +5728,8 @@ export class Canvas implements DirtyTracker {
    *
    *  Everything else -- the sigma, the kernel's size, the `match` arm's calibration, the k --
    *  is `PlanGaussian`'s, asked inside the pass so there is one answer and not two. */
-  private _mayGaussian = (plan: GlassBlurPlan): boolean =>
-    this._glassGaussian !== 'off' && plan.MaxLod === 0;
+  private _maySeparable = (plan: GlassBlurPlan): boolean =>
+    (this._glassGaussian !== 'off' || this._blurSeparable) && plan.MaxLod === 0;
 
   /** Issue ONE per-surface build: the walk's two calls, and the pool bookkeeping. This is the
    *  path `?blur-first`, `?blur-phased` and every atlas REFUSAL take, and it is the engine as it
@@ -5664,7 +5741,7 @@ export class Canvas implements DirtyTracker {
     const st = this._blurFirstStats;
     const t0 = performance.now();
     const handle = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region,
-      this._mayPresample(plan), this._mayGaussian(plan));
+      this._mayPresample(plan), this._maySeparable(plan));
     const t1 = performance.now();
     r.GenerateBlurMipmap(plan.MaxLod);
     this._opMs.Blur += t1 - t0;
@@ -8100,11 +8177,90 @@ export class Canvas implements DirtyTracker {
     if (this._renderer instanceof WebGL2Renderer) {
       this._renderer.DiagGlassGaussian = this._glassGaussian;
     }
-    // `?gauss-debug` rides the arm and means nothing without it: asked on an unarmed page it is
-    // refused by name rather than silently doing nothing, which would read as "no magenta, clean".
+
+    // `?blur-chain=on|off` -- THE PER-SURFACE GLASS BUILD'S PLAN.
+    //
+    // DEFAULT OFF, i.e. the SEPARABLE PLAN is the engine (`Core/Blur.Separable.ts`): k from the
+    // sigma, one linear-sampled Gaussian pair at the residual, at the width today's chain DELIVERS
+    // -- a true Gaussian in place of a four-step staircase that beats with period `2^depth`, in
+    // `log2(k) + 2` passes where the chain paid `log2(k) + 2 * depth`. `?blur-chain=on` (or the
+    // bare flag) is the control arm: the dual-filter chain byte for byte, so every earlier chain
+    // cell stays reproducible in the new binary.
+    //
+    // Parsed after every blur arm it has to read. REFUSED BY NAME beside the four arms it
+    // SUPERSEDES -- `?pyramid-atlas`, `?border-direct`, `?glass-presample`, `?glass-gaussian` are
+    // each an earlier attempt at this lever on the chain, and a cell under one of them measures
+    // that arm against the chain it was built on, so they keep the chain rather than compose --
+    // and beside the diagnostics calibrated on the chain's pass count (`?blur-phased`,
+    // `?blur-first`, the restart probes). `?glass-group` and `?shadow-probe` COMPOSE: a group's
+    // union is a per-surface build of every member at once and takes the plan; the probe reads
+    // the handle, whatever built it.
+    if (params.has('blur-chain')) {
+      const raw = (params.get('blur-chain') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?blur-chain takes 'on' or 'off', got '${raw}'`);
+      }
+      this._blurSeparable = raw === 'off';
+    }
+    if (params.has('blur-sigma')) {
+      const raw = (params.get('blur-sigma') ?? '').trim();
+      if (raw !== 'delivered' && raw !== 'authored') {
+        throw new Error(`[Jaui] ?blur-sigma takes 'delivered' or 'authored', got '${raw}'`);
+      }
+      this._blurSigma = raw;
+    }
+    if (params.has('blur-k')) {
+      const raw = (params.get('blur-k') ?? '').trim();
+      if (raw !== 'round' && raw !== 'floor') {
+        throw new Error(`[Jaui] ?blur-k takes 'round' or 'floor', got '${raw}'`);
+      }
+      this._blurKRule = raw;
+    }
+    if (params.has('blur-fetches')) {
+      const raw = (params.get('blur-fetches') ?? '').trim();
+      const n = Number(raw);
+      RadiusForFetches(n);
+      this._blurFetches = n;
+    }
+    if (params.has('gauss-upload')) {
+      const raw = (params.get('gauss-upload') ?? '').trim();
+      if (raw !== 'full' && raw !== 'prefix') {
+        throw new Error(`[Jaui] ?gauss-upload takes 'full' or 'prefix', got '${raw}'`);
+      }
+      this._gaussUploadPrefix = raw === 'prefix';
+    }
+    if (this._blurSeparable) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._pyramidAtlas ? 'pyramid-atlas-packs-chain-levels-and-is-superseded-by-the-separable-plan'
+        : this._borderDirect ? 'border-direct-gathers-the-chain-s-hops-and-is-superseded-by-the-separable-plan'
+        : this._glassPresample ? 'glass-presample-re-bases-a-chain-and-is-superseded-by-the-separable-plan'
+        : this._glassGaussian !== 'off' ? 'glass-gaussian-is-the-separable-arm-this-plan-supersedes'
+        : params.has('blur-phased') ? 'blur-phased-was-calibrated-on-the-chain-s-pass-count'
+        : params.has('blur-first') ? 'blur-first-was-calibrated-on-the-chain-s-pass-count'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-at-a-build-whose-pass-count-this-plan-moves'
+        : null;
+      if (why !== null) {
+        this._blurSeparable = false;
+        this._blurSeparableRefused = why;
+      }
+    }
+    if (this._renderer instanceof WebGL2Renderer) {
+      this._renderer.DiagBlurSeparable = this._blurSeparable;
+      this._renderer.DiagBlurSigma = this._blurSigma;
+      this._renderer.DiagBlurFetches = this._blurFetches;
+      this._renderer.DiagBlurKRule = this._blurKRule;
+    }
+    BlurPass.ForceFetches = this._blurFetches;
+    BlurPass.GaussUploadPrefix = this._gaussUploadPrefix;
+
+    // `?gauss-debug` rides a separable path and means nothing without one: asked where neither is
+    // armed it is refused by name rather than silently doing nothing ("no magenta, clean").
     if (params.has('gauss-debug')) {
-      this._gaussDebug = this._glassGaussian !== 'off';
-      if (!this._gaussDebug) JTrace('jaui:gauss-debug armed=off reason=glass-gaussian-is-off');
+      this._gaussDebug = this._glassGaussian !== 'off' || this._blurSeparable;
+      if (!this._gaussDebug) JTrace('jaui:gauss-debug armed=off reason=no-separable-path-is-armed');
     }
     BlurPass.GaussDebugMagenta = this._gaussDebug;
     // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
@@ -8116,6 +8272,47 @@ export class Canvas implements DirtyTracker {
       + (this._glassGaussian === 'match' ? ` sigma=${GAUSS_MATCH_SIGMA}` : '')
       + (this._gaussDebug ? ' debug=magenta' : '')
       + (this._glassGaussianRefused !== '' ? ` reason=${this._glassGaussianRefused}` : ''));
+    // THE MARK, on both arms, from the line that decides. `compile=` is where the separable kernel
+    // sat in its batch (`boot#<i>` on every worker page): the per-load compile ORDER stamp the
+    // Metal defect's third candidate asked for. `none` in main-thread mode, where `Init` has not run.
+    JTrace(`jaui:blur-plan armed=${this._blurSeparable ? 'separable' : 'chain'}`
+      + ` default=${!params.has('blur-chain')}`
+      + ` sigma=${this._blurSigma} k=${this._blurKRule} fetches=${this._blurFetches ?? 'auto'}`
+      + ` upload=${this._gaussUploadPrefix ? 'prefix' : 'full'}`
+      + ` compile=${this._renderer instanceof WebGL2Renderer ? this._renderer.BlurPlanCensus.Compile : 'none'}`
+      + (this._gaussDebug ? ' debug=magenta' : '')
+      + (this._blurSeparable ? ' pixels=DIFFERENT' : ' pixels=SAME')
+      + (this._blurSeparableRefused !== '' ? ` reason=${this._blurSeparableRefused}` : ''));
+    {
+      const g = globalThis as unknown as { __jauiBlurPlan?: () => BlurPlanCensus };
+      g.__jauiBlurPlan = () => {
+        const r = this._renderer;
+        const on = r instanceof WebGL2Renderer;
+        const c = on ? r.BlurPlanCensus : null;
+        return {
+          Armed: this._blurSeparable ? 'separable' : 'chain',
+          Sigma: this._blurSigma,
+          KRule: this._blurKRule,
+          Fetches: this._blurFetches,
+          Upload: this._gaussUploadPrefix ? 'prefix' : 'full',
+          SepBuilds: c?.SepBuilds ?? 0,
+          SepPasses: c?.SepPasses ?? 0,
+          SepFill: c?.SepFill ?? 0,
+          SepReads: c?.SepReads ?? 0,
+          ChainBuilds: c?.ChainBuilds ?? 0,
+          ChainPasses: c?.ChainPasses ?? 0,
+          ChainFill: c?.ChainFill ?? 0,
+          ChainReads: c?.ChainReads ?? 0,
+          Classes: c?.Classes ?? 'none',
+          Draws: c?.Draws ?? '',
+          DrawsTotal: c?.DrawsTotal ?? 0,
+          Targets: c?.Targets ?? '',
+          Compile: c?.Compile ?? 'none',
+          PlanRefused: c?.Refused ?? 'none',
+          Refused: this._blurSeparableRefused,
+        };
+      };
+    }
     // `?glass-group=on|off` -- THE CONTAINER-SCOPED SHARED BACKDROP.
     //
     // DEFAULT ON since 2026-09-20 (Jack: "Adopt Apple's rule"; the seven-shot gate saw the phased

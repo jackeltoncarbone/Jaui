@@ -55,7 +55,7 @@ describe('?blur-src — the substitution changes the READ and nothing else', () 
     // The call itself is left as the baseline line, region and all — which is also what keeps the
     // read-after-write ledger's own gate on it load-bearing rather than rewritten around.
     expect(body).toContain('pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined,'
-      + '\n      rebase, gaussMode)');
+      + '\n      rebase, gaussMode, sepReq)');
   });
 
   it('the card branch still RESOLVES its source, so the copy and its encoder end survive', () => {
@@ -66,7 +66,7 @@ describe('?blur-src — the substitution changes the READ and nothing else', () 
     expect(resolve).toBeGreaterThan(-1);
     expect(body.indexOf('src = this._blurSrcFor(src);')).toBeGreaterThan(resolve);
     expect(body.indexOf('pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined,'
-      + '\n        rebase, gaussMode)'))
+      + '\n        rebase, gaussMode, sepReq)'))
       .toBeGreaterThan(body.indexOf('src = this._blurSrcFor(src);'));
   });
 

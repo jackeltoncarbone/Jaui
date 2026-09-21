@@ -162,6 +162,20 @@ export class SceneReadLedger {
    *  both arms and a pass-count prediction quoted against it would be reading a column this lever
    *  cannot move. This is the one that moves. */
   GaussianPasses = 0;
+  /** THE BLUR PLAN, per rendered frame: every PER-SURFACE build (glass fills, rims, group unions),
+   *  split by the plan that ran it, in one currency -- builds, render passes, destination px
+   *  written and bilinear fetches issued. `Separable*` is the default plan; `SurfaceChain*` is the
+   *  dual-filter chain, which is every build under `?blur-chain=on` and any build the separable
+   *  plan refused. Booked off `BlurPass.LastBuild`, what the pass DID. `SeparablePasses +
+   *  SurfaceChainPasses` is THE number the blurfast lane exists to move. */
+  SeparableBuilds = 0;
+  SeparablePasses = 0;
+  SeparableFill = 0;
+  SeparableReads = 0;
+  SurfaceChainBuilds = 0;
+  SurfaceChainPasses = 0;
+  SurfaceChainFill = 0;
+  SurfaceChainReads = 0;
   /** `?glass-group`: the container-scoped shared backdrop, per rendered frame.
    *
    *  `GroupBuilds` is pyramids built for a GROUP of glass siblings; `GroupMembers` is how many
@@ -236,6 +250,14 @@ export class SceneReadLedger {
     this.PresampledBuilds = 0;
     this.GaussianBuilds = 0;
     this.GaussianPasses = 0;
+    this.SeparableBuilds = 0;
+    this.SeparablePasses = 0;
+    this.SeparableFill = 0;
+    this.SeparableReads = 0;
+    this.SurfaceChainBuilds = 0;
+    this.SurfaceChainPasses = 0;
+    this.SurfaceChainFill = 0;
+    this.SurfaceChainReads = 0;
     this.GroupBuilds = 0;
     this.GroupMembers = 0;
     this.GroupFallbacks = 0;
@@ -328,6 +350,21 @@ export class SceneReadLedger {
   NoteGaussian = (passes: number): void => {
     this.GaussianBuilds++;
     this.GaussianPasses += passes;
+  };
+  /** One per-surface build, on the side of the plan that ran it. A `?glass-gaussian` build is
+   *  `NoteGaussian`'s and is not booked here. */
+  NoteSurfaceBuild = (separable: boolean, passes: number, fill: number, reads: number): void => {
+    if (separable) {
+      this.SeparableBuilds++;
+      this.SeparablePasses += passes;
+      this.SeparableFill += fill;
+      this.SeparableReads += reads;
+      return;
+    }
+    this.SurfaceChainBuilds++;
+    this.SurfaceChainPasses += passes;
+    this.SurfaceChainFill += fill;
+    this.SurfaceChainReads += reads;
   };
   /** One pyramid built for a group of glass siblings under `?glass-group`. */
   NoteGroupBuild = (): void => { this.GroupBuilds++; };

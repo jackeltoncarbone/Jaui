@@ -138,17 +138,24 @@ describe('glass-gaussian > the linear-sampled kernel', () => {
     expect(k.Offsets[k.Fetches - 2]).toBe(9);
   });
 
-  it('the tables are GAUSS_MAX_FETCHES long, and only the LIVE PREFIX is uploaded', () => {
+  it('the tables are GAUSS_MAX_FETCHES long, uploaded WHOLE (zero tail), the prefix only under ?gauss-upload=prefix', () => {
     const k = GaussianKernelFor(2);
     expect(k.Offsets.length).toBe(GAUSS_MAX_FETCHES);
     expect(k.Weights.length).toBe(GAUSS_MAX_FETCHES);
     expect(k.Fetches).toBeLessThan(GAUSS_MAX_FETCHES);
-    // A count at or under the array's ACTIVE size is legal under every reading of GL ES 3.0;
-    // uploading all 64 would be legal only while the linker keeps the array at its declared
-    // size. The loop runs `u_Fetches` times, so the tail is never read either way.
-    const body = arrowBody(PASS, '_blurGaussian');
-    expect(body).toContain('k.Offsets.subarray(0, k.Fetches)');
-    expect(body).toContain('k.Weights.subarray(0, k.Fetches)');
+    // Lane blurfast: the whole table goes up, zero past `Fetches` (the Metal defect's first
+    // candidate, an uninitialised tail, removed by construction); GL ES 3.0 2.12.6 ignores values
+    // past the highest active element, so it is legal whatever the linker kept.
+    for (let i = k.Fetches; i < GAUSS_MAX_FETCHES; i++) {
+      expect(k.Offsets[i]).toBe(0);
+      expect(k.Weights[i]).toBe(0);
+    }
+    expect(arrowBody(PASS, '_blurGaussian')).toContain('this._uploadKernel(k);');
+    const up = arrowBody(PASS, '_uploadKernel');
+    expect(up).toContain('gl.uniform1fv(this._gOffLoc, k.Offsets);');
+    expect(up).toContain('gl.uniform1fv(this._gWtLoc, k.Weights);');
+    expect(up).toContain('if (BlurPass.GaussUploadPrefix) {');
+    expect(up).toContain('k.Offsets.subarray(0, k.Fetches)');
   });
 
   it('a sigma whose kernel passes the table is REFUSED by name, never truncated', () => {
@@ -442,8 +449,8 @@ describe('glass-gaussian > what a shot will see, predicted by the RULE', () => {
     // The arm reaches exactly the per-surface glass builds. `?glass-gaussian` never reaches the
     // shared backdrop or the progressive blur (they are a different `BlurPass` and a different
     // call site), which is what makes `pblur-scrim@90` a 0-pixel prediction rather than a hope.
-    expect(JAUI).toContain('private _mayGaussian = (plan: GlassBlurPlan): boolean =>');
-    expect(JAUI.split('this._mayGaussian(plan)').length - 1).toBe(3);
+    expect(JAUI).toContain('private _maySeparable = (plan: GlassBlurPlan): boolean =>');
+    expect(JAUI.split('this._maySeparable(plan)').length - 1).toBe(3);
     // `BuildSharedBackdrop` and the pblur path do not carry the argument at all.
     expect(RENDERER).toContain('BuildSharedBackdrop');
     const shared = arrowBody(RENDERER, 'BuildSharedBackdrop');
@@ -722,7 +729,7 @@ describe('glass-gaussian > the instrument', () => {
     const body = arrowBody(RENDERER, 'ComputeBlur');
     expect(body).toContain(
       "const gaussMode: GaussianMode = gaussian === true ? this.DiagGlassGaussian : 'off';");
-    expect(body).toContain('rebase, gaussMode)');
+    expect(body).toContain('rebase, gaussMode, sepReq)');
   });
 
   it('the boot mark prints the arm, the default and whether the pixels move', () => {

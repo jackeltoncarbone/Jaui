@@ -632,9 +632,9 @@ describe('glass-presample > the flag, the counter and the gate', () => {
     const body = arrowBody(RENDERER, 'ComputeBlur');
     expect(body).toContain('const rebase = presample === true && this.DiagGlassPresample;');
     expect(body).toContain('pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined,'
-      + '\n      rebase, gaussMode)');
+      + '\n      rebase, gaussMode, sepReq)');
     expect(body).toContain('pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined,'
-      + '\n        rebase, gaussMode)');
+      + '\n        rebase, gaussMode, sepReq)');
   });
 
   it('all three per-surface glass build sites ask, and they ask the same question', () => {
