@@ -1073,6 +1073,35 @@ export class BlurPass {
    *  every build did before this lane. The default uploads all `GAUSS_MAX_FETCHES` entries, zero
    *  past `u_Fetches` -- see `_uploadKernel`. */
   static GaussUploadPrefix = false;
+  /** `?blur-temp=discard|clear|keep`, measurement only. What a bound target is told about its
+   *  previous contents, and the arm that tests the Metal seam's mechanism directly.
+   *
+   *  `discard` is the shipped behaviour: `invalidateFramebuffer`, which ANGLE turns into Metal's
+   *  `LoadAction.DontCare`. `_bindTarget`'s own comment states the safety condition -- "safe
+   *  precisely because the viewport is the full level and the quad covers all of it" -- so a target
+   *  that is discarded and then NOT fully covered reads undefined, and on a pooled target the
+   *  undefined value in practice is the PREVIOUS TENANT's pixels.
+   *
+   *  Why this is the arm to run. The M4's seam is two single-texel-wide vertical runs of 4-5 px,
+   *  always brighter, tapering at both ends with the peak in the interior (+29, +74, +81, +20, -1),
+   *  at the IDENTICAL offset inside two different builds of a temp that twenty builds share. **That
+   *  shape is the V pass's own kernel profile.** The V pass reads a vertical line, so ONE stale
+   *  texel at (x, y0) contaminates outputs at (x, y0-R .. y0+R) weighted by the kernel -- one texel
+   *  wide, the kernel's support tall, peaking where the weight peaks. An 11-fetch kernel spans about
+   *  that run; a 25-fetch one spreads the same stale texel over 2.5x the rows at a lower weight,
+   *  which is why `match` trips and `on` does not.
+   *
+   *  It also explains why `?gauss-debug` did NOT exonerate the temp. That scan looks for
+   *  R>200 / B>200 / G<80 in the FINAL shot, but a single magenta temp texel arrives at the canvas
+   *  attenuated by one kernel weight (~0.2-0.3), so it lands far under the threshold. The magenta
+   *  scan excludes a large unwritten REGION and cannot see one texel; the comment on
+   *  `GaussDebugMagenta` above overstates it.
+   *
+   *  `clear` is the decisive instrument because it converts the intermittent into a determinism
+   *  question: every uncovered texel takes the clear colour on EVERY load, so a `clear`-vs-`keep`
+   *  pair differs wherever coverage is incomplete, at n=1 instead of n=98. `keep` loads the previous
+   *  contents legitimately, so a seam that vanishes under it is a discard-plus-coverage defect. */
+  static TempLoad: 'discard' | 'clear' | 'keep' = 'discard';
   private _gaussDebugClears = 0;
   /** Magenta clears `?gauss-debug` issued on this pass: 2 per Gaussian build, or the arm is vacuous. */
   get GaussDebugClears(): number { return this._gaussDebugClears; }
@@ -2762,8 +2791,23 @@ export class BlurPass {
     fb.Bind();
     if (this.Timers !== null) this.Timers.SetTarget(`${this.TimerTag}:${key}`);
     gl.viewport(0, 0, fb.Width, fb.Height);
-    gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
+    // `?blur-temp`: the shipped path discards. See `TempLoad` for why the other two arms exist and
+    // what each one proves. `keep` issues nothing at all, which is the legitimate load.
+    if (BlurPass.TempLoad === 'discard') gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0]);
+    else if (BlurPass.TempLoad === 'clear') {
+      // A colour no blur can produce, so any texel the following quad fails to cover is visible as
+      // itself rather than as a plausible pixel. Unlike `?gauss-debug` this clears EVERY bound
+      // target on every pass, and it is read by DIFFING clear against keep rather than by
+      // threshold-scanning the shot, which is what let one attenuated texel hide before.
+      gl.clearColor(1, 0, 1, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this._tempClears++;
+    }
   };
+
+  private _tempClears = 0;
+  /** Clears `?blur-temp=clear` issued on this pass. Zero on an armed run means the arm is vacuous. */
+  get TempClears(): number { return this._tempClears; }
 
   /** Report the bound framebuffer to the pass timer. `default` is the unbound (swap chain) state,
    *  which every chain here leaves behind and which makes the next pass's boundary a hard one. */

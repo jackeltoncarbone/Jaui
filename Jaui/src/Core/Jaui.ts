@@ -988,6 +988,11 @@ export class Canvas implements DirtyTracker {
   private _blurKRule: SeparableKRule = 'round';
   /** `?gauss-upload=prefix`: the pre-lane uniform upload, as a control for the Metal fix. */
   private _gaussUploadPrefix = false;
+  /** `?blur-temp=discard|clear|keep`: what a bound blur target is told about its previous contents.
+   *  `BlurPass.TempLoad` carries the argument; the short version is that the M4's seam is one stale
+   *  texel in a temp twenty builds share, and `discard` (the shipped `invalidateFramebuffer`) is
+   *  what makes an uncovered texel undefined rather than merely old. */
+  private _blurTemp: 'discard' | 'clear' | 'keep' = 'discard';
   /** The last `jaui:blur-plan` gate line, printed on a SHAPE change rather than per frame. */
   private _blurPlanLastLine = '';
   /** The last `jaui:glass-presample` gate line, printed on a SHAPE change rather than per frame. */
@@ -8678,6 +8683,14 @@ export class Canvas implements DirtyTracker {
       }
       this._gaussUploadPrefix = raw === 'prefix';
     }
+    if (params.has('blur-temp')) {
+      const raw = (params.get('blur-temp') ?? '').trim();
+      if (raw !== 'discard' && raw !== 'clear' && raw !== 'keep') {
+        throw new Error(`[Jaui] ?blur-temp takes 'discard', 'clear' or 'keep', got '${raw}'`);
+      }
+      this._blurTemp = raw;
+    }
+    BlurPass.TempLoad = this._blurTemp;
     if (this._blurSeparable) {
       const r = this._renderer;
       const why =
@@ -8728,6 +8741,7 @@ export class Canvas implements DirtyTracker {
       + ` default=${!params.has('blur-chain')}`
       + ` sigma=${this._blurSigma} k=${this._blurKRule} fetches=${this._blurFetches ?? 'auto'}`
       + ` upload=${this._gaussUploadPrefix ? 'prefix' : 'full'}`
+      + ` temp=${this._blurTemp}`
       + ` compile=${this._renderer instanceof WebGL2Renderer ? this._renderer.BlurPlanCensus.Compile : 'none'}`
       + (this._gaussDebug ? ' debug=magenta' : '')
       + (this._blurSeparable ? ' pixels=DIFFERENT' : ' pixels=SAME')
