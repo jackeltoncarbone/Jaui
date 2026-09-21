@@ -941,7 +941,7 @@ export class Canvas implements DirtyTracker {
    *  the rule the group already applies to the fill, and the one Jack ruled.
    *
    *  The ease is unchanged: same slot, same dt, same snap, one probe per member per frame. */
-  private _shadowProbe: 'walk' | 'group' = 'walk';
+  private _shadowProbe: 'walk' | 'group' = 'group';
   private _shadowProbeRefused = '';
   private _shadowProbeLastLine = '';
   /** The slot each member's probe wrote at the group's capture, with the rect it probed so the walk

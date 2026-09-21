@@ -311,17 +311,17 @@ const clearance = (a: ReturnType<typeof covered>, b: ReturnType<typeof covered>)
 // -- 1. THE FLAG ----------------------------------------------------------------------------
 
 describe('?shadow-probe - the flag, its mark and its refusals', () => {
-  it('defaults to `walk`, marks itself SAME, and the default is today', () => {
+  it('defaults to `group` (the 2026-09-21 flip: -0.72 ms on the M4, pixel-identical on both platforms), marks itself SAME', () => {
     const w = walk('');
-    expect(w.Census.Mode).toBe('walk');
+    expect(w.Census.Mode).toBe('group');
     expect(w.Census.Refused).toBe('');
-    expect(w.Marks).toContain('jaui:shadow-probe armed=walk default=true pixels=SAME');
+    expect(w.Marks).toContain('jaui:shadow-probe armed=group default=true pixels=SAME');
   });
 
-  it('`group` arms beside the default glass-group', () => {
-    const w = walk('?shadow-probe=group');
-    expect(w.Census.Mode).toBe('group');
-    expect(w.Marks).toContain('jaui:shadow-probe armed=group default=false pixels=SAME');
+  it('`walk` is the control arm: yesterday's per-card probe, byte for byte', () => {
+    const w = walk('?shadow-probe=walk');
+    expect(w.Census.Mode).toBe('walk');
+    expect(w.Marks).toContain('jaui:shadow-probe armed=walk default=false pixels=SAME');
   });
 
   it('refuses by name, most specific first, and falls back to `walk`', () => {
