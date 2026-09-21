@@ -1,4 +1,4 @@
-import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop } from '../Jiv/Jiv.Types';
+import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop, BlendMode } from '../Jiv/Jiv.Types';
 import { ParseProgressiveBlur } from '../ProgressiveBlur/ProgressiveBlur.Stops';
 import type { ResolveContext } from './Length';
 import { Resolve, ResolveTernary, ResolveVars } from './Length';
@@ -111,11 +111,12 @@ export const THEME_DARK_VAR = 'Dark';
 /** The 0/1 twin of THEME_DARK_VAR, so a sheet can weight a light value without writing (1 - @Dark). */
 export const THEME_LIGHT_VAR = 'Light';
 
-const _GRADE_FN = /(Brightness|Saturate|Contrast)\s*\(([^()]*)\)/gi;
+const _GRADE_FN = /(Brightness|Saturate|Contrast|Lift)\s*\(([^()]*)\)/gi;
 
 /** A grade argument may be a length expression over vars, so a material can state its per-theme grade in
- *  one line: `Contrast(0.6 * @Dark + 1 * @Light)`. Those arguments are evaluated to numbers here, before the
- *  filter parse (which caches by string and reads plain numbers). Literal filters pass through untouched. */
+ *  one line: `Contrast(0.6 * @Dark + 1 * @Light)`, and a wash its per-theme lift: `Lift(@JwiftWashLift)`.
+ *  Those arguments are evaluated to numbers here, before the filter parse (which caches by string and
+ *  reads plain numbers). Literal filters pass through untouched. */
 const _resolveGradeArgs = (raw: string, ctx: ResolveContext): string => {
   if (raw.indexOf('@') < 0) return raw;
   return raw.replace(_GRADE_FN, (whole, fn: string, arg: string) =>
@@ -133,6 +134,14 @@ const _resolveTint = (s: JivStyle, ctx: ResolveContext): number => {
     case 'Ink':   return dark ? strength : -strength;
     default:      return dark ? -strength : strength;
   }
+};
+
+const _BLEND_MODES: ReadonlySet<string> = new Set(['Normal', 'PlusLighter', 'Screen']);
+
+/** Refuse a blend mode the engine cannot draw, rather than accept it and paint source-over. */
+const _resolveBlendMode = (raw: BlendMode): BlendMode => {
+  if (_BLEND_MODES.has(raw)) return raw;
+  throw new Error(`[Jaui] BlendMode "${String(raw)}" is not drawn by this engine. Supported: Normal, PlusLighter, Screen.`);
 };
 
 const _inferMaterial = (thickness: number, direction: ProgressiveBlurDirection | null): MaterialType => {
@@ -224,7 +233,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderRadiusSmoothness: smoothness,
 
     Background: ParseBackground(ResolveVars(ResolveTernary(s.Background, ctx), ctx)),
-    BlendMode: s.BlendMode,
+    BlendMode: _resolveBlendMode(s.BlendMode),
 
     Frost: Resolve(s.Frost, ctx, 'W'),
     // Heavy-end frost sigma for the pblur material: the foreground Filter blur
@@ -239,6 +248,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BackdropBrightness: backdrop.Brightness,
     BackdropSaturation: backdrop.Saturation,
     BackdropContrast: backdrop.Contrast,
+    BackdropLift: backdrop.Lift,
 
     // Foreground filter grade — multiplies the element's final rgb at paint
     // time and cascades to descendants (folded into Effective* downstream).

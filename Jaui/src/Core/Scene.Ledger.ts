@@ -219,6 +219,13 @@ export class SceneReadLedger {
   GroupBuilds = 0;
   GroupMembers = 0;
   GroupFallbacks = 0;
+  /** `BackdropFilter: Lift(n)` under-draws this frame (Core/Lift.ts), and `BlendMode` draws: the
+   *  element-blend batches, panel and text counted apart. `BlendSwitches` is every blend-state change
+   *  either of them made -- into its equation and back out of it -- because that is what they cost the
+   *  batch: each one is a flush on both sides. */
+  LiftDraws = 0;
+  BlendDraws = 0;
+  BlendSwitches = 0;
   /** `?shadow-probe`: adaptive-shadow probes this frame, and the binds of the 1x1 state target they
    *  took. The walk arm binds once per probe (`binds == probes`); `group` binds once per group.
    *  Neither column is an encoder END - `EndsByKey['shadow-state']` is, and it moves only when a
@@ -318,6 +325,9 @@ export class SceneReadLedger {
     this.GroupBuilds = 0;
     this.GroupMembers = 0;
     this.GroupFallbacks = 0;
+    this.LiftDraws = 0;
+    this.BlendDraws = 0;
+    this.BlendSwitches = 0;
     this.ShadowProbes = 0;
     this.ShadowProbeBinds = 0;
     this.GlassDraws = 0;

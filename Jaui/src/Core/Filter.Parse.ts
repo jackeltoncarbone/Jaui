@@ -14,6 +14,8 @@
  * Supported functions:
  *   Brightness(x)  Saturate(x)  Contrast(x)   — scalar grade multipliers
  *   Blur(len)                                 — a Length (frost / LOD octave)
+ *   Lift(n)                                   — BackdropFilter only: a signed constant, in 0-255
+ *                                               units, added to every channel (see Core/Lift.ts)
  *
  * … with one exception: the `fresnel` zone takes Brightness + Saturate ONLY, and
  * REFUSES Blur() and Contrast() rather than accepting and ignoring them. See the
@@ -85,6 +87,8 @@ export interface ParsedFilter {
   Saturation: number;
   /** Contrast multiplier. Identity 1. */
   Contrast: number;
+  /** `Lift(n)` as a fraction of full scale (n / 255), signed. Identity 0. Backdrop zone only. */
+  Lift: number;
   /** Raw Length string for the zone's blur (frost px for BackdropFilter, LOD
    *  octave offset for BorderFilter); null when no Blur() was authored. The
    *  resolver resolves this under the live context. */
@@ -141,9 +145,12 @@ export const AssignStyleWithFilterMerge = (
   }
 };
 
-const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, BlurRaw: null, ForegroundBlur: null };
+const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, BlurRaw: null, ForegroundBlur: null };
 
 const _cacheBackdrop = new Map<string, ParsedFilter>();
+// Its own, now that the zones accept different functions: `Lift()` parses on the backdrop and throws
+// on the border, so a string the backdrop cached must not answer for the border.
+const _cacheBorder = new Map<string, ParsedFilter>();
 const _cacheForeground = new Map<string, ParsedFilter>();
 const _cacheFresnel = new Map<string, ParsedFilter>();
 const _FN = /([A-Za-z]+)\s*\(([^)]*)\)/g;
@@ -197,7 +204,8 @@ const _edgeToDirection = (raw: string): ProgressiveBlurDirection | null => {
  *       the band depth from each edge to the sharp center.
  */
 export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedFilter => {
-  const cache = zone === 'foreground' ? _cacheForeground : zone === 'fresnel' ? _cacheFresnel : _cacheBackdrop;
+  const cache = zone === 'foreground' ? _cacheForeground : zone === 'fresnel' ? _cacheFresnel
+    : zone === 'border' ? _cacheBorder : _cacheBackdrop;
   const cached = cache.get(raw);
   if (cached) return cached;
 
@@ -207,7 +215,7 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
     return IDENTITY;
   }
 
-  const out: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, BlurRaw: null, ForegroundBlur: null };
+  const out: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, BlurRaw: null, ForegroundBlur: null };
   _FN.lastIndex = 0;
   let m: RegExpExecArray | null;
   let matched = false;
@@ -222,6 +230,13 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
         if (zone === 'fresnel') throw new Error(_refuseInFresnel('Contrast', raw));
         out.Contrast = _num(arg, 'Contrast', raw);
         break;
+      case 'lift': {
+        if (zone !== 'backdrop') throw new Error(_refuseLift(zone, raw));
+        const n = _num(arg, 'Lift', raw);
+        if (Math.abs(n) > 255) throw new Error(`[Jaui] Lift() takes a signed amount of 255, got ${n} in "${raw}".`);
+        out.Lift = n / 255;
+        break;
+      }
       case 'blur':
         if (zone === 'fresnel') throw new Error(_refuseInFresnel('Blur', raw));
         if (zone === 'foreground') {
@@ -244,7 +259,7 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
           zone === 'fresnel'
             ? `[Jaui] Unknown BorderFresnelFilter function "${m[1]}" in "${raw}". The Fresnel takes Brightness and Saturate only.`
             : `[Jaui] Unknown filter function "${m[1]}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
-              (zone === 'foreground' ? ', LinearProgressiveBlur, EdgeProgressiveBlur.' : '.'),
+              (zone === 'foreground' ? ', LinearProgressiveBlur, EdgeProgressiveBlur.' : zone === 'backdrop' ? ', Lift.' : '.'),
         );
     }
   }
@@ -346,6 +361,14 @@ const _refuseInFresnel = (fn: string, raw: string): string =>
       'rim carries; Brightness() sets how hot it burns.'
     : 'The Fresnel derives its color from the gather the border zone already sampled, at the LOD that ' +
       'the BorderFilter Blur() chose. Author the radius there.');
+
+/** `Lift()` belongs to the backdrop. Each other zone already has the tool the author meant. */
+const _refuseLift = (zone: FilterZone, raw: string): string =>
+  `[Jaui] Lift() is a BackdropFilter function; got it on the ${zone} zone in "${raw}". ` +
+  (zone === 'foreground'
+    ? 'Filter already grades the whole element, ink included (Brightness/Contrast); an element that should ADD its own ' +
+      'paint onto what is below it is BlendMode: PlusLighter.'
+    : 'The rim grades its own gather with Brightness/Saturate/Contrast.');
 
 const _num = (arg: string, fn: string, raw: string): number => {
   const n = parseFloat(arg);

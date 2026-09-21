@@ -15,6 +15,7 @@ import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
+import { FoldLift, Lift, LiftAmount, LiftGraded, LiftRefusalOf, type CompositeBlend, type LiftMode } from './Lift';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, CLIP_FLOATS_PER_ENTRY, type ClipShape, type ClipStack } from './Clip.Stack';
 import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
@@ -143,14 +144,19 @@ const _backdropMaxLod = (
  *  (BackdropBrightness / Saturation / Contrast ≠ 1, BackdropFrostBlur > 0).
  *  These flat panels need the blur pyramid bound and the scene flushed just
  *  like glass does, so the shader's backdrop sample reflects everything
- *  drawn behind the panel. */
+ *  drawn behind the panel.
+ *
+ *  A `Lift(n)` counts only when it is folded into the grade (Core/Lift.ts): that is the one case in
+ *  which the packer writes a non-identity Brightness / Contrast the fragment will sample with. A lift
+ *  drawn UNDER the element reads nothing and is its own draw. */
 const _hasBackdropFilter = (node: Jiv): boolean => {
   const s = node.RenderStyle;
   return Math.abs(s.BackdropBrightness - 1) > 0.001
     || Math.abs(s.BackdropSaturation - 1) > 0.001
     || Math.abs(s.BackdropContrast - 1) > 0.001
     || s.BackdropFrostBlur > 0.001
-    || Math.abs(s.Tint) > 0.001;
+    || Math.abs(s.Tint) > 0.001
+    || LiftGraded(node) !== 0;
 };
 
 /** What the occlusion pre-pass accumulates as it walks. `Order` is the node visit index, which is
@@ -1149,6 +1155,15 @@ export class Canvas implements DirtyTracker {
    *  engine's emission byte for byte in the same binary. `_isEmptyPanel` carries the rule. */
   private _emptyPanelCull: boolean = true;
   private _emptyPanelStats = { Panels: 0, Px: 0, Refused: '' };
+  /** `BackdropFilter: Lift(n)` and `BlendMode`, per rendered frame (Core/Lift.ts). `Under` / `Graded`
+   *  are the two implementations; `Refused` names why each graded lift could not go under; `Builds` is
+   *  every pyramid build an UNDER-drawn element's own paint caused, which must be 0 -- non-zero is
+   *  this lever failing. `PanelBatches` is the shared Color-batch draws: a lift or a blend landing in
+   *  the middle of a run splits one batch into two, so a scene read with and without one shows the
+   *  batch cost of its switches directly. */
+  private _liftStats = { Under: 0, Graded: 0, Builds: 0, PanelBatches: 0, Refused: {} as Record<string, number> };
+  /** The last `jaui:lift` gate line, printed on a SHAPE change rather than per frame. */
+  private _liftLastLine = '';
   /** The last `jaui:emptypanels` gate line, printed on a SHAPE change rather than per frame. */
   private _emptyPanelLastLine = '';
   /** `?atlas-instanced` -- ONE INSTANCED DRAW PER ATLAS LEVEL, and the question it asks.
@@ -2001,9 +2016,12 @@ export class Canvas implements DirtyTracker {
     const memo = this._subtreeDynamicMemo.get(node);
     if (memo !== undefined) return memo;
     const s = node.RenderStyle;
+    // A lift's under-draw and an element BlendMode both READ the destination through the blend unit,
+    // and a capture's destination is a cleared layer, not the scene: they would add onto nothing.
     let dyn = node instanceof Janvas
       || _isGlass(s.Material) || s.Material === 'ProgressiveBlur'
       || _hasBackdropFilter(node)
+      || LiftAmount(s) !== 0 || s.BlendMode !== 'Normal'
       || Math.abs(s.BorderBrightness - 1) > 0.001 || Math.abs(s.BorderSaturation - 1) > 0.001
       || Math.abs(s.BorderContrast - 1) > 0.001 || s.BorderBackdropBlur > 0.001;
     if (!dyn) {
@@ -2876,6 +2894,7 @@ export class Canvas implements DirtyTracker {
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
       r.PanelDrawBatch(flushW, flushH, null, 0, this._specTiltX, this._specTiltY);
+      this._liftStats.PanelBatches++;
       this._counts.Panels += this._panelBuffer.Count;
       this._panelBuffer.Begin(); // reset count for the next batch
     };
@@ -2902,6 +2921,29 @@ export class Canvas implements DirtyTracker {
       r.TextDrawBatch(flushW, flushH, atlas);
       this._counts.Text += 1; // one flushed batch = one draw call
       this._textBuffer.Begin();
+    };
+
+    // `BackdropFilter: Lift(n)`'s under-draw (Core/Lift.ts). One instance of the element's own shape
+    // -- `Push` with 'LiftOnly', so the radii, the smoothness, the clip stack, the 3D homography and
+    // the opacity are the ones its fill would have used, and coverage is the SAME SDF evaluation --
+    // filled with |n| / 255 and drawn with the additive (n > 0) or reverse-subtract (n < 0) blend.
+    // No snapshot, no sampler, no pyramid. Both batches flush first, because the blend reads the
+    // destination and everything beneath the element has to be in it.
+    const emitLiftUnder = (node: Jiv, lift: number, eff: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number): void => {
+      flushPanels();
+      flushText();
+      this._panelBuffer.Begin();
+      this._panelBuffer.Push(node, this._dpr, eff, clipOffset, clipCount, xformIndex, 'LiftOnly');
+      r2.SetCompositeBlend(lift > 0 ? 'LiftAdd' : 'LiftSubtract');
+      r.PanelBeginBatch();
+      r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+      r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
+      r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+      r.PanelDrawBatch(flushW, flushH, null, 0, this._specTiltX, this._specTiltY, false, null);
+      r2.RestoreBlend();
+      r2.NoteLiftDraw();
+      this._counts.Panels++;
+      this._panelBuffer.Begin();
     };
 
 
@@ -3329,6 +3371,27 @@ export class Canvas implements DirtyTracker {
       // pass-1/pass-2 boundary -- see `_phasedPaints`. Its children are walked either way.
       const phasedPaints = this._phasedPass === 0 || this._phasedPaints(node);
 
+      // `BackdropFilter: Lift(n)` (Core/Lift.ts). Drawn HERE, before anything of this node's own --
+      // its fill, border, shadow, text, SVG and children all come later in paint order -- which is
+      // the whole guarantee that the lift never reaches the element's ink. `liftBuilds0` brackets the
+      // node's own paint: an under-drawn element that still caused a pyramid build is the lane failing.
+      let liftBuilds0 = -1;
+      const blend = phasedPaints ? this._elementBlendOf(node) : null;
+      if (phasedPaints) {
+        const lift = LiftAmount(node.RenderStyle);
+        if (lift !== 0) {
+          const refusal = LiftRefusalOf(node);
+          if (refusal === null) {
+            liftBuilds0 = r2.PyramidBuilds;
+            if (!this._diagNoPanels) emitLiftUnder(node, lift, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+            this._liftStats.Under++;
+          } else {
+            this._liftStats.Graded++;
+            this._liftStats.Refused[refusal] = (this._liftStats.Refused[refusal] ?? 0) + 1;
+          }
+        }
+      }
+
       if (!phasedPaints) {
         // This node's panel, text and vector belong to another pass. Nothing here, deliberately:
         // the counters, the buffers and the ledger must see exactly one paint of this node per
@@ -3477,10 +3540,10 @@ export class Canvas implements DirtyTracker {
           Stops: node.RenderStyle.ProgressiveBlurStops,
           Opacity: node.EffectiveOpacity,
           Background: node.RenderStyle.Background.Color,
+          // A progressive blur samples anyway, so a Lift() on one always folds (Core/Lift.ts).
           Grading: {
-            Brightness: node.RenderStyle.BackdropBrightness,
+            ...FoldLift(node.RenderStyle.BackdropBrightness, node.RenderStyle.BackdropContrast, LiftGraded(node)),
             Saturation: node.RenderStyle.BackdropSaturation,
-            Contrast: node.RenderStyle.BackdropContrast,
           },
           ClipOffset: clipMeta.Offset,
           ClipCount: clipMeta.Count,
@@ -3903,19 +3966,23 @@ export class Canvas implements DirtyTracker {
           if (node.RenderStyle.Background.Kind !== 'Color') flushPanels();
         } else {
         const flatBgPaint = this._computeBgPaint(node);
-        if (flatBgPaint !== undefined) {
-          this._bcNoteBgPaint(flatBgPaint);
+        if (flatBgPaint !== undefined || blend !== null) {
+          // A gradient or image fill draws alone because its paint is a batch uniform; an element
+          // `BlendMode` draws alone because its blend state is. One path for both.
+          if (flatBgPaint !== undefined) this._bcNoteBgPaint(flatBgPaint);
           flushPanels();
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
           r.EnableBlend();
+          if (blend !== null) r2.SetCompositeBlend(blend);
           r.PanelBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
           r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, flatBgPaint);
+          if (blend !== null) { r2.RestoreBlend(); r2.NoteBlendDraw(); }
           this._counts.Panels++;
-          if (flatBgPaint.Mode === 'Image') this._counts.Image++;
+          if (flatBgPaint !== undefined && flatBgPaint.Mode === 'Image') this._counts.Image++;
           this._panelBuffer.Begin();
         } else {
           // `ownBorderMode` travels with the BATCHED instance too. It was omitted here, so
@@ -3939,7 +4006,19 @@ export class Canvas implements DirtyTracker {
       const anim = this._textAnimators.get(node);
       if (phasedPaints && anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
-        this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+        if (blend === null) {
+          this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+        } else {
+          // The element's own text is its ink too, so it blends -- in a batch of its own, because the
+          // blend state is per draw. The text program writes straight alpha, which PlusLighter's
+          // SRC_ALPHA factor wants; `_elementBlendOf` has already refused Screen on text.
+          flushText();
+          this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+          r2.SetCompositeBlend(blend);
+          flushText();
+          r2.RestoreBlend();
+          r2.NoteBlendDraw();
+        }
       }
 
       // Emit this node's vector SVG (tessellated fills) as immediate draws. Like
@@ -3988,6 +4067,7 @@ export class Canvas implements DirtyTracker {
         const _fbg = _fs.Background;
         const _inked = node.EffectiveOpacity > 0.001 && (
           (_fbg.Kind !== 'Color' || _fbg.Color.A > 0.001)
+          || liftBuilds0 >= 0
           || _fs.ShadowColor.A > 0.001
           || this._hasPaintedBorder(node)
           || (this._textAnimators.get(node)?.Words.length ?? 0) > 0
@@ -4003,6 +4083,8 @@ export class Canvas implements DirtyTracker {
           );
         }
       }
+
+      if (liftBuilds0 >= 0) this._liftStats.Builds += r2.PyramidBuilds - liftBuilds0;
 
       if (this._bcOn) this._bc.Close();
 
@@ -4137,6 +4219,11 @@ export class Canvas implements DirtyTracker {
     // site from style the walk has already resolved.
     this._emptyPanelStats.Panels = 0;
     this._emptyPanelStats.Px = 0;
+    this._liftStats.Under = 0;
+    this._liftStats.Graded = 0;
+    this._liftStats.Builds = 0;
+    this._liftStats.PanelBatches = 0;
+    this._liftStats.Refused = {};
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
     if (this._phasedWalk && !this._diagNoUi) {
       // THE PHASED COMPOSITION, run for `?blur-phased` and for the DEFAULT `?pyramid-atlas` alike
@@ -4464,6 +4551,22 @@ export class Canvas implements DirtyTracker {
       const line = `jaui:emptypanels panels=${this._emptyPanelStats.Panels}`
         + ` px=${(this._emptyPanelStats.Px / 1e6).toFixed(1)}M`;
       if (line !== this._emptyPanelLastLine) { this._emptyPanelLastLine = line; JTrace(line); }
+    }
+
+    // `Lift()` and `BlendMode`'s gate, on a SHAPE change. `liftBuilds=` is the claim: an under-drawn
+    // lift costs one draw and two blend switches and NO build, so anything but 0 there is the lane
+    // failing. `refused=` names every graded lift's reason, so which implementation a class took is
+    // never a mystery. `blendSwitches=` against `panelBatches=` is what the switches cost the batch.
+    if (!this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+      const gl2 = this._renderer;
+      const st = this._liftStats;
+      const refused = Object.keys(st.Refused).sort().map((k) => `${k}:${st.Refused[k]}`).join(',');
+      const line = `jaui:lift armed=${Lift.Mode}`
+        + ` lifts=${st.Under + st.Graded} liftUnder=${st.Under} liftGraded=${st.Graded}`
+        + ` liftDraws=${gl2.LiftDraws} liftBuilds=${st.Builds}`
+        + ` blends=${gl2.BlendDraws} blendSwitches=${gl2.BlendSwitches} panelBatches=${st.PanelBatches}`
+        + ` refused=${refused === '' ? 'none' : refused}`;
+      if (line !== this._liftLastLine) { this._liftLastLine = line; JTrace(line); }
     }
 
     // `?glass-presample`'s gate, on the same terms: a SHAPE change, not a frame.
@@ -5191,6 +5294,27 @@ export class Canvas implements DirtyTracker {
    *
    *  Every clause below is EXACT rather than an epsilon, because a 0.0005 that survived would
    *  multiply the destination by 0.9995 and that is not the same picture. */
+  /** The blend this element's own paint takes, or null for source-over. Refuses, by name, every
+   *  element whose paint the blend could not reach whole: a surface that samples (its fill is drawn by
+   *  the glass or progressive-blur branch, not the flat one this blend is wired into), an SVG, a border
+   *  re-emitted among its children, and Screen over text (the text program has no premultiplied
+   *  output, and screen at partial coverage needs one). A blend that silently skipped part of the
+   *  element would be a different picture wearing the property's name. */
+  private _elementBlendOf = (node: Jiv): CompositeBlend | null => {
+    const s = node.RenderStyle;
+    if (s.BlendMode === 'Normal') return null;
+    const why = s.Material !== 'None' ? `its material is ${s.Material}`
+      : _hasBackdropFilter(node) ? 'it samples its backdrop (BackdropFilter / Tint)'
+      : node.SvgVector ? 'it paints an SVG'
+      : s.BorderLayer !== 0 && this._hasPaintedBorder(node) ? 'its border is re-emitted among its children (BorderLayer)'
+      : s.BlendMode === 'Screen' && (this._textAnimators.get(node)?.Words.length ?? 0) > 0 ? 'Screen cannot blend text at partial coverage'
+      : '';
+    if (why !== '') {
+      throw new Error(`[Jaui] BlendMode: ${s.BlendMode} blends a flat element's own paint, and this one cannot: ${why}.`);
+    }
+    return s.BlendMode;
+  };
+
   private _isEmptyPanel = (node: Jiv): boolean => {
     const s = node.RenderStyle;
     // A border of any width has coverage, and a border of any alpha inks it. Both exactly zero is
@@ -9433,6 +9557,24 @@ export class Canvas implements DirtyTracker {
     {
       const g = globalThis as unknown as { __jauiEmptyPanels?: () => EmptyPanelCensus };
       g.__jauiEmptyPanels = () => ({ Armed: this._emptyPanelCull, ...this._emptyPanelStats });
+    }
+    // `?lift=` -- `BackdropFilter: Lift(n)`'s two implementations (Core/Lift.ts). Default `on`: the
+    // engine draws a lift under its element when nothing else there samples, and folds it into the
+    // grade when something does. `graded` sends EVERY lift through the fold -- the equivalence arm,
+    // whose pixels must match `on` to the blend unit's precision and whose `builds=` rises by one per
+    // lift. `off` draws no lift at all, the null arm.
+    if (params.has('lift')) {
+      const raw = (params.get('lift') ?? '').trim();
+      if (raw !== 'on' && raw !== 'graded' && raw !== 'off') {
+        throw new Error(`[Jaui] ?lift takes 'on', 'graded' or 'off', got '${raw}'`);
+      }
+      Lift.Mode = raw as LiftMode;
+    }
+    JTrace(`jaui:lift armed=${Lift.Mode} default=${!params.has('lift')}`
+      + (Lift.Mode === 'on' ? '' : ' pixels=DIFFERENT'));
+    {
+      const g = globalThis as unknown as { __jauiLift?: () => unknown };
+      g.__jauiLift = () => ({ Armed: Lift.Mode, ...this._liftStats, Refused: { ...this._liftStats.Refused } });
     }
     // `?blur-cache=on|off|verify` -- A CLEAN BACKDROP DOES NOT REBUILD ITS BLUR. Default OFF.
     //

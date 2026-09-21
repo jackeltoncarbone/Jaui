@@ -64,6 +64,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BackdropFilter',         s => s.BackdropBrightness,           (s, v) => { s.BackdropBrightness = v; }],
   ['BackdropFilter',         s => s.BackdropSaturation,           (s, v) => { s.BackdropSaturation = v; }],
   ['BackdropFilter',         s => s.BackdropContrast,             (s, v) => { s.BackdropContrast = v; }],
+  ['BackdropFilter',         s => s.BackdropLift,                 (s, v) => { s.BackdropLift = v; }],
 
   // Foreground filter grade (multiplies final rgb) — bucket `Filter`, so
   // `@Transition Filter { ... }` springs brightness/saturation/contrast.

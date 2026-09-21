@@ -249,9 +249,12 @@ describe('routing: which batches take the flat program', () => {
       expect(packer, `instance offset ${n} is no longer ${field}`)
         .toMatch(new RegExp(`data\\[offset \\+ ${n}\\] = ${field}`));
     };
-    at(32, 'style\\.BackdropBrightness');
+    // Brightness and Contrast carry a lift the walk could not draw under the element (Core/Lift.ts):
+    // the SAME two floats, folded, so the classifier still reads the grade the fragment runs.
+    expect(packer).toContain('const grade = FoldLift(style.BackdropBrightness, style.BackdropContrast, LiftGraded(jiv));');
+    at(32, 'grade\\.Brightness');
     at(33, 'style\\.BackdropSaturation');
-    at(34, 'style\\.BackdropContrast');
+    at(34, 'grade\\.Contrast');
     at(41, 'style\\.Tint');
     // frostLod is derived, not copied: log2 of the frost in device px, floored at 0.
     expect(packer).toContain('const blurPx = Math.max(0.5, style.BackdropFrostBlur * d);');
