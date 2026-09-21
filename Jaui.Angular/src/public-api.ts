@@ -28,7 +28,7 @@ export * from './Seo/Semantic.Mirror';
 // need the core class can import from 'jaui' directly.
 export type {
   JivStyle, LayoutConfig, ChildLayout, TextStyle,
-  CornerShape, BlendMode, MaterialType, Color,
+  CornerShape, MaterialType, Color,
   ProgressiveBlurDirection,
   Stylesheet, Ruleset,
 } from 'jaui';

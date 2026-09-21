@@ -19,7 +19,7 @@ import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
  *   2. For every numeric binding, spring.Target = targetRender[field]
  *   3. spring.Step(dt); write spring.Value into renderStyle[field]
  *
- * Non-numeric fields (Material, Overflow, BlendMode, booleans) snap — they're
+ * Non-numeric fields (Material, Overflow, LiftDeclaration, booleans) snap — they're
  * copied directly into RenderStyle from the target each tick. No spring.
  *
  * Colors, Transform.*, and BorderRadius[] are decomposed into their leaf
@@ -71,6 +71,11 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['Filter',                 s => s.Brightness,                   (s, v) => { s.Brightness = v; }],
   ['Filter',                 s => s.Saturation,                   (s, v) => { s.Saturation = v; }],
   ['Filter',                 s => s.Contrast,                     (s, v) => { s.Contrast = v; }],
+  // The FOREGROUND additive amount springs under `Filter`, beside the grade it sits next to, and it
+  // is SIGNED so a theme flip springs add -> nothing -> subtract and never passes through a wrong
+  // direction. The lift COLORS snap (below): the amount is what animates and what flips with the
+  // theme; the color is the material's identity.
+  ['Filter',                 s => s.ForegroundLift,               (s, v) => { s.ForegroundLift = v; }],
 
   // Refraction band geometry
   ['BezelWidth',             s => s.BezelWidth,                   (s, v) => { s.BezelWidth = v; }],
@@ -184,7 +189,12 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.ProgressiveBlurStops = target.ProgressiveBlurStops;
   render.CornerShape = target.CornerShape;
   render.BorderRadiusRaw = target.BorderRadiusRaw;
-  render.BlendMode = target.BlendMode;
+  // The lift declaration and both zone COLORS snap. An additive color's amount is what moves (it
+  // springs in the two buckets above); its hue is not a spring, and `LiftDeclaration` is a tagged
+  // value, not a number.
+  render.LiftDeclaration = target.LiftDeclaration;
+  render.ForegroundLiftColor = target.ForegroundLiftColor;
+  render.BackdropLiftColor = target.BackdropLiftColor;
   render.ContainBorder = target.ContainBorder;
   render.InnerShadow = target.InnerShadow;
   render.Isolate = target.Isolate;

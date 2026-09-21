@@ -1,5 +1,5 @@
 /**
- * `BackdropFilter: Lift(n)` and `BlendMode` -- Core/Lift.ts.
+ * THE ADDITIVE COLOR -- `Lift(<color>, <amount>)` in three zones -- Core/Lift.ts.
  *
  *   1. THE PARSE. `Lift(n)` is a backdrop function in 0-255 units that takes a bare var, and nothing
  *      else takes it.
@@ -12,7 +12,8 @@
  *   4. THE WALK, headless through a recording renderer: which path each element took, that the
  *      under-draw builds nothing and snapshots nothing, and that it is drawn BEFORE the element's
  *      own paint -- which is the whole guarantee that the ink is never lifted.
- *   5. THE ELEMENT BLEND. What `BlendMode` sets, around which draws, and what it refuses.
+ *   5. THE INK BLEND. What `Filter: Lift()` sets, around which draws, and what it refuses.
+ *   6. THE CASCADE. `Lift:`'s algebra, its barrier, and the one refusal that is an author error.
  *
  * WHAT THIS FILE CANNOT SEE: there is no rasteriser here. The blend equations are modelled from the
  * GL spec's definitions and pinned to the renderer's source; the orchestrator's shots are the proof.
@@ -26,7 +27,8 @@ import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '@jaui/Jiv/Jiv.Instan
 import { ParseFilter } from '@jaui/Core/Filter.Parse';
 import { ResolveStyle, SEED_CONTEXT } from '@jaui/Core/Style.Resolver';
 import { DefaultJivStyle } from '@jaui/Jiv/Jiv.Defaults';
-import { FoldLift, Lift } from '@jaui/Core/Lift';
+import { CascadeLift, FoldLift, Lift, LiftGateLine, LiftIsGray } from '@jaui/Core/Lift';
+import type { LiftCensus, LiftValue } from '@jaui/Core/Lift';
 import { readRenderer, readJaui, arrowBody } from './Scene.ReadAfterWrite.Source';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -34,6 +36,11 @@ import { fileURLToPath } from 'node:url';
 
 const PANEL_FRAG = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'Jiv', 'Shaders', 'Jiv.Panel.frag'), 'utf8',
+).replace(/\r\n/g, '\n');
+
+/** Core/Lift.ts's own source, for the pins that are about what the module SAYS rather than does. */
+const readLiftSource = (): string => readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'Core', 'Lift.ts'), 'utf8',
 ).replace(/\r\n/g, '\n');
 
 afterEach(() => { Lift.Mode = 'on'; });
@@ -55,9 +62,13 @@ describe('Lift() parses as a backdrop function, in 0-255 units', () => {
   });
 
   it('is refused on every zone but the backdrop, naming the tool that zone already has', () => {
-    expect(() => ParseFilter('Lift(18)', 'foreground')).toThrow(/BlendMode: PlusLighter/);
-    expect(() => ParseFilter('Lift(18)', 'border')).toThrow(/BackdropFilter function/);
-    expect(() => ParseFilter('Lift(18)', 'fresnel')).toThrow(/BackdropFilter function/);
+    // INVERTED. The foreground zone used to refuse `Lift` and name `BlendMode: PlusLighter`; the
+    // foreground zone IS that surface now, so it accepts. The rule the old assertion protected --
+    // "a zone that cannot do this names the tool that can" -- still holds for the two RIM zones,
+    // which is where it is pinned now.
+    expect(ParseFilter('Lift(18)', 'foreground').Lift).toBeCloseTo(18 / 255, 12);
+    expect(() => ParseFilter('Lift(18)', 'border')).toThrow(/BACKDROP or its FOREGROUND/);
+    expect(() => ParseFilter('Lift(18)', 'fresnel')).toThrow(/BACKDROP or its FOREGROUND/);
     expect(() => ParseFilter('Lift(300)')).toThrow(/signed amount of 255/);
   });
 
@@ -260,7 +271,7 @@ const placed = (x: number, y: number, w: number, h: number): Record<string, stri
   Position: 'Placed', Left: x + 'px', Top: y + 'px', Width: w + 'px', Height: h + 'px',
 });
 
-interface Walked { Rec: Rec; Census: { Under: number; Graded: number; Builds: number; Refused: Record<string, number> }; Emits: Jiv[] }
+interface Walked { Rec: Rec; Census: LiftCensus; Emits: Jiv[] }
 
 const walk = (search: string, build: (root: Jiv) => void): Walked => {
   const rec: Rec = { Calls: [], Batches: [], Builds: 0 };
@@ -275,7 +286,7 @@ const walk = (search: string, build: (root: Jiv) => void): Walked => {
     emits.push(n); rec.Calls.push({ Fn: 'EmitText', Args: [n] }); real(n, ...rest);
   };
   c.RenderHeadless(1000);
-  const g = globalThis as unknown as { __jauiLift: () => Walked['Census'] };
+  const g = globalThis as unknown as { __jauiLift: () => LiftCensus };
   return { Rec: rec, Census: g.__jauiLift(), Emits: emits };
 };
 
@@ -388,31 +399,46 @@ describe('the walk: a lift beside anything that samples is folded, and says why'
 
 // ── 5. THE ELEMENT BLEND ───────────────────────────────────────────────────────────────────────
 
-describe('BlendMode blends the element\'s own paint, one draw at a time', () => {
-  it('PlusLighter wraps the element\'s panel AND its text', () => {
-    const w = walk('', (root) => root.AddChild(wash({ BlendMode: 'PlusLighter', Background: 'rgba(255,200,120,0.6)' })));
+describe('Filter: Lift() makes the element\'s own paint ADD, one draw at a time', () => {
+  it('the ink blend wraps the element\'s panel AND its text', () => {
+    const w = walk('', (root) => root.AddChild(wash({ Filter: 'Lift(18)', Background: 'rgba(255,200,120,0.6)' })));
+    // The additive SHAPE draw (LiftAdd), then the panel and the text, each in a batch of its own
+    // because the blend state is per draw.
     const sets = w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend');
-    expect(sets.map((c) => c.Args[0])).toEqual(['PlusLighter', 'PlusLighter']);
-    expect(fns(w.Rec).filter((f) => f === 'RestoreBlend').length).toBe(2);
+    expect(sets.map((c) => c.Args[0])).toEqual(['LiftAdd', 'PlusLighter', 'PlusLighter']);
+    expect(fns(w.Rec).filter((f) => f === 'RestoreBlend').length).toBe(3);
   });
 
-  it('Lift under, PlusLighter on top: the lift lands first, then the element adds onto it', () => {
-    const w = walk('', (root) => root.AddChild(wash({ BlendMode: 'PlusLighter', BackdropFilter: 'Lift(18)', Background: 'rgba(255,200,120,0.6)' })));
+  it('a NEGATIVE foreground amount takes PlusDarker: the element paint SUBTRACTS', () => {
+    const w = walk('', (root) => root.AddChild(wash({ Filter: 'Lift(-20)', Background: 'rgba(255,200,120,0.6)' })));
+    const sets = w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend').map((c) => c.Args[0]);
+    expect(sets).toEqual(['LiftSubtract', 'PlusDarker', 'PlusDarker']);
+  });
+
+  it('backdrop AND foreground on one element: the shape draw lands first, then the element adds onto it', () => {
+    const w = walk('', (root) => root.AddChild(wash({
+      Filter: 'Lift(18)', BackdropFilter: 'Lift(18)', Background: 'rgba(255,200,120,0.6)',
+    })));
     const sets = w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend').map((c) => c.Args[0]);
     expect(sets).toEqual(['LiftAdd', 'PlusLighter', 'PlusLighter']);
+    // ONE shape draw, not two: the backdrop zone's is the one emitted when both are authored,
+    // because two would double the offset.
+    expect(w.Census.Under).toBe(1);
   });
 
-  it('refuses what it cannot blend whole, by name', () => {
-    expect(() => walk('', (root) => root.AddChild(wash({ BlendMode: 'Screen' })))).toThrow(/Screen cannot blend text/);
-    expect(() => walk('', (root) => root.AddChild(wash({ BlendMode: 'PlusLighter', BackdropFilter: 'Brightness(1.2)' }))))
+  it('an AUTHORED foreground lift refuses what it cannot reach whole, by name', () => {
+    expect(() => walk('', (root) => root.AddChild(wash({ Filter: 'Lift(18)', BackdropFilter: 'Brightness(1.2)' }))))
       .toThrow(/samples its backdrop/);
-    expect(() => walk('', (root) => root.AddChild(wash({ BlendMode: 'PlusLighter', Thickness: '4' })))).toThrow(/material/);
-    expect(() => new Jiv({ Style: { BlendMode: 'Multiply' as never } })).toThrow(/not drawn by this engine/);
+    expect(() => walk('', (root) => root.AddChild(wash({ Filter: 'Lift(18)', Thickness: '4' })))).toThrow(/material/);
   });
 
-  it('Screen without text draws, with the premultiplied output', () => {
-    const w = walk('', (root) => root.AddChild(wash({ BlendMode: 'Screen', Background: '#446' }, '')));
-    expect(w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend').map((c) => c.Args[0])).toEqual(['Screen']);
+  it('BlendMode is GONE from the authoring surface, not deprecated', () => {
+    // It was the surface for PlusLighter and Screen. `Filter: Lift()` is that surface now, so the
+    // property, its type and both of its values LEFT. A style that still sets it is an unknown
+    // property, which is what any other misspelling is -- not a shim, not a warning.
+    expect(Object.prototype.hasOwnProperty.call(DefaultJivStyle, 'BlendMode')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(DefaultJivStyle, 'Lift')).toBe(true);
+    expect(DefaultJivStyle.Lift).toBe('Inherit');
   });
 });
 
@@ -423,20 +449,17 @@ describe('the blend states, as the renderer sets them and as GL defines them', (
     expect(body).toContain("case 'LiftAdd':\n        gl.blendEquation(gl.FUNC_ADD);\n        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);");
     expect(body).toContain("case 'LiftSubtract':\n        gl.blendEquationSeparate(gl.FUNC_REVERSE_SUBTRACT, gl.FUNC_ADD);\n        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);");
     expect(body).toContain("case 'PlusLighter':\n        gl.blendEquation(gl.FUNC_ADD);\n        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);");
-    expect(body).toContain("case 'Screen':\n        gl.blendEquation(gl.FUNC_ADD);\n        gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);\n        this._premulOut = 1;");
+    expect(body).toContain("case 'PlusDarker':\n        gl.blendEquationSeparate(gl.FUNC_REVERSE_SUBTRACT, gl.FUNC_ADD);\n        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);");
+    // `SRC_ALPHA` AND NOT `ONE`, on every one of the four. This is the load-bearing half of the
+    // premultiplication reasoning and it OUTLIVED Screen: the panel and text programs write straight
+    // alpha, so SRC_ALPHA is what makes a half-covered edge add half. Given a premultiplied source it
+    // would be scaled by coverage twice and every antialiased edge would come out thin (a-squared
+    // instead of a).
+    expect(body.match(/gl\.SRC_ALPHA, gl\.ONE,/g)?.length).toBe(4);
+    expect(body).not.toContain('gl.blendFuncSeparate(gl.ONE,');
     const restore = arrowBody(readRenderer(), 'RestoreBlend');
     expect(restore).toContain('gl.blendEquation(gl.FUNC_ADD);');
     expect(restore).toContain('this.EnableBlend();');
-    expect(restore).toContain('this._premulOut = 0;');
-  });
-
-  it('Screen, premultiplied, is 1 - (1 - dst)(1 - src) at full coverage and a coverage lerp of it at an edge', () => {
-    for (const dst of [0, 0.2, 0.5, 0.9]) for (const src of [0, 0.3, 0.7, 1]) for (const a of [1, 0.5, 0.25]) {
-      const ps = src * a;                         // u_PremulOut: rgb *= a
-      const out = ps * 1 + dst * (1 - ps);        // ONE, ONE_MINUS_SRC_COLOR
-      const screen = 1 - (1 - dst) * (1 - src);
-      expect(out).toBeCloseTo(dst + a * (screen - dst), 12);
-    }
   });
 
   it('PlusLighter at SRC_ALPHA scales by coverage: a half-covered edge adds half', () => {
@@ -445,17 +468,290 @@ describe('the blend states, as the renderer sets them and as GL defines them', (
     expect(add(0.2, 0.6, 1)).toBeCloseTo(0.8, 12);
   });
 
-  it('the panel program premultiplies only under Screen, on the line before it writes', () => {
-    expect(PANEL_FRAG).toContain('uniform float u_PremulOut;');
-    expect(PANEL_FRAG).toContain('    if (u_PremulOut > 0.5) result.rgb *= result.a;\n    fragColor = result;\n}');
-    expect(readRenderer()).toContain('gl.uniform1f(locs.premulOut, this._premulOut);');
+  it('the premultiplying uniform is GONE, and nothing is left setting it', () => {
+    // The INVERSE of the pin it replaces. `u_PremulOut` existed for exactly one blend state --
+    // Screen, whose destination factor `1 - src*a` is a product no blend factor forms -- and Screen
+    // left with `BlendMode`. A uniform no draw can ever set is dead weight in the program this
+    // project measured as REGISTER-BOUND, so it left too. Its reasoning is kept in Core/Lift.ts's
+    // header, because it is why the four surviving states are correct.
+    expect(PANEL_FRAG).not.toContain('uniform float u_PremulOut;');
+    expect(PANEL_FRAG).not.toContain('u_PremulOut > 0.5');
+    expect(readRenderer()).not.toContain('gl.uniform1f(locs.premulOut');
+    expect(readRenderer()).not.toContain("gl.getUniformLocation(p, 'u_PremulOut')");
   });
 
   it('the under-draw is emitted before the node\'s own branch, so nothing of the element precedes it', () => {
     const walkSrc = readJaui();
-    const lift = walkSrc.indexOf('emitLiftUnder(node, lift, eff');
+    const lift = walkSrc.indexOf('emitLiftUnder(node, shape, eff');
     const chain = walkSrc.indexOf("} else if (material === 'ProgressiveBlur' && !this._diagNoPblur) {");
     expect(lift).toBeGreaterThan(0);
     expect(lift).toBeLessThan(chain);
+  });
+});
+
+// == 6. THE ADDITIVE COLOR: A COLOR TIMES A SIGNED AMOUNT ========================================
+
+describe('Lift(<color>, <amount>) is a color times a signed amount', () => {
+  it('BYTE-IDENTITY: Lift(18) IS Lift(rgb(255,255,255), 18) -- the whole back-compatibility story', () => {
+    // Every site that shipped wears the one-argument spelling. If these two are not the same bits,
+    // the measured wash constants move, which the brief forbids outright. So this is pinned at three
+    // levels: the parse, the resolve, and the packed instance float.
+    const one = ParseFilter('Lift(18)');
+    const two = ParseFilter('Lift(rgb(255, 255, 255), 18)');
+    expect(two.Lift).toBe(one.Lift);
+    expect(one.LiftColor).toBe(null);       // null IS white: no color is allocated
+    expect(two.LiftColor).toBe('rgb(255, 255, 255)');
+
+    const rs1 = ResolveStyle({ ...DefaultJivStyle, BackdropFilter: 'Lift(18)' }, SEED_CONTEXT);
+    const rs2 = ResolveStyle({ ...DefaultJivStyle, BackdropFilter: 'Lift(rgb(255,255,255), 18)' }, SEED_CONTEXT);
+    expect(rs2.BackdropLift).toBe(rs1.BackdropLift);
+    expect(rs1.BackdropLiftColor).toEqual({ R: 1, G: 1, B: 1, A: 1 });
+    expect(rs2.BackdropLiftColor).toEqual(rs1.BackdropLiftColor);
+
+    // The packed instance: the fill lanes are |n| * color, and |n| * 1 === |n|.
+    const push = (style: Record<string, string>): Float32Array => {
+      const n = wash(style);
+      const root = new Jiv({ ChildLayout: placed(0, 0, 400, 300), Style: { Background: TRANSPARENT } });
+      root.AddChild(n);
+      const b = new JivInstanceBuffer();
+      b.Begin();
+      b.Push(n, 1, undefined, 0, 0, -1, 'LiftOnly');
+      return b.Data.slice(0, JIV_FLOATS_PER_INSTANCE);
+    };
+    const a = push({ BackdropFilter: 'Lift(18)' });
+    const b = push({ BackdropFilter: 'Lift(rgb(255,255,255), 18)' });
+    expect(Array.from(a)).toEqual(Array.from(b));
+  });
+
+  it('the amount is in 0-255 units in EVERY spelling, so one wash var reads the same in all three', () => {
+    // The brief asserted @JwiftWashLift was `18 / 255 * @Dark ...` and that the two-argument amount
+    // was therefore a FRACTION. It is not: the shipped var is `18 * @Dark - 12 * @Light`, in 255
+    // units. One convention everywhere is what lets the same var be dropped into any of the three
+    // zones with no edit and no seam.
+    const vars = new Map([['W', '18 * @Dark - 12 * @Light'], ['Dark', '1'], ['Light', '0']]);
+    const ctx = { ...SEED_CONTEXT, Vars: vars };
+    expect(ResolveStyle({ ...DefaultJivStyle, BackdropFilter: 'Lift(@W)' }, ctx).BackdropLift)
+      .toBeCloseTo(18 / 255, 12);
+    expect(ResolveStyle({ ...DefaultJivStyle, BackdropFilter: 'Lift(rgb(255,255,255), @W)' }, ctx).BackdropLift)
+      .toBeCloseTo(18 / 255, 12);
+    expect(ResolveStyle({ ...DefaultJivStyle, Filter: 'Lift(rgb(255,255,255), @W)' }, ctx).ForegroundLift)
+      .toBeCloseTo(18 / 255, 12);
+    const d = ResolveStyle({ ...DefaultJivStyle, Lift: 'rgb(255,255,255) @W' }, ctx).LiftDeclaration;
+    expect((d as LiftValue).Amount).toBeCloseTo(18 / 255, 12);
+  });
+
+  it('A NESTED COLOR ARGUMENT SURVIVES THE SCAN -- the defect the old regex had', () => {
+    // `/([A-Za-z]+)\s*\(([^)]*)\)/g` stops at the FIRST `)`, so it read `Lift(rgb(255,220,180), 18)`
+    // as `Lift(rgb(255,220,180)` and then found no second function: the AMOUNT vanished and the lift
+    // silently became 0. Nothing caught it, because a dropped argument is not a parse error. This is
+    // the assertion that would have.
+    const f = ParseFilter('Lift(rgb(255, 220, 180), 18)');
+    expect(f.Lift).toBeCloseTo(18 / 255, 12);
+    expect(f.LiftColor).toBe('rgb(255, 220, 180)');
+    // And beside another function, in either order.
+    expect(ParseFilter('Brightness(1.2) Lift(rgb(255,220,180), 30)').Lift).toBeCloseTo(30 / 255, 12);
+    expect(ParseFilter('Lift(rgb(255,220,180), 30) Brightness(1.2)').Brightness).toBe(1.2);
+    // A var inside the amount of a two-argument lift resolves too -- the resolver's own regex had
+    // the identical `[^()]*` defect and matched nothing at all.
+    const vars = new Map([['W', '29'], ['Dark', '1'], ['Light', '0']]);
+    const rs = ResolveStyle(
+      { ...DefaultJivStyle, BackdropFilter: 'Lift(rgb(255,220,180), @W)' }, { ...SEED_CONTEXT, Vars: vars },
+    );
+    expect(rs.BackdropLift).toBeCloseTo(29 / 255, 12);
+    expect(rs.BackdropLiftColor.G).toBeCloseTo(220 / 255, 6);
+  });
+
+  it('a chromatic lift fills the shape with |n| * color, per channel', () => {
+    let node!: Jiv;
+    const w = walk('', (root) => {
+      node = wash({ BackdropFilter: 'Lift(rgb(255, 128, 0), 30)' });
+      root.AddChild(node);
+    });
+    const set = fns(w.Rec).indexOf('SetCompositeBlend');
+    const batchIdx = w.Rec.Calls.slice(0, set + 2).filter((c) => c.Fn === 'PanelDrawBatch').length - 1;
+    const d = w.Rec.Batches[batchIdx][0];
+    const l = 30 / 255;
+    expect(d[12]).toBeCloseTo(l * 1, 6);
+    expect(d[13]).toBeCloseTo(l * (128 / 255), 6);
+    expect(d[14]).toBeCloseTo(l * 0, 6);
+    expect(d[15]).toBe(1);
+  });
+
+  it('there is no Sink: the negative is the amount sign, and it is the same var', () => {
+    const vars = new Map([['W', '18 * @Dark - 12 * @Light']]);
+    const dark = ResolveStyle({ ...DefaultJivStyle, BackdropFilter: 'Lift(@W)' },
+      { ...SEED_CONTEXT, Vars: new Map([...vars, ['Dark', '1'], ['Light', '0']]) });
+    const light = ResolveStyle({ ...DefaultJivStyle, BackdropFilter: 'Lift(@W)' },
+      { ...SEED_CONTEXT, Vars: new Map([...vars, ['Dark', '0'], ['Light', '1']]) });
+    expect(dark.BackdropLift).toBeGreaterThan(0);
+    expect(light.BackdropLift).toBeLessThan(0);
+  });
+
+  it('greyness is judged at one 8-bit step, so #fff and rgb(255,255,255) are both grey', () => {
+    expect(LiftIsGray({ R: 1, G: 1, B: 1, Amount: 0.1 })).toBe(true);
+    expect(LiftIsGray({ R: 1, G: 254 / 255, B: 1, Amount: 0.1 })).toBe(true);
+    expect(LiftIsGray({ R: 1, G: 250 / 255, B: 1, Amount: 0.1 })).toBe(false);
+    // Amount 0 is gray whatever the color: there is nothing to carry.
+    expect(LiftIsGray({ R: 1, G: 0, B: 0, Amount: 0 })).toBe(true);
+  });
+
+  it('refuses a third argument, and an unbalanced parenthesis, rather than dropping it', () => {
+    expect(() => ParseFilter('Lift(rgb(1,2,3), 18, 4)')).toThrow(/takes <amount> or <color>, <amount>/);
+    expect(() => ParseFilter('Lift(rgb(1,2,3, 18)')).toThrow(/unbalanced parenthesis/);
+  });
+});
+
+// == 7. THE CASCADE ==============================================================================
+
+describe('the cascade carries a VALUE, like color, and Isolate is the barrier', () => {
+  const V: LiftValue = { R: 1, G: 1, B: 1, Amount: 0.1 };
+  const W: LiftValue = { R: 1, G: 0.5, B: 0, Amount: 0.2 };
+
+  it('CascadeLift: the full truth table, in one place', () => {
+    // not authored, no ancestor -> nothing
+    expect(CascadeLift('Inherit', null, false, false))
+      .toEqual({ Self: null, Authored: false, ToChildren: null });
+    // not authored, an ancestor has one -> INHERITED, and it keeps travelling
+    expect(CascadeLift('Inherit', V, false, false))
+      .toEqual({ Self: V, Authored: false, ToChildren: V });
+    // authored here -> AUTHORED (this node emits the shape draw), and it travels
+    expect(CascadeLift(W, V, false, false))
+      .toEqual({ Self: W, Authored: true, ToChildren: W });
+    // `Lift: None` -> the reset, per node AND its subtree
+    expect(CascadeLift('None', V, false, false))
+      .toEqual({ Self: null, Authored: false, ToChildren: null });
+    // Isolate -> the value neither ARRIVES...
+    expect(CascadeLift('Inherit', V, false, true))
+      .toEqual({ Self: null, Authored: false, ToChildren: null });
+    // ...nor LEAVES: an isolated node's own authored lift applies to itself and stops
+    expect(CascadeLift(W, V, false, true))
+      .toEqual({ Self: W, Authored: true, ToChildren: null });
+    // the Root is a base, like _cascadeFilterGrade's
+    expect(CascadeLift('Inherit', V, true, false))
+      .toEqual({ Self: null, Authored: false, ToChildren: null });
+  });
+
+  const tree = (containerStyle: Record<string, string>, childStyle: Record<string, string> = {}): Walked =>
+    walk('', (root) => {
+      const host = new Jiv({
+        ChildLayout: placed(0, 0, 300, 200),
+        Style: { Background: TRANSPARENT, Opacity: '1', ...containerStyle },
+      });
+      host.AddChild(wash(childStyle));
+      root.AddChild(host);
+    });
+
+  it('a container with Lift: its OWN backdrop lifts ONCE, and the child INHERITS ink only', () => {
+    const w = tree({ Lift: 'rgb(255,255,255) 30' });
+    // ONE shape draw for the whole subtree: the container's. Cascading the shape draw would lift
+    // the same pixels once per descendant, which is the one variant to argue against.
+    expect(w.Census.Under).toBe(1);
+    expect(w.Census.Authored).toBe(1);
+    expect(w.Census.Inherited).toBe(1);
+    // The container's own ink adds, AND the child's does: additive STACKS.
+    const sets = w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend').map((c) => c.Args[0]);
+    expect(sets[0]).toBe('LiftAdd');
+    expect(sets.filter((x) => x === 'PlusLighter').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('Lift: None on the child is the reset -- the color: black override', () => {
+    const w = tree({ Lift: 'rgb(255,255,255) 30' }, { Lift: 'None' });
+    expect(w.Census.Authored).toBe(1);
+    expect(w.Census.Inherited).toBe(0);
+  });
+
+  it('Isolate: true on the child is the subtree barrier, and it is the SAME word that stops Filter', () => {
+    const w = tree({ Lift: 'rgb(255,255,255) 30' }, { Isolate: 'true' });
+    expect(w.Census.Authored).toBe(1);
+    expect(w.Census.Inherited).toBe(0);
+    // No new vocabulary: this is the property `_cascadeFilterGrade` already reads.
+    expect(readJaui()).toContain('const base = node === this.Root || rs.Isolate;');
+  });
+
+  it('a GLASS child IGNORES an inherited lift and paints normally, counted as its own key', () => {
+    // A cascade that threw the moment it contained one glass child would be unusable, and the author
+    // did not put the lift there.
+    const w = tree({ Lift: 'rgb(255,255,255) 30' }, { Thickness: '4' });
+    expect(w.Census.IgnoredSampling).toBe(1);
+    expect(w.Census.Inherited).toBe(0);
+    expect(w.Census.Authored).toBe(1);
+  });
+
+  it('an AUTHORED lift on a glass node still refuses BY NAME -- that is an author error', () => {
+    expect(() => tree({}, { Lift: 'rgb(255,255,255) 30', Thickness: '4' })).toThrow(/material is LiquidGlass/);
+  });
+
+  it('the cascade costs one walk, and the census says how much of it carried anything', () => {
+    const w = tree({ Lift: 'rgb(255,255,255) 30' });
+    // Root + host + child, and every one of them visited exactly once.
+    expect(w.Census.CascadeVisited).toBe(3);
+    expect(w.Census.CascadeCarried).toBe(2);   // host + child; the Root is a base
+    const none = tree({});
+    expect(none.Census.CascadeVisited).toBe(3);
+    expect(none.Census.CascadeCarried).toBe(0);
+  });
+
+  it('NO TARGET, NO PASS, NO COPY: the cascade is one more field on the walk that already runs', () => {
+    const w = tree({ Lift: 'rgb(255,255,255) 30' });
+    expect(fns(w.Rec)).not.toContain('SnapshotScreen');
+    expect(fns(w.Rec)).not.toContain('ComputeBlur');
+    expect(w.Census.Builds).toBe(0);
+    // The walk is shaped like the two beside it, and is called beside them.
+    expect(readJaui()).toContain('this._cascadeLift(this.Root, null);');
+  });
+
+  it('A CHROMATIC lift that must FOLD refuses by name -- the scalar grade cannot carry chroma', () => {
+    expect(() => walk('', (root) => root.AddChild(wash({
+      BackdropFilter: 'Brightness(1.2) Lift(rgb(255, 220, 180), 30)',
+    })))).toThrow(/is CHROMATIC/);
+    // A GRAY lift in the same place folds exactly as it always did.
+    const gray = walk('', (root) => root.AddChild(wash({ BackdropFilter: 'Brightness(1.2) Lift(30)' })));
+    expect(gray.Census.Refused).toEqual({ Grade: 1 });
+  });
+
+  it('a chromatic lift in the FOREGROUND zone works: that zone never folds', () => {
+    const w = walk('', (root) => root.AddChild(wash({ Filter: 'Lift(rgb(255, 220, 180), 30)' })));
+    expect(w.Census.Under).toBe(1);
+    expect(w.Census.Graded).toBe(0);
+    expect(w.Census.Refused).toEqual({});
+  });
+
+  it('THE LAYER CACHE READS THE CASCADE, not the node style -- the quiet way to lose a backdrop', () => {
+    // An inherited lift is not in RenderStyle at all. A style-only check would let a cached subtree
+    // capture into a CLEARED target, where the lift adds onto nothing and silently vanishes.
+    const src = arrowBody(readJaui(), '_subtreeSamplesLiveScene');
+    expect(src).toContain('LiftTouchesInk(s, node.EffectiveLift)');
+    expect(src).not.toContain("s.BlendMode !== 'Normal'");
+    // And the predicate itself reads BOTH halves: the cascade result (the only place an inherited
+    // lift appears) and the node's own declaration (available even before the cascade has run).
+    const lift = readLiftSource();
+    const pred = lift.slice(lift.indexOf('export const LiftTouchesInk'), lift.indexOf('/** Null when the lift can be drawn'));
+    expect(pred).toContain('effective !== null');
+    expect(pred).toContain('rs.LiftDeclaration');
+    expect(pred).toContain('rs.ForegroundLift');
+  });
+
+  it('ONE INSTRUMENT: the gate line is formatted from the census the probe returns', () => {
+    const w = tree({ Lift: 'rgb(255,255,255) 30' });
+    const line = LiftGateLine(w.Census);
+    expect(line).toContain(`authored=${w.Census.Authored}`);
+    expect(line).toContain(`inherited=${w.Census.Inherited}`);
+    expect(line).toContain(`ignoredSampling=${w.Census.IgnoredSampling}`);
+    expect(line).toContain(`liftBuilds=${w.Census.Builds}`);
+    expect(line).toContain(`cascadeVisited=${w.Census.CascadeVisited}`);
+    expect(line).toContain(`cascadeCarried=${w.Census.CascadeCarried}`);
+    expect(line).toContain(`blends=${w.Census.Blends}`);
+    // And the engine prints that exact function's output, so the two cannot drift apart again.
+    expect(readJaui()).toContain('const line = LiftGateLine(this._liftCensus());');
+  });
+
+  it('an idle tree reads 0 authored and 0 inherited -- the attributable half of the gate', () => {
+    const w = tree({});
+    expect(w.Census.Authored).toBe(0);
+    expect(w.Census.Inherited).toBe(0);
+    expect(w.Census.IgnoredSampling).toBe(0);
+    expect(w.Census.Under + w.Census.Graded).toBe(0);
+    expect(w.Census.Blends).toBe(0);
+    expect(fns(w.Rec)).not.toContain('SetCompositeBlend');
   });
 });

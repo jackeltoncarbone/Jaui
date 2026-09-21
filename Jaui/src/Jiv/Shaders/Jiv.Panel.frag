@@ -322,8 +322,11 @@ uniform vec4      u_BgGradTangent[MAX_BG_GRAD_STOPS];
 uniform float     u_BgGradPos[MAX_BG_GRAD_STOPS];
 
 out vec4 fragColor;
-// 1 only for a `BlendMode: Screen` draw, whose blend reads a PREMULTIPLIED source; 0 on every other.
-uniform float u_PremulOut;
+// `u_PremulOut` was here. It premultiplied this fragment's rgb by its alpha for a `BlendMode: Screen`
+// draw, the one blend state whose destination factor (`1 - src*a`) is a product no blend factor forms.
+// `BlendMode` and `Screen` are both gone (Core/Lift.ts): every surviving composite state reads a
+// STRAIGHT source and takes `SRC_ALPHA`, so this program has one fewer uniform branch and writes the
+// same bits it always did on every draw that is not a Screen -- which is now every draw.
 
 #if !defined(MATERIAL_FLAT)
 // Triangular-PDF dither — breaks 8-bit banding on smooth blurred backdrops.
@@ -2162,6 +2165,5 @@ void main() {
         result.rgb += gradDither / max(result.a, 0.25);
     }
 
-    if (u_PremulOut > 0.5) result.rgb *= result.a;
     fragColor = result;
 }

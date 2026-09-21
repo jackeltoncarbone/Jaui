@@ -1,48 +1,113 @@
 /**
- * `BackdropFilter: Lift(n)` -- one authored number, two implementations, and the engine picks.
+ * `Lift(<color>, <amount>)` -- AN ADDITIVE COLOR. Where an ordinary color covers what is beneath it,
+ * an additive color adds to it.
  *
- * A lift adds the signed constant `L = n / 255` to every channel of whatever is painted beneath the
- * element, inside the element's shape, scaled by its coverage and opacity. It carries the colour at 1
- * (a constant added to all three channels moves luma and leaves chroma where it was), and it never
- * touches the element's own ink.
+ * The value is a color times a signed amount, and the amount is where the theme flip lives:
  *
- * UNDER. `Lift(n)` with nothing else that samples the backdrop. No snapshot, no pyramid: one extra
- * panel instance in the element's own shape (same SDF, same radii, same clip stack) drawn BEFORE the
- * element's own panel, with blend state
+ *     Lift(rgb(255, 255, 255), @JwiftWashLift)      // @JwiftWashLift = 18 * @Dark - 12 * @Light
+ *     Lift(rgb(255, 220, 180), @JwiftWashLift)      // the same var against a warm color
+ *     Lift(18)                                      // white times 18, the one-argument spelling
  *
- *     L > 0   FUNC_ADD               rgb: dst + src * srcA     alpha: dst
- *     L < 0   FUNC_REVERSE_SUBTRACT  rgb: dst - src * srcA     alpha: dst
+ * The amount is in 0-255 units in EVERY spelling, signed, and it is stored here as `n / 255`.
+ * `Lift(18)` is therefore `Lift(rgb(255,255,255), 18)` to the bit: the one-argument form is the
+ * two-argument form with a white color, not a different code path. There is NO `Sink` -- the negative
+ * is the amount's sign, which is where the theme flip already lives. Positive adds the color,
+ * negative subtracts it.
  *
- * where src = |L| on every channel and srcA = coverage * opacity * clip. Both are exact per-channel
- * offsets; neither is a multiply, so neither scales chroma. The element's fill, border, shadow and
- * text are separate draws that come after, so the ink is never in the blend.
+ * ## THREE ZONES, AND THE PLACE SAYS WHICH SIDE OF THE ELEMENT IT TOUCHES
  *
- * GRADED. `Lift(n)` next to anything that already samples (Brightness / Saturate / Contrast, Blur, a
- * glass body, a Tint, a progressive blur): the fragment is reading the backdrop anyway, so the lift is
- * folded into the grade it already runs. `applyGrading` is contrast about 0.5, then saturate about
- * luma, then brightness:
+ * One mechanism serves all three. `Lift(c, n)` puts an ADDITIVE DRAW of the element's own shape, in
+ * `|n|/255 * c` at the element's own coverage, into the destination before anything of the element
+ * paints. The zones differ only in whether the element's -- and its descendants' -- own INK then
+ * COVERS that destination or ADDS to it:
+ *
+ * | zone                       | additive shape draw    | own ink | descendants' ink |
+ * |----------------------------|------------------------|---------|------------------|
+ * | `BackdropFilter: Lift(..)` | yes                    | covers  | covers           |
+ * | `Filter: Lift(..)`         | yes                    | ADDS    | covers           |
+ * | `Lift: <color> <amount>`   | yes, where AUTHORED    | ADDS    | ADD (cascades)   |
+ *
+ * So a FULLY TRANSPARENT element gets the same pixels from the backdrop zone and the foreground zone.
+ * That is not a defect and it is not a collapse of the design: it is Jack's own reading of it --
+ * "or foreground only which is just all of it technically". An element with paint is where they part.
+ *
+ * The additive draw is emitted ONCE, at the node where the lift is AUTHORED. An INHERITED lift never
+ * emits one, because cascading a backdrop op would lift the same pixels once per descendant -- the one
+ * variant to argue against rather than build.
+ *
+ * ## THE CASCADE CARRIES A VALUE, LIKE `color`
+ *
+ * `Lift: <color> <amount>` is one more field on the walk that already cascades `Filter` and `Opacity`.
+ * No new pass, no render target, no copy -- which is the whole reason the shape is affordable on the
+ * phone, where a per-subtree target is the cost class this week has been spent deleting.
+ *
+ * Additive therefore STACKS: a label on an additive card adds twice, two overlapping additive siblings
+ * double. That is what light does, and it is the cheap default. What CSS got wrong is that
+ * `mix-blend-mode` looks like a color property and costs a compositing layer -- it reads as free and
+ * allocates a target. An Apple-designed replacement would not hide a render target behind a property
+ * that looks like `color`.
+ *
+ *   - `Lift: None` is the reset, per node AND its subtree -- the `color: black` override.
+ *   - `Isolate: true` is the subtree barrier. It already means "stop the `Filter` cascade here"
+ *     (`_cascadeFilterGrade`'s `base = node === this.Root || rs.Isolate`), so this adds no vocabulary.
+ *     An isolated node does not receive an inherited lift, and its own authored lift does not reach its
+ *     children: the lift stops there. See `CascadeLift` for the algebra.
+ *
+ * ## TWO IMPLEMENTATIONS OF THE ADDITIVE DRAW, CHOSEN PER ELEMENT PER FRAME
+ *
+ * UNDER. Nothing beside the lift samples the backdrop. One instance of the element's own shape
+ * (`Push(..., 'LiftOnly')`) in its own draw -- same SDF, same radii, same clip stack, same opacity:
+ *
+ *     n > 0   FUNC_ADD               rgb: dst + src * srcA     alpha: dst
+ *     n < 0   FUNC_REVERSE_SUBTRACT  rgb: dst - src * srcA     alpha: dst
+ *
+ * where src = `|n|/255 * c` per channel and srcA = coverage * opacity * clip. Neither case is a
+ * multiply. There is no snapshot, no sampler and no pyramid.
+ *
+ * GRADED. Something beside it already samples (a grade, a blur, a glass body, a Tint, a progressive
+ * blur), so the fragment is reading the backdrop anyway and the lift folds into the grade it already
+ * runs. `applyGrading` is contrast about 0.5, then saturate about luma, then brightness:
  *
  *     y = b*c*luma(x) + b*(1 - c)/2 + b*c*s*(x - luma(x))
  *
- * An additive L after the grade is a new pair (b', c') with the same GAIN (b'c' = bc, so the chroma
- * term b*c*s and the luma slope are untouched) and an offset larger by exactly L:
+ * An additive L after the grade is a new pair with the SAME GAIN (b'c' = bc, so the chroma term and
+ * the luma slope are untouched) and an offset larger by exactly L:
  *
  *     b'(1 - c')/2 = b(1 - c)/2 + L   and   b'c' = bc   =>   b' = b + 2L,   c' = b*c / (b + 2L)
  *
- * which at the identity grade (b = c = 1) is the washeffect pair b = 1 + 2L, c = 1/b. The naive
- * composition, multiplying the pairs (b * (1+2L), c / (1+2L)), keeps the gain too but its offset is
- * b(1 - c)/2 + b*L: it scales the lift by the authored Brightness, which is not what was written.
- * Saturate never enters: it multiplies the chroma, and a lift has none. So the lift lands LAST in the
- * grade, before a glass body's Tint (which runs after the grade in both the shader and this fold).
+ * which at the identity grade is the washeffect pair `1 + 2L, 1/(1 + 2L)`. The naive composition,
+ * multiplying the pairs `(b(1+2L), c/(1+2L))`, keeps the gain too but its offset is `b(1-c)/2 + b*L`:
+ * it scales the lift by the authored Brightness, which is not what was written. Saturate never enters
+ * -- it multiplies chroma, and a GRAY lift has none.
  *
- * Both paths put `x + L * coverage` on screen for a transparent element: UNDER by the blend unit,
- * GRADED as `(x + L) * a + x * (1 - a)` through the ordinary source-over. They are held to agree in
- * `tests/Lift.Equivalence.test.ts`.
+ * WHICH IS WHY A CHROMATIC LIFT CANNOT TAKE THE GRADED PATH. `(Brightness, Saturation, Contrast)` are
+ * three SCALARS applied to all three channels; a per-channel offset needs three more numbers. The
+ * instance stride is 60 floats = exactly 15 `vec4` vertex attributes, and WebGL2 guarantees 16 in
+ * total -- which is why the foreground grade is bit-packed into one reused lane rather than given
+ * lanes of its own. So a chromatic lift on an element that must take the graded path is REFUSED BY
+ * NAME (`ChromaticGraded`) rather than silently desaturated into a gray one, which would be a
+ * different picture wearing the property's name. A gray lift folds exactly as it always did.
  *
  * Why the choice is made HERE, at draw time, and not in the resolver: the foreground `Filter`
  * cascades, and the graded path's fragment grades its WHOLE result -- the lifted backdrop included --
  * by it. An additive blend cannot apply a multiply, so an element under a non-identity foreground
  * grade takes the graded path, and the cascaded grade only exists after the resolve.
+ *
+ * ## THE BLEND FACTORS, AND WHY `SRC_ALPHA` AND NOT `ONE`
+ *
+ * The panel and text programs write STRAIGHT alpha (rgb, coverage). `SRC_ALPHA` is what makes a
+ * half-covered edge pixel add half, so edges do not bloom. Given a PREMULTIPLIED source instead,
+ * `SRC_ALPHA` would scale it by coverage a second time and every antialiased edge would come out thin
+ * (a-squared instead of a): a premultiplied source must take `ONE`. Every state here reads a straight
+ * source, so every state here takes `SRC_ALPHA`.
+ *
+ * `BlendMode` is gone. It was the authoring surface for `PlusLighter` / `Screen`; the foreground zone
+ * of this additive color is that surface now, and `CompositeBlend` remains what it always was -- the
+ * internal name for the GL state. `Screen` left with it: it is not additive, it is not a color offset,
+ * it is a different equation, and no site in the app wanted it. It was the only state that needed a
+ * premultiplied source (its destination factor is `1 - src*a`, and no blend factor forms a product),
+ * so `u_PremulOut` left with it too. The reasoning is kept above because it is the reason the four
+ * surviving states are correct, not because any of them is premultiplied.
  */
 
 import type { JivRenderStyle } from '../Jiv/Jiv.Types';
@@ -53,29 +118,63 @@ export const LIFT_EPSILON = 1e-4;
 /** The grade epsilon `_hasBackdropFilter` and the panel fragment's `hasBackdropFilter` both use. */
 const GRADE_EPSILON = 0.001;
 
+/** A channel further than this from white makes a lift CHROMATIC, which the scalar backdrop grade
+ *  cannot carry (see the header). One 8-bit step, so `rgb(255,255,255)` and `#fff` are both gray and
+ *  `rgb(255,254,255)` is not pretending otherwise. */
+const CHROMA_EPSILON = 1 / 255;
+
 /** `?lift=` -- `on` (default) lets the engine choose; `graded` sends every lift through the fold, the
  *  equivalence arm; `off` draws no lift at all, the null arm. */
 export type LiftMode = 'on' | 'graded' | 'off';
 
-/** The four blend states a draw can take that compose against the destination instead of over it:
- *  the two signs of a lift's under-draw and the two element `BlendMode`s. `WebGL2Renderer.SetCompositeBlend`. */
-export type CompositeBlend = 'LiftAdd' | 'LiftSubtract' | 'PlusLighter' | 'Screen';
+/** The four blend states a draw can take that compose against the destination instead of over it.
+ *  `Lift*` are the additive SHAPE draw, whose alpha factors are `ZERO, ONE` so a transparent element
+ *  stays transparent. `Plus*` are the element's own INK adding or subtracting, whose alpha factors are
+ *  `ONE, ONE_MINUS_SRC_ALPHA` so alpha still accumulates the ordinary way. Both signs of both, because
+ *  the sign of the amount is where the theme flip lives. `WebGL2Renderer.SetCompositeBlend`.
+ *
+ *  `PlusLighter` / `PlusDarker` are Apple's own names for this pair (`CGBlendMode.plusLighter` /
+ *  `.plusDarker`); they are no longer authorable under any name. */
+export type CompositeBlend = 'LiftAdd' | 'LiftSubtract' | 'PlusLighter' | 'PlusDarker';
 
-/** Why a lift did not take the under-draw. The census prints these by name. */
-export type LiftRefusal = 'Glass' | 'ProgressiveBlur' | 'Grade' | 'Blur' | 'Tint' | 'Filter' | 'Shadow' | 'Forced';
+/** Why a lift's additive draw did not go UNDER the element. The census prints these by name. The first
+ *  eight choose the graded fold instead; `ChromaticGraded` is the one that is an author ERROR, because
+ *  the fold cannot carry chroma (see the header) and there is no third implementation. */
+export type LiftRefusal =
+  | 'Glass' | 'ProgressiveBlur' | 'Grade' | 'Blur' | 'Tint' | 'Filter' | 'Shadow' | 'Forced'
+  | 'ChromaticGraded';
 
-/** What a lift needs to know about its element: the resolved style and the CASCADED foreground grade. */
-export interface LiftSubject {
-  RenderStyle: JivRenderStyle;
-  EffectiveBrightness: number;
-  EffectiveSaturation: number;
-  EffectiveContrast: number;
+/** An additive color: a color times a signed amount. The channels are 0..1 (the color's own alpha is
+ *  not part of an additive color -- there is nothing to be transparent over) and `Amount` is signed as
+ *  a fraction of full scale, so `Lift(18)` is `{ R: 1, G: 1, B: 1, Amount: 18/255 }`. */
+export interface LiftValue {
+  R: number;
+  G: number;
+  B: number;
+  /** Signed, a fraction of full scale. Authored in 0-255 units and divided here. */
+  Amount: number;
 }
+
+/** What the `Lift:` property resolved to on one node, before the cascade:
+ *    - `'Inherit'`  the property was not authored -- take the ancestor's value (the initial value)
+ *    - `'None'`     `Lift: None`, the reset: this node and its subtree carry nothing
+ *    - a value      `Lift: <color> <amount>`, authored here */
+export type LiftDeclaration = 'Inherit' | 'None' | LiftValue;
 
 export class Lift {
   /** Set once from the URL flags, before the first frame. */
   static Mode: LiftMode = 'on';
 }
+
+/** White, the color the one-argument `Lift(n)` means. Shared and never mutated, so an element with no
+ *  chromatic lift allocates nothing. */
+export const LIFT_WHITE: LiftValue = { R: 1, G: 1, B: 1, Amount: 0 };
+
+/** True when this lift's color is white to within one 8-bit step, so the scalar backdrop grade can
+ *  carry it. A lift of amount 0 is gray whatever its color -- there is nothing to carry. */
+export const LiftIsGray = (v: LiftValue): boolean =>
+  Math.abs(v.Amount) <= LIFT_EPSILON
+  || (Math.abs(v.R - 1) <= CHROMA_EPSILON && Math.abs(v.G - 1) <= CHROMA_EPSILON && Math.abs(v.B - 1) <= CHROMA_EPSILON);
 
 /** The foreground grade as the fragment sees it after `_packFgGrade`'s quantisation. */
 const _fgIsIdentity = (b: number, s: number, c: number): boolean =>
@@ -90,37 +189,98 @@ export const LiftAmount = (rs: JivRenderStyle): number => {
   return Math.abs(l) > LIFT_EPSILON ? l : 0;
 };
 
+/** The element's own additive-ink amount: the FOREGROUND zone, 0 when there is none or the null arm is
+ *  armed. Unlike the backdrop amount this one may be INHERITED, so the walk passes the cascade result
+ *  in rather than reading the style. */
+export const LiftInkAmount = (amount: number): number => {
+  if (Lift.Mode === 'off') return 0;
+  return Math.abs(amount) > LIFT_EPSILON ? amount : 0;
+};
+
+/** The GL state the element's own ink takes to ADD (or subtract) instead of cover. */
+export const InkBlendOf = (amount: number): CompositeBlend => (amount > 0 ? 'PlusLighter' : 'PlusDarker');
+
+/** True when this element's own ink MIGHT add instead of cover, so nothing may treat it as an
+ *  ordinary source-over panel: not the empty-panel cull (a quad that adds is not `x*1 + c*0`), not
+ *  the occlusion pre-pass (an element that brightens what is beneath it is not a coverer however
+ *  opaque its fill), and not the retained layer cache (a capture's destination is a CLEARED target,
+ *  so a lift there adds onto nothing).
+ *
+ *  BOTH HALVES, and that is the point. `effective` is the CASCADE result, which is the only place an
+ *  INHERITED lift appears -- reading the style alone is the quiet way to let a cached subtree lose
+ *  its backdrop. `rs.LiftDeclaration` is the node's OWN declaration, which is available even when
+ *  this is asked before the cascade has run for the frame. Either one is enough to refuse, and
+ *  refusing too often is only a missed optimization; refusing too rarely is a wrong picture. */
+export const LiftTouchesInk = (rs: JivRenderStyle, effective: LiftValue | null): boolean => {
+  if (Lift.Mode === 'off') return false;
+  if (effective !== null && Math.abs(effective.Amount) > LIFT_EPSILON) return true;
+  if (Math.abs(rs.ForegroundLift) > LIFT_EPSILON) return true;
+  const d = rs.LiftDeclaration;
+  return d !== 'Inherit' && d !== 'None' && Math.abs(d.Amount) > LIFT_EPSILON;
+};
+
+/** The GL state the additive SHAPE draw takes. */
+export const ShapeBlendOf = (amount: number): CompositeBlend => (amount > 0 ? 'LiftAdd' : 'LiftSubtract');
+
+/** What a lift needs to know about its element: the resolved style, the CASCADED foreground grade, and
+ *  the lift's own color (which decides whether the fold can carry it). */
+export interface LiftSubject {
+  RenderStyle: JivRenderStyle;
+  EffectiveBrightness: number;
+  EffectiveSaturation: number;
+  EffectiveContrast: number;
+}
+
+/** True when this element's fragment reads its backdrop, so an additive draw under it and additive ink
+ *  on it are both the wrong picture. The one predicate behind the sampling refusals. */
+export const LiftSamplesBackdrop = (s: JivRenderStyle): boolean =>
+  s.Material === 'LiquidGlass'
+  || s.Material === 'ProgressiveBlur'
+  || Math.abs(s.BackdropBrightness - 1) > GRADE_EPSILON
+  || Math.abs(s.BackdropSaturation - 1) > GRADE_EPSILON
+  || Math.abs(s.BackdropContrast - 1) > GRADE_EPSILON
+  || s.BackdropFrostBlur > GRADE_EPSILON
+  || Math.abs(s.Tint) > GRADE_EPSILON;
+
 /** Null when the lift can be drawn under the element; otherwise the FIRST reason it cannot, in the
- *  order the fragment would meet them. Asked only of an element that has a lift. */
-export const LiftRefusalOf = (n: LiftSubject): LiftRefusal | null => {
+ *  order the fragment would meet them. Asked only of an element that has a lift.
+ *
+ *  `color` is the lift's own color. When the element must take the graded fold and the color is not
+ *  gray, the answer is `ChromaticGraded`: an author error, not an implementation choice, because the
+ *  scalar grade cannot carry chroma and there is no third path. */
+export const LiftRefusalOf = (n: LiftSubject, color: LiftValue = LIFT_WHITE): LiftRefusal | null => {
   const s = n.RenderStyle;
-  if (Lift.Mode === 'graded') return 'Forced';
-  if (s.Material === 'LiquidGlass') return 'Glass';
-  if (s.Material === 'ProgressiveBlur') return 'ProgressiveBlur';
+  const graded = (why: LiftRefusal): LiftRefusal => (LiftIsGray(color) ? why : 'ChromaticGraded');
+  if (Lift.Mode === 'graded') return graded('Forced');
+  if (s.Material === 'LiquidGlass') return graded('Glass');
+  if (s.Material === 'ProgressiveBlur') return graded('ProgressiveBlur');
   if (Math.abs(s.BackdropBrightness - 1) > GRADE_EPSILON
     || Math.abs(s.BackdropSaturation - 1) > GRADE_EPSILON
-    || Math.abs(s.BackdropContrast - 1) > GRADE_EPSILON) return 'Grade';
-  if (s.BackdropFrostBlur > GRADE_EPSILON) return 'Blur';
-  if (Math.abs(s.Tint) > GRADE_EPSILON) return 'Tint';
+    || Math.abs(s.BackdropContrast - 1) > GRADE_EPSILON) return graded('Grade');
+  if (s.BackdropFrostBlur > GRADE_EPSILON) return graded('Blur');
+  if (Math.abs(s.Tint) > GRADE_EPSILON) return graded('Tint');
   // The graded fragment grades its whole result, backdrop included, by the foreground Filter.
-  if (!_fgIsIdentity(n.EffectiveBrightness, n.EffectiveSaturation, n.EffectiveContrast)) return 'Filter';
+  if (!_fgIsIdentity(n.EffectiveBrightness, n.EffectiveSaturation, n.EffectiveContrast)) return graded('Filter');
   // The graded fill is opaque over the backdrop (`fillA = fillAlpha`), so it hides the element's own
   // drop shadow under its shape; a transparent element over an under-draw shows it. Same picture
   // only without one.
-  if (s.ShadowColor.A > GRADE_EPSILON) return 'Shadow';
+  if (s.ShadowColor.A > GRADE_EPSILON) return graded('Shadow');
   return null;
 };
 
 /** The lift this element draws UNDER itself, 0 when it has none or takes the graded path. */
-export const LiftUnder = (n: LiftSubject): number => {
+export const LiftUnder = (n: LiftSubject, color?: LiftValue): number => {
   const l = LiftAmount(n.RenderStyle);
-  return l !== 0 && LiftRefusalOf(n) === null ? l : 0;
+  return l !== 0 && LiftRefusalOf(n, color) === null ? l : 0;
 };
 
-/** The lift folded into this element's backdrop grade, 0 when it has none or draws it under. */
-export const LiftGraded = (n: LiftSubject): number => {
+/** The lift folded into this element's backdrop grade, 0 when it has none or draws it under. A
+ *  `ChromaticGraded` refusal returns 0 too: it folds nothing, it throws at the walk. */
+export const LiftGraded = (n: LiftSubject, color?: LiftValue): number => {
   const l = LiftAmount(n.RenderStyle);
-  return l !== 0 && LiftRefusalOf(n) !== null ? l : 0;
+  if (l === 0) return 0;
+  const r = LiftRefusalOf(n, color);
+  return r === null || r === 'ChromaticGraded' ? 0 : l;
 };
 
 /** The grade pair that adds `lift` after `(brightness, contrast)`. Saturation is untouched (see the
@@ -136,4 +296,72 @@ export const FoldLift = (brightness: number, contrast: number, lift: number): { 
     );
   }
   return { Brightness: b, Contrast: (brightness * contrast) / b };
+};
+
+/** ONE step of the lift cascade, the same shape as `_cascadeFilterGrade`'s.
+ *
+ *      inherited = (isRoot || Isolate) ? null : parent
+ *      self      = decl === 'None' ? null : decl === 'Inherit' ? inherited : decl
+ *      children  = Isolate ? null : self
+ *
+ *  Read it as one sentence: an inherited lift makes a node's ink additive; the node where it is
+ *  AUTHORED additionally emits the additive shape draw. `Isolate` stops the value dead -- it neither
+ *  arrives nor leaves -- which is the cheap way to buy "the lift applies once to this group" without
+ *  a render target, and it is the ONLY place the author asks for that by name. */
+export const CascadeLift = (
+  decl: LiftDeclaration,
+  parent: LiftValue | null,
+  isRoot: boolean,
+  isolate: boolean,
+): { Self: LiftValue | null; Authored: boolean; ToChildren: LiftValue | null } => {
+  const inherited = isRoot || isolate ? null : parent;
+  const authored = decl !== 'Inherit' && decl !== 'None';
+  const self = decl === 'None' ? null : decl === 'Inherit' ? inherited : decl;
+  return { Self: self, Authored: authored, ToChildren: isolate ? null : self };
+};
+
+/** THE EFFECT FIELD. One object, and `LiftGateLine` formats the `jaui:lift` line FROM it, so the gate
+ *  line and `__jauiLift()` cannot print different numbers. They did once -- the line had `blends=` and
+ *  the census did not -- and the divergence cost a round trip to notice, so the two are now the same
+ *  read by construction rather than by discipline. */
+export interface LiftCensus {
+  Armed: LiftMode;
+  /** Lifts DECLARED on the node that applied them. An authored lift emits the additive shape draw. */
+  Authored: number;
+  /** Lifts that arrived through the cascade. An inherited lift makes ink add and emits NO shape draw:
+   *  cascading the draw would lift the same pixels once per descendant. */
+  Inherited: number;
+  /** Inherited lifts a node DROPPED because it samples its backdrop. Not an error -- a cascade that
+   *  threw the moment it contained one glass child would be unusable. */
+  IgnoredSampling: number;
+  /** The shape draw's two implementations. */
+  Under: number;
+  Graded: number;
+  /** Pyramid builds caused by an UNDER-drawn element's own paint. MUST BE 0. Non-zero is this lane
+   *  failing, exactly as before. */
+  Builds: number;
+  /** The cascade's own cost: nodes the walk visited, and how many came out carrying a value. */
+  CascadeVisited: number;
+  CascadeCarried: number;
+  /** Shared Color-batch draws. An additive draw landing mid-run splits one batch into two. */
+  PanelBatches: number;
+  /** Counted at the draw call, on the renderer. */
+  LiftDraws: number;
+  Blends: number;
+  BlendSwitches: number;
+  /** Why each graded lift could not go under, by name. */
+  Refused: Record<string, number>;
+}
+
+/** The `jaui:lift` gate line, formatted from the census and from nothing else. */
+export const LiftGateLine = (c: LiftCensus): string => {
+  const refused = Object.keys(c.Refused).sort().map((k) => `${k}:${c.Refused[k]}`).join(',');
+  return `jaui:lift armed=${c.Armed}`
+    + ` lifts=${c.Authored + c.Inherited} authored=${c.Authored} inherited=${c.Inherited}`
+    + ` ignoredSampling=${c.IgnoredSampling}`
+    + ` liftUnder=${c.Under} liftGraded=${c.Graded}`
+    + ` liftDraws=${c.LiftDraws} liftBuilds=${c.Builds}`
+    + ` cascadeVisited=${c.CascadeVisited} cascadeCarried=${c.CascadeCarried}`
+    + ` blends=${c.Blends} blendSwitches=${c.BlendSwitches} panelBatches=${c.PanelBatches}`
+    + ` refused=${refused === '' ? 'none' : refused}`;
 };

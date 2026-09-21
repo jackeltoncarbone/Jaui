@@ -1,6 +1,7 @@
 import type { Jiv } from './Jiv';
 import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
 import { FoldLift, LiftGraded } from '../Core/Lift';
+import type { LiftValue } from '../Core/Lift';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -170,7 +171,11 @@ export class JivInstanceBuffer {
    *                      exactly the coverage the element's own fill would have had. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
-          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'GlassBorderOnly' | 'LiftOnly' = 'Normal'): void => {
+          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'GlassBorderOnly' | 'LiftOnly' = 'Normal',
+          /** `'LiftOnly'` only: the additive color to fill with, when it is NOT the backdrop zone's.
+           *  The FOREGROUND zone and the inherited `Lift:` property carry their own color+amount and
+           *  share this one push, because the additive draw is the same draw (Core/Lift.ts). */
+          liftOverride: LiftValue | null = null): void => {
     if (this._count >= this._capacity) this._grow();
 
     const style = jiv.RenderStyle;
@@ -386,8 +391,17 @@ export class JivInstanceBuffer {
       // sign survives (−0 is not < 0 in GLSL); the rim AA stays effectively crisp.
       data[offset + 28] = -Math.max(borderEdgeAa, 1e-3);
     } else if (borderMode === 'LiftOnly') {
-      const l = Math.abs(style.BackdropLift);
-      data[offset + 12] = l; data[offset + 13] = l; data[offset + 14] = l; data[offset + 15] = 1;
+      // THE ADDITIVE COLOR's fill: |amount| times the color, per channel, at alpha 1 (Core/Lift.ts).
+      // The blend's `SRC_ALPHA` factor then multiplies it by the element's own coverage, so a
+      // half-covered edge pixel adds half. `liftOverride` is the FOREGROUND zone's or the inherited
+      // property's color+amount when it is not the backdrop zone's; the zones share this one push
+      // because the additive draw is the same draw.
+      //
+      // A white color leaves this byte-identical to the grey lift that shipped: `l * 1 === l`.
+      const amount = liftOverride === null ? style.BackdropLift : liftOverride.Amount;
+      const c = liftOverride === null ? style.BackdropLiftColor : liftOverride;
+      const l = Math.abs(amount);
+      data[offset + 12] = l * c.R; data[offset + 13] = l * c.G; data[offset + 14] = l * c.B; data[offset + 15] = 1;
       data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0;
       data[offset + 20] = 0; data[offset + 21] = 0; data[offset + 22] = 0; data[offset + 23] = 0;
       data[offset + 24] = 0; data[offset + 25] = 0; data[offset + 26] = 0; data[offset + 27] = 0;

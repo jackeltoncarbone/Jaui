@@ -14,7 +14,9 @@ export const DefaultJivStyle: JivStyle = {
   CornerShape: 'Round',
   BorderRadiusSmoothness: '0.3',
   Background: 'rgba(0, 0, 0, 0)',
-  BlendMode: 'Normal',
+  // THE ADDITIVE COLOR, inherited (Core/Lift.ts). `Inherit` is the initial value -- take the
+  // ancestor's, which for a node with no additive ancestor is nothing at all. `None` is the reset.
+  Lift: 'Inherit',
   // Filters — identity by default (no grade, no frost). See Jiv.Types.
   Filter: 'None',
   BackdropFilter: 'None',

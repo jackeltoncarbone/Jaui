@@ -291,12 +291,17 @@ describe('emptypanels — the admission rule, said exactly', () => {
     expect(isEmpty(c, at({ Tint: '0.4' }))).toBe(false);
   });
 
-  it('a blend mode that could read the destination is refused', () => {
-    // Both admitted modes happen to leave the destination alone at source alpha 0, and they are
-    // refused anyway: the rule is written about SOURCE-OVER, and a future mode need not be so kind.
-    expect(isEmpty(c, at({ BlendMode: 'PlusLighter' }))).toBe(false);
-    expect(isEmpty(c, at({ BlendMode: 'Screen' }))).toBe(false);
-    expect(isEmpty(c, at({ BlendMode: 'Normal' }))).toBe(true);
+  it('a composite that could read the destination is refused', () => {
+    // SAME RULE, NEW SPELLING. `BlendMode` was the authoring surface for this and it is gone; the
+    // FOREGROUND zone of the additive color is that surface now (Core/Lift.ts). The rule is written
+    // about SOURCE-OVER: a panel whose own ink ADDS is not compositing `x * 1 + c * 0`, so
+    // withholding its quad is not provably a no-op. It was inert while `BlendMode` reached no draw
+    // call; it is live now.
+    expect(isEmpty(c, at({ Filter: 'Lift(18)' }))).toBe(false);
+    expect(isEmpty(c, at({ Filter: 'Lift(-20)' }))).toBe(false);
+    expect(isEmpty(c, at({ Lift: 'rgb(255,255,255) 30' }))).toBe(false);
+    expect(isEmpty(c, at({ Lift: 'None' }))).toBe(true);
+    expect(isEmpty(c, at({}))).toBe(true);
   });
 
   it('an Image background is refused whatever its placeholder says: the CPU cannot read a texture', () => {

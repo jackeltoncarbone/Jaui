@@ -128,7 +128,6 @@ interface _PanelLocs {
   glassSkip:      WebGLUniformLocation | null;
   glassGate:      WebGLUniformLocation | null;
   // `BlendMode: Screen`'s premultiplied output. Declared by every panel program; 0 on every other draw.
-  premulOut:      WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -170,7 +169,6 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   borderGather:   gl.getUniformLocation(p, 'u_BorderGather'),
   glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
   glassGate:      gl.getUniformLocation(p, 'u_GlassGate'),
-  premulOut:      gl.getUniformLocation(p, 'u_PremulOut'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -1817,8 +1815,6 @@ export class WebGL2Renderer implements Renderer {
     // `?glass-gates`' new gates: every bit set on a glass draw, so every one of them is TRUE and
     // runs the code it fences. A null location (every program but a `+<gate>` cut) is a no-op.
     gl.uniform1i(locs.glassGate, isGlass ? GLASS_GATE_OPEN : 0);
-    // Set on every batch for the reason `glassAdapt` is: a uniform outlives the draw that set it.
-    gl.uniform1f(locs.premulOut, this._premulOut);
     if (isGlass && this.DiagGlassSkipCensus) this._noteGlassFragments();
     // On EVERY armed arm, `nogather` included: the fragment counts are a property of the rim's
     // geometry and not of which program shades it, and two arms whose census disagreed could not be
@@ -4973,23 +4969,28 @@ export class WebGL2Renderer implements Renderer {
     this._gl.disable(this._gl.BLEND);
   };
 
-  /** 1 while a Screen draw is in flight: the panel program multiplies its rgb by its alpha on the way
-   *  out, because screen's destination factor needs `src * srcA` and no blend factor forms a product. */
-  private _premulOut = 0;
-
-  /** The blend for ONE draw that composes against the destination rather than over it. Every mode keeps
-   *  the destination's ALPHA except PlusLighter and Screen, which accumulate coverage the way
-   *  `EnableBlend` does. The panel and text programs write STRAIGHT alpha (rgb, coverage), so the
-   *  coverage is applied by the SRC_ALPHA factor and a half-covered edge pixel gets half:
+  /** The blend for ONE draw that composes against the destination rather than over it. Four states:
+   *  two SIGNS times two ZONES of the additive color (Core/Lift.ts). The `Lift*` pair is the additive
+   *  SHAPE draw and keeps the destination's ALPHA (`ZERO, ONE`), so a transparent element stays
+   *  transparent; the `Plus*` pair is the element's own INK adding or subtracting and accumulates
+   *  coverage the way `EnableBlend` does.
    *
-   *    LiftAdd       FUNC_ADD                rgb  dst + src*srcA            (Lift(n), n > 0)
-   *    LiftSubtract  FUNC_REVERSE_SUBTRACT   rgb  dst - src*srcA            (Lift(n), n < 0)
-   *    PlusLighter   FUNC_ADD                rgb  dst + src*srcA
-   *    Screen        FUNC_ADD, premul src    rgb  src*srcA + dst*(1 - src*srcA)
+   *  The panel and text programs write STRAIGHT alpha (rgb, coverage), so the coverage is applied by
+   *  the SRC_ALPHA factor and a half-covered edge pixel gets half:
    *
-   *  A premultiplied source would take ONE where these take SRC_ALPHA; given one with SRC_ALPHA it would
-   *  be scaled by its coverage twice and every antialiased edge would come out thin. Undone by
-   *  `RestoreBlend`, which the caller owes before anything else draws. */
+   *    LiftAdd       FUNC_ADD                rgb  dst + src*srcA     alpha  dst   (amount > 0)
+   *    LiftSubtract  FUNC_REVERSE_SUBTRACT   rgb  dst - src*srcA     alpha  dst   (amount < 0)
+   *    PlusLighter   FUNC_ADD                rgb  dst + src*srcA     alpha  accumulates
+   *    PlusDarker    FUNC_REVERSE_SUBTRACT   rgb  dst - src*srcA     alpha  accumulates
+   *
+   *  `SRC_ALPHA` AND NOT `ONE`, on every one of them. A premultiplied source would take `ONE`; given
+   *  one with `SRC_ALPHA` it would be scaled by its coverage twice and every antialiased edge would
+   *  come out thin (a-squared instead of a). Every state here reads a straight source.
+   *
+   *  `Screen` was the fifth and it is GONE with `BlendMode`. It was the only one that needed a
+   *  premultiplied source -- its destination factor is `1 - src*a` and no blend factor forms a product
+   *  -- which is why `u_PremulOut` existed and why it left too. Undone by `RestoreBlend`, which the
+   *  caller owes before anything else draws. */
   SetCompositeBlend = (kind: CompositeBlend): void => {
     const gl = this._gl;
     gl.enable(gl.BLEND);
@@ -5006,10 +5007,9 @@ export class WebGL2Renderer implements Renderer {
         gl.blendEquation(gl.FUNC_ADD);
         gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         break;
-      case 'Screen':
-        gl.blendEquation(gl.FUNC_ADD);
-        gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-        this._premulOut = 1;
+      case 'PlusDarker':
+        gl.blendEquationSeparate(gl.FUNC_REVERSE_SUBTRACT, gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         break;
     }
     this._sceneLedger.BlendSwitches++;
@@ -5021,7 +5021,6 @@ export class WebGL2Renderer implements Renderer {
     const gl = this._gl;
     gl.blendEquation(gl.FUNC_ADD);
     this.EnableBlend();
-    this._premulOut = 0;
     this._sceneLedger.BlendSwitches++;
   };
 

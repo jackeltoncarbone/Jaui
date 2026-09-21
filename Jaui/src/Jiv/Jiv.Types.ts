@@ -1,4 +1,6 @@
 import type { Color } from '../Core/Types';
+// Type-only, so the Lift <-> Jiv.Types cycle is erased at compile time.
+import type { LiftDeclaration } from '../Core/Lift';
 import type { Transform } from '../Transform/Transform.Types';
 import type { FitMode } from '../Element/Element';
 
@@ -74,19 +76,12 @@ export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRigh
  *    • Dark / Light: always black / always white, whatever the theme (glass over video or a camera). */
 export type TintTone = 'Ground' | 'Ink' | 'Dark' | 'Light';
 
-/** How this element's OWN paint (fill, border, shadow, its own text) composes onto everything already
- *  painted beneath it: CSS `mix-blend-mode`, PascalCased.
- *    • Normal       source-over.
- *    • PlusLighter  additive: `dst + src * coverage` per channel, clipping at white (CSS `plus-lighter`,
- *                   Canvas 2D `lighter`). For LIGHT: a glow, a specular, an emissive sprite.
- *    • Screen       `1 - (1 - dst)(1 - src)` at coverage: lightens like an add but rolls off into white
- *                   instead of clipping. Refused on an element that paints text (the text program has
- *                   no premultiplied output, and screen cannot be coverage-correct without one).
- *  Not a group: descendants paint Normal unless they say otherwise, and the element's own layers blend
- *  one draw at a time. No other CSS mode is admitted, because a value that reached no draw call would
- *  be a silent no-op. Distinct from `BackdropFilter: Lift(n)`, which adds a constant UNDER the element
- *  and never touches its ink. */
-export type BlendMode = 'Normal' | 'PlusLighter' | 'Screen';
+/* `BlendMode` was here. It was the authoring surface for `PlusLighter` and `Screen` -- CSS
+ * `mix-blend-mode`, PascalCased -- and it is GONE, not deprecated. The FOREGROUND zone of the
+ * additive color is that surface now (`Filter: Lift(<color>, <amount>)`, Core/Lift.ts), which is the
+ * same idea with the color the property always needed. `Screen` left with it: it is not additive and
+ * not a color offset, it is a different equation, and no site in the app wanted it. `CompositeBlend`
+ * in Core/Lift.ts remains the internal name for the GL state, which is what it always was. */
 
 /**
  * Authorable style — every numeric / dimensional / color / transform field is
@@ -152,7 +147,21 @@ export interface JivStyle {
   BorderRadiusSmoothness: string;
   // Fill
   Background: string;
-  BlendMode: BlendMode;
+
+  /** THE ADDITIVE COLOR, as an INHERITED property -- the one that cascades, like `color` (Core/Lift.ts).
+   *
+   *      Lift: rgb(255, 255, 255) @JwiftWashLift     // a color then a signed amount, 0-255 units
+   *      Lift: None                                  // the reset, per node AND its subtree
+   *      Lift: Inherit                               // the initial value: take the ancestor's
+   *
+   *  Set it on a container and the container lifts its backdrop AND every descendant's own paint adds
+   *  instead of covering. The same color-then-amount pair `Lift()` takes, because it is one idea with
+   *  one spelling wherever it appears. `Isolate: true` is the subtree barrier -- the value neither
+   *  arrives nor leaves -- and it is the same word that already stops the `Filter` cascade.
+   *
+   *  Additive STACKS: a label on an additive card adds twice. That is what light does, and it costs no
+   *  render target, which is the whole reason this shape is affordable. */
+  Lift: string;
 
   // ── Filters (CSS-shaped, ordered function lists) ──────────────────
   // One property per zone; each is a space-separated list of PascalCase
@@ -370,7 +379,17 @@ export interface JivRenderStyle {
   BorderRadiusSmoothness: number;
 
   Background: BackgroundValue;
-  BlendMode: BlendMode;
+
+  /** `Lift:`'s resolved declaration for THIS node, before the cascade: `'Inherit'` (not authored),
+   *  `'None'` (the reset) or the authored value. The walk turns it into `Element.EffectiveLift`. */
+  LiftDeclaration: LiftDeclaration;
+  /** `Filter: Lift()`'s amount, a signed fraction of full scale. The element's own ink ADDS. */
+  ForegroundLift: number;
+  /** `Filter: Lift()`'s color, 0..1 per channel. White when the one-argument spelling was used. */
+  ForegroundLiftColor: Color;
+  /** `BackdropFilter: Lift()`'s color, 0..1 per channel. White when the one-argument spelling was
+   *  used, which is what keeps `Lift(18)` byte-identical. */
+  BackdropLiftColor: Color;
 
   Frost: number;
   BackdropFrostBlur: number;

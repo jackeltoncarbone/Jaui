@@ -14,8 +14,11 @@
  * Supported functions:
  *   Brightness(x)  Saturate(x)  Contrast(x)   — scalar grade multipliers
  *   Blur(len)                                 — a Length (frost / LOD octave)
- *   Lift(n)                                   — BackdropFilter only: a signed constant, in 0-255
- *                                               units, added to every channel (see Core/Lift.ts)
+ *   Lift(n) / Lift(color, n)                  — Filter + BackdropFilter: an ADDITIVE COLOR, a color
+ *                                               times a signed amount in 0-255 units. On the
+ *                                               BACKDROP it lifts what is under the element; on the
+ *                                               FOREGROUND the element's own ink adds instead of
+ *                                               covering. `Lift(n)` is white times n. See Core/Lift.ts
  *
  * … with one exception: the `fresnel` zone takes Brightness + Saturate ONLY, and
  * REFUSES Blur() and Contrast() rather than accepting and ignoring them. See the
@@ -87,8 +90,14 @@ export interface ParsedFilter {
   Saturation: number;
   /** Contrast multiplier. Identity 1. */
   Contrast: number;
-  /** `Lift(n)` as a fraction of full scale (n / 255), signed. Identity 0. Backdrop zone only. */
+  /** `Lift()`'s amount as a fraction of full scale (n / 255), signed. Identity 0. Backdrop and
+   *  foreground zones (the place says which side of the element it touches -- Core/Lift.ts). */
   Lift: number;
+  /** `Lift()`'s color as AUTHORED, still a string, because the resolver may need to resolve a var in
+   *  it and the parse cache is keyed by string. `null` means the one-argument spelling, which is
+   *  WHITE -- kept as null rather than a white Color so `Lift(18)` allocates nothing and stays
+   *  byte-identical to what shipped. */
+  LiftColor: string | null;
   /** Raw Length string for the zone's blur (frost px for BackdropFilter, LOD
    *  octave offset for BorderFilter); null when no Blur() was authored. The
    *  resolver resolves this under the live context. */
@@ -145,7 +154,7 @@ export const AssignStyleWithFilterMerge = (
   }
 };
 
-const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, BlurRaw: null, ForegroundBlur: null };
+const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, LiftColor: null, BlurRaw: null, ForegroundBlur: null };
 
 const _cacheBackdrop = new Map<string, ParsedFilter>();
 // Its own, now that the zones accept different functions: `Lift()` parses on the backdrop and throws
@@ -153,7 +162,58 @@ const _cacheBackdrop = new Map<string, ParsedFilter>();
 const _cacheBorder = new Map<string, ParsedFilter>();
 const _cacheForeground = new Map<string, ParsedFilter>();
 const _cacheFresnel = new Map<string, ParsedFilter>();
-const _FN = /([A-Za-z]+)\s*\(([^)]*)\)/g;
+/** Split a function list into (name, argument) pairs, counting parentheses so a function may take
+ *  ANOTHER function as an argument -- which `Lift(rgb(255, 220, 180), 18)` does. The regex this
+ *  replaced was `/([A-Za-z]+)\s*\(([^)]*)\)/g`, and `[^)]*` stops at the FIRST `)`: it read that
+ *  string as `Lift(rgb(255, 220, 180)` and then found no second function, so the amount vanished
+ *  and the lift silently became 0. Nothing caught it, because a dropped argument is not a parse
+ *  error. Returns null at the first malformed token rather than skipping it. */
+export const SplitFilterFunctions = (raw: string): { Name: string; Arg: string }[] | null => {
+  const out: { Name: string; Arg: string }[] = [];
+  let i = 0;
+  const n = raw.length;
+  while (i < n) {
+    while (i < n && !/[A-Za-z]/.test(raw[i])) {
+      // Only whitespace and commas separate functions; anything else is a malformed list.
+      if (!/[\s,]/.test(raw[i])) return null;
+      i++;
+    }
+    if (i >= n) break;
+    const nameStart = i;
+    while (i < n && /[A-Za-z]/.test(raw[i])) i++;
+    const name = raw.slice(nameStart, i);
+    while (i < n && /\s/.test(raw[i])) i++;
+    if (i >= n || raw[i] !== '(') return null;
+    i++; // past '('
+    const argStart = i;
+    let depth = 1;
+    while (i < n && depth > 0) {
+      if (raw[i] === '(') depth++;
+      else if (raw[i] === ')') depth--;
+      if (depth > 0) i++;
+    }
+    if (depth !== 0) return null; // unbalanced
+    out.push({ Name: name, Arg: raw.slice(argStart, i) });
+    i++; // past the matching ')'
+  }
+  return out;
+};
+
+/** Split a function's argument on its TOP-LEVEL commas, so `rgb(255, 220, 180), 18` is two arguments
+ *  and not four. */
+export const SplitTopLevelArgs = (arg: string): string[] => {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < arg.length; i++) {
+    const ch = arg[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (ch === ',' && depth === 0) { out.push(arg.slice(start, i)); start = i + 1; }
+  }
+  out.push(arg.slice(start));
+  return out.map((p) => p.trim()).filter((p) => p.length > 0);
+};
 
 /** Map an edge keyword to the pblur direction (the edge that ramps to fully
  *  blurred). `EdgeProgressiveBlur(Top, …)` blurs AT the top, clear toward the
@@ -215,14 +275,21 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
     return IDENTITY;
   }
 
-  const out: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, BlurRaw: null, ForegroundBlur: null };
-  _FN.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  let matched = false;
-  while ((m = _FN.exec(trimmed)) !== null) {
-    matched = true;
-    const fn = m[1].toLowerCase();
-    const arg = m[2].trim();
+  const out: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, LiftColor: null, BlurRaw: null, ForegroundBlur: null };
+  // `null` is a MALFORMED list (an unbalanced paren, a bare token, a name with no call). It has to
+  // throw rather than fall through as "nothing matched", because a filter string the author wrote and
+  // the engine silently dropped is the exact failure the old regex had.
+  const fns = SplitFilterFunctions(trimmed);
+  if (fns === null) {
+    throw new Error(
+      `[Jaui] Could not parse filter "${raw}" — expected a function list like "Brightness(1.1) Saturate(1.2)". ` +
+      'Check for an unbalanced parenthesis or a value outside a function.',
+    );
+  }
+  const matched = fns.length > 0;
+  for (const f of fns) {
+    const fn = f.Name.toLowerCase();
+    const arg = f.Arg.trim();
     switch (fn) {
       case 'brightness': out.Brightness = _num(arg, 'Brightness', raw); break;
       case 'saturate':   out.Saturation = _num(arg, 'Saturate', raw); break;
@@ -231,10 +298,24 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
         out.Contrast = _num(arg, 'Contrast', raw);
         break;
       case 'lift': {
-        if (zone !== 'backdrop') throw new Error(_refuseLift(zone, raw));
-        const n = _num(arg, 'Lift', raw);
+        // The BACKDROP zone lifts what is under the element; the FOREGROUND zone makes the element's
+        // own ink add instead of cover. Both take the same value. The rim zones still refuse: they
+        // grade their own gather, and there is nothing beneath a stroke to add to.
+        if (zone !== 'backdrop' && zone !== 'foreground') throw new Error(_refuseLift(zone, raw));
+        const parts = SplitTopLevelArgs(arg);
+        if (parts.length > 2) {
+          throw new Error(
+            `[Jaui] Lift() takes <amount> or <color>, <amount>; got ${parts.length} arguments in "${raw}".`,
+          );
+        }
+        // One argument is the amount against WHITE. Two is a color and an amount. `LiftColor: null`
+        // IS white -- the one-argument form must stay byte-identical, so it allocates no color and
+        // takes no different code path downstream.
+        const amountRaw = parts.length === 2 ? parts[1] : parts[0];
+        const n = _num(amountRaw, 'Lift', raw);
         if (Math.abs(n) > 255) throw new Error(`[Jaui] Lift() takes a signed amount of 255, got ${n} in "${raw}".`);
         out.Lift = n / 255;
+        out.LiftColor = parts.length === 2 ? parts[0] : null;
         break;
       }
       case 'blur':
@@ -257,9 +338,9 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
       default:
         throw new Error(
           zone === 'fresnel'
-            ? `[Jaui] Unknown BorderFresnelFilter function "${m[1]}" in "${raw}". The Fresnel takes Brightness and Saturate only.`
-            : `[Jaui] Unknown filter function "${m[1]}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
-              (zone === 'foreground' ? ', LinearProgressiveBlur, EdgeProgressiveBlur.' : zone === 'backdrop' ? ', Lift.' : '.'),
+            ? `[Jaui] Unknown BorderFresnelFilter function "${f.Name}" in "${raw}". The Fresnel takes Brightness and Saturate only.`
+            : `[Jaui] Unknown filter function "${f.Name}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
+              (zone === 'foreground' ? ', Lift, LinearProgressiveBlur, EdgeProgressiveBlur.' : zone === 'backdrop' ? ', Lift.' : '.'),
         );
     }
   }
@@ -362,13 +443,15 @@ const _refuseInFresnel = (fn: string, raw: string): string =>
     : 'The Fresnel derives its color from the gather the border zone already sampled, at the LOD that ' +
       'the BorderFilter Blur() chose. Author the radius there.');
 
-/** `Lift()` belongs to the backdrop. Each other zone already has the tool the author meant. */
+/** `Lift()` touches one side of the element, and the two RIM zones are neither side: a border and a
+ *  Fresnel grade their own gather, and there is nothing beneath a stroke for an additive color to add
+ *  to. The backdrop and foreground zones both take it (Core/Lift.ts). */
 const _refuseLift = (zone: FilterZone, raw: string): string =>
-  `[Jaui] Lift() is a BackdropFilter function; got it on the ${zone} zone in "${raw}". ` +
-  (zone === 'foreground'
-    ? 'Filter already grades the whole element, ink included (Brightness/Contrast); an element that should ADD its own ' +
-      'paint onto what is below it is BlendMode: PlusLighter.'
-    : 'The rim grades its own gather with Brightness/Saturate/Contrast.');
+  `[Jaui] Lift() is an additive color for the element's BACKDROP or its FOREGROUND; got it on the ` +
+  `${zone} zone in "${raw}". The rim grades its own gather with Brightness/Saturate/Contrast, and a ` +
+  `stroke has no backdrop of its own to add to. Author the lift on BackdropFilter (what is under the ` +
+  `element lifts), on Filter (the element's own paint adds), or as the inherited Lift property (both, ` +
+  `and it cascades).`;
 
 const _num = (arg: string, fn: string, raw: string): number => {
   const n = parseFloat(arg);
