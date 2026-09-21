@@ -576,3 +576,33 @@ describe('Jiv.Panel.frag - the same ten bits, every gate present, none of it out
     expect(main.indexOf('GlassSkirtCut()')).toBeLessThan(main.indexOf('clipStackDistance('));
   });
 });
+
+// -- 5. THE CACHE KEY (added at fold, 2026-09-20) ---------------------------------------------------
+//
+// A census miss costs ~53 ms of CPU per instance on this box. Keyed on all 60 floats, the cache missed
+// on every frame of glass-grid while the adaptive shadow eased: 40 x 53 ms inside the draw batch, a
+// two-second frame and a black canvas under `?glass-skip=none`. The key is now the geometry the census
+// reads, with the rect origin as its pixel-centre phase.
+describe('the census cache key is the geometry the census reads', () => {
+  it('a shadow change and a whole-pixel move HIT; a width change MISSES', () => {
+    censusOf(FILL, 0);
+    const shadow = new Float32Array(FILL); shadow[23] = shadow[23] + 1e-3;
+    const t0 = performance.now(); censusOf(shadow, 0); const t1 = performance.now();
+    const moved = new Float32Array(FILL); moved[0] = moved[0] + 40; moved[1] = moved[1] + 40;
+    const t2 = performance.now(); censusOf(moved, 0); const t3 = performance.now();
+    const wider = new Float32Array(FILL); wider[2] = wider[2] + 2;
+    const t4 = performance.now(); censusOf(wider, 0); const t5 = performance.now();
+    expect(t1 - t0).toBeLessThan(5);
+    expect(t3 - t2).toBeLessThan(5);
+    expect(t5 - t4).toBeGreaterThan(5);
+    expect(censusOf(moved, 0)).toEqual(censusOf(FILL, 0));
+  });
+  it('the key offsets are exactly the offsets the census reads', () => {
+    const src = readFileSync(new URL('../src/Core/Glass.Skip.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    const body = src.slice(src.indexOf('export const GlassInstanceCensus'));
+    const reads = new Set([...body.matchAll(/O\.([A-Za-z]+)( \+ ([0-9]))?/g)].map((m) => m[1] + (m[3] ?? '')));
+    reads.delete('RectX'); reads.delete('RectY');
+    const keyed = new Set([...src.slice(src.indexOf('GLASS_CENSUS_KEY_OFFSETS'), src.indexOf('];', src.indexOf('GLASS_CENSUS_KEY_OFFSETS'))).matchAll(/O\.([A-Za-z]+)( \+ ([0-9]))?/g)].map((m) => m[1] + (m[3] ?? '')));
+    expect([...keyed].sort()).toEqual([...reads].sort());
+  });
+});

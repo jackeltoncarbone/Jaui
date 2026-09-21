@@ -117,6 +117,13 @@ const O = {
   LightAngle: 40, SpecIntensity: 44, Ca: 46, SpecPacked: 47, BorderVariance: 50, ClipCount: 55,
 } as const;
 
+/** Every instance float `GlassInstanceCensus` reads other than the rect origin (which enters the key
+ *  as its fractional part). Exported so a test can assert it against the reads in the source. */
+export const GLASS_CENSUS_KEY_OFFSETS: readonly number[] = [
+  O.RectW, O.RectH, O.Cos, O.Sin, O.HalfW, O.HalfH, O.Radii, O.Radii + 1, O.Radii + 2, O.Radii + 3,
+  O.BorderWidth, O.EdgeAa, O.Smooth, O.Thickness, O.Bezel, O.BezelScale, O.LightAngle, O.SpecIntensity,
+  O.Ca, O.SpecPacked, O.BorderVariance, O.ClipCount,
+];
 const smoothstep = (e0: number, e1: number, x: number): number => {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
@@ -176,8 +183,17 @@ const CACHE_MAX = 256;
 export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): GlassFragCensus => {
   const c = EmptyGlassFragCensus();
   if (d[b + O.Cos] > 1.5) { c.Projective = 1; return c; }
-  let key = String(mask);
-  for (let i = 0; i < 60; i++) key += ',' + d[b + i];
+  // THE CACHE KEY IS THE GEOMETRY THE CENSUS READS, NOT THE WHOLE INSTANCE. A miss costs ~53 ms of
+  // CPU per instance (measured 2026-09-20 on the lane's own fixtures), and a key over all 60 floats
+  // missed on EVERY frame of glass-grid while the adaptive shadow eased - 40 misses x 53 ms inside
+  // the draw batch, a two-second frame and a black canvas under `?glass-skip=none`. The counts are
+  // translation-invariant up to the pixel-centre PHASE of the rect origin, so the origin enters
+  // as its fractional part and a grid scrolling by whole pixels hits too. Offsets listed once, in
+  // the order `O` declares them; any new read in `fragment` must be added here or the cache lies.
+  const fx = d[b + O.RectX] - Math.floor(d[b + O.RectX]);
+  const fy = d[b + O.RectY] - Math.floor(d[b + O.RectY]);
+  let key = String(mask) + ',' + fx + ',' + fy;
+  for (const o of GLASS_CENSUS_KEY_OFFSETS) key += ',' + d[b + o];
   const hit = _cache.get(key);
   if (hit !== undefined) return hit;
 
