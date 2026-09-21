@@ -281,6 +281,18 @@ export interface GlassGroupCensus {
   Refused: string;
 }
 
+/** `?shadow-probe`, per rendered frame. `Probes` / `Batches` / `Ends` read 20 / 20 / 19 walked and
+ *  20 / 1 / 0 grouped on glass-grid; `Moved` must read 0 and `Grouped` the members probed at capture. */
+export interface ShadowProbeCensus {
+  Mode: 'walk' | 'group';
+  Probes: number;
+  Batches: number;
+  Ends: number;
+  Grouped: number;
+  Moved: number;
+  Refused: string;
+}
+
 /** `?glass-skip`, per rendered frame. `Draws` and `Census.Frags` must read the same on every arm
  *  as on `none` -- the arms change what a glass fragment DOES, never which draws run or how big
  *  they are -- and `Census.Taps` against `Census.TapsFull` is what a stage removed. */
@@ -303,6 +315,7 @@ import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer, PANEL_PROGRAM_COUNT } from './WebGL2.Renderer';
+import type { ShadowProbe } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
@@ -403,6 +416,8 @@ interface FillPyramid {
  *  about the walk and not about the plan. */
 interface GlassGroup {
   Members: Jiv[];
+  /** Each member's own fill plan, in member order: what `?shadow-probe=group` probes with. */
+  Plans: GlassBlurPlan[];
   /** The sigma every member shares, in device px. `PlanBackdropUnion`'s `radius`. */
   Radius: number;
   Plan: BackdropUnionPlan;
@@ -907,6 +922,35 @@ export class Canvas implements DirtyTracker {
   private _glassGroupStats = {
     Groups: 0, Builds: 0, Members: 0, Fallbacks: 0, Solo: 0, MaxLod: 0, Unplanned: 0, Rects: '',
   };
+  /** `?shadow-probe=walk|group` -- WHERE A GROUP MEMBER'S ADAPTIVE-SHADOW PROBE RUNS.
+   *
+   *  `walk` (the default while measured) is today: each member probes just before its own draw.
+   *  Under `?glass-group` the builds no longer end the scene's encoder per card, so that probe's
+   *  1x1 `shadow-state` bind does instead -- `EndsByKey` `{blur:1, shadow-state:19}` on glass-grid,
+   *  twenty scene segments either way. `group` probes EVERY member at the group's capture, beside
+   *  its one build, in one bind (`MeasureShadowBackdrops`), where the build has already ended the
+   *  encoder: the group's members then draw in ONE scene segment.
+   *
+   *  PIXEL-NEUTRAL wherever nothing painted between group entry and member N's draw lands inside
+   *  member N's probe footprint, which is member N's own box plus the half-texel of a linear tap.
+   *  The pyramid half of the reading is the group's handle in both arms; only the sharp scene tap
+   *  moves in time, and it reads the same texels. On glass-grid the nearest foreign paint is a
+   *  neighbour's shadow quad, 32 px (sideways) / 36 px (vertically) outside its face, against a
+   *  40 px gap: 8 / 4 px clear. `Shadow.Probe.test.ts` pins it on the real walk's own draws. On a
+   *  page whose members overlap, the capture reads the bed where the walk read the neighbour --
+   *  the rule the group already applies to the fill, and the one Jack ruled.
+   *
+   *  The ease is unchanged: same slot, same dt, same snap, one probe per member per frame. */
+  private _shadowProbe: 'walk' | 'group' = 'walk';
+  private _shadowProbeRefused = '';
+  private _shadowProbeLastLine = '';
+  /** The slot each member's probe wrote at the group's capture, with the rect it probed so the walk
+   *  can check the member it draws is the one that was measured. */
+  private _groupShadow = new Map<Jiv, { Slot: number; Adaptive: number; Rect: { x: number; y: number; w: number; h: number } }>();
+  /** `Grouped`: members whose draw took a capture-time reading. `Moved`: members probed at the
+   *  capture whose walk rect differed, or who fell back off the group after it was probed -- it
+   *  must read 0; a non-zero reading voids the cell. */
+  private _shadowProbeStats = { Grouped: 0, Moved: 0 };
   /** `?glass-skip` -- THE GLASS DRAW'S STAGE ABLATIONS. `null` is unarmed (today's engine, no
    *  census); a number is the `u_GlassSkip` mask every glass draw uploads, 0 for `none`, the control
    *  that prints the census at no GPU cost. Picture-DIFFERENT instruments by design; default off.
@@ -3335,7 +3379,7 @@ export class Canvas implements DirtyTracker {
           //
           // It is asked BEFORE `preFill` rather than after, and the flag parse refuses
           // `?blur-first` and `?blur-phased` by name, so the two can never both answer.
-          const groupFill = this._glassGroup ? this._glassGroupTake(node, region, w, h) : null;
+          const groupFill = this._glassGroup ? this._glassGroupTake(node, region, w, h, dt) : null;
           if (groupFill !== null) {
             lastBackdrop = groupFill;
           } else if (preFill !== undefined) {
@@ -3394,7 +3438,16 @@ export class Canvas implements DirtyTracker {
         const _rs = node.RenderStyle;
         const _shadowScene = sceneSnap ?? r.SceneTexture;
         const preShadow = this._phasedWalk ? this._phasedShadow.get(node) : undefined;
-        if (preShadow !== undefined) {
+        // `?shadow-probe=group`: measured at the group's capture, beside its one build. See
+        // `_shadowProbe` for why that reads the same texels the probe below would read here.
+        const groupShadow = this._shadowProbe === 'group' ? this._groupShadow.get(node) : undefined;
+        if (groupShadow !== undefined) {
+          const gr = groupShadow.Rect;
+          if (gr.x !== px || gr.y !== py || gr.w !== pw || gr.h !== ph) this._shadowProbeStats.Moved++;
+          shadowBackdrop = { Slot: groupShadow.Slot, Adaptive: groupShadow.Adaptive };
+          this._shadowProbeStats.Grouped++;
+          this._adaptiveShadowsDrawn = true;
+        } else if (preShadow !== undefined) {
           // `?blur-phased`: measured in phase 2, beside this surface's own build, where the probe's
           // `shadow-state` bind rides the end the build already paid. Here, in pass 3, the scene is
           // bound and a draw has landed since the last end, so probing would END the scene encoder
@@ -3946,6 +3999,24 @@ export class Canvas implements DirtyTracker {
       if (line !== this._glassGroupLastLine) {
         this._glassGroupLastLine = line;
         for (const l of lines) JTrace(l);
+      }
+    }
+
+    // `?shadow-probe`'s gate, on both arms and on a SHAPE change. `probes` against `batches` is the
+    // move itself (20 / 20 walked, 20 / 1 grouped on glass-grid); `ends` is the column it exists to
+    // move, `EndsByKey['shadow-state']` (19 walked, 0 grouped: the batch's bind lands on the scene
+    // the build already ended); `switches` is the frame's scene segments less one. `moved` must read
+    // 0, and `grouped` must equal the group's members, or the arm measured something else.
+    if (this._glassGroup && !this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+      const gl2 = this._renderer;
+      const sp = this._shadowProbeStats;
+      const line = `jaui:shadow-probe mode=${this._shadowProbe} probes=${gl2.ShadowProbes}`
+        + ` batches=${gl2.ShadowProbeBinds} ends=${gl2.SceneEndsByKey['shadow-state'] ?? 0}`
+        + ` grouped=${sp.Grouped} moved=${sp.Moved}`
+        + ` blur=${gl2.SceneEndsByKey['blur'] ?? 0} switches=${gl2.SceneSwitches}`;
+      if (line !== this._shadowProbeLastLine) {
+        this._shadowProbeLastLine = line;
+        JTrace(line);
       }
     }
 
@@ -5588,6 +5659,9 @@ export class Canvas implements DirtyTracker {
   private _glassGroupPrepass = (w: number, h: number): void => {
     this._glassGroups.clear();
     this._glassGroupHandles.clear();
+    this._groupShadow.clear();
+    this._shadowProbeStats.Grouped = 0;
+    this._shadowProbeStats.Moved = 0;
     const st = this._glassGroupStats;
     st.Groups = 0; st.Builds = 0; st.Members = 0; st.Fallbacks = 0;
     st.Solo = 0; st.MaxLod = 0; st.Unplanned = 0; st.Rects = '';
@@ -5679,7 +5753,9 @@ export class Canvas implements DirtyTracker {
       const radius = members[0].Plan.Radius;
       const plan = PlanBackdropUnion(members.map((m) => m.Plan.Region), w, h, radius);
       if (plan === null) { st.Unplanned += members.length; st.Fallbacks += members.length; return; }
-      const group: GlassGroup = { Members: members.map((m) => m.Node), Radius: radius, Plan: plan };
+      const group: GlassGroup = {
+        Members: members.map((m) => m.Node), Plans: members.map((m) => m.Plan), Radius: radius, Plan: plan,
+      };
       for (const m of members) this._glassGroups.set(m.Node, group);
       st.Groups++;
       rects.push(`${plan.RectW}x${plan.RectH}@k${plan.K}/d${plan.Depth}x${members.length}`);
@@ -5721,7 +5797,7 @@ export class Canvas implements DirtyTracker {
    *  smear rather than as a crash. It falls back to its own build and says so on the gate.
    */
   private _glassGroupTake = (
-    node: Jiv, region: { x: number; y: number; w: number; h: number }, w: number, h: number,
+    node: Jiv, region: { x: number; y: number; w: number; h: number }, w: number, h: number, dt: number,
   ): GpuTextureHandle | null => {
     const g = this._glassGroups.get(node);
     if (g === undefined) return null;
@@ -5729,6 +5805,9 @@ export class Canvas implements DirtyTracker {
     if (!(r instanceof WebGL2Renderer) || !_regionContains(g.Plan.Region, region)) {
       this._glassGroups.delete(node);
       this._glassGroupStats.Fallbacks++;
+      // Probed at the capture against a pyramid it will not now sample: the walk probes it again
+      // against its own, and the gate's `moved=` says the cell is void.
+      if (this._groupShadow.delete(node)) this._shadowProbeStats.Moved++;
       return null;
     }
     const have = this._glassGroupHandles.get(node);
@@ -5749,13 +5828,48 @@ export class Canvas implements DirtyTracker {
     r.GenerateBlurMipmap(0);
     this._opMs.Blur += t1 - t0;
     this._opMs.Mip += performance.now() - t1;
-    r.RebindSceneTarget();
+    // `?shadow-probe=group`: every member's probe, here, where the build has just ended the scene's
+    // encoder and before any member paints. The batch rebinds the scene itself.
+    if (this._shadowProbe !== 'group' || !this._glassGroupProbe(r, g, handle, dt)) r.RebindSceneTarget();
     for (const m of g.Members) this._glassGroupHandles.set(m, handle);
     const st = this._glassGroupStats;
     st.Builds++;
     st.Members++;
     r.NoteGroupMember();
     return handle;
+  };
+
+  /** `?shadow-probe=group`: THE GROUP'S ADAPTIVE-SHADOW PROBES, taken at its capture.
+   *
+   *  The walk's own arguments, from the plan the scan recorded for each member -- the rect, the
+   *  detail LOD off the member's frost and base LOD, the group's handle as the pyramid, the live
+   *  scene as the sharp tap -- exactly as `_phasedShadowProbes` takes them from `_phasedBuilt`.
+   *  A member that takes a raw-scene SNAPSHOT is left to the walk: its sharp tap is that snapshot,
+   *  taken at its own point in the walk, and there is no snapshot here to hand it. None does on
+   *  glass-grid (every class there authors frost).
+   *
+   *  False when no member qualified, so the caller still owes the scene its rebind. */
+  private _glassGroupProbe = (r: WebGL2Renderer, g: GlassGroup, handle: GpuTextureHandle, dt: number): boolean => {
+    const d = this._dpr;
+    const probes: ShadowProbe[] = [];
+    const nodes: Jiv[] = [];
+    for (let i = 0; i < g.Members.length; i++) {
+      const plan = g.Plans[i];
+      if (!plan.AdaptiveShadow || plan.InstFrostLod < SCENE_TAP_FROST_LOD) continue;
+      probes.push({
+        Key: g.Members[i],
+        Rect: { x: plan.Px, y: plan.Py, w: plan.Pw, h: plan.Ph },
+        DetailLod: Math.log2(Math.max(plan.FrostCssPx, SHADOW_DETAIL_MIN_PT) * d) - plan.BaseFrostLod,
+      });
+      nodes.push(g.Members[i]);
+    }
+    if (probes.length === 0) return false;
+    const slots = r.MeasureShadowBackdrops(probes, handle, r.SceneTexture, dt);
+    for (let i = 0; i < nodes.length; i++) {
+      if (slots[i] < 0) continue;
+      this._groupShadow.set(nodes[i], { Slot: slots[i], Adaptive: nodes[i].RenderStyle.ShadowAdaptive, Rect: probes[i].Rect });
+    }
+    return true;
   };
 
   /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px).
@@ -7979,6 +8093,56 @@ export class Canvas implements DirtyTracker {
           Blur: on ? (r.SceneEndsByKey['blur'] ?? 0) : 0,
           Rects: st.Rects,
           Refused: this._glassGroupRefused,
+        };
+      };
+    }
+
+    // `?shadow-probe=walk|group` -- WHERE A GROUP MEMBER'S ADAPTIVE-SHADOW PROBE RUNS.
+    //
+    // DEFAULT `walk`, today's engine byte for byte, while the M4 prices `group`; see `_shadowProbe`.
+    // Parsed after `?glass-group`'s refusals, because `group` probes AT that arm's capture and
+    // there is nothing to probe at without one. Refused BY NAME, most specific first, so a refused
+    // cell says which flag did it rather than only that the group was off:
+    //   `?blur-phased`      runs its own probe pass (`_phasedShadowProbes`) beside its own builds;
+    //   `?scene-restarts` / `?small-restarts`  insert their point AFTER the walk's probe and price
+    //                       a segment count this arm moves;
+    //   `?shadow-snap=off`  a measured arm of the probe's ease, held to the probe it was measured on;
+    //   `?glass-group=off`  (or refused) no group, no capture to probe at.
+    if (params.has('shadow-probe')) {
+      const raw = (params.get('shadow-probe') ?? '').trim();
+      if (raw !== 'walk' && raw !== 'group') {
+        throw new Error(`[Jaui] ?shadow-probe takes 'walk' or 'group', got '${raw}'`);
+      }
+      this._shadowProbe = raw;
+    }
+    if (this._shadowProbe === 'group') {
+      const why =
+        params.has('blur-phased') ? 'blur-phased-probes-in-its-own-pass-beside-its-own-builds'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-after-the-walk-probe-and-price-the-segments-this-arm-moves'
+        : !this._shadowSnapArmed ? 'shadow-snap-off-is-an-arm-of-the-probe-ease-held-to-the-walk-probe'
+        : !this._glassGroup ? 'glass-group-off-no-group-no-capture-to-probe-at'
+        : null;
+      if (why !== null) {
+        this._shadowProbe = 'walk';
+        this._shadowProbeRefused = why;
+      }
+    }
+    JTrace(`jaui:shadow-probe armed=${this._shadowProbe} default=${!params.has('shadow-probe')} pixels=SAME`
+      + (this._shadowProbeRefused !== '' ? ` reason=${this._shadowProbeRefused}` : ''));
+    {
+      const g = globalThis as unknown as { __jauiShadowProbe?: () => ShadowProbeCensus };
+      g.__jauiShadowProbe = () => {
+        const r = this._renderer;
+        const on = r instanceof WebGL2Renderer;
+        return {
+          Mode: this._shadowProbe,
+          Probes: on ? r.ShadowProbes : 0,
+          Batches: on ? r.ShadowProbeBinds : 0,
+          Ends: on ? (r.SceneEndsByKey['shadow-state'] ?? 0) : 0,
+          Grouped: this._shadowProbeStats.Grouped,
+          Moved: this._shadowProbeStats.Moved,
+          Refused: this._shadowProbeRefused,
         };
       };
     }

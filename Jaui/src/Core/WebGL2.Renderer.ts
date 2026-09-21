@@ -264,6 +264,15 @@ interface _CardTarget {
  *  ON -- see `PANEL_PROGRAM_BORDER_DIRECT`. This constant is the count an UNFLAGGED page compiles,
  *  which is exactly what the three marks that print it are claiming. */
 export const PANEL_PROGRAM_COUNT = 5;
+
+/** One adaptive-shadow probe of a `MeasureShadowBackdrops` batch: `MeasureShadowBackdrop`'s own
+ *  per-surface arguments, the pyramid and the sharp tap being the group's and shared. */
+export interface ShadowProbe {
+  Key: object;
+  Rect: { x: number; y: number; w: number; h: number };
+  DetailLod: number;
+}
+
 /** The SIXTH variant, `MATERIAL_GLASS + BORDER_DIRECT`: the glass program with the border zone's
  *  one backdrop tap gathered from a blit of the scene instead of read out of a pyramid. It is a
  *  sixth copy of the biggest fragment shader in the engine, and a page that did not arm
@@ -805,6 +814,9 @@ export class WebGL2Renderer implements Renderer {
   get GroupBuilds(): number { return this._sceneLedger.GroupBuilds; }
   get GroupMembers(): number { return this._sceneLedger.GroupMembers; }
   get GroupFallbacks(): number { return this._sceneLedger.GroupFallbacks; }
+  /** `?shadow-probe`'s effect field: probes drawn, and state-target binds they took. */
+  get ShadowProbes(): number { return this._sceneLedger.ShadowProbes; }
+  get ShadowProbeBinds(): number { return this._sceneLedger.ShadowProbeBinds; }
   get GlassDraws(): number { return this._sceneLedger.GlassDraws; }
   get GlassCensus(): GlassFragCensus { return this._sceneLedger.GlassCensus; }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
@@ -3416,6 +3428,10 @@ export class WebGL2Renderer implements Renderer {
   /** Probes that wrote a whole reading on the last snap frame. Reset when a snap frame begins. */
   ShadowSnapped = 0;
 
+  /** Set for the duration of `MeasureShadowBackdrops`: the state target is already bound and the
+   *  scene is rebound once after the last probe, so each probe skips its own bind and rebind. */
+  private _shadowBatch = false;
+
   MeasureShadowBackdrop = (
     key: object,
     rect: { x: number; y: number; w: number; h: number },
@@ -3453,9 +3469,14 @@ export class WebGL2Renderer implements Renderer {
 
     const program = this._shadowShader!;
     const locs = this._shadowLocs!;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this._shadowStateFbo);
-    this._tgt('shadow-state');
-    const timed = this._pass !== null && this._pass.Begin('shadow');
+    const batched = this._shadowBatch;
+    if (!batched) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this._shadowStateFbo);
+      this._tgt('shadow-state');
+      this._sceneLedger.NoteShadowProbeBind();
+    }
+    this._sceneLedger.NoteShadowProbe();
+    const timed = !batched && this._pass !== null && this._pass.Begin('shadow');
     gl.viewport(entry.Slot, 0, 1, 1);
     gl.disable(gl.SCISSOR_TEST);
     // A new surface takes its first reading whole; after that each frame moves a time-based share toward
@@ -3493,9 +3514,48 @@ export class WebGL2Renderer implements Renderer {
     gl.bindVertexArray(this._quad.Vao);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
     gl.blendColor(0, 0, 0, 0);
-    this.RebindSceneTarget();
+    if (!batched) this.RebindSceneTarget();
     if (timed) this._pass!.End();
     return entry.Slot;
+  };
+
+  /** `?shadow-probe=group`: every probe of one glass group, in ONE bind of the state target.
+   *
+   *  Each probe is exactly the one `MeasureShadowBackdrop` takes alone -- same slot claim, same ease,
+   *  same snap, same uniforms, same draw into its own texel -- with the bind hoisted out and the
+   *  scene rebound once after the last. Called beside the group's build, where the build has just
+   *  ended the scene's encoder, so the one bind lands on a clean scene and ends nothing: the group's
+   *  twenty cards then draw in one scene segment instead of twenty.
+   *
+   *  A CARD TARGET REFUSES IT. The card resolve in `MeasureShadowBackdrop` binds framebuffers of its
+   *  own ahead of the state bind, which inside a held bind would draw a probe into the card; the
+   *  group already refuses `?cardcomposite` by name, so reaching here with one open is a caller bug.
+   *
+   *  Returns one slot per probe, in order, -1 where the row had no free slot. */
+  MeasureShadowBackdrops = (
+    probes: readonly ShadowProbe[],
+    backdrop: GpuTextureHandle,
+    scene: GpuTextureHandle,
+    dtSeconds: number,
+  ): number[] => {
+    if (this._activeCard !== null) {
+      throw new Error('[Jaui] MeasureShadowBackdrops: a card target is open; a batched probe cannot hold the state bind across its resolve');
+    }
+    const gl = this._gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this._shadowStateFbo);
+    this._tgt('shadow-state');
+    this._sceneLedger.NoteShadowProbeBind();
+    const timed = this._pass !== null && this._pass.Begin('shadow');
+    const slots: number[] = [];
+    this._shadowBatch = true;
+    try {
+      for (const p of probes) slots.push(this.MeasureShadowBackdrop(p.Key, p.Rect, p.DetailLod, backdrop, scene, dtSeconds));
+    } finally {
+      this._shadowBatch = false;
+    }
+    this.RebindSceneTarget();
+    if (timed) this._pass!.End();
+    return slots;
   };
 
   EndShadowBackdropFrame = (): void => {

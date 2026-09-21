@@ -177,6 +177,13 @@ export class SceneReadLedger {
   GroupBuilds = 0;
   GroupMembers = 0;
   GroupFallbacks = 0;
+  /** `?shadow-probe`: adaptive-shadow probes this frame, and the binds of the 1x1 state target they
+   *  took. The walk arm binds once per probe (`binds == probes`); `group` binds once per group.
+   *  Neither column is an encoder END - `EndsByKey['shadow-state']` is, and it moves only when a
+   *  bind lands on a dirty scene - so the triple `probes / binds / ends` is what the gate prints:
+   *  20 / 20 / 19 on glass-grid today, 20 / 1 / 0 under `group`. */
+  ShadowProbes = 0;
+  ShadowProbeBinds = 0;
   /** `?glass-skip`: GLASS DRAWS this frame (panel batches shaded by the glass program), and the
    *  fragment census of every instance they drew -- `frags=` and `taps=` on the gate line, the
    *  denominator the M4's per-fragment reading needs. Booked only while the flag is armed (`none`
@@ -223,6 +230,8 @@ export class SceneReadLedger {
     this.GroupBuilds = 0;
     this.GroupMembers = 0;
     this.GroupFallbacks = 0;
+    this.ShadowProbes = 0;
+    this.ShadowProbeBinds = 0;
     this.GlassDraws = 0;
     this.GlassCensus = EmptyGlassFragCensus();
     this._written = false;
@@ -318,6 +327,12 @@ export class SceneReadLedger {
 
   /** `n` glass fills no group covered, which built one at a time exactly as they do today. */
   NoteGroupFallback = (n: number): void => { this.GroupFallbacks += n; };
+
+  /** One adaptive-shadow probe drew into its slot of the state row. */
+  NoteShadowProbe = (): void => { this.ShadowProbes++; };
+
+  /** The 1x1 state target was bound for one or more probes. */
+  NoteShadowProbeBind = (): void => { this.ShadowProbeBinds++; };
 
   /** One glass batch drew; `census` is its instances' fragment census under the armed mask. */
   NoteGlassDraw = (census: GlassFragCensus): void => {
