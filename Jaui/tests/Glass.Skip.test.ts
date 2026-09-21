@@ -37,7 +37,9 @@ import {
 import {
   GlassBatchPredicates, GlassProgramFor, ParseGlassPrograms, ParseGlassReg,
   GLASS_OFF_BORDER_EDGE_AA, GLASS_OFF_FRESNEL_STRENGTH, GLASS_OFF_SPECULAR_INTENSITY,
+  ParseGlassGates, GLASS_GATE_BARRIERS, GLASS_GATE_OPEN, type GlassGateBarrier,
 } from '@jaui/Core/Glass.Programs';
+import { OnJauiTrace } from '@jaui/Diagnostics/Jaui.Trace';
 import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber } from './Scene.ReadAfterWrite.Source';
 import { preprocess, codeLines, readPanelFrag } from './Flat.Program.Source';
 
@@ -775,5 +777,149 @@ describe('the census cache key is the geometry the census reads', () => {
     reads.delete('RectX'); reads.delete('RectY');
     const keyed = new Set([...src.slice(src.indexOf('GLASS_CENSUS_KEY_OFFSETS'), src.indexOf('];', src.indexOf('GLASS_CENSUS_KEY_OFFSETS'))).matchAll(/O\.([A-Za-z]+)( \+ ([0-9]))?/g)].map((m) => m[1] + (m[3] ?? '')));
     expect([...keyed].sort()).toEqual([...reads].sort());
+  });
+});
+
+// -- 6. ?glass-gates (lane gatebisect) ---------------------------------------------------------------
+//
+// The arm compiles the glass family again with gates removed (the ten, one at a time) or added (new
+// TRUE gates). The walk must not notice: same draws, same quads, same floats, under every arm. The
+// draw site binds the arm's family in place of the boot family and changes nothing else. The new
+// gate word is uploaded as GLASS_GATE_OPEN on every glass draw of every arm - including the
+// shipped one, where no program declares it and the location is null.
+
+const BARRIER_NAMES = Object.keys(GLASS_GATE_BARRIERS) as GlassGateBarrier[];
+
+interface GatesCensus { Armed: string; Removed: string[]; Barriers: string[]; Programs: number; Refused: string }
+const gatesCensus = (): GatesCensus =>
+  (globalThis as unknown as { __jauiGlassGates: () => GatesCensus }).__jauiGlassGates();
+const gatesKey = (w: Walked): string | undefined => (w.Mutable.DiagGlassGates as { Key: string } | null)?.Key;
+
+/** A walk with the engine's marks captured, so a refusal is read off the line that prints it. */
+const walkMarked = (search: string): { W: Walked; Marks: string[] } => {
+  const marks: string[] = [];
+  OnJauiTrace((m) => marks.push(m));
+  try {
+    return { W: walk(search), Marks: marks };
+  } finally {
+    OnJauiTrace(null);
+  }
+};
+
+describe('?glass-gates on glass-grid - the walk draws the same draws under every arm', () => {
+  const off = walk('');
+
+  it('unflagged: off, nothing handed to the renderer, the mark says so', () => {
+    const { W, Marks } = walkMarked('');
+    expect(W.Mutable.DiagGlassGates).toBeNull();
+    expect(gatesCensus()).toMatchObject({ Armed: 'off', Removed: [], Barriers: [], Programs: 0, Refused: '' });
+    expect(Marks).toContain('jaui:glass-gates armed=off programs=0 default=true pixels=SAME');
+  });
+
+  it('every single gate removed, all ten, every new gate, and all of them: the same draws, the same floats', () => {
+    const arms = [...SINGLE, 'all', ...BARRIER_NAMES.map((b) => `+${b}`),
+      `all,${BARRIER_NAMES.map((b) => `+${b}`).join(',')}`];
+    for (const arm of arms) {
+      const { W, Marks } = walkMarked(`?glass-gates=${encodeURIComponent(arm)}`);
+      const parsed = ParseGlassGates(arm)!;
+      expect(gatesKey(W), arm).toBe(parsed.Key);
+      expect(gatesCensus().Programs, arm).toBe(3);
+      expect(Marks, arm).toContain(`jaui:glass-gates armed=${parsed.Key} programs=3 default=false pixels=SAME`);
+      // Draw count, extents and every instance float: the walk never reads the arm.
+      expect(glassDraws(W).length, arm).toBe(40);
+      expect(shape(W), arm).toEqual(shape(off));
+    }
+  });
+
+  it('a `+` typed in the URL arrives as a space and still means a new gate', () => {
+    const w = walk('?glass-gates=+lod,+grad');
+    expect(gatesKey(w)).toBe('+lod,+grad');
+    expect(shape(w)).toEqual(shape(off));
+  });
+
+  it('?glass-programs=off composes: the full program is cut the same way, the draws do not move', () => {
+    const w = walk('?glass-programs=off&glass-gates=backdrop');
+    expect(w.Mutable.DiagGlassPrograms).toBe('off');
+    expect(gatesKey(w)).toBe('backdrop');
+    expect(shape(w)).toEqual(shape(off));
+  });
+});
+
+describe('?glass-gates - refusals by name', () => {
+  it('?glass-skip with any non-zero mask is refused: the gates it would switch are the ones being priced', () => {
+    for (const q of ['?glass-gates=rim&glass-skip=sdf', '?glass-gates=%2Blod&glass-skip=all', '?glass-gates=all&glass-skip=border']) {
+      const w = walk(q);
+      expect(w.Census.Armed, q).toBe(false);
+      expect(w.Census.Refused, q).toBe('glass-gates-compiles-the-gates-away-add-glass-gates=off');
+      expect(w.Mutable.DiagGlassSkip, q).toBe(0);
+      expect(gatesKey(w), q).toBeDefined();
+    }
+  });
+
+  it('...and `none` composes: mask 0 is the shipped value, the census rides along', () => {
+    const w = walk('?glass-gates=all&glass-skip=none');
+    expect(w.Census.Armed).toBe(true);
+    expect(w.Census.Mask).toBe(0);
+    expect(gatesKey(w)).toBe('all');
+  });
+
+  it('?glass-reg is refused beside it, by name: both cut the glass family', () => {
+    for (const reg of ['scope', 'all', 'nogates'] as const) {
+      const { W, Marks } = walkMarked(`?glass-gates=all&glass-reg=${reg}`);
+      expect(W.Mutable.DiagGlassReg, reg).toBe('off');
+      expect(gatesKey(W), reg).toBe('all');
+      expect(Marks.find((m) => m.startsWith('jaui:glass-reg ')), reg)
+        .toBe('jaui:glass-reg armed=off programs=0 default=false pixels=SAME reason=glass-gates-cuts-the-glass-family-add-glass-gates=off');
+    }
+    // Unarmed gates leave ?glass-reg alone.
+    expect(walk('?glass-reg=nogates').Mutable.DiagGlassReg).toBe('nogates');
+  });
+
+  it('a name that is not a gate throws by name, and a removed gate written with `+` is refused', () => {
+    expect(() => walk('?glass-gates=shadows')).toThrow(/glass-gates.*got 'shadows'/);
+    expect(() => walk('?glass-gates=%2Brim')).toThrow(/'rim' is one of the ten gates/);
+  });
+});
+
+describe('?glass-gates at the draw site - its own family, the gate word uploaded open', () => {
+  const GATE = 'uniform1i(loc:glassGate, ';
+
+  it('every glass draw uploads GLASS_GATE_OPEN, on the shipped path too; a non-glass draw 0', () => {
+    expect(GLASS_GATE_OPEN).toBe(63);
+    for (const b of BARRIER_NAMES) expect(GLASS_GATE_OPEN & GLASS_GATE_BARRIERS[b], b).not.toBe(0);
+    const site = drawSite();
+    for (const inst of [FILL, RIM]) {
+      expect(site.Draw(inst, true, 0, false).filter((c) => c.startsWith(GATE))).toEqual([`${GATE}63)`]);
+    }
+    expect(site.Draw(FILL, false, 0, false).filter((c) => c.startsWith(GATE))).toEqual([`${GATE}0)`]);
+  });
+
+  it('binds its own family for every kind, throws by name when never compiled, and changes only the program', () => {
+    const site = drawSite();
+    const r = site.Renderer;
+    const base = { rim: site.Draw(RIM, true, 0, false), fill: site.Draw(FILL, true, 0, false) };
+    r.DiagGlassGates = ParseGlassGates('backdrop,+lod');
+    expect(() => site.Draw(FILL, true, 0, false)).toThrow(/\?glass-gates=backdrop,\+lod but its programs were never compiled/);
+    const locs = new Proxy({}, { get: (_t, key) => `loc:${String(key)}` });
+    const fam = (k: string) => ({ Shader: { Program: `program:gates-${k}` }, Locs: locs });
+    Object.assign(r as unknown as Record<string, unknown>, {
+      _glassGatePrograms: { full: fam('full'), borderOnly: fam('borderOnly'), noLight: fam('noLight') },
+      _glassGatesCut: 'backdrop,+lod',
+    });
+    const rim = site.Draw(RIM, true, 0, false);
+    const fill = site.Draw(FILL, true, 0, false);
+    expect(rim).toContain('useProgram(program:gates-borderOnly)');
+    expect(fill).toContain('useProgram(program:gates-noLight)');
+    const unbind = (c: string[]) => c.filter((x) => !x.startsWith('useProgram('));
+    expect(unbind(rim)).toEqual(unbind(base.rim));
+    expect(unbind(fill)).toEqual(unbind(base.fill));
+    r.DiagGlassPrograms = 'off';
+    expect(site.Draw(FILL, true, 0, false)).toContain('useProgram(program:gates-full)');
+    // A family cut for another arm is not this arm's.
+    r.DiagGlassGates = ParseGlassGates('sdf');
+    expect(() => site.Draw(FILL, true, 0, false)).toThrow(/\?glass-gates=sdf/);
+    // A non-glass draw never reaches the family.
+    r.DiagGlassGates = ParseGlassGates('backdrop,+lod');
+    expect(site.Draw(FILL, false, 0, false)).toContain('useProgram(program:none)');
   });
 });

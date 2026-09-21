@@ -24,7 +24,8 @@ import { SceneReadLedger } from './Scene.Ledger';
 import { EmptyGlassFragCensus, AddGlassFragCensus, GlassInstanceCensus, type GlassFragCensus } from './Glass.Skip';
 import {
   GLASS_PROGRAM_KINDS, GLASS_REG_DEFINES, GLASS_VARIANT_DEFINES, GlassBatchPredicates, GlassProgramFor,
-  type GlassProgramKind, type GlassProgramsArm, type GlassRegArm,
+  GLASS_GATE_OPEN, GlassGatesDefines,
+  type GlassProgramKind, type GlassProgramsArm, type GlassRegArm, type GlassGatesArm,
 } from './Glass.Programs';
 import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
 import { PACE_FENCE_RING, type PaceFenceSample } from './Tick.Pace';
@@ -120,6 +121,7 @@ interface _PanelLocs {
   // ── `?glass-skip`'s mask. Declared by the glass and non-glass programs, read only by the glass
   // one (`GlassSkips` is a constant false in the other, so it compiles out and this is null there).
   glassSkip:      WebGLUniformLocation | null;
+  glassGate:      WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -159,6 +161,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   borderTap:      gl.getUniformLocation(p, 'u_BorderTap'),
   borderGather:   gl.getUniformLocation(p, 'u_BorderGather'),
   glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
+  glassGate:      gl.getUniformLocation(p, 'u_GlassGate'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -280,6 +283,10 @@ export const GLASS_VARIANT_PROGRAMS = 2;
  *  `ArmFlaggedPrograms`) and never at boot, `PANEL_PROGRAM_BORDER_DIRECT`'s rule: the default is
  *  `off`, and a page that did not arm it never binds them. */
 export const GLASS_REG_PROGRAMS = 3;
+/** `?glass-gates`' programs: the same glass family cut with the arm's `GLASS_NO_GATE_*` /
+ *  `GLASS_GATE_*` defines. Compiled when the flag ARMS (`EnsureGlassGatePrograms`), never at boot,
+ *  by `GLASS_REG_PROGRAMS`' rule; the two flags never arm together (`Jaui` refuses `?glass-reg`). */
+export const GLASS_GATE_PROGRAMS = 3;
 
 /** One adaptive-shadow probe of a `MeasureShadowBackdrops` batch: `MeasureShadowBackdrop`'s own
  *  per-surface arguments, the pyramid and the sharp tap being the group's and shared. */
@@ -572,6 +579,10 @@ export class WebGL2Renderer implements Renderer {
   private _glassRegPrograms: Record<GlassProgramKind, _PanelProgram> | null = null;
   private _glassRegShaders: Record<GlassProgramKind, ShaderProgram> | null = null;
   private _glassRegCut: GlassRegArm = 'off';
+  /** `?glass-gates`' family, `_glassRegPrograms`' shape, cut for `_glassGatesCut` (an arm's `Key`). */
+  private _glassGatePrograms: Record<GlassProgramKind, _PanelProgram> | null = null;
+  private _glassGateShaders: Record<GlassProgramKind, ShaderProgram> | null = null;
+  private _glassGatesCut = '';
   /** MATERIAL_GLASS + BORDER_DIRECT: the glass program with the border zone's ONE backdrop tap
    *  computed from a blit of the scene instead of read out of a pyramid. Only ever bound for a
    *  `'GlassBorderOnly'` draw whose backdrop handle came out of `ComputeBorderDirect`; see
@@ -616,6 +627,9 @@ export class WebGL2Renderer implements Renderer {
    *  `ArmFlaggedPrograms` compiles for it. Default OFF on both sides of the worker boundary, for the
    *  reason `DiagBorderDirect` is: `Init` reads the default on the worker path however the URL read. */
   DiagGlassReg: GlassRegArm = 'off';
+  /** `?glass-gates`: null binds the boot family; an arm binds `_glassGatePrograms`, compiled for it
+   *  by `ArmFlaggedPrograms`. Default null on both sides of the worker boundary, `DiagGlassReg`'s rule. */
+  DiagGlassGates: GlassGatesArm | null = null;
   /** `?flat-program=off` sends every panel back through the full program. Default ON: the flat
    *  program is pixel-identical by construction, so the only reason to hold the old routing is to
    *  measure the two arms against each other in ONE binary. Set by `Jaui._initDebugFromUrl`. */
@@ -993,7 +1007,9 @@ export class WebGL2Renderer implements Renderer {
     // `?glass-reg`'s family, off the SURVIVING arm (`_initDebugFromUrl` has already taken its
     // refusals), in its own batch. 0 when the flag is off, which is the unflagged page.
     const reg = this.DiagGlassReg !== 'off' ? this.EnsureGlassRegPrograms() : 0;
-    const late = pool + atlas + border + gauss + reg;
+    // `?glass-gates`' family, on the same terms.
+    const gates = this.DiagGlassGates !== null ? this.EnsureGlassGatePrograms() : 0;
+    const late = pool + atlas + border + gauss + reg + gates;
     if (late === 0) return;
     const reason = [
       pool > 0 ? 'blur-pool' : null,
@@ -1001,6 +1017,7 @@ export class WebGL2Renderer implements Renderer {
       border > 0 ? 'border-direct' : null,
       this.DiagGlassGaussian !== 'off' ? 'glass-gaussian' : null,
       reg > 0 ? `glass-reg-${this.DiagGlassReg}` : null,
+      gates > 0 ? `glass-gates-${this.DiagGlassGates?.Key}` : null,
     ].filter((r) => r !== null).join('+');
     JTrace(`jaui:shaders:issued n=${this._bootShaderCount} +${late}`
       + ` reason=${reason} ${JMs(performance.now() - t0)}ms`);
@@ -1067,6 +1084,9 @@ export class WebGL2Renderer implements Renderer {
     this._glassRegShaders = null;
     this._glassRegPrograms = null;
     this._glassRegCut = 'off';
+    this._glassGateShaders = null;
+    this._glassGatePrograms = null;
+    this._glassGatesCut = '';
     this._shadowShader = null;
     this._shadowLocs = null;
     this._shadowStateTex = null;
@@ -1101,10 +1121,10 @@ export class WebGL2Renderer implements Renderer {
     // EIGHTEEN programs stand between a cold tab and its first pixel: the seven panel variants (two
     // of them the glass program's `?glass-programs` cuts), the text, stroke, two SVG, blit,
     // clip-mask, progressive-blur and adaptive-shadow singles, and the three kernels every
-    // `BlurPass` has. Nine programs are NOT here, and each is a flag's: the five a `BlurPass` binds
-    // only under an atlas arm, the eighth panel variant only `?border-direct` binds, and the three
-    // `?glass-reg` cuts -- see `ArmFlaggedPrograms`, `BlurPass._atlas`, `PANEL_PROGRAM_BORDER_DIRECT`
-    // and `GLASS_REG_PROGRAMS`.
+    // `BlurPass` has. Twelve programs are NOT here, and each is a flag's: the five a `BlurPass` binds
+    // only under an atlas arm, the eighth panel variant only `?border-direct` binds, the three
+    // `?glass-reg` cuts and the three `?glass-gates` cuts -- see `ArmFlaggedPrograms`,
+    // `BlurPass._atlas`, `PANEL_PROGRAM_BORDER_DIRECT`, `GLASS_REG_PROGRAMS` and `GLASS_GATE_PROGRAMS`.
     // Compiled one at a time —
     // compile, ask, link, ask — they run the driver's compiler pool one deep and the waits add up
     // in a line; issued together they overlap, and the whole set costs about what its slowest
@@ -1145,6 +1165,8 @@ export class WebGL2Renderer implements Renderer {
     if (this.DiagBorderDirect) this.EnsurePanelBorderDirectProgram(batch);
     // And for `?glass-reg`'s three, by the same rule.
     if (this.DiagGlassReg !== 'off') this.EnsureGlassRegPrograms(batch);
+    // And `?glass-gates`' three.
+    if (this.DiagGlassGates !== null) this.EnsureGlassGatePrograms(batch);
     this._compileTextShader(batch);
     this._compileStrokeShader(batch);
     this._compileSvgFillShader(batch);
@@ -1693,7 +1715,11 @@ export class WebGL2Renderer implements Renderer {
     // those arms measure.
     const glassKind = isGlass && !hasBorderScratch ? this._glassBatchKind() : null;
     // Under an armed `?glass-reg` every kind, `full` included, comes from that flag's family.
-    const reg = glassKind !== null && this.DiagGlassReg !== 'off' ? this._glassRegOrThrow(glassKind) : null;
+    // Under an armed `?glass-gates`, the same, from that flag's family.
+    const reg = glassKind === null ? null
+      : this.DiagGlassReg !== 'off' ? this._glassRegOrThrow(glassKind)
+      : this.DiagGlassGates !== null ? this._glassGatesOrThrow(glassKind)
+      : null;
     const isFlat = !isGlass
       && this.DiagFlatProgram
       && backdrop === null
@@ -1748,6 +1774,9 @@ export class WebGL2Renderer implements Renderer {
     // call stream, and the value is the only thing that differs. 0 on a non-glass draw whatever the
     // flag holds, so the mask can never reach a program the arm is not about.
     gl.uniform1i(locs.glassSkip, isGlass ? this.DiagGlassSkip : 0);
+    // `?glass-gates`' new gates: every bit set on a glass draw, so every one of them is TRUE and
+    // runs the code it fences. A null location (every program but a `+<gate>` cut) is a no-op.
+    gl.uniform1i(locs.glassGate, isGlass ? GLASS_GATE_OPEN : 0);
     if (isGlass && this.DiagGlassSkipCensus) this._noteGlassFragments();
     // On EVERY armed arm, `nogather` included: the fragment counts are a property of the rim's
     // geometry and not of which program shades it, and two arms whose census disagreed could not be
@@ -4621,6 +4650,7 @@ export class WebGL2Renderer implements Renderer {
     this._panelLocsGlassNoLight = _extractPanelLocs(gl, this._panelShaderGlassNoLight.Program);
     // `?glass-reg`'s family, when it joined THIS batch (main-thread order) and is not wired yet.
     if (this._glassRegShaders !== null && this._glassRegPrograms === null) this._wireGlassReg();
+    if (this._glassGateShaders !== null && this._glassGatePrograms === null) this._wireGlassGates();
     // The sixth variant's locations when this renderer HAS it and the batch that carried it has
     // been resolved by whoever owned that batch. `EnsurePanelBorderDirectProgram` wires its own
     // when it owns the batch, so this is the other case: it joined `Init`'s batch (main-thread
@@ -4691,6 +4721,56 @@ export class WebGL2Renderer implements Renderer {
       throw new Error(`[Jaui] a glass draw asked for ?glass-reg=${this.DiagGlassReg} but its programs were`
         + ' never compiled. They are issued when the flag arms, not at boot: call EnsureGlassRegPrograms'
         + ' (ArmFlaggedPrograms does it off DiagGlassReg).');
+    }
+    return family[kind];
+  };
+
+  /**
+   * Compile `?glass-gates`' family -- the three glass programs cut with the armed value's
+   * `GLASS_NO_GATE_*` / `GLASS_GATE_*` defines on top of their own -- and return how many were
+   * issued: `GLASS_GATE_PROGRAMS`, or 0 when this renderer already has them for this arm or the flag
+   * is off. `EnsureGlassRegPrograms`' shape, called from the same two places.
+   */
+  EnsureGlassGatePrograms = (batch?: ShaderBatch): number => {
+    const arm = this.DiagGlassGates;
+    if (arm === null) return 0;
+    if (this.DiagGlassReg !== 'off') {
+      throw new Error(`[Jaui] ?glass-gates=${arm.Key} and ?glass-reg=${this.DiagGlassReg} both cut the glass family;`
+        + ' Jaui refuses ?glass-reg beside ?glass-gates');
+    }
+    if (this._glassGateShaders !== null && this._glassGatesCut === arm.Key) return 0;
+    const b = batch ?? new ShaderBatch(this._gl);
+    const shaders = {} as Record<GlassProgramKind, ShaderProgram>;
+    for (const kind of GLASS_PROGRAM_KINDS) {
+      shaders[kind] = b.Add(panelVertSrc, panelFragSrc,
+        { MATERIAL_GLASS: true, ...GLASS_VARIANT_DEFINES[kind], ...GlassGatesDefines(arm) });
+    }
+    this._glassGateShaders = shaders;
+    this._glassGatePrograms = null;
+    this._glassGatesCut = arm.Key;
+    if (batch === undefined) { b.Resolve(); this._wireGlassGates(); }
+    return GLASS_GATE_PROGRAMS;
+  };
+
+  /** Read `?glass-gates`' locations, once per compile, after whichever batch carried it resolved. */
+  private _wireGlassGates = (): void => {
+    const shaders = this._glassGateShaders;
+    if (shaders === null) throw new Error('[Jaui] _wireGlassGates ran before the ?glass-gates programs existed');
+    const out = {} as Record<GlassProgramKind, _PanelProgram>;
+    for (const kind of GLASS_PROGRAM_KINDS) {
+      out[kind] = { Shader: shaders[kind], Locs: _extractPanelLocs(this._gl, shaders[kind].Program) };
+    }
+    this._glassGatePrograms = out;
+  };
+
+  /** `?glass-gates`' program for `kind`, or a throw naming what was not armed. */
+  private _glassGatesOrThrow = (kind: GlassProgramKind): _PanelProgram => {
+    const family = this._glassGatePrograms;
+    const key = this.DiagGlassGates?.Key ?? '';
+    if (family === null || this._glassGatesCut !== key) {
+      throw new Error(`[Jaui] a glass draw asked for ?glass-gates=${key} but its programs were never compiled.`
+        + ' They are issued when the flag arms, not at boot: call EnsureGlassGatePrograms'
+        + ' (ArmFlaggedPrograms does it off DiagGlassGates).');
     }
     return family[kind];
   };

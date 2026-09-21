@@ -97,6 +97,14 @@ flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lod
 //                       it was before lane glassdraw added them, keeping that lane's moved lines.
 //                       The arm that says whether the -43% of 62cfb35 was its line moves or its
 //                       branches.
+//   GLASS_NO_GATE_<S>   (lane gatebisect) ONE of those ten gates folded to false, S one of BACKDROP
+//                       CA RIM SPECULAR BORDER SDF GRADE SHADOW SKIRT CLIP; all ten together are
+//                       GLASS_NO_SKIP_GATES' text exactly. The bisect of what the ten were worth.
+//   GLASS_GATE_<S>      (lane gatebisect) a NEW uniform gate, TRUE on every draw, around one heavy
+//                       statement that runs unconditionally today, S one of BEZEL REFRACT LOD GRAD
+//                       ABSORB AMBIENT. The statements inside are the shipped ones; a value a gated
+//                       block hands on is declared ahead of the gate and assigned by the same
+//                       expression. A control-flow boundary and nothing else.
 #if !defined(MATERIAL_FLAT)
 // Dual-filter blurred backdrop pyramid (base sigma = u_BaseFrostLod equivalent).
 // Mipmapped — each integer LOD above the base ≈ doubles the effective sigma.
@@ -166,10 +174,70 @@ const int GLASS_SKIP_SHADOW   = 128;   // the drop shadow as 0
 const int GLASS_SKIP_SKIRT    = 256;   // discard outside the face's padded box, before anything
 const int GLASS_SKIP_CLIP     = 512;   // the clip stack as "inside everything"
 const vec3 GLASS_SKIP_FLAT = vec3(0.5);
-#if defined(MATERIAL_GLASS) && !defined(GLASS_NO_SKIP_GATES)
+// ?glass-gates' BISECT (`Core/Glass.Programs.ts`): GLASS_NO_GATE_<STAGE> compiles that one stage's
+// gate away, the way GLASS_NO_SKIP_GATES compiles all ten away, and nothing else. The call sites are
+// untouched; what changes is which bits `GlassSkips` can ever answer yes for. A stage whose bit is
+// out of GLASS_GATES_KEPT answers `(u_GlassSkip & 0) != 0` - a constant false once the call is
+// inlined, the same fold that turns GLASS_NO_SKIP_GATES' `return false` into no branch - so its gate
+// statement folds to the code its not-skipped side ran. With the mask at 0 on the uniform (the only
+// value `?glass-gates` allows beside it) every kept gate takes that side too: the same arithmetic on
+// every fragment, only the control flow differs. All ten defined is the `#else`: exactly the
+// GLASS_NO_SKIP_GATES line, so `?glass-gates=all` IS `?glass-reg=nogates`, byte for byte.
+#if defined(MATERIAL_GLASS) && !defined(GLASS_NO_SKIP_GATES) && !(defined(GLASS_NO_GATE_BACKDROP) || defined(GLASS_NO_GATE_CA) || defined(GLASS_NO_GATE_RIM) || defined(GLASS_NO_GATE_SPECULAR) || defined(GLASS_NO_GATE_BORDER) || defined(GLASS_NO_GATE_SDF) || defined(GLASS_NO_GATE_GRADE) || defined(GLASS_NO_GATE_SHADOW) || defined(GLASS_NO_GATE_SKIRT) || defined(GLASS_NO_GATE_CLIP))
 bool GlassSkips(int bit) { return (u_GlassSkip & bit) != 0; }
+#elif defined(MATERIAL_GLASS) && !defined(GLASS_NO_SKIP_GATES) && !(defined(GLASS_NO_GATE_BACKDROP) && defined(GLASS_NO_GATE_CA) && defined(GLASS_NO_GATE_RIM) && defined(GLASS_NO_GATE_SPECULAR) && defined(GLASS_NO_GATE_BORDER) && defined(GLASS_NO_GATE_SDF) && defined(GLASS_NO_GATE_GRADE) && defined(GLASS_NO_GATE_SHADOW) && defined(GLASS_NO_GATE_SKIRT) && defined(GLASS_NO_GATE_CLIP))
+const int GLASS_GATES_KEPT = 0
+#if !defined(GLASS_NO_GATE_BACKDROP)
+    | GLASS_SKIP_BACKDROP
+#endif
+#if !defined(GLASS_NO_GATE_CA)
+    | GLASS_SKIP_CA
+#endif
+#if !defined(GLASS_NO_GATE_RIM)
+    | GLASS_SKIP_RIM
+#endif
+#if !defined(GLASS_NO_GATE_SPECULAR)
+    | GLASS_SKIP_SPECULAR
+#endif
+#if !defined(GLASS_NO_GATE_BORDER)
+    | GLASS_SKIP_BORDER
+#endif
+#if !defined(GLASS_NO_GATE_SDF)
+    | GLASS_SKIP_SDF
+#endif
+#if !defined(GLASS_NO_GATE_GRADE)
+    | GLASS_SKIP_GRADE
+#endif
+#if !defined(GLASS_NO_GATE_SHADOW)
+    | GLASS_SKIP_SHADOW
+#endif
+#if !defined(GLASS_NO_GATE_SKIRT)
+    | GLASS_SKIP_SKIRT
+#endif
+#if !defined(GLASS_NO_GATE_CLIP)
+    | GLASS_SKIP_CLIP
+#endif
+    ;
+bool GlassSkips(int bit) { return (u_GlassSkip & (GLASS_GATES_KEPT & bit)) != 0; }
 #else
 bool GlassSkips(int bit) { return false; }
+#endif
+
+// ?glass-gates' EXTENSION: `+<stage>` puts a NEW uniform gate around a heavy statement that runs
+// unconditionally today. `u_GlassGate` is uploaded as GLASS_GATE_OPEN (every bit set) on every glass
+// draw (`WebGL2Renderer.PanelDrawBatch`), so each gate's condition is TRUE on the shipped path and
+// the statements inside run exactly as they do without it; the gate's only effect is the
+// control-flow boundary. Declared only in a program cut with one of the six defines, so the shipped
+// programs do not contain a token of it. The bit values are `Glass.Programs.GLASS_GATE_BARRIERS`.
+#if defined(MATERIAL_GLASS) && (defined(GLASS_GATE_BEZEL) || defined(GLASS_GATE_REFRACT) || defined(GLASS_GATE_LOD) || defined(GLASS_GATE_GRAD) || defined(GLASS_GATE_ABSORB) || defined(GLASS_GATE_AMBIENT))
+uniform int u_GlassGate;
+const int GLASS_BARRIER_BEZEL   = 1;     // the bezel hump: four smoothsteps into `bend` / `hump`
+const int GLASS_BARRIER_REFRACT = 2;     // the refraction offset: rotated normal, bulge, clamp
+const int GLASS_BARRIER_LOD     = 4;     // the rim blur LOD: rim boost, fwidth footprint, frost ramp
+const int GLASS_BARRIER_GRAD    = 8;     // ShapeGrad_inner, split from ShapeSDF_inner in CornerEval
+const int GLASS_BARRIER_ABSORB  = 16;    // the Beer-Lambert absorption: a vec3 pow
+const int GLASS_BARRIER_AMBIENT = 32;    // the hemispherical rim ambient: a pow and its composite
+bool GlassGate(int bit) { return (u_GlassGate & bit) != 0; }
 #endif
 
 // The `sdf` arm's substitute: the exact distance to the SHARP rectangle of the same half-size, and
@@ -789,11 +857,19 @@ void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
 
     // Outside the band (pillW 0 or 1) exactly one path runs; only the band pays
     // for both the superellipse and the polyline pill, then mixes them.
+    // `+grad`: a boundary between the distance's pow()s and the gradient's. A pure barrier - the
+    // gradient feeds the refraction, the border chain and the rim, so no amount makes it skippable.
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_GRAD)
+    if (GlassGate(GLASS_BARRIER_GRAD)) {
+#endif
     if (pillW <= 0.0) {
         distOut = dSuper;
         gradOut = ShapeGrad_inner(p, halfSize, vec2(rCorner), n);
         return;
     }
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_GRAD)
+    }
+#endif
     float dPill; vec2 gPill;
     SS_PillEval(p, halfSize, dPill, gPill);
     if (pillW >= 1.0) {
@@ -1233,10 +1309,26 @@ void main() {
     // dark band over a dark page, the icon that sits above the bar. Past it the bend reverses and pulls
     // the interior toward the edge, easing to flat by the width. About 12px outward at the outline and
     // 5px inward peaking mid-bezel on the iPhone, so the inward half carries 0.4 of the outward.
+    //
+    // `+bezel`: the two bands inside a gate, and the two values they hand on declared ahead of it and
+    // assigned by the same expressions. It could skip on an amount only where both readers vanish
+    // (Thickness x Refraction 0 AND ChromaticAberration 0); glass-grid has neither, so it is a
+    // pure barrier there.
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_BEZEL)
+    float bend;
+    float hump;
+    if (GlassGate(GLASS_BARRIER_BEZEL)) {
+#endif
     float outwardBand = smoothstep(0.0, s * 0.4, x) * (1.0 - smoothstep(s * 0.4, s, x));
     float inwardBand = smoothstep(s, (s + 1.0) * 0.5, x) * (1.0 - smoothstep((s + 1.0) * 0.5, 1.0, x));
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_BEZEL)
+    bend = 0.4 * inwardBand - outwardBand;
+    hump = max(inwardBand, outwardBand);
+    }
+#else
     float bend = 0.4 * inwardBand - outwardBand;
     float hump = max(inwardBand, outwardBand);
+#endif
 
     // ── Fill alpha (shape mask) ──
     // Silhouette AA is hardcoded ~0.5px — BorderBlur must NOT fade the
@@ -1292,6 +1384,14 @@ void main() {
 
 #if !defined(MATERIAL_FLAT)
     if (materialType == 1.0) {
+        // `+refract`: the offset chain inside a gate, `refractOffset` declared ahead of it and
+        // assigned by the same expression. It could skip on RefractionStrength exactly 0 (every
+        // term is multiplied by it and the clamp is then a no-op); glass-grid refracts, so here it
+        // is a pure barrier.
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_REFRACT)
+        vec2 refractOffset;
+        if (GlassGate(GLASS_BARRIER_REFRACT)) {
+#endif
         // Edge refraction: rotate the outward normal ~10° along the tangent,
         // then negate to sample INWARD (Show Studio's `-refract * edgeIntensity`).
         vec2 tangent = vec2(-normal.y, normal.x);
@@ -1315,7 +1415,11 @@ void main() {
             bulgeDisp = radialDir * domeProfile * bulgeMag;
         }
 
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_REFRACT)
+        refractOffset = (edgeDisp + bulgeDisp) * refractionStrength;
+#else
         vec2 refractOffset = (edgeDisp + bulgeDisp) * refractionStrength;
+#endif
 
         // Clamp the displacement so a strong Thickness×Refraction can't push the
         // sample past the panel's OWN footprint — beyond it lies the scissored
@@ -1327,6 +1431,9 @@ void main() {
         float _maxOff = min(panelHalfSize.x, panelHalfSize.y);
         float _offLen = length(refractOffset);
         if (_offLen > _maxOff) refractOffset *= _maxOff / _offLen;
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_REFRACT)
+        }
+#endif
 
         // The body's tap coordinates. A rim overlay (GLASS_BORDER_ONLY) takes no body tap and no
         // rim-specular tap, the only two readers of all five, so it computes none of them.
@@ -1366,6 +1473,14 @@ void main() {
         // the blur ramp over more of the interior so the rim↔center blur
         // difference doesn't read as a sharp ring. Gaussian-shaped falloff
         // (x * (2 - x)) gives a gentler inward dropoff than pure smoothstep.
+        //
+        // `+lod`: this whole computation inside a gate - every local it declares dies inside, and
+        // `lodBoost` is the outer one. It sits at the fill program's register peak (the map's `lod`
+        // column). It could skip on frostReq exactly 0 (a clear surface: the whole boost is
+        // multiplied by it); glass-grid is frosted, so here it is a pure barrier.
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_LOD)
+        if (GlassGate(GLASS_BARRIER_LOD)) {
+#endif
         float rimT = clamp(edgeDist / (bezelWidth * 2.5), 0.0, 1.0);
         float rimBoost = (1.0 - rimT) * (1.0 - rimT);
         // Refraction-footprint LOD. `sampleBackdrop` uses textureLod (explicit
@@ -1391,6 +1506,9 @@ void main() {
         // frost so clear glass refracts CRISP while frosted glass still hides folds.
         float frostReq = clamp((frostLod - u_BaseFrostLod) * 4.0, 0.0, 1.0);
         lodBoost = ((rimBoost * 1.5 + innerBlur * 1.0) * glassiness + refractLod) * frostReq;
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_LOD)
+        }
+#endif
         // Chromatic aberration splits the R/B taps by ±caStep along the normal.
         // caStep = normal * (ca * hump * 3) — and `hump` is ~0 across the entire
         // flat interior (decays to <2e-4 by x=3·bezel). So for the vast interior
@@ -1447,6 +1565,11 @@ void main() {
     // springs to/from zero (no seam at the variant boundary).
     // A rim overlay's `backdrop` reaches nothing (GLASS_BORDER_ONLY excludes the fill composite).
 #if !defined(GLASS_BORDER_ONLY)
+    // `+absorb`: a gate around the block. The block's own condition already skips on the
+    // per-instance amounts (Tint.a, glassiness), coherently; the gate adds the uniform boundary only.
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_ABSORB)
+    if (GlassGate(GLASS_BARRIER_ABSORB)) {
+#endif
     if (materialType == 1.0 && v_Tint.a > 0.001 && glassiness > 0.001) {
 #if defined(GLASS_REG_REMAT)
         edgeDist = max(-dist, 0.0);
@@ -1455,6 +1578,9 @@ void main() {
         vec3 absorb = pow(max(v_Tint.rgb, vec3(0.0001)), vec3(pathLength * v_Tint.a));
         backdrop *= absorb;
     }
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_ABSORB)
+    }
+#endif
 #endif
 
 #if defined(GLASS_REG)
@@ -1744,6 +1870,12 @@ void main() {
         // A rim overlay (GLASS_BORDER_ONLY) adds `rimAmbientRgb * 0.0` to an rgb of exactly +0,
         // which is +0 for every finite ambient: excluded, ambient and all.
 #if !defined(GLASS_BORDER_ONLY)
+        // `+ambient`: a gate around the ambient and its composite; every local dies inside. It could
+        // skip on EdgeLightTop and EdgeLightBottom both exactly 0 (the ambient is then +0 and the
+        // composite adds +0 * fillAlpha); it does not - the gate is TRUE on every draw.
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_AMBIENT)
+        if (GlassGate(GLASS_BARRIER_AMBIENT)) {
+#endif
         float hemiTop = max(-normal.y, 0.0);
         float hemiBottom = max(normal.y, 0.0);
         float hemiAmbient = (edgeLightTop * hemiTop + edgeLightBottom * hemiBottom);
@@ -1758,6 +1890,9 @@ void main() {
         //   4) Blinn-Phong specular catchlight (additive bright)
         //   5) hairline silhouette stroke
         result.rgb += rimAmbientRgb * fillAlpha;
+#if defined(MATERIAL_GLASS) && defined(GLASS_GATE_AMBIENT)
+        }
+#endif
 #endif
         result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
         result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;

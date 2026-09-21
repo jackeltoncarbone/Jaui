@@ -34,7 +34,8 @@ import {
 } from './BlurPass';
 import { EmptyGlassFragCensus, GlassSkipNames, ParseGlassSkip, GLASS_SKIP_STAGES, type GlassFragCensus } from './Glass.Skip';
 import {
-  GLASS_PROGRAMS_PREEMPT, ParseGlassPrograms, ParseGlassReg, type GlassProgramsArm, type GlassRegArm,
+  GLASS_PROGRAMS_PREEMPT, ParseGlassPrograms, ParseGlassReg, ParseGlassGates,
+  type GlassProgramsArm, type GlassRegArm, type GlassGatesArm,
 } from './Glass.Programs';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
 import {
@@ -308,6 +309,15 @@ export interface GlassProgramsCensus {
   Fallbacks: number;
 }
 
+/** `?glass-gates`: the arm as it survived its refusals, and the programs it compiled. */
+export interface GlassGatesCensus {
+  Armed: string;
+  Removed: readonly string[];
+  Barriers: readonly string[];
+  Programs: number;
+  Refused: string;
+}
+
 /** `?glass-skip`, per rendered frame. `Draws` and `Census.Frags` must read the same on every arm
  *  as on `none` -- the arms change what a glass fragment DOES, never which draws run or how big
  *  they are -- and `Census.Taps` against `Census.TapsFull` is what a stage removed. */
@@ -329,7 +339,7 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
-import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS } from './WebGL2.Renderer';
+import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS, GLASS_GATE_PROGRAMS } from './WebGL2.Renderer';
 import type { ShadowProbe } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
@@ -980,6 +990,10 @@ export class Canvas implements DirtyTracker {
   /** `?glass-reg` -- the glass family cut with a register-lifetime arm. Default `off` while it is
    *  measured. `scope` / `all` / `nogates`: see `Glass.Programs` and `Jiv.Panel.frag`. */
   private _glassReg: GlassRegArm = 'off';
+  /** `?glass-gates` -- the ten gates compiled away one at a time, and new TRUE gates compiled in.
+   *  Default null (off). See `Glass.Programs` and `Jiv.Panel.frag`. */
+  private _glassGates: GlassGatesArm | null = null;
+  private _glassGatesRefused = '';
   /** The last `jaui:glass-programs` gate line: the batch counts, printed when they change. */
   private _glassProgramsLastLine = '';
   /** `?emptypanels` -- A PANEL THAT PAINTS NOTHING IS NOT PUSHED. Default ON.
@@ -4071,7 +4085,8 @@ export class Canvas implements DirtyTracker {
     if (this._glassPrograms !== 'off' && this._renderer instanceof WebGL2Renderer) {
       const c = this._renderer.GlassProgramCensus;
       const line = `jaui:glass-programs armed=${this._glassPrograms} reg=${this._glassReg}`
-        + ` programs=${PANEL_PROGRAM_COUNT + (this._glassReg === 'off' ? 0 : GLASS_REG_PROGRAMS)}`
+        + ` programs=${PANEL_PROGRAM_COUNT + (this._glassReg === 'off' ? 0 : GLASS_REG_PROGRAMS)
+          + (this._glassGates === null ? 0 : GLASS_GATE_PROGRAMS)}`
         + ` borderOnlyBatches=${c.BorderOnly} noGlow=${c.NoGlow} noSpec=${c.NoSpec} fallbacks=${c.Fallbacks}`
         + ' pixels=SAME';
       if (line !== this._glassProgramsLastLine) { this._glassProgramsLastLine = line; JTrace(line); }
@@ -7588,6 +7603,13 @@ export class Canvas implements DirtyTracker {
     // Mac measures it. Swaps the glass family for the same three programs cut with a lifetime arm,
     // compiled when it arms (`ArmFlaggedPrograms`). Parsed HERE, ahead of `?glass-skip`, because
     // `?glass-skip` refuses beside whichever of them compiles its gated code away.
+    //
+    // `?glass-gates=<off|all|stage,...|+gate,...>` -- PIXEL-IDENTICAL BY CONSTRUCTION, DEFAULT OFF.
+    // `<stage>` compiles ONE of the ten `?glass-skip` gates away (GLASS_NO_GATE_<STAGE>; `all` is
+    // `?glass-reg=nogates` byte for byte); `+<gate>` compiles in a NEW uniform gate that is TRUE on
+    // every draw around a statement that runs unconditionally today. Its own three programs, compiled
+    // when it arms. Parsed ahead of `?glass-reg`, which it refuses by name: both cut the glass
+    // family, and a cell with both would price two things.
     {
       const r = this._renderer;
       const webgl2 = r instanceof WebGL2Renderer;
@@ -7596,11 +7618,29 @@ export class Canvas implements DirtyTracker {
       if (webgl2) (r as WebGL2Renderer).DiagGlassPrograms = this._glassPrograms;
       JTrace(`jaui:glass-programs armed=${this._glassPrograms} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}`
         + ` default=${!params.has('glass-programs')} pixels=SAME${webgl2 ? '' : ' reason=webgl2-only'}`);
+      const gates = ParseGlassGates(params.has('glass-gates') ? params.get('glass-gates') : null);
+      this._glassGates = webgl2 ? gates : null;
+      this._glassGatesRefused = !webgl2 && gates !== null ? 'webgl2-only' : '';
+      if (webgl2) (r as WebGL2Renderer).DiagGlassGates = this._glassGates;
+      JTrace(`jaui:glass-gates armed=${this._glassGates === null ? 'off' : this._glassGates.Key}`
+        + ` programs=${this._glassGates === null ? 0 : GLASS_GATE_PROGRAMS}`
+        + ` default=${!params.has('glass-gates')} pixels=SAME`
+        + (this._glassGatesRefused !== '' ? ` reason=${this._glassGatesRefused}` : ''));
       const reg = ParseGlassReg(params.has('glass-reg') ? params.get('glass-reg') : null);
-      this._glassReg = webgl2 ? reg : 'off';
+      const regBesideGates = this._glassGates !== null && reg !== 'off';
+      this._glassReg = webgl2 && !regBesideGates ? reg : 'off';
       if (webgl2) (r as WebGL2Renderer).DiagGlassReg = this._glassReg;
       JTrace(`jaui:glass-reg armed=${this._glassReg} programs=${this._glassReg === 'off' ? 0 : GLASS_REG_PROGRAMS}`
-        + ` default=${!params.has('glass-reg')} pixels=SAME${webgl2 || reg === 'off' ? '' : ' reason=webgl2-only'}`);
+        + ` default=${!params.has('glass-reg')} pixels=SAME${webgl2 || reg === 'off' ? '' : ' reason=webgl2-only'}`
+        + (regBesideGates ? ' reason=glass-gates-cuts-the-glass-family-add-glass-gates=off' : ''));
+      const gg = globalThis as unknown as { __jauiGlassGates?: () => GlassGatesCensus };
+      gg.__jauiGlassGates = () => ({
+        Armed: this._glassGates === null ? 'off' : this._glassGates.Key,
+        Removed: this._glassGates?.Removed ?? [],
+        Barriers: this._glassGates?.Barriers ?? [],
+        Programs: this._glassGates === null ? 0 : GLASS_GATE_PROGRAMS,
+        Refused: this._glassGatesRefused,
+      });
       const g = globalThis as unknown as { __jauiGlassPrograms?: () => GlassProgramsCensus };
       g.__jauiGlassPrograms = () => {
         const rr = this._renderer;
@@ -8246,6 +8286,8 @@ export class Canvas implements DirtyTracker {
           ? 'a-no-star-diagnostic-removes-the-glass-draws-this-arm-prices'
         : this._glassReg === 'nogates' && this._glassSkip !== 0
           ? 'glass-reg-nogates-compiles-the-ten-gates-away'
+        : this._glassGates !== null && this._glassSkip !== 0
+          ? 'glass-gates-compiles-the-gates-away-add-glass-gates=off'
         : this._glassSkipPreempted();
       if (why !== null) {
         this._glassSkip = null;

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BlurPass, BLUR_PROGRAMS_BOOT, BLUR_PROGRAMS_ATLAS } from '../src/Core/BlurPass';
 import {
-  PANEL_PROGRAM_COUNT, PANEL_PROGRAM_BORDER_DIRECT, GLASS_VARIANT_PROGRAMS, GLASS_REG_PROGRAMS,
+  PANEL_PROGRAM_COUNT, PANEL_PROGRAM_BORDER_DIRECT, GLASS_VARIANT_PROGRAMS, GLASS_REG_PROGRAMS, GLASS_GATE_PROGRAMS,
 } from '../src/Core/WebGL2.Renderer';
 import { FakeGl } from './Blur.Chains.Source';
 import { arrowBody, readRenderer, readJaui } from './Scene.ReadAfterWrite.Source';
@@ -294,8 +294,9 @@ describe('the boot set is every program an unflagged page can bind, and only tho
     expect(INIT).toContain('EIGHTEEN programs stand between a cold tab and its first pixel');
     expect(readFileSync(join(__dirname, '../src/Core/Shader.Compiler.ts'), 'utf8'))
       .toContain('EIGHTEEN IS THE UNFLAGGED SET');
-    // And the nine that are NOT in it are exactly the three flags' sets.
-    expect(BLUR_PROGRAMS_ATLAS + PANEL_PROGRAM_BORDER_DIRECT + GLASS_REG_PROGRAMS).toBe(9);
+    // And the twelve that are NOT in it are exactly the four flags' sets (lane gatebisect's
+    // `?glass-gates` family made it twelve).
+    expect(BLUR_PROGRAMS_ATLAS + PANEL_PROGRAM_BORDER_DIRECT + GLASS_REG_PROGRAMS + GLASS_GATE_PROGRAMS).toBe(12);
   });
 
   it('the restart probe and the instanced VAO stay where they are: off the boot batch', () => {

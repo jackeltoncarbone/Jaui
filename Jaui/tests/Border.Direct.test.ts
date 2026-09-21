@@ -299,8 +299,9 @@ describe('border-direct > the wiring, read off the source', () => {
     expect(arm).toContain(
       'const border = this.DiagBorderDirect ? this.EnsurePanelBorderDirectProgram() : 0;');
     expect(arm).toContain("border > 0 ? 'border-direct' : null,");
-    // `+ reg` since lane glassreg: `?glass-reg`'s family arms through the same method.
-    expect(arm).toContain('const late = pool + atlas + border + gauss + reg;');
+    // `+ reg` since lane glassreg: `?glass-reg`'s family arms through the same method; `+ gates`
+    // since lane gatebisect, `?glass-gates`' family the same way.
+    expect(arm).toContain('const late = pool + atlas + border + gauss + reg + gates;');
     // Init's copy is main-thread order only, where the parse runs first and it joins the boot batch.
     expect(RENDERER).toContain('if (this.DiagBorderDirect) this.EnsurePanelBorderDirectProgram(batch);');
     // The renderer's own default must AGREE with the flag's, or the worker path -- where Init runs
