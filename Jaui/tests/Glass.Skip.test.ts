@@ -34,6 +34,10 @@ import {
   GLASS_SKIP_STAGES, GLASS_SKIP_ALL, GlassSkipNames, ParseGlassSkip, GlassInstanceCensus,
   EmptyGlassFragCensus, type GlassSkipStage, type GlassFragCensus,
 } from '@jaui/Core/Glass.Skip';
+import {
+  GlassBatchPredicates, GlassProgramFor, ParseGlassPrograms, ParseGlassReg,
+  GLASS_OFF_BORDER_EDGE_AA, GLASS_OFF_FRESNEL_STRENGTH, GLASS_OFF_SPECULAR_INTENSITY,
+} from '@jaui/Core/Glass.Programs';
 import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber } from './Scene.ReadAfterWrite.Source';
 import { preprocess, codeLines, readPanelFrag } from './Flat.Program.Source';
 
@@ -257,8 +261,10 @@ describe('?glass-skip on glass-grid - the walk draws the same draws under every 
   });
 
   it('every single stage, and all ten: the same draws, the same quads, the mask on the renderer', () => {
+    // Beside `?glass-programs=off`, the arm's own meaning: every stage gates code the one glass
+    // program runs. (The default `on` refuses `rim` and `specular` by name; see the refusals.)
     for (const stage of [...SINGLE, 'all']) {
-      const w = walk(`?glass-skip=${stage}`);
+      const w = walk(`?glass-programs=off&glass-skip=${stage}`);
       const mask = stage === 'all' ? GLASS_SKIP_ALL : GLASS_SKIP_STAGES[stage as GlassSkipStage];
       expect(w.Census.Armed, stage).toBe(true);
       expect(w.Census.Mask, stage).toBe(mask);
@@ -269,7 +275,7 @@ describe('?glass-skip on glass-grid - the walk draws the same draws under every 
   });
 
   it('a comma list is the union of its stages', () => {
-    const w = walk('?glass-skip=rim,specular,border');
+    const w = walk('?glass-programs=off&glass-skip=rim,specular,border');
     expect(w.Census.Mask).toBe(4 | 8 | 16);
     expect(w.Census.Stages).toEqual(['rim', 'specular', 'border']);
     expect(shape(w)).toEqual(shape(off));
@@ -277,13 +283,13 @@ describe('?glass-skip on glass-grid - the walk draws the same draws under every 
 
   it('`?glass-group` (the default) COMPOSES: under it and without it, the arm moves no draw', () => {
     const groupOff = walk('?glass-group=off');
-    const groupOffArm = walk('?glass-group=off&glass-skip=all');
+    const groupOffArm = walk('?glass-group=off&glass-programs=off&glass-skip=all');
     expect(groupOffArm.Census.Armed).toBe(true);
     expect(shape(groupOffArm)).toEqual(shape(groupOff));
     // The group changes which pyramid each draw binds, never the draw: the per-draw shapes match
     // across the two group arms except the backdrop handle, which `shape` does not read.
     expect(shape(groupOff)).toEqual(shape(off));
-    const groupOn = walk('?glass-skip=all');
+    const groupOn = walk('?glass-programs=off&glass-skip=all');
     expect(new Set(glassDraws(groupOn).filter((d) => d.Site === 'fill').map((d) => d.Backdrop)).size).toBe(1);
     expect(new Set(glassDraws(groupOffArm).filter((d) => d.Site === 'fill').map((d) => d.Backdrop)).size).toBe(20);
   });
@@ -315,6 +321,42 @@ describe('?glass-skip - refusals by name, each falling back to the unflagged dra
 
   it('?no-glass-draw removes the draws this arm prices', () => {
     refused('?no-glass-draw&glass-skip=sdf', 'a-no-star-diagnostic-removes-the-glass-draws-this-arm-prices');
+  });
+
+  it('?glass-programs (default on) compiles the rim glow and the catchlight away from under their bits', () => {
+    refused('?glass-skip=rim', 'glass-programs-on-compiles-away-rim-add-glass-programs=off');
+    refused('?glass-skip=specular', 'glass-programs-on-compiles-away-specular-add-glass-programs=off');
+    refused('?glass-skip=all', 'glass-programs-on-compiles-away-rim-and-specular-add-glass-programs=off');
+    refused('?glass-programs=border-only&glass-skip=specular',
+      'glass-programs-border-only-compiles-away-specular-add-glass-programs=off');
+    refused('?glass-programs=no-light&glass-skip=rim,border',
+      'glass-programs-no-light-compiles-away-rim-add-glass-programs=off');
+  });
+
+  it('...and every other stage, and `none`, COMPOSE with the default', () => {
+    // `ca`, `grade` and `shadow` are compiled out of the RIM program too, but they never executed on
+    // a rim (inside `borderOnly == 0.0`, or at shadow alpha 0), and the fills keep them.
+    for (const stage of ['none', ...SINGLE.filter((st) => st !== 'rim' && st !== 'specular')]) {
+      const w = walk(`?glass-skip=${stage}`);
+      expect(w.Census.Armed, stage).toBe(true);
+      expect(w.Census.Refused, stage).toBe('');
+    }
+    // Under `border-only` the fills take the full program, so `rim` still gates code that runs.
+    expect(walk('?glass-programs=border-only&glass-skip=rim').Census.Armed).toBe(true);
+  });
+
+  it('?glass-reg=nogates compiles all ten gates away: every non-zero mask is refused, `none` composes', () => {
+    refused('?glass-programs=off&glass-reg=nogates&glass-skip=sdf', 'glass-reg-nogates-compiles-the-ten-gates-away');
+    expect(walk('?glass-reg=nogates&glass-skip=none').Census.Armed).toBe(true);
+  });
+
+  it('?glass-reg=scope and =all COMPOSE: the gates live inside the stages they move with', () => {
+    for (const arm of ['scope', 'all']) {
+      const w = walk(`?glass-programs=off&glass-reg=${arm}&glass-skip=all`);
+      expect(w.Census.Armed, arm).toBe(true);
+      expect(w.Mutable.DiagGlassReg, arm).toBe(arm);
+      expect(shape(w), arm).toEqual(shape(walk('')));
+    }
   });
 
   it('an unknown stage throws by name rather than arming a partial mask', () => {
@@ -354,12 +396,17 @@ const drawSite = () => {
     _gl: gl,
     _panelShaderGlass: { Program: 'program:glass' }, _panelLocsGlass: locs,
     _panelShaderNone: { Program: 'program:none' }, _panelLocsNone: locs,
+    _panelShaderGlassBorderOnly: { Program: 'program:glass-border-only' }, _panelLocsGlassBorderOnly: locs,
+    _panelShaderGlassNoLight: { Program: 'program:glass-no-light' }, _panelLocsGlassNoLight: locs,
   });
   const draw = (inst: Float32Array, glass: boolean, mask: number, census: boolean): string[] => {
     r.DiagGlassSkip = mask;
     r.DiagGlassSkipCensus = census;
     r.PanelBeginBatch();
     r.PanelAddInstance(inst, 0, inst.length);
+    // The renderer skips a `useProgram` for the program already bound. Two glass programs now
+    // alternate (rim / fill), so every stream starts unbound and carries its own bind.
+    (r as unknown as { _lastProgram: unknown })._lastProgram = null;
     calls.length = 0;
     const backdrop = { _brand: 'GpuTextureHandle', _glTex: 'tex:pyramid' } as never;
     r.PanelDrawBatch(CANVAS_W, CANVAS_H, backdrop, 3, 0, 0, glass, null);
@@ -411,6 +458,129 @@ describe('the draw site - one GL stream under every mask, the uniform the only d
     site.Draw(RIM, true, 0, true);
     expect(r.GlassDraws).toBe(2);
     expect(r.GlassCensus.Frags).toBe(2 * 496 * 372);
+  });
+});
+
+// -- 2b. ?glass-programs ON GLASS-GRID'S REAL INSTANCES ---------------------------------------
+
+describe('?glass-programs on glass-grid - every rim takes BORDER_ONLY, every fill NO_GLOW + NO_SPEC', () => {
+  const g = glassDraws(cards);
+
+  it('the predicates, on every glass draw the walk issued: forty batches, zero fallbacks', () => {
+    const kinds = g.map((d) => GlassProgramFor(GlassBatchPredicates(d.Instances, d.Instances.length / 60, 60), 'on'));
+    expect(kinds.length).toBe(40);
+    g.forEach((d, i) => expect(kinds[i], d.Site).toBe(d.Site === 'rim' ? 'borderOnly' : 'noLight'));
+    expect(kinds.filter((k) => k === 'full').length).toBe(0);
+    // Each arm alone: `border-only` sends the fills back to the full program, `no-light` takes
+    // every batch (a rim's Fresnel and Specular are the sheet's zeros too), `off` takes none.
+    const under = (arm: 'border-only' | 'no-light' | 'off') =>
+      g.map((d) => GlassProgramFor(GlassBatchPredicates(d.Instances, 1, 60), arm));
+    expect(under('border-only')).toEqual(g.map((d) => (d.Site === 'rim' ? 'borderOnly' : 'full')));
+    expect(under('no-light')).toEqual(g.map(() => 'noLight'));
+    expect(under('off')).toEqual(g.map(() => 'full'));
+  });
+
+  it('the predicates are exact: one instance answering no sends the whole batch back', () => {
+    const two = new Float32Array(120);
+    two.set(RIM, 0); two.set(RIM, 60);
+    expect(GlassProgramFor(GlassBatchPredicates(two, 2, 60), 'on')).toBe('borderOnly');
+    two.set(FILL, 60);                        // a fill joins the rim batch: not every instance is a rim
+    expect(GlassProgramFor(GlassBatchPredicates(two, 2, 60), 'on')).toBe('noLight');
+    two[60 + GLASS_OFF_FRESNEL_STRENGTH] = 0.55;   // and one lit instance: the full program
+    expect(GlassProgramFor(GlassBatchPredicates(two, 2, 60), 'on')).toBe('full');
+    const neg = new Float32Array(FILL); neg[GLASS_OFF_SPECULAR_INTENSITY] = -0;
+    expect(GlassBatchPredicates(neg, 1, 60).NoSpec).toBe(false);     // +0 exactly, never -0
+    expect(GlassBatchPredicates(new Float32Array(0), 0, 60)).toEqual({ BorderOnly: false, NoGlow: false, NoSpec: false });
+    // The offsets are the packer's.
+    expect(RIM[GLASS_OFF_BORDER_EDGE_AA]).toBeLessThan(0);
+    expect(FILL[GLASS_OFF_BORDER_EDGE_AA]).toBeGreaterThanOrEqual(0);
+    const packer = readFileSync(new URL('../src/Jiv/Jiv.InstanceBuffer.ts', import.meta.url), 'utf8');
+    expect(packer).toContain(`data[offset + ${GLASS_OFF_FRESNEL_STRENGTH}] = style.FresnelStrength;`);
+    expect(packer).toContain(`data[offset + ${GLASS_OFF_SPECULAR_INTENSITY}] = style.SpecularIntensity;`);
+    expect(packer).toContain(`data[offset + ${GLASS_OFF_BORDER_EDGE_AA}] = -Math.max(borderEdgeAa, 1e-3);`);
+  });
+
+  it('the real draw site binds the variant, books it, and changes nothing else in the stream', () => {
+    const site = drawSite();
+    const r = site.Renderer;
+    const ledger = (r as unknown as { _sceneLedger: { BeginFrame: () => void } })._sceneLedger;
+    ledger.BeginFrame();
+    const rim = site.Draw(RIM, true, 0, false);
+    const fill = site.Draw(FILL, true, 0, false);
+    expect(rim).toContain('useProgram(program:glass-border-only)');
+    expect(fill).toContain('useProgram(program:glass-no-light)');
+    expect(r.GlassProgramCensus).toEqual({ BorderOnly: 1, NoGlow: 1, NoSpec: 1, Fallbacks: 0 });
+    r.DiagGlassPrograms = 'off';
+    const rimOff = site.Draw(RIM, true, 0, false);
+    const fillOff = site.Draw(FILL, true, 0, false);
+    expect(rimOff).toContain('useProgram(program:glass)');
+    expect(fillOff).toContain('useProgram(program:glass)');
+    // `off` books nothing: the arm is not consulted.
+    expect(r.GlassProgramCensus).toEqual({ BorderOnly: 1, NoGlow: 1, NoSpec: 1, Fallbacks: 0 });
+    // The ONE difference between the arms is the program bound: every other call, uniforms and
+    // textures and the draw itself, is the same call with the same arguments.
+    const unbind = (c: string[]) => c.filter((x) => !x.startsWith('useProgram('));
+    expect(unbind(rim)).toEqual(unbind(rimOff));
+    expect(unbind(fill)).toEqual(unbind(fillOff));
+    // A lit batch under `on` falls back and is counted.
+    r.DiagGlassPrograms = 'on';
+    const lit = new Float32Array(FILL); lit[GLASS_OFF_FRESNEL_STRENGTH] = 0.7;
+    expect(site.Draw(lit, true, 0, false)).toContain('useProgram(program:glass)');
+    expect(r.GlassProgramCensus.Fallbacks).toBe(1);
+    // A non-glass draw is never asked.
+    site.Draw(FILL, false, 0, false);
+    expect(r.GlassProgramCensus).toEqual({ BorderOnly: 1, NoGlow: 1, NoSpec: 1, Fallbacks: 1 });
+  });
+
+  it('?glass-reg binds its own family for every kind, and throws by name when it was never compiled', () => {
+    const site = drawSite();
+    const r = site.Renderer;
+    r.DiagGlassReg = 'scope';
+    expect(() => site.Draw(FILL, true, 0, false)).toThrow(/\?glass-reg=scope but its programs were never compiled/);
+    const locs = new Proxy({}, { get: (_t, key) => `loc:${String(key)}` });
+    const fam = (k: string) => ({ Shader: { Program: `program:reg-${k}` }, Locs: locs });
+    Object.assign(r as unknown as Record<string, unknown>, {
+      _glassRegPrograms: { full: fam('full'), borderOnly: fam('borderOnly'), noLight: fam('noLight') },
+      _glassRegCut: 'scope',
+    });
+    expect(site.Draw(RIM, true, 0, false)).toContain('useProgram(program:reg-borderOnly)');
+    expect(site.Draw(FILL, true, 0, false)).toContain('useProgram(program:reg-noLight)');
+    r.DiagGlassPrograms = 'off';
+    expect(site.Draw(FILL, true, 0, false)).toContain('useProgram(program:reg-full)');
+    // A family cut for another value is not this arm's: the pick refuses rather than binding it.
+    r.DiagGlassReg = 'all';
+    expect(() => site.Draw(FILL, true, 0, false)).toThrow(/\?glass-reg=all/);
+  });
+
+  it('the walk: the default arm and its mark, and the renderer fields each arm hands over', () => {
+    const d = walk('');
+    expect(d.Mutable.DiagGlassPrograms).toBe('on');
+    expect(d.Mutable.DiagGlassReg).toBe('off');
+    const census = (globalThis as unknown as { __jauiGlassPrograms: () => { Arm: string; Reg: string; Programs: number } })
+      .__jauiGlassPrograms();
+    expect(census).toMatchObject({ Arm: 'on', Reg: 'off', Programs: 7 });
+    for (const arm of ['off', 'border-only', 'no-light'] as const) {
+      expect(walk(`?glass-programs=${arm}`).Mutable.DiagGlassPrograms, arm).toBe(arm);
+    }
+    for (const arm of ['scope', 'all', 'nogates'] as const) {
+      expect(walk(`?glass-reg=${arm}`).Mutable.DiagGlassReg, arm).toBe(arm);
+    }
+    // No arm moves a draw: the programs differ, the draws do not.
+    for (const q of ['?glass-programs=off', '?glass-reg=scope', '?glass-reg=nogates&glass-programs=no-light']) {
+      expect(shape(walk(q)), q).toEqual(shape(d));
+    }
+  });
+
+  it('the parses: named values only, bare flags pick the arm, anything else throws by name', () => {
+    expect(ParseGlassPrograms(null)).toBe('on');
+    expect(ParseGlassPrograms('')).toBe('on');
+    expect(ParseGlassPrograms('border-only')).toBe('border-only');
+    expect(() => ParseGlassPrograms('border')).toThrow(/got 'border'/);
+    expect(ParseGlassReg(null)).toBe('off');
+    expect(ParseGlassReg('')).toBe('scope');
+    expect(ParseGlassReg('nogates')).toBe('nogates');
+    expect(() => ParseGlassReg('lifetime')).toThrow(/got 'lifetime'/);
+    expect(() => walk('?glass-programs=of')).toThrow(/glass-programs/);
   });
 });
 

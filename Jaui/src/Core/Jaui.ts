@@ -32,7 +32,10 @@ import {
   GAUSS_PASSES, GAUSS_MATCH_SIGMA, type GaussianMode,
   type AtlasBuildMember, type BackdropUnionPlan,
 } from './BlurPass';
-import { EmptyGlassFragCensus, GlassSkipNames, ParseGlassSkip, type GlassFragCensus } from './Glass.Skip';
+import { EmptyGlassFragCensus, GlassSkipNames, ParseGlassSkip, GLASS_SKIP_STAGES, type GlassFragCensus } from './Glass.Skip';
+import {
+  GLASS_PROGRAMS_PREEMPT, ParseGlassPrograms, ParseGlassReg, type GlassProgramsArm, type GlassRegArm,
+} from './Glass.Programs';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
 import {
   BORDER_DIRECT_L2_WINDOW, BORDER_DIRECT_PHASE, type BorderDirectArm,
@@ -281,6 +284,18 @@ export interface GlassGroupCensus {
   Refused: string;
 }
 
+/** `?glass-programs` / `?glass-reg`, per rendered frame: the arms, the panel programs the boot
+ *  compiles, and the glass batches each variant took (and the ones that fell back). */
+export interface GlassProgramsCensus {
+  Arm: GlassProgramsArm;
+  Reg: GlassRegArm;
+  Programs: number;
+  BorderOnly: number;
+  NoGlow: number;
+  NoSpec: number;
+  Fallbacks: number;
+}
+
 /** `?glass-skip`, per rendered frame. `Draws` and `Census.Frags` must read the same on every arm
  *  as on `none` -- the arms change what a glass fragment DOES, never which draws run or how big
  *  they are -- and `Census.Taps` against `Census.TapsFull` is what a stage removed. */
@@ -302,7 +317,7 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
-import { WebGL2Renderer, PANEL_PROGRAM_COUNT } from './WebGL2.Renderer';
+import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
@@ -915,6 +930,14 @@ export class Canvas implements DirtyTracker {
   private _glassSkipRefused = '';
   /** The last `jaui:glass-skip` gate line, printed on a SHAPE change like every gate above it. */
   private _glassSkipLastLine = '';
+  /** `?glass-programs` -- the glass program's compiled-out variants (`Glass.Programs`). Default `on`:
+   *  pixel-identical by construction, compiled at boot on every arm, so `off` is a routing change. */
+  private _glassPrograms: GlassProgramsArm = 'on';
+  /** `?glass-reg` -- the glass family cut with a register-lifetime arm. Default `off` while it is
+   *  measured. `scope` / `all` / `nogates`: see `Glass.Programs` and `Jiv.Panel.frag`. */
+  private _glassReg: GlassRegArm = 'off';
+  /** The last `jaui:glass-programs` gate line: the batch counts, printed when they change. */
+  private _glassProgramsLastLine = '';
   /** `?emptypanels` -- A PANEL THAT PAINTS NOTHING IS NOT PUSHED. Default ON.
    *
    *  A fully transparent background with no painted border and no shadow shades its whole quad to
@@ -3969,6 +3992,18 @@ export class Canvas implements DirtyTracker {
         + ` pill=${c.PillApprox} projective=${c.Projective}`
         + ` pixels=${mask === 0 ? 'SAME' : 'DIFFERENT'}`;
       if (line !== this._glassSkipLastLine) { this._glassSkipLastLine = line; JTrace(line); }
+    }
+
+    // `?glass-programs`' gate, on the same terms: printed when the counts change. On glass-grid the
+    // armed default reads `borderOnlyBatches=20 noGlow=20 noSpec=20 fallbacks=0` every frame, so it
+    // prints once; a fallback above zero is a batch an armed variant could not take.
+    if (this._glassPrograms !== 'off' && this._renderer instanceof WebGL2Renderer) {
+      const c = this._renderer.GlassProgramCensus;
+      const line = `jaui:glass-programs armed=${this._glassPrograms} reg=${this._glassReg}`
+        + ` programs=${PANEL_PROGRAM_COUNT + (this._glassReg === 'off' ? 0 : GLASS_REG_PROGRAMS)}`
+        + ` borderOnlyBatches=${c.BorderOnly} noGlow=${c.NoGlow} noSpec=${c.NoSpec} fallbacks=${c.Fallbacks}`
+        + ' pixels=SAME';
+      if (line !== this._glassProgramsLastLine) { this._glassProgramsLastLine = line; JTrace(line); }
     }
 
     // `?border-direct`'s gate, on the same terms as the three above: a SHAPE change, not a frame.
@@ -7426,6 +7461,40 @@ export class Canvas implements DirtyTracker {
         : tsBad ? ` reason=only-on-and-off-are-values-got-${twoStop}` : '';
       JTrace(`jaui:two-stop-gradient armed=${tsArmed ? 'on' : 'off'} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}${tsWhy}`);
     }
+    // `?glass-programs=<on|off|border-only|no-light>` -- PIXEL-IDENTICAL BY CONSTRUCTION, DEFAULT ON.
+    //
+    // A glass batch whose every instance is a rim overlay takes MATERIAL_GLASS + GLASS_BORDER_ONLY;
+    // one whose every instance has FresnelStrength and SpecularIntensity exactly +0 takes
+    // MATERIAL_GLASS + GLASS_NO_GLOW + GLASS_NO_SPEC; anything else takes the full glass program and
+    // is COUNTED as a fallback. Each exclusion removes code whose output is provably zero or
+    // discarded for every instance the predicate admitted (the argument is in `Jiv.Panel.frag`'s
+    // header). Both variants are compiled at boot in every arm, so the arms differ by a program bind.
+    //
+    // `?glass-reg=<off|scope|all|nogates>` -- PIXEL-IDENTICAL BY CONSTRUCTION, DEFAULT OFF while the
+    // Mac measures it. Swaps the glass family for the same three programs cut with a lifetime arm,
+    // compiled when it arms (`ArmFlaggedPrograms`). Parsed HERE, ahead of `?glass-skip`, because
+    // `?glass-skip` refuses beside whichever of them compiles its gated code away.
+    {
+      const r = this._renderer;
+      const webgl2 = r instanceof WebGL2Renderer;
+      const gp = ParseGlassPrograms(params.has('glass-programs') ? params.get('glass-programs') : null);
+      this._glassPrograms = webgl2 ? gp : 'off';
+      if (webgl2) (r as WebGL2Renderer).DiagGlassPrograms = this._glassPrograms;
+      JTrace(`jaui:glass-programs armed=${this._glassPrograms} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}`
+        + ` default=${!params.has('glass-programs')} pixels=SAME${webgl2 ? '' : ' reason=webgl2-only'}`);
+      const reg = ParseGlassReg(params.has('glass-reg') ? params.get('glass-reg') : null);
+      this._glassReg = webgl2 ? reg : 'off';
+      if (webgl2) (r as WebGL2Renderer).DiagGlassReg = this._glassReg;
+      JTrace(`jaui:glass-reg armed=${this._glassReg} programs=${this._glassReg === 'off' ? 0 : GLASS_REG_PROGRAMS}`
+        + ` default=${!params.has('glass-reg')} pixels=SAME${webgl2 || reg === 'off' ? '' : ' reason=webgl2-only'}`);
+      const g = globalThis as unknown as { __jauiGlassPrograms?: () => GlassProgramsCensus };
+      g.__jauiGlassPrograms = () => {
+        const rr = this._renderer;
+        const c = rr instanceof WebGL2Renderer ? rr.GlassProgramCensus
+          : { BorderOnly: 0, NoGlow: 0, NoSpec: 0, Fallbacks: 0 };
+        return { Arm: this._glassPrograms, Reg: this._glassReg, Programs: PANEL_PROGRAM_COUNT, ...c };
+      };
+    }
     // `?shadow-snap=off` — THE DIAGNOSTIC ARM, and the fix is DEFAULT ON.
     //
     // Off restores the loop as it parked before this lane: three taus of settle window and no final
@@ -8011,7 +8080,9 @@ export class Canvas implements DirtyTracker {
         : !this._borderSourceFill ? 'border-source-scene-splits-the-card-draw-across-a-second-build'
         : this._diagNoGlassDraw || this._diagNoGlass || this._diagNoUi
           ? 'a-no-star-diagnostic-removes-the-glass-draws-this-arm-prices'
-        : null;
+        : this._glassReg === 'nogates' && this._glassSkip !== 0
+          ? 'glass-reg-nogates-compiles-the-ten-gates-away'
+        : this._glassSkipPreempted();
       if (why !== null) {
         this._glassSkip = null;
         this._glassSkipRefused = why;
@@ -8255,6 +8326,16 @@ export class Canvas implements DirtyTracker {
     // (`Start` runs after this constructor returns), so a program an arm needs is compiled off the
     // frame and a program no arm needs is never compiled at all.
     if (this._renderer instanceof WebGL2Renderer) this._renderer.ArmFlaggedPrograms();
+  };
+
+  /** `?glass-skip`'s refusal beside `?glass-programs`: the stages of the armed mask that the armed
+   *  variants compile away from under their bit (`Glass.Programs.GLASS_PROGRAMS_PREEMPT`), by name,
+   *  or null when every bit still gates code that runs. Mask 0 (`none`) is never refused. */
+  private _glassSkipPreempted = (): string | null => {
+    const mask = this._glassSkip ?? 0;
+    const gone = GLASS_PROGRAMS_PREEMPT[this._glassPrograms].filter((st) => (mask & GLASS_SKIP_STAGES[st]) !== 0);
+    return gone.length === 0 ? null
+      : `glass-programs-${this._glassPrograms}-compiles-away-${gone.join('-and-')}-add-glass-programs=off`;
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────

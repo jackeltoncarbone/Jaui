@@ -170,8 +170,9 @@ describe('what the flat program keeps, byte for byte', () => {
     // bootcompile2 moved out of the boot batch. Both counts, because the file still declares the
     // sixth -- in `EnsurePanelBorderDirectProgram` rather than in `_compilePanelShader`. One for
     // the import, one per Add. Re-aimed twice, intent unchanged.
+    // Lane glassreg's `?glass-reg` family is one more `Add`, in a loop over its three kinds.
     expect((RENDERER.match(/panelVertSrc/g) ?? []).length)
-      .toBe(1 + PANEL_PROGRAM_COUNT + PANEL_PROGRAM_BORDER_DIRECT);
+      .toBe(1 + PANEL_PROGRAM_COUNT + PANEL_PROGRAM_BORDER_DIRECT + 1);
   });
 });
 
@@ -183,7 +184,8 @@ describe('routing: which batches take the flat program', () => {
     // is not in the boot batch -- which is what this constant counts and what the three
     // `programs=` marks that print it are claiming.
     expect(RENDERER).toContain(`export const PANEL_PROGRAM_COUNT = ${PANEL_PROGRAM_COUNT};`);
-    expect(PANEL_PROGRAM_COUNT).toBe(5);
+    // Seven since lane glassreg: the glass program's two `?glass-programs` cuts joined the boot.
+    expect(PANEL_PROGRAM_COUNT).toBe(7);
     const adds = RENDERER.match(/batch\.Add\(panelVertSrc, panelFragSrc/g) ?? [];
     expect(adds.length).toBe(PANEL_PROGRAM_COUNT);
     // And the sixth, on its own batch, on the arm.
@@ -305,7 +307,7 @@ describe('the flag', () => {
   });
 
   it('reports the program count from the renderer, never a literal', () => {
-    expect(JAUI).toContain("import { WebGL2Renderer, PANEL_PROGRAM_COUNT } from './WebGL2.Renderer';");
+    expect(JAUI).toContain("import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS } from './WebGL2.Renderer';");
     expect(JAUI).not.toMatch(/jaui:flat-program[^`]*programs=3/);
   });
 });

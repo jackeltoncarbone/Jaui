@@ -6,6 +6,7 @@
  * after a build. `WebGL2.Renderer` owns the ONE instance and every call site.
  */
 import { AddGlassFragCensus, EmptyGlassFragCensus, type GlassFragCensus } from './Glass.Skip';
+import type { GlassProgramKind } from './Glass.Programs';
 
 /**
  * How many times a frame READS the scene target after WRITING into it.
@@ -186,6 +187,14 @@ export class SceneReadLedger {
    *  because every arm draws the same draw. So must `Frags`; `Taps` is the column a stage moves. */
   GlassDraws = 0;
   GlassCensus: GlassFragCensus = EmptyGlassFragCensus();
+  /** `?glass-programs`: glass batches routed to each variant this frame, and the ones an armed
+   *  arm could NOT route (a predicate failed on some instance) that drew with the full program.
+   *  `NoGlow` / `NoSpec` count batches shaded by a program compiled with that define. Always booked:
+   *  four increments per glass batch, and the arm is on by default. */
+  GlassBorderOnlyBatches = 0;
+  GlassNoGlowBatches = 0;
+  GlassNoSpecBatches = 0;
+  GlassProgramFallbacks = 0;
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -225,6 +234,10 @@ export class SceneReadLedger {
     this.GroupFallbacks = 0;
     this.GlassDraws = 0;
     this.GlassCensus = EmptyGlassFragCensus();
+    this.GlassBorderOnlyBatches = 0;
+    this.GlassNoGlowBatches = 0;
+    this.GlassNoSpecBatches = 0;
+    this.GlassProgramFallbacks = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -324,5 +337,11 @@ export class SceneReadLedger {
     this.GlassDraws++;
     AddGlassFragCensus(this.GlassCensus, census);
   };
-}
 
+  /** One glass batch took `kind` under an armed `?glass-programs`. */
+  NoteGlassProgram = (kind: GlassProgramKind): void => {
+    if (kind === 'borderOnly') this.GlassBorderOnlyBatches++;
+    else if (kind === 'noLight') { this.GlassNoGlowBatches++; this.GlassNoSpecBatches++; }
+    else this.GlassProgramFallbacks++;
+  };
+}
