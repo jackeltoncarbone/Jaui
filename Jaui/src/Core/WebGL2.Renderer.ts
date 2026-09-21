@@ -3678,7 +3678,7 @@ export class WebGL2Renderer implements Renderer {
     SepBuilds: number; SepPasses: number; SepFill: number; SepReads: number;
     ChainBuilds: number; ChainPasses: number; ChainFill: number; ChainReads: number;
     Classes: string; Refused: string; Targets: string; Draws: string; DrawsTotal: number;
-    Compile: string;
+    Compile: string; TempClears: number;
   } {
     const l = this._sceneLedger;
     const draws: string[] = [];
@@ -3700,6 +3700,9 @@ export class WebGL2Renderer implements Renderer {
       Targets: main === undefined ? '0::0MB' : main.SeparableTargetCensus,
       Draws: draws.join(','), DrawsTotal: total,
       Compile: main === undefined ? 'none' : main.GaussianCompileStamp,
+      // Effect field for ?blur-temp=clear: zero on an armed clear run means the arm never reached a
+      // bound target and its 0-px reading is vacuous rather than evidence of complete coverage.
+      TempClears: this._blurPasses().reduce((n, p) => n + p.TempClears, 0),
     };
   }
 

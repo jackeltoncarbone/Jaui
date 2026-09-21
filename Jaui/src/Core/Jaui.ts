@@ -323,6 +323,9 @@ export interface BlurPlanCensus {
   Targets: string;
   /** Where the separable kernel compiled: `boot#<i>`, `pool#<i>` or `arm#<i>`. */
   Compile: string;
+  /** `?blur-temp=clear`: magenta clears issued this frame. THE effect field for that arm - zero
+   *  under the flag means it never reached a bound target, so its pixel reading says nothing. */
+  TempClears: number;
   /** Clauses inside the plan that sent a separable request to the chain, `<why>x<count>`. */
   PlanRefused: string;
   /** Empty unless a FLAG refused the plan outright, in which case it names which. */
@@ -8771,6 +8774,7 @@ export class Canvas implements DirtyTracker {
           DrawsTotal: c?.DrawsTotal ?? 0,
           Targets: c?.Targets ?? '',
           Compile: c?.Compile ?? 'none',
+          TempClears: c?.TempClears ?? 0,
           PlanRefused: c?.Refused ?? 'none',
           Refused: this._blurSeparableRefused,
         };
