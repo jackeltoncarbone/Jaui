@@ -19,10 +19,30 @@
  *                                               BACKDROP it lifts what is under the element; on the
  *                                               FOREGROUND the element's own ink adds instead of
  *                                               covering. `Lift(n)` is white times n. See Core/Lift.ts
+ *   Lift(n)                                   — TextFilter: the element's INK adds, at |n|/255 of its
+ *                                               own `Color`, and NOTHING else about the element
+ *                                               changes. The one-argument form ONLY — see below.
  *
- * … with one exception: the `fresnel` zone takes Brightness + Saturate ONLY, and
- * REFUSES Blur() and Contrast() rather than accepting and ignoring them. See the
- * `'fresnel'` paragraph on ParseFilter for the physics behind each refusal.
+ * … with two exceptions, both of which REFUSE rather than accept-and-ignore:
+ *   • the `fresnel` zone takes Brightness + Saturate ONLY, and refuses Blur() and Contrast(). See the
+ *     `'fresnel'` paragraph on ParseFilter for the physics behind each refusal.
+ *   • the `text` zone takes Lift() ONLY, and refuses the grade functions and every blur. See
+ *     `_refuseInText`.
+ *
+ * ## WHY `Lift()`'s COLOR ARGUMENT IS NOT ACCEPTED IN EVERY ZONE
+ *
+ * A zone either brings its own color or it does not, and that decides the arity:
+ *
+ *   • `backdrop` / `foreground` paint an additive draw of the element's SHAPE. There is no source
+ *     color there, so the lift supplies one: `Lift(<color>, <amount>)` and the color is ABSOLUTE.
+ *   • `text` grades ink that ALREADY HAS a color — `Color`, on the TextStyle. A second color here
+ *     could only be a per-channel MULTIPLIER on that ink, which is a different meaning for the same
+ *     argument in the same grammar. So the two-argument form is REFUSED in the text zone by name and
+ *     the message names `Color` as the property that owns the ink's color.
+ *
+ * The amount always means "how much", applied to whatever that zone paints: in the foreground zone
+ * the amount belongs to the SHAPE draw and only its SIGN reaches the ink (which adds at its own full
+ * color); in the text zone there is no shape draw, so the amount scales the ink itself.
  *
  * Semantics:
  *   • Identity = the function absent (Brightness/Saturate/Contrast → 1, Blur → none).
@@ -90,8 +110,10 @@ export interface ParsedFilter {
   Saturation: number;
   /** Contrast multiplier. Identity 1. */
   Contrast: number;
-  /** `Lift()`'s amount as a fraction of full scale (n / 255), signed. Identity 0. Backdrop and
-   *  foreground zones (the place says which side of the element it touches -- Core/Lift.ts). */
+  /** `Lift()`'s amount as a fraction of full scale (n / 255), signed. Identity 0. Backdrop, foreground
+   *  and text zones (the place says which side of the element it touches -- Core/Lift.ts). In the text
+   *  zone the magnitude SCALES the ink; in the foreground zone only the sign reaches the ink and the
+   *  magnitude belongs to the shape draw. */
   Lift: number;
   /** `Lift()`'s color as AUTHORED, still a string, because the resolver may need to resolve a var in
    *  it and the parse cache is keyed by string. `null` means the one-argument spelling, which is
@@ -110,12 +132,22 @@ export interface ParsedFilter {
 
 /** Which zone a filter value grades. Each zone reads the SAME function list but
  *  accepts a different subset — `Blur()` means a foreground blur, a frost radius
- *  and an LOD octave in the three that take it, and nothing at all in `fresnel`. */
-export type FilterZone = 'foreground' | 'backdrop' | 'border' | 'fresnel';
+ *  and an LOD octave in the three that take it, and nothing at all in `fresnel`
+ *  or `text`. */
+export type FilterZone = 'foreground' | 'backdrop' | 'border' | 'fresnel' | 'text';
 
-/** The four author-facing filter properties. Used by the JSS merge layers
- *  to concatenate (merge-by-function) rather than replace these specific keys. */
-export const FILTER_PROPS = ['Filter', 'BackdropFilter', 'BorderFilter', 'BorderFresnelFilter'] as const;
+/** The five author-facing filter properties. Used by the JSS merge layers
+ *  to concatenate (merge-by-function) rather than replace these specific keys.
+ *
+ *  `TextFilter` is in this list and therefore on `JivStyle`, NOT on `TextStyle`, even though the ink's
+ *  COLOR lives on `TextStyle`. Two reasons, and the second is the precedent:
+ *    1. Merge-by-function only happens in the `'Style'` slot (`Jss.Parser._assignToSlot`). On
+ *       `TextStyle` it would be plain last-wins, so a `:Hover { TextFilter: Lift(50) }` would clobber
+ *       the base declaration instead of merging by function like its four siblings.
+ *    2. `BorderFilter` is already on `JivStyle` while `BorderColor` is its color. Zone FILTERS live on
+ *       `JivStyle`; a zone's COLOR lives wherever that zone's color already lives. `TextFilter` joins
+ *       the filters. */
+export const FILTER_PROPS = ['Filter', 'BackdropFilter', 'BorderFilter', 'BorderFresnelFilter', 'TextFilter'] as const;
 
 const _FILTER_KEYS: ReadonlySet<string> = new Set(FILTER_PROPS);
 
@@ -162,6 +194,9 @@ const _cacheBackdrop = new Map<string, ParsedFilter>();
 const _cacheBorder = new Map<string, ParsedFilter>();
 const _cacheForeground = new Map<string, ParsedFilter>();
 const _cacheFresnel = new Map<string, ParsedFilter>();
+// The text zone accepts ONLY `Lift()`, so a string the foreground cached (where `Brightness()` is
+// legal) must not answer for it. Same reason the border got its own cache when `Lift()` landed.
+const _cacheText = new Map<string, ParsedFilter>();
 /** Split a function list into (name, argument) pairs, counting parentheses so a function may take
  *  ANOTHER function as an argument -- which `Lift(rgb(255, 220, 180), 18)` does. The regex this
  *  replaced was `/([A-Za-z]+)\s*\(([^)]*)\)/g`, and `[^)]*` stops at the FIRST `)`: it read that
@@ -265,7 +300,7 @@ const _edgeToDirection = (raw: string): ProgressiveBlurDirection | null => {
  */
 export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedFilter => {
   const cache = zone === 'foreground' ? _cacheForeground : zone === 'fresnel' ? _cacheFresnel
-    : zone === 'border' ? _cacheBorder : _cacheBackdrop;
+    : zone === 'border' ? _cacheBorder : zone === 'text' ? _cacheText : _cacheBackdrop;
   const cached = cache.get(raw);
   if (cached) return cached;
 
@@ -291,21 +326,45 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
     const fn = f.Name.toLowerCase();
     const arg = f.Arg.trim();
     switch (fn) {
-      case 'brightness': out.Brightness = _num(arg, 'Brightness', raw); break;
-      case 'saturate':   out.Saturation = _num(arg, 'Saturate', raw); break;
+      case 'brightness':
+        if (zone === 'text') throw new Error(_refuseInText('Brightness', raw));
+        out.Brightness = _num(arg, 'Brightness', raw);
+        break;
+      case 'saturate':
+        if (zone === 'text') throw new Error(_refuseInText('Saturate', raw));
+        out.Saturation = _num(arg, 'Saturate', raw);
+        break;
       case 'contrast':
         if (zone === 'fresnel') throw new Error(_refuseInFresnel('Contrast', raw));
+        if (zone === 'text') throw new Error(_refuseInText('Contrast', raw));
         out.Contrast = _num(arg, 'Contrast', raw);
         break;
       case 'lift': {
         // The BACKDROP zone lifts what is under the element; the FOREGROUND zone makes the element's
-        // own ink add instead of cover. Both take the same value. The rim zones still refuse: they
-        // grade their own gather, and there is nothing beneath a stroke to add to.
-        if (zone !== 'backdrop' && zone !== 'foreground') throw new Error(_refuseLift(zone, raw));
+        // own ink add instead of cover; the TEXT zone makes ONLY the ink add and leaves the fill,
+        // border and shadow alone. The rim zones still refuse -- see `_refuseLift` for the three
+        // measured obstacles, each with the draw that could not carry it.
+        if (zone !== 'backdrop' && zone !== 'foreground' && zone !== 'text') {
+          throw new Error(_refuseLift(zone, raw));
+        }
         const parts = SplitTopLevelArgs(arg);
         if (parts.length > 2) {
           throw new Error(
             `[Jaui] Lift() takes <amount> or <color>, <amount>; got ${parts.length} arguments in "${raw}".`,
+          );
+        }
+        // The ink already HAS a color, so a second one here would be a per-channel multiplier on it
+        // rather than the absolute color it is in the other two zones -- one word, two meanings. The
+        // one-argument form only, and the message names the property that owns the ink's color.
+        if (zone === 'text' && parts.length === 2) {
+          throw new Error(
+            `[Jaui] TextFilter: Lift() takes <amount> only; got a color argument in "${raw}". The ink ` +
+            'already has a color -- `Color`, on the text style -- and the amount says how much of it ' +
+            'ADDS: Lift(255) adds the ink at its own full color, Lift(128) at half, a negative amount ' +
+            'subtracts. A color here could only multiply the ink channel by channel, which is not what ' +
+            'the same argument means on BackdropFilter or Filter (there it IS the color, because an ' +
+            'additive draw of the shape has no other source). Set the ink with Color and the strength ' +
+            'with the amount.',
           );
         }
         // One argument is the amount against WHITE. Two is a color and an amount. `LiftColor: null`
@@ -320,6 +379,7 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
       }
       case 'blur':
         if (zone === 'fresnel') throw new Error(_refuseInFresnel('Blur', raw));
+        if (zone === 'text') throw new Error(_refuseInText('Blur', raw));
         if (zone === 'foreground') {
           // Uniform foreground blur — the whole element blurs evenly.
           out.ForegroundBlur = { Mode: 'uniform', Direction: 'ToBottom', Edges: 'All', FeatherRaw: null, Easing: 1, Uniform: true, RadiusRaw: arg || '0' };
@@ -329,18 +389,22 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
         break;
       case 'linearprogressiveblur':
         if (zone === 'fresnel') throw new Error(_refuseInFresnel('LinearProgressiveBlur', raw));
+        if (zone === 'text') throw new Error(_refuseInText('LinearProgressiveBlur', raw));
         out.ForegroundBlur = _parseLinear(arg, raw);
         break;
       case 'edgeprogressiveblur':
         if (zone === 'fresnel') throw new Error(_refuseInFresnel('EdgeProgressiveBlur', raw));
+        if (zone === 'text') throw new Error(_refuseInText('EdgeProgressiveBlur', raw));
         out.ForegroundBlur = _parseEdge(arg, raw);
         break;
       default:
         throw new Error(
           zone === 'fresnel'
             ? `[Jaui] Unknown BorderFresnelFilter function "${f.Name}" in "${raw}". The Fresnel takes Brightness and Saturate only.`
-            : `[Jaui] Unknown filter function "${f.Name}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
-              (zone === 'foreground' ? ', Lift, LinearProgressiveBlur, EdgeProgressiveBlur.' : zone === 'backdrop' ? ', Lift.' : '.'),
+            : zone === 'text'
+              ? `[Jaui] Unknown TextFilter function "${f.Name}" in "${raw}". TextFilter takes Lift() only.`
+              : `[Jaui] Unknown filter function "${f.Name}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
+                (zone === 'foreground' ? ', Lift, LinearProgressiveBlur, EdgeProgressiveBlur.' : zone === 'backdrop' ? ', Lift.' : '.'),
         );
     }
   }
@@ -443,15 +507,50 @@ const _refuseInFresnel = (fn: string, raw: string): string =>
     : 'The Fresnel derives its color from the gather the border zone already sampled, at the LOD that ' +
       'the BorderFilter Blur() chose. Author the radius there.');
 
-/** `Lift()` touches one side of the element, and the two RIM zones are neither side: a border and a
- *  Fresnel grade their own gather, and there is nothing beneath a stroke for an additive color to add
- *  to. The backdrop and foreground zones both take it (Core/Lift.ts). */
+/** `Lift()` needs a draw whose blend state it can own, or a grade it can fold into. The rim has
+ *  NEITHER, and this is the measured reason rather than the old hand-wave ("a stroke has no backdrop
+ *  of its own"), which was written when a lift only meant a shape draw:
+ *
+ *   1. A FLAT stroke is composited INSIDE the shared panel fragment -- `Jiv.Panel.frag` builds one
+ *      `result` from fill, shadow and border and writes it once. One draw has one blend state, so the
+ *      rim cannot ADD while the fill still COVERS.
+ *   2. The only existing way to give a stroke its own draw is the `BorderLayer` overlay
+ *      (`'Suppress'` + `'BorderOnly'`), and `Jaui._liftZonesOf` ALREADY refuses a lift on exactly
+ *      those nodes ("its border is re-emitted among its children"). The two mechanisms are mutually
+ *      exclusive today; an additive rim has to unpick that refusal first, and that is a pixel
+ *      decision, not a parse decision.
+ *   3. A GLASS rim is not a stroke at all -- it is a backdrop gather, graded, then mixed with
+ *      `BorderColor` and a Fresnel highlight. Its grade is the same THREE SCALARS the backdrop grade
+ *      is, so a per-channel offset cannot ride it, for the identical reason `ChromaticGraded` exists.
+ *
+ *  A borders-only element needs none of this: with no fill and no shadow its whole paint IS the
+ *  stroke, so `Filter: Lift()` already makes that one draw additive. What is genuinely missing is a
+ *  FILLED panel whose rim adds, and that needs a second draw that does not exist yet. */
 const _refuseLift = (zone: FilterZone, raw: string): string =>
-  `[Jaui] Lift() is an additive color for the element's BACKDROP or its FOREGROUND; got it on the ` +
-  `${zone} zone in "${raw}". The rim grades its own gather with Brightness/Saturate/Contrast, and a ` +
-  `stroke has no backdrop of its own to add to. Author the lift on BackdropFilter (what is under the ` +
-  `element lifts), on Filter (the element's own paint adds), or as the inherited Lift property (both, ` +
-  `and it cascades).`;
+  `[Jaui] Lift() is an additive color for the element's BACKDROP, its FOREGROUND or its INK; got it ` +
+  `on the ${zone} zone in "${raw}". A flat stroke is composited inside the same fragment as the fill ` +
+  `and the shadow, so one draw has one blend state and the rim cannot add while the fill covers; a ` +
+  `glass rim is a graded backdrop gather whose grade is three scalars and cannot carry a per-channel ` +
+  `offset. Author the lift on BackdropFilter (what is under the element lifts), on Filter (the ` +
+  `element's own paint adds -- and on a borders-only element that IS the rim), on TextFilter (only ` +
+  `the ink adds), or as the inherited Lift property (both, and it cascades).`;
+
+/** The text zone takes `Lift()` and nothing else. Each refusal names the property that DOES own the
+ *  thing asked for, so the author's next move is obvious -- the `'fresnel'` zone's own convention.
+ *
+ *  The grade functions are refused rather than folded into the ink color, even though grading a KNOWN
+ *  color is pure arithmetic and would need no shader change: `Filter` already grades the element's
+ *  composited pixels INCLUDING its text, so an ink-only grade is a second way to spell something that
+ *  exists, and it would silently disagree with `Filter` about whether the fill is graded too. The
+ *  blurs are refused because a text-only blur is not built at all -- there is no ink-only blur pass. */
+const _refuseInText = (fn: string, raw: string): string =>
+  `[Jaui] TextFilter takes Lift() only; got ${fn}() in "${raw}". ` +
+  (fn === 'Brightness' || fn === 'Saturate' || fn === 'Contrast'
+    ? 'The foreground `Filter` already grades this element\'s composited pixels, its own text included, '
+      + 'so an ink-only grade would be a second spelling for something that exists. Author the grade on '
+      + 'Filter, or set the ink\'s color directly with Color.'
+    : 'There is no ink-only blur pass. `Filter: Blur()` blurs the element\'s content, text included; '
+      + 'author it there.');
 
 const _num = (arg: string, fn: string, raw: string): number => {
   const n = parseFloat(arg);

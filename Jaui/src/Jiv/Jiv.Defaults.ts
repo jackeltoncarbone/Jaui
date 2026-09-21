@@ -28,6 +28,9 @@ export const DefaultJivStyle: JivStyle = {
   // regardless — BorderFresnelStrength is 0, so nothing reads this until a class
   // asks for a Fresnel.
   BorderFresnelFilter: 'Brightness(1) Saturate(1.6)',
+  // The INK zone. 'None' means the ink covers, which is what ink does -- so the default costs one
+  // identity parse per style and reaches no draw.
+  TextFilter: 'None',
   Isolate: 'false',
   Frost: '0',
   Thickness: '0',

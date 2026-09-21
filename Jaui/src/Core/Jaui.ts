@@ -17,7 +17,8 @@ import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import {
   CascadeLift, FoldLift, InkBlendOf, Lift, LiftAmount, LiftGateLine, LiftGraded, LiftInkAmount,
-  LiftRefusalOf, LiftSamplesBackdrop, LiftTouchesInk, LIFT_WHITE, ShapeBlendOf,
+  LiftInkScale, LiftRefusalOf, LiftSamplesBackdrop, LiftTouchesInk, LIFT_WHITE, ShapeBlendOf,
+  TextLiftAmount,
   type CompositeBlend, type LiftCensus, type LiftMode, type LiftValue,
 } from './Lift';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
@@ -174,6 +175,20 @@ const _hasBackdropFilter = (node: Jiv): boolean => {
     || Math.abs(s.Tint) > 0.001
     || LiftGraded(node) !== 0;
 };
+
+/** The additive zones ONE node takes this frame, resolved once per node by `_liftZonesOf`.
+ *
+ *  `Shape` is the additive draw of the element's own silhouette (null = none). `Ink` is the blend the
+ *  element's PANEL takes, and `TextInk` the blend its TEXT batch takes -- two fields because they are
+ *  two draws, and `TextFilter: Lift()` moves only the second. `TextScale` multiplies the glyph
+ *  instance's tint lane so the ink adds `|amount|` of its own color; it is 1 whenever the ink is not
+ *  scaled, which keeps every pre-existing path byte-identical. */
+interface LiftZones {
+  Shape: LiftValue | null;
+  Ink: CompositeBlend | null;
+  TextInk: CompositeBlend | null;
+  TextScale: number;
+}
 
 /** What the occlusion pre-pass accumulates as it walks. `Order` is the node visit index, which is
  *  the paint order for everything this lever reasons about; `Reads` is the subset of those indices
@@ -1191,7 +1206,7 @@ export class Canvas implements DirtyTracker {
    *                           one batch into two, so a scene read with and without one prices the
    *                           switches directly. */
   private _liftStats = {
-    Authored: 0, Inherited: 0, IgnoredSampling: 0,
+    Authored: 0, Inherited: 0, IgnoredSampling: 0, TextInk: 0,
     Under: 0, Graded: 0, Builds: 0,
     CascadeVisited: 0, CascadeCarried: 0,
     PanelBatches: 0, Refused: {} as Record<string, number>,
@@ -3448,7 +3463,9 @@ export class Canvas implements DirtyTracker {
       // children all come later in paint order -- which is the whole guarantee that the lift never
       // reaches the element's ink. `liftBuilds0` brackets the node's own paint: an under-drawn
       // element that still caused a pyramid build is this lane failing.
-      const zones = phasedPaints ? this._liftZonesOf(node) : { Shape: null, Ink: null };
+      const zones: LiftZones = phasedPaints
+        ? this._liftZonesOf(node)
+        : { Shape: null, Ink: null, TextInk: null, TextScale: 1 };
       const blend = zones.Ink;
       if (phasedPaints) {
         const backdrop = LiftAmount(node.RenderStyle);
@@ -4096,19 +4113,32 @@ export class Canvas implements DirtyTracker {
       const anim = this._textAnimators.get(node);
       if (phasedPaints && anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
-        if (blend === null) {
-          this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
+        // The INK's blend, which is NOT the panel's: `TextFilter: Lift()` moves this one and leaves
+        // `zones.Ink` null, so the fill keeps covering. With no `TextFilter` this is `zones.Ink` and
+        // the path below is byte-identical to what shipped.
+        const inkBlend = zones.TextInk;
+        if (inkBlend === null) {
+          this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 1);
         } else {
           // The element's own text is its ink too, so it blends -- in a batch of its own, because the
           // blend state is per draw. The text program writes straight alpha, which PlusLighter's
-          // SRC_ALPHA factor wants, and `_liftZonesOf` has already refused every element whose paint
-          // the blend could not reach whole.
+          // SRC_ALPHA factor wants, so the contribution is `color * scale * coverage` and a
+          // half-covered glyph edge adds half.
+          //
+          // `flushText()` FIRST drains other nodes' accumulated glyphs under the ordinary blend, so
+          // the composite state cannot leak onto a sibling's text.
           flushText();
-          this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex);
-          r2.SetCompositeBlend(blend);
+          this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex, zones.TextScale);
+          r2.SetCompositeBlend(inkBlend);
           flushText();
           r2.RestoreBlend();
           r2.NoteBlendDraw();
+          // Counted where the ink ACTUALLY added, not where the zone was authored: this site is
+          // already inside the "has glyphs, visible, non-empty box" guard, so a `TextFilter` on an
+          // element with no text draws nothing and never reads as one. The test is whether the TEXT
+          // zone supplied this blend, so an element blending only because of `Filter: Lift()` still
+          // counts under `authored`/`inherited` and not here.
+          if (TextLiftAmount(node.RenderStyle) !== 0) this._liftStats.TextInk++;
         }
       }
 
@@ -4313,6 +4343,7 @@ export class Canvas implements DirtyTracker {
     this._liftStats.Authored = 0;
     this._liftStats.Inherited = 0;
     this._liftStats.IgnoredSampling = 0;
+    this._liftStats.TextInk = 0;
     this._liftStats.Under = 0;
     this._liftStats.Graded = 0;
     this._liftStats.Builds = 0;
@@ -5441,6 +5472,7 @@ export class Canvas implements DirtyTracker {
       Authored: st.Authored,
       Inherited: st.Inherited,
       IgnoredSampling: st.IgnoredSampling,
+      TextInk: st.TextInk,
       Under: st.Under,
       Graded: st.Graded,
       Builds: st.Builds,
@@ -5454,11 +5486,25 @@ export class Canvas implements DirtyTracker {
     };
   };
 
-  private _liftZonesOf = (node: Jiv): { Shape: LiftValue | null; Ink: CompositeBlend | null } => {
+  private _liftZonesOf = (node: Jiv): LiftZones => {
     const s = node.RenderStyle;
     const eff = node.EffectiveLift;
     const fgAmount = LiftInkAmount(s.ForegroundLift);
     const propAmount = eff === null ? 0 : LiftInkAmount(eff.Amount);
+
+    // THE INK ZONE (`TextFilter: Lift()`), resolved FIRST and INDEPENDENTLY of everything below.
+    //
+    // It does not pass through the sampling refusals and it must not: those refuse an element whose
+    // own paint "cannot be reached whole", and they are right about the fill, the border and the
+    // shadow, which are one fragment with the material. The TEXT is not in that fragment -- it is
+    // emitted into its own batch, from its own atlas, after the material has committed -- so a glass
+    // surface's ink can add while its body samples its backdrop exactly as before. That is the
+    // capability this zone exists for, and it is why the refusal list below is not consulted.
+    //
+    // It also emits NO shape draw, so it never reaches `Shape` and can never raise `Under`/`Graded`.
+    const textAmount = TextLiftAmount(s);
+    const textInk = textAmount !== 0 ? InkBlendOf(textAmount) : null;
+    const textScale = textAmount !== 0 ? LiftInkScale(textAmount) : 1;
 
     // The ink amount: the `Filter` zone's if it was authored, else the cascaded property's.
     const inkAmount = fgAmount !== 0 ? fgAmount : propAmount;
@@ -5466,7 +5512,7 @@ export class Canvas implements DirtyTracker {
       ? { R: s.ForegroundLiftColor.R, G: s.ForegroundLiftColor.G, B: s.ForegroundLiftColor.B, Amount: fgAmount }
       : (eff ?? LIFT_WHITE);
 
-    if (inkAmount === 0) return { Shape: null, Ink: null };
+    if (inkAmount === 0) return { Shape: null, Ink: null, TextInk: textInk, TextScale: textScale };
 
     // Authored HERE means this node named the lift, in either zone: only then does it emit the shape
     // draw. `EffectiveLiftAuthored` is the property's half; a `Filter: Lift()` is authored by
@@ -5480,9 +5526,11 @@ export class Canvas implements DirtyTracker {
       : '';
     if (why !== '') {
       if (!authoredHere) {
-        // Inherited: drop it, count it, paint normally. Not an error.
+        // Inherited: drop it, count it, paint normally. Not an error. The INK zone survives this --
+        // it was never subject to the refusal (see above), so a glass child inside an additive
+        // cascade still honors its own `TextFilter`.
         this._liftStats.IgnoredSampling++;
-        return { Shape: null, Ink: null };
+        return { Shape: null, Ink: null, TextInk: textInk, TextScale: textScale };
       }
       throw new Error(
         `[Jaui] Lift(): the FOREGROUND zone makes this element's own paint ADD instead of cover, and ` +
@@ -5494,6 +5542,12 @@ export class Canvas implements DirtyTracker {
     return {
       Shape: authoredHere ? { R: inkColor.R, G: inkColor.G, B: inkColor.B, Amount: inkAmount } : null,
       Ink: InkBlendOf(inkAmount),
+      // `TextFilter` is the more specific zone, so it WINS for the ink when both are authored. The
+      // two are not in conflict and neither is refused: `Filter` still governs the panel draw and
+      // the shape draw, `TextFilter` governs the text batch, and they are different draws. With no
+      // `TextFilter` this is `InkBlendOf(inkAmount)`, which is byte-identical to what shipped.
+      TextInk: textInk ?? InkBlendOf(inkAmount),
+      TextScale: textScale,
     };
   };
 
@@ -7040,7 +7094,16 @@ export class Canvas implements DirtyTracker {
     }
   };
 
-  private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number = -1): void => {
+  /** `inkScale` is `TextFilter: Lift()`'s amount as a fraction of full scale, multiplied into the
+   *  glyph instance's TINT lane -- which is already an RGBA multiplier on the raster, so an additive
+   *  ink costs no attribute, no shader change and no second atlas entry. 1 is "unscaled" and is what
+   *  every path but a lifted ink passes, so those stay byte-identical.
+   *
+   *  RGB ONLY, never the alpha: the fragment writes `texel * tint * opacity * clipAlpha` and the
+   *  blend's source factor is `SRC_ALPHA`, so the contribution is `rgb * a`. Scaling rgb keeps that
+   *  LINEAR in glyph coverage (a half-covered edge adds half); scaling alpha as well would square the
+   *  coverage and thin every antialiased edge -- the `a-squared` trap. */
+  private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number = -1, inkScale: number = 1): void => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return;
     const anim = this._textAnimators.get(node);
     if (!anim || anim.Words.length === 0) return;
@@ -7140,9 +7203,12 @@ export class Canvas implements DirtyTracker {
         cmd3.Opacity = opacity;
         cmd3.ClipOffset = clipOffset;
         cmd3.ClipCount = clipCount;
-        cmd3.TintR = w.TintR.Value;
-        cmd3.TintG = w.TintG.Value;
-        cmd3.TintB = w.TintB.Value;
+        // MULTIPLIED into the tint, not assigned over it: this lane already carries the
+        // color-transition ratio (`oldColor/newColor`, decaying to 1), so an additive ink must
+        // compose with a color change in flight rather than cancel it.
+        cmd3.TintR = w.TintR.Value * inkScale;
+        cmd3.TintG = w.TintG.Value * inkScale;
+        cmd3.TintB = w.TintB.Value * inkScale;
         cmd3.TintA = w.TintA.Value;
         cmd3.XformIndex = xformIndex;
         this._textBuffer.Push(cmd3);
@@ -7157,9 +7223,10 @@ export class Canvas implements DirtyTracker {
       cmd.Opacity = opacity;
       cmd.ClipOffset = clipOffset;
       cmd.ClipCount = clipCount;
-      cmd.TintR = w.TintR.Value;
-      cmd.TintG = w.TintG.Value;
-      cmd.TintB = w.TintB.Value;
+      // See the 3D path above: multiplied, never assigned, and RGB only.
+      cmd.TintR = w.TintR.Value * inkScale;
+      cmd.TintG = w.TintG.Value * inkScale;
+      cmd.TintB = w.TintB.Value * inkScale;
       cmd.TintA = w.TintA.Value;
       cmd.Cos = tCos;
       cmd.Sin = tSin;

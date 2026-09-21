@@ -76,6 +76,11 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // direction. The lift COLORS snap (below): the amount is what animates and what flips with the
   // theme; the color is the material's identity.
   ['Filter',                 s => s.ForegroundLift,               (s, v) => { s.ForegroundLift = v; }],
+  // The INK amount springs under its OWN bucket `TextFilter`, not under `Filter`, because it is its
+  // own authorable property and a glyph's glow should be tunable without retiming the element's
+  // grade. Signed, for the same theme-flip reason as its foreground sibling. There is no color to
+  // snap beside it: the ink's color is `Color`, which the text animator already springs.
+  ['TextFilter',             s => s.TextLift,                     (s, v) => { s.TextLift = v; }],
 
   // Refraction band geometry
   ['BezelWidth',             s => s.BezelWidth,                   (s, v) => { s.BezelWidth = v; }],

@@ -26,6 +26,21 @@
  * | `BackdropFilter: Lift(..)` | yes                    | covers  | covers           |
  * | `Filter: Lift(..)`         | yes                    | ADDS    | covers           |
  * | `Lift: <color> <amount>`   | yes, where AUTHORED    | ADDS    | ADD (cascades)   |
+ * | `TextFilter: Lift(n)`      | NO                     | ADDS    | covers           |
+ *
+ * `TextFilter` is the FOURTH row and the odd one: it emits no shape draw at all. It exists because the
+ * other three cannot say "only the ink" -- an element's fill, border, shadow and text are ONE draw, so
+ * `Filter: Lift()` moves all four together. The ink is the one of the four that is already drawn
+ * separately (its own batch, its own atlas, after the material has committed), so it is the one that
+ * can be separated. That also means `TextFilter` WORKS ON GLASS, where an authored foreground lift is
+ * refused: the glass body is a different draw and is left alone.
+ *
+ * Its amount SCALES the ink rather than only flipping its sign. That is not an inconsistency with the
+ * foreground zone: the amount always says "how much" of whatever the zone paints, and in the
+ * foreground zone the amount is already spent on the SHAPE draw (so only its sign is left for the
+ * ink). With no shape draw, the amount has nothing else to mean. `TextFilter` takes the ONE-argument
+ * form only -- the ink's color is `Color`, and `Filter.Parse._refuseInText` says why a second color
+ * there would be a different meaning for the same word.
  *
  * So a FULLY TRANSPARENT element gets the same pixels from the backdrop zone and the foreground zone.
  * That is not a defect and it is not a collapse of the design: it is Jack's own reading of it --
@@ -215,9 +230,43 @@ export const LiftTouchesInk = (rs: JivRenderStyle, effective: LiftValue | null):
   if (Lift.Mode === 'off') return false;
   if (effective !== null && Math.abs(effective.Amount) > LIFT_EPSILON) return true;
   if (Math.abs(rs.ForegroundLift) > LIFT_EPSILON) return true;
+  // The INK zone (`TextFilter: Lift()`) makes this element's ink add, which is exactly what this
+  // predicate asks. It is counted CONSERVATIVELY: a text lift leaves the PANEL alone, so the
+  // empty-panel cull and the occlusion pre-pass would both still be sound on the fill -- but the
+  // retained layer cache would NOT be, because a capture's destination is a cleared target and ink
+  // that adds onto nothing is a wrong picture. Rather than split one predicate into three, this
+  // refuses all three: per this function's own rule, refusing too often costs an optimization and
+  // refusing too rarely costs correctness.
+  if (Math.abs(rs.TextLift) > LIFT_EPSILON) return true;
   const d = rs.LiftDeclaration;
   return d !== 'Inherit' && d !== 'None' && Math.abs(d.Amount) > LIFT_EPSILON;
 };
+
+/** The INK zone's amount, 0 when there is none or the null arm is armed. Same shape as
+ *  `LiftInkAmount`, read from the style rather than the cascade because `TextFilter` does NOT
+ *  cascade -- it is a per-element zone like its four siblings, not the inherited `Lift:` property. */
+export const TextLiftAmount = (rs: JivRenderStyle): number => {
+  if (Lift.Mode === 'off') return 0;
+  const l = rs.TextLift;
+  return Math.abs(l) > LIFT_EPSILON ? l : 0;
+};
+
+/** How much of its own color a lifted ink adds: `|amount|`, a fraction of full scale. This multiplies
+ *  the text instance's TINT lane, which is already an RGBA multiplier on the glyph raster, so an
+ *  additive ink needs NO new vertex attribute, NO shader change and NO second atlas entry.
+ *
+ *  WHY THE TINT LANE AND NOT THE RASTER. The glyph's color is baked into the atlas bitmap by
+ *  Canvas2D `fillText` and the atlas is keyed by that color, so scaling the color at raster time
+ *  would cut a fresh atlas entry per amount -- and the atlas is the real ceiling. The tint lane is
+ *  `(1,1,1,1)` for all settled text and exists precisely to multiply the raster.
+ *
+ *  AND WHY IT IS COVERAGE-LINEAR. The text fragment writes `texel * tint * opacity * clipAlpha` and
+ *  the atlas texel is STRAIGHT (uploaded from a canvas with `UNPACK_PREMULTIPLY_ALPHA_WEBGL` at its
+ *  default `false`, so the browser un-premultiplies). Under `PlusLighter`'s `SRC_ALPHA, ONE` the
+ *  contribution is `texel.rgb * scale * texel.a`, which is LINEAR in glyph coverage: a half-covered
+ *  edge adds half. Scaling the tint's RGB and not its ALPHA is what keeps that true -- scaling alpha
+ *  instead would give `a-squared` and every antialiased edge would come out thin. */
+export const LiftInkScale = (amount: number): number => Math.abs(amount);
 
 /** The GL state the additive SHAPE draw takes. */
 export const ShapeBlendOf = (amount: number): CompositeBlend => (amount > 0 ? 'LiftAdd' : 'LiftSubtract');
@@ -334,6 +383,13 @@ export interface LiftCensus {
   /** Inherited lifts a node DROPPED because it samples its backdrop. Not an error -- a cascade that
    *  threw the moment it contained one glass child would be unusable. */
   IgnoredSampling: number;
+  /** Nodes whose INK added because of the `TextFilter` zone. Disjoint from `Authored` and
+   *  `Inherited`, which count the shape-draw zones: a text lift emits NO shape draw, so it can never
+   *  raise `Under` or `Graded`. It DOES raise `Blends`, because the ink takes a batch of its own.
+   *
+   *  `textInk=N` with `authored=0 inherited=0 liftUnder=0 liftGraded=0` is the signature of this zone
+   *  working as designed -- the ink moved and nothing else did. */
+  TextInk: number;
   /** The shape draw's two implementations. */
   Under: number;
   Graded: number;
@@ -359,6 +415,7 @@ export const LiftGateLine = (c: LiftCensus): string => {
   return `jaui:lift armed=${c.Armed}`
     + ` lifts=${c.Authored + c.Inherited} authored=${c.Authored} inherited=${c.Inherited}`
     + ` ignoredSampling=${c.IgnoredSampling}`
+    + ` textInk=${c.TextInk}`
     + ` liftUnder=${c.Under} liftGraded=${c.Graded}`
     + ` liftDraws=${c.LiftDraws} liftBuilds=${c.Builds}`
     + ` cascadeVisited=${c.CascadeVisited} cascadeCarried=${c.CascadeCarried}`

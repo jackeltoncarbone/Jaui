@@ -252,6 +252,11 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // the backdrop seen THROUGH the bevel, the highlight is what the lit face throws back.
   // Brightness + Saturate only; the 'fresnel' zone throws on Blur()/Contrast().
   const fresnel = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BorderFresnelFilter, ctx), ctx), 'fresnel');
+  // The INK zone. Takes `Lift()` only, so the only field of this parse that is ever read is `.Lift`
+  // -- the amount that scales the element's own ink. It resolves through the SAME `_resolveGradeArgs`
+  // as its four siblings, so `TextFilter: Lift(30 * @Dark - 20 * @Light)` flips with the theme in one
+  // line exactly as a wash does.
+  const ink = ParseFilter(_resolveGradeArgs(ResolveTernary(s.TextFilter, ctx), ctx), 'text');
   const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
   // A gradient-driven blur spectrum implies the ProgressiveBlur material and the
   // ramp axis on its own, so the author doesn't also need ProgressiveBlurDirection.
@@ -304,6 +309,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
     LiftDeclaration: _resolveLiftProperty(ResolveTernary(s.Lift, ctx), ctx),
     ForegroundLift: fg.Lift,
+    TextLift: ink.Lift,
     ForegroundLiftColor: _resolveLiftColor(fg.LiftColor, ctx),
     BackdropLiftColor: _resolveLiftColor(backdrop.LiftColor, ctx),
 

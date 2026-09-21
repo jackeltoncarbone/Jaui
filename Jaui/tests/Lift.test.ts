@@ -24,10 +24,10 @@ import type { Renderer } from '@jaui/Core/Renderer';
 import { BrowserPlatform } from '@jaui/Core/Platform';
 import { Jiv } from '@jaui/Jiv/Jiv';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '@jaui/Jiv/Jiv.InstanceBuffer';
-import { ParseFilter } from '@jaui/Core/Filter.Parse';
+import { ParseFilter, FILTER_PROPS, MergeFilterValue } from '@jaui/Core/Filter.Parse';
 import { ResolveStyle, SEED_CONTEXT } from '@jaui/Core/Style.Resolver';
 import { DefaultJivStyle } from '@jaui/Jiv/Jiv.Defaults';
-import { CascadeLift, FoldLift, Lift, LiftGateLine, LiftIsGray } from '@jaui/Core/Lift';
+import { CascadeLift, FoldLift, Lift, LiftGateLine, LiftIsGray, LiftTouchesInk } from '@jaui/Core/Lift';
 import type { LiftCensus, LiftValue } from '@jaui/Core/Lift';
 import { readRenderer, readJaui, arrowBody } from './Scene.ReadAfterWrite.Source';
 import { readFileSync } from 'node:fs';
@@ -61,15 +61,29 @@ describe('Lift() parses as a backdrop function, in 0-255 units', () => {
     expect(f.BlurRaw).toBe('8pt');
   });
 
-  it('is refused on every zone but the backdrop, naming the tool that zone already has', () => {
-    // INVERTED. The foreground zone used to refuse `Lift` and name `BlendMode: PlusLighter`; the
-    // foreground zone IS that surface now, so it accepts. The rule the old assertion protected --
-    // "a zone that cannot do this names the tool that can" -- still holds for the two RIM zones,
-    // which is where it is pinned now.
+  it('is refused on the two RIM zones only, naming the tool that zone already has', () => {
+    // INVERTED TWICE. The foreground zone used to refuse `Lift` and name `BlendMode: PlusLighter`;
+    // the foreground zone IS that surface now. The TEXT zone joined it. The rule the original
+    // assertion protected -- "a zone that cannot do this names the tool that can" -- still holds for
+    // the two RIM zones, which is where it stays pinned; the literal moved because the message now
+    // lists three accepting zones instead of two.
     expect(ParseFilter('Lift(18)', 'foreground').Lift).toBeCloseTo(18 / 255, 12);
-    expect(() => ParseFilter('Lift(18)', 'border')).toThrow(/BACKDROP or its FOREGROUND/);
-    expect(() => ParseFilter('Lift(18)', 'fresnel')).toThrow(/BACKDROP or its FOREGROUND/);
+    expect(ParseFilter('Lift(18)', 'text').Lift).toBeCloseTo(18 / 255, 12);
+    expect(() => ParseFilter('Lift(18)', 'border')).toThrow(/BACKDROP, its FOREGROUND or its INK/);
+    expect(() => ParseFilter('Lift(18)', 'fresnel')).toThrow(/BACKDROP, its FOREGROUND or its INK/);
     expect(() => ParseFilter('Lift(300)')).toThrow(/signed amount of 255/);
+  });
+
+  it('names all three obstacles when the RIM refuses it, not the old hand-wave', () => {
+    // The rule: a refusal has to say what could not carry the value, or the next author re-files it
+    // as a bug. The message that shipped said "a stroke has no backdrop of its own to add to", which
+    // was written when a lift only meant a shape draw and is not the real reason.
+    let msg = '';
+    try { ParseFilter('Lift(18)', 'border'); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toMatch(/same fragment as the fill/);      // one draw, one blend state
+    expect(msg).toMatch(/three scalars/);                  // the glass rim's grade cannot carry chroma
+    expect(msg).toMatch(/borders-only element/);           // and what DOES work today
+    expect(msg).toMatch(/TextFilter/);                     // names the new zone as an alternative
   });
 
   it('takes a bare var, because the resolver evaluates a grade argument before the parse', () => {
@@ -283,7 +297,9 @@ const walk = (search: string, build: (root: Jiv) => void): Walked => {
   const priv = c as unknown as { _emitTextFor: (n: Jiv, ...rest: never[]) => void };
   const real = priv._emitTextFor;
   priv._emitTextFor = (n: Jiv, ...rest: never[]): void => {
-    emits.push(n); rec.Calls.push({ Fn: 'EmitText', Args: [n] }); real(n, ...rest);
+    // `...rest` is recorded too, so a test can read the INK SCALE the text zone passed (the 5th of
+    // the rest args -- m, clipOffset, clipCount, xformIndex, inkScale). Existing pins read Args[0].
+    emits.push(n); rec.Calls.push({ Fn: 'EmitText', Args: [n, ...rest] }); real(n, ...rest);
   };
   c.RenderHeadless(1000);
   const g = globalThis as unknown as { __jauiLift: () => LiftCensus };
@@ -753,5 +769,288 @@ describe('the cascade carries a VALUE, like color, and Isolate is the barrier', 
     expect(w.Census.Under + w.Census.Graded).toBe(0);
     expect(w.Census.Blends).toBe(0);
     expect(fns(w.Rec)).not.toContain('SetCompositeBlend');
+  });
+});
+
+// ── 7. THE INK ZONE: `TextFilter: Lift(n)` ─────────────────────────────────────────────────────
+//
+// The capability the other four zones cannot express: ONLY the ink adds. An element's fill, border
+// and shadow are one fragment, so `Filter: Lift()` moves all of them together; the text is the one
+// part already drawn separately, so it is the one part that can be separated.
+
+describe('TextFilter is the fifth zone, and it takes Lift() and nothing else', () => {
+  it('parses the one-argument form in the same 0-255 units as every other zone', () => {
+    expect(ParseFilter('Lift(30)', 'text').Lift).toBeCloseTo(30 / 255, 12);
+    expect(ParseFilter('Lift(-20)', 'text').Lift).toBeCloseTo(-20 / 255, 12);
+    expect(ParseFilter('None', 'text').Lift).toBe(0);
+    // ONE convention. The same string means the same amount in all three accepting zones.
+    expect(ParseFilter('Lift(30)', 'text').Lift).toBe(ParseFilter('Lift(30)', 'backdrop').Lift);
+    expect(ParseFilter('Lift(30)', 'text').Lift).toBe(ParseFilter('Lift(30)', 'foreground').Lift);
+  });
+
+  it('REFUSES the two-argument form, naming Color as the property that owns the ink', () => {
+    // The rule: an argument that would mean something DIFFERENT in this zone than in the others is
+    // refused, not quietly reinterpreted. In the shape zones the color IS the source; on ink it
+    // could only multiply the glyph's own color.
+    let msg = '';
+    try { ParseFilter('Lift(rgb(255, 220, 180), 30)', 'text'); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toMatch(/takes <amount> only/);
+    expect(msg).toMatch(/Color/);
+    expect(msg).toMatch(/channel by channel/);
+    // ...while the two zones that have no color of their own still take it.
+    expect(ParseFilter('Lift(rgb(255, 220, 180), 30)', 'backdrop').LiftColor).toBe('rgb(255, 220, 180)');
+    expect(ParseFilter('Lift(rgb(255, 220, 180), 30)', 'foreground').LiftColor).toBe('rgb(255, 220, 180)');
+  });
+
+  it('REFUSES the grade functions and every blur, each naming what does own it', () => {
+    for (const fn of ['Brightness(1.2)', 'Saturate(1.2)', 'Contrast(1.2)']) {
+      expect(() => ParseFilter(fn, 'text')).toThrow(/TextFilter takes Lift\(\) only/);
+      expect(() => ParseFilter(fn, 'text')).toThrow(/Author the grade on Filter/);
+    }
+    for (const fn of ['Blur(4pt)', 'LinearProgressiveBlur(Top, 8pt)', 'EdgeProgressiveBlur(8pt)']) {
+      expect(() => ParseFilter(fn, 'text')).toThrow(/no ink-only blur pass/);
+    }
+    expect(() => ParseFilter('Sharpen(2)', 'text')).toThrow(/TextFilter takes Lift\(\) only/);
+  });
+
+  it('has its OWN parse cache, so a string the foreground cached cannot answer for it', () => {
+    // The trap this closes: `Brightness(1.1)` is legal on the foreground and illegal on the ink. A
+    // shared cache would hand the foreground's parse back and the refusal would never fire.
+    expect(ParseFilter('Brightness(1.1)', 'foreground').Brightness).toBeCloseTo(1.1, 12);
+    expect(() => ParseFilter('Brightness(1.1)', 'text')).toThrow(/TextFilter takes Lift\(\) only/);
+    // ...and in the other order, so the test is not passing by cache-fill accident.
+    expect(() => ParseFilter('Saturate(1.3)', 'text')).toThrow(/TextFilter takes Lift\(\) only/);
+    expect(ParseFilter('Saturate(1.3)', 'foreground').Saturation).toBeCloseTo(1.3, 12);
+  });
+
+  it('merges by function like its four siblings, because it is a FILTER_PROP on JivStyle', () => {
+    // Not decoration: merge-by-function only happens in the `Style` slot, so this is the observable
+    // consequence of putting `TextFilter` on JivStyle rather than beside `Color` on TextStyle.
+    expect(FILTER_PROPS as readonly string[]).toContain('TextFilter');
+    expect(ParseFilter('Lift(18) Lift(30)', 'text').Lift).toBeCloseTo(30 / 255, 12);
+    const merged = MergeFilterValue('Lift(18)', 'Lift(30)');
+    expect(ParseFilter(merged, 'text').Lift).toBeCloseTo(30 / 255, 12);
+  });
+
+  it('resolves onto TextLift, and takes a bare var so it flips with the theme in one line', () => {
+    const rs = ResolveStyle({ ...DefaultJivStyle, TextFilter: 'Lift(30)' }, SEED_CONTEXT);
+    expect(rs.TextLift).toBeCloseTo(30 / 255, 12);
+    expect(ResolveStyle({ ...DefaultJivStyle }, SEED_CONTEXT).TextLift).toBe(0);
+
+    const vars = new Map([['Glow', '30 * @Dark - 20 * @Light'], ['Dark', '1'], ['Light', '0']]);
+    const dark = ResolveStyle({ ...DefaultJivStyle, TextFilter: 'Lift(@Glow)' }, { ...SEED_CONTEXT, Vars: vars });
+    expect(dark.TextLift).toBeCloseTo(30 / 255, 12);
+    const light = ResolveStyle({ ...DefaultJivStyle, TextFilter: 'Lift(@Glow)' },
+      { ...SEED_CONTEXT, Vars: new Map([...vars, ['Dark', '0'], ['Light', '1']]) });
+    expect(light.TextLift).toBeCloseTo(-20 / 255, 12);
+  });
+
+  it('leaves the FILL, the BORDER and the SHADOW amounts untouched -- the whole deliverable', () => {
+    const rs = ResolveStyle({ ...DefaultJivStyle, TextFilter: 'Lift(30)' }, SEED_CONTEXT);
+    expect(rs.ForegroundLift).toBe(0);          // the fill does not add
+    expect(rs.BackdropLift).toBe(0);            // nothing lifts the backdrop
+    expect(rs.LiftDeclaration).toBe('Inherit'); // nothing cascades
+    expect(rs.Brightness).toBe(1);              // and no grade was smuggled in
+    expect(rs.Saturation).toBe(1);
+    expect(rs.Contrast).toBe(1);
+  });
+});
+
+describe('the ink zone at the DRAW: only the text batch blends', () => {
+  it('sets PlusLighter around the TEXT draw and leaves the panel batch alone', () => {
+    const w = walk('', (root) => {
+      root.AddChild(wash({ TextFilter: 'Lift(30)', Background: 'rgb(40, 40, 40)' }));
+    });
+    const f = fns(w.Rec);
+    const sets = w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend');
+    expect(sets.length).toBe(1);
+    expect(sets[0].Args[0]).toBe('PlusLighter');
+    // The composite blend is set AFTER the text is emitted, which is what makes it the INK's blend
+    // and not the panel's. NOTE: `TextDrawBatch` is unobservable in this harness -- the glyph atlas
+    // is null without a real GL texture, so `flushText` returns before drawing. What IS observable
+    // is that NO PANEL draw falls inside the blend, which is the actual claim: the fill kept
+    // covering while the ink added.
+    const set = f.indexOf('SetCompositeBlend');
+    const restore = f.indexOf('RestoreBlend');
+    expect(f.indexOf('EmitText')).toBeLessThan(set);
+    expect(restore).toBeGreaterThan(set);
+    expect(f.slice(set, restore)).not.toContain('PanelDrawBatch');
+    // NO shape draw: this zone draws nothing of its own.
+    expect(w.Census.Under).toBe(0);
+    expect(w.Census.Graded).toBe(0);
+    expect(w.Census.Authored).toBe(0);
+    expect(w.Census.Inherited).toBe(0);
+    expect(w.Census.Builds).toBe(0);
+    expect(w.Census.TextInk).toBe(1);
+  });
+
+  it('a negative amount subtracts, so the theme flip lives in the sign here too', () => {
+    const w = walk('', (root) => { root.AddChild(wash({ TextFilter: 'Lift(-20)' })); });
+    const sets = w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend').map((c) => c.Args[0]);
+    expect(sets).toEqual(['PlusDarker']);
+    expect(w.Census.TextInk).toBe(1);
+  });
+
+  it('passes |amount| as the ink SCALE, and RGB-only is what keeps the edge linear', () => {
+    const w = walk('', (root) => { root.AddChild(wash({ TextFilter: 'Lift(30)' })); });
+    const emit = w.Rec.Calls.find((c) => c.Fn === 'EmitText');
+    // Args are [node, m, clipOffset, clipCount, xformIndex, inkScale].
+    expect(emit!.Args[5]).toBeCloseTo(30 / 255, 12);
+    const neg = walk('', (root) => { root.AddChild(wash({ TextFilter: 'Lift(-30)' })); });
+    // The SIGN is spent on the blend equation, so the scale is the MAGNITUDE. A negative scale would
+    // subtract twice over and give back the positive picture.
+    expect(neg.Rec.Calls.find((c) => c.Fn === 'EmitText')!.Args[5]).toBeCloseTo(30 / 255, 12);
+  });
+
+  it('passes scale 1 when there is no text lift, so every pre-existing path is byte-identical', () => {
+    const plain = walk('', (root) => { root.AddChild(wash({})); });
+    expect(plain.Rec.Calls.find((c) => c.Fn === 'EmitText')!.Args[5]).toBe(1);
+    // ...including the element-wide ink lift, whose ink still adds at its own FULL color.
+    const fg = walk('', (root) => { root.AddChild(wash({ Filter: 'Lift(30)' })); });
+    expect(fg.Rec.Calls.find((c) => c.Fn === 'EmitText')!.Args[5]).toBe(1);
+  });
+
+  it('the null arm zeroes it: ?lift=off draws no blend and reads textInk=0', () => {
+    const w = walk('?lift=off', (root) => { root.AddChild(wash({ TextFilter: 'Lift(30)' })); });
+    expect(fns(w.Rec)).not.toContain('SetCompositeBlend');
+    expect(w.Census.TextInk).toBe(0);
+    expect(w.Census.Armed).toBe('off');
+  });
+
+  it('an element with a TextFilter but NO text reads textInk=0 -- counted where it DREW', () => {
+    // The census must not credit a zone that painted nothing, or it cannot be used as evidence.
+    const w = walk('', (root) => {
+      root.AddChild(new Jiv({
+        ChildLayout: placed(20, 20, 160, 40),
+        Style: { Background: 'rgb(40, 40, 40)', TextFilter: 'Lift(30)' },
+      }));
+    });
+    expect(w.Census.TextInk).toBe(0);
+    expect(fns(w.Rec)).not.toContain('SetCompositeBlend');
+  });
+});
+
+describe('the ink zone does NOT cascade -- it sits where Color sits', () => {
+  it('a TextFilter on a container does not reach a child text element', () => {
+    // I walked into this myself writing the gallery row: `TextFilter` is a per-element zone like its
+    // four siblings, NOT the inherited `Lift:` property. A container with no text of its own and a
+    // TextFilter therefore blends NOTHING, and the child's glyphs keep covering. That is the correct
+    // behavior -- it is where `Color` lives too -- but it is worth a pin, because the failure mode is
+    // a silent no-op and this row of the gallery was authored wrong the first time.
+    const w = walk('', (root) => {
+      const container = new Jiv({
+        ChildLayout: placed(0, 0, 300, 200),
+        Style: { Background: 'rgb(0,0,0)', TextFilter: 'Lift(30)' },
+      });
+      container.AddChild(wash({}, 'child'));
+      root.AddChild(container);
+    });
+    expect(fns(w.Rec)).not.toContain('SetCompositeBlend');
+    expect(w.Census.TextInk).toBe(0);
+    // ...and authored on the CHILD, the same tree blends.
+    const ok = walk('', (root) => {
+      const container = new Jiv({ ChildLayout: placed(0, 0, 300, 200), Style: { Background: 'rgb(0,0,0)' } });
+      container.AddChild(wash({ TextFilter: 'Lift(30)' }, 'child'));
+      root.AddChild(container);
+    });
+    expect(ok.Census.TextInk).toBe(1);
+  });
+
+  it('the inherited Lift: property does NOT set the ink scale -- only TextFilter does', () => {
+    // The cascade makes a descendant's ink ADD (blend), but at its own full color: the amount there
+    // is spent on the container's shape draw. Only the text zone scales the ink.
+    const w = walk('', (root) => {
+      const container = new Jiv({ ChildLayout: placed(0, 0, 300, 200), Style: { Lift: 'rgb(255,255,255) 30' } });
+      container.AddChild(wash({}, 'child'));
+      root.AddChild(container);
+    });
+    expect(w.Census.Inherited).toBeGreaterThan(0);
+    const emit = w.Rec.Calls.find((c) => c.Fn === 'EmitText');
+    expect(emit!.Args[5]).toBe(1);
+  });
+});
+
+describe('the ink zone WORKS ON GLASS, which is why it exists', () => {
+  it('a glass surface honors TextFilter while an authored Filter: Lift() on it throws', () => {
+    // An authored foreground lift is refused on glass because the element's own paint cannot be
+    // reached whole. Its TEXT is not in that draw at all -- separate batch, separate atlas, after
+    // the material has committed -- so the ink zone is not subject to that refusal.
+    expect(() => walk('', (root) => {
+      root.AddChild(wash({ Thickness: '8', Filter: 'Lift(30)' }));
+    })).toThrow(/cannot be reached whole/);
+
+    const w = walk('', (root) => { root.AddChild(wash({ Thickness: '8', TextFilter: 'Lift(30)' })); });
+    const sets = w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend').map((c) => c.Args[0]);
+    expect(sets).toEqual(['PlusLighter']);
+    expect(w.Census.TextInk).toBe(1);
+    expect(w.Census.IgnoredSampling).toBe(0);   // nothing was dropped: it was never refused
+    expect(w.Census.Refused).toEqual({});
+  });
+
+  it('a glass child inside an additive cascade keeps its own TextFilter while ignoring the cascade', () => {
+    const w = walk('', (root) => {
+      const container = new Jiv({ ChildLayout: placed(0, 0, 300, 200), Style: { Lift: 'rgb(255,255,255) 30' } });
+      container.AddChild(wash({ Thickness: '8', TextFilter: 'Lift(30)' }));
+      root.AddChild(container);
+    });
+    // The inherited lift is dropped by the glass child (soft refusal, counted)...
+    expect(w.Census.IgnoredSampling).toBe(1);
+    // ...and its OWN ink zone still fires.
+    expect(w.Census.TextInk).toBe(1);
+  });
+});
+
+describe('the ink zone and the element-wide lift are different draws, so neither refuses the other', () => {
+  it('TextFilter wins for the ink; Filter still governs the panel and the shape draw', () => {
+    const w = walk('', (root) => {
+      root.AddChild(wash({ Filter: 'Lift(30)', TextFilter: 'Lift(-20)', Background: 'rgb(40,40,40)' }));
+    });
+    const sets = w.Rec.Calls.filter((c) => c.Fn === 'SetCompositeBlend').map((c) => c.Args[0]);
+    // Three draws: the shape under-draw (LiftAdd), the panel whose ink adds (PlusLighter), and the
+    // text, which took the TEXT zone's sign and subtracts.
+    expect(sets).toEqual(['LiftAdd', 'PlusLighter', 'PlusDarker']);
+    expect(w.Census.Under).toBe(1);
+    expect(w.Census.Authored).toBe(1);
+    expect(w.Census.TextInk).toBe(1);
+    // And the ink took the TEXT zone's magnitude, not the foreground zone's.
+    expect(w.Rec.Calls.find((c) => c.Fn === 'EmitText')!.Args[5]).toBeCloseTo(20 / 255, 12);
+  });
+});
+
+describe('the ink zone is one instrument with the gate line', () => {
+  it('textInk appears in the gate line and equals the census field', () => {
+    const w = walk('', (root) => {
+      root.AddChild(wash({ TextFilter: 'Lift(30)' }));
+      root.AddChild(wash({ TextFilter: 'Lift(30)' }, 'Bb'));
+    });
+    expect(w.Census.TextInk).toBe(2);
+    const line = LiftGateLine(w.Census);
+    expect(line).toContain('textInk=2');
+    expect(line).toContain(`textInk=${w.Census.TextInk}`);
+  });
+
+  it('a lifted ink refuses the empty-panel cull and the layer cache, via LiftTouchesInk', () => {
+    // A capture's destination is a CLEARED target, so ink that adds there adds onto nothing. The
+    // predicate is deliberately conservative -- it also blocks two levers a text lift would not
+    // actually break -- because refusing too rarely is a wrong picture.
+    const rs = ResolveStyle({ ...DefaultJivStyle, TextFilter: 'Lift(30)' }, SEED_CONTEXT);
+    expect(LiftTouchesInk(rs, null)).toBe(true);
+    const plain = ResolveStyle({ ...DefaultJivStyle }, SEED_CONTEXT);
+    expect(LiftTouchesInk(plain, null)).toBe(false);
+    // ...and the null arm turns it off, like every other half of this feature.
+    Lift.Mode = 'off';
+    expect(LiftTouchesInk(rs, null)).toBe(false);
+  });
+
+  it('the ink scale multiplies the tint lane and never its alpha -- pinned on the source', () => {
+    // The `a-squared` trap: the text fragment writes `texel * tint * opacity * clipAlpha` and the
+    // blend's source factor is SRC_ALPHA, so the contribution is rgb * a. Scaling rgb keeps a
+    // half-covered glyph edge adding half; scaling alpha too would square the coverage.
+    const src = readJaui();
+    expect(src).toContain('cmd.TintR = w.TintR.Value * inkScale;');
+    expect(src).toContain('cmd.TintA = w.TintA.Value;');
+    expect(src).not.toContain('cmd.TintA = w.TintA.Value * inkScale');
+    expect(src).toContain('cmd3.TintR = w.TintR.Value * inkScale;');
+    expect(src).not.toContain('cmd3.TintA = w.TintA.Value * inkScale');
   });
 });

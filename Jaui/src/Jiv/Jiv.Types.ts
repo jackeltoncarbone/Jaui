@@ -217,6 +217,35 @@ export interface JivStyle {
    *  property only says what color it is, exactly as `BorderColor.a` and
    *  `BorderFilter` already split amount from grade for the rim itself. */
   BorderFresnelFilter: string;
+  /** THE INK ZONE -- the fifth filter zone, and the only one that touches the element's TEXT and
+   *  nothing else:
+   *
+   *      TextFilter: Lift(30)        // the ink ADDS, at 30/255 of its own Color
+   *      TextFilter: Lift(-20)       // the ink SUBTRACTS
+   *      TextFilter: None            // the default: the ink covers, as ink does
+   *
+   *  It takes `Lift()` and NOTHING else (`Filter.Parse`'s `'text'` zone refuses the grade functions
+   *  and every blur by name, each naming the property that does own it).
+   *
+   *  WHAT IT IS FOR. `Filter: Lift()` is the element-WIDE lever: it makes the fill, the border, the
+   *  shadow AND the ink additive together, because they are one draw. There was no way to say "this
+   *  element's GLYPH glows and its fill is untouched" -- which is what a label over live imagery
+   *  wants. This is that.
+   *
+   *  The amount SCALES the ink: `Lift(255)` adds the ink at its own full `Color`, `Lift(128)` at half.
+   *  That differs from the foreground zone, where the amount belongs to the shape draw and only its
+   *  sign reaches the ink -- because here there is no shape draw for it to belong to. `TextFilter`
+   *  emits NO additive shape draw at all; it changes one draw's blend state and nothing else.
+   *
+   *  IT WORKS ON GLASS, WHICH `Filter: Lift()` DOES NOT. An authored foreground lift is refused on a
+   *  glass or progressive-blur surface because that element's own paint cannot be reached whole. Text
+   *  is not in that draw -- it is emitted into its own batch after the material has committed -- so a
+   *  glass toolbar's glyphs can add while its body samples its backdrop as usual.
+   *
+   *  NOT FOR ORDINARY LABEL INK. Apple: "Symbols and text that appear on Liquid Glass can have color,
+   *  like in a selected tab bar item" -- a lift on ink is for a glyph that should GLOW over live
+   *  content, not a way to brighten text. An ordinary label keeps its ink. */
+  TextFilter: string;
   /** Cascade barrier for the foreground `Filter`. `true` stops an ancestor's
    *  Filter grade from folding into this element + its subtree (CSS
    *  `isolation: isolate`). Default `false`. */
@@ -385,6 +414,11 @@ export interface JivRenderStyle {
   LiftDeclaration: LiftDeclaration;
   /** `Filter: Lift()`'s amount, a signed fraction of full scale. The element's own ink ADDS. */
   ForegroundLift: number;
+  /** `TextFilter: Lift()`'s amount, a signed fraction of full scale. ONLY the element's ink adds, at
+   *  `|amount|` of its own `Color`; the fill, border and shadow are untouched. 0 = the ink covers.
+   *  There is no `TextLiftColor`: the ink's color is `Color` on the text style, which is exactly why
+   *  the text zone refuses a color argument (`Filter.Parse._refuseInText`). */
+  TextLift: number;
   /** `Filter: Lift()`'s color, 0..1 per channel. White when the one-argument spelling was used. */
   ForegroundLiftColor: Color;
   /** `BackdropFilter: Lift()`'s color, 0..1 per channel. White when the one-argument spelling was
