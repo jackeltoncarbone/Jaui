@@ -1156,7 +1156,7 @@ export class Canvas implements DirtyTracker {
   // it, so the lane goes back to off until it does. A feature that is known-wrong stays off while it is
   // being fixed rather than shipping its artefact to the person using the app. `?glass-adapt=on` still
   // arms it for whoever is working on it.
-  private _glassAdapt: 'on' | 'off' = 'on';
+  private _glassAdapt: 'on' | 'off' = 'off';
   private _glassAdaptRefused = '';
   /** This frame's adapted draws, for the census; and draws that wanted to adapt but had no probe. */
   private _glassAdaptDraws: GlassAdaptDraw[] = [];
