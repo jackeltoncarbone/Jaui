@@ -160,6 +160,22 @@ export class SceneReadLedger {
    *  both arms and a pass-count prediction quoted against it would be reading a column this lever
    *  cannot move. This is the one that moves. */
   GaussianPasses = 0;
+  /** `?glass-group`: the container-scoped shared backdrop, per rendered frame.
+   *
+   *  `GroupBuilds` is pyramids built for a GROUP of glass siblings; `GroupMembers` is how many
+   *  surfaces took one; `GroupFallbacks` is glass fills the grouping did not cover, which built
+   *  exactly as they build today. Read them TOGETHER, because the vacuous shape this ledger keeps
+   *  being bitten by is a flag armed with `builds=0 members=0 fallbacks=20` -- the engine it
+   *  inherited, wearing the flag's name and priced as though it had grouped something.
+   *
+   *  On `glass-grid` at dpr 2 they must read 1 / 20 / 0: `Perf.GlassGrid.ts` puts all twenty cards
+   *  under ONE `PerfGrid` parent, so the page is one group of twenty and not four bands of five.
+   *  `EndsByKey.blur` falls from 20 to 1 beside them -- twenty fills become one group build, and
+   *  `?border-source=fill` (the default since Jaui `f1834cf`) already put every rim on the fill's
+   *  handle, which is now the group's. */
+  GroupBuilds = 0;
+  GroupMembers = 0;
+  GroupFallbacks = 0;
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -194,6 +210,9 @@ export class SceneReadLedger {
     this.PresampledBuilds = 0;
     this.GaussianBuilds = 0;
     this.GaussianPasses = 0;
+    this.GroupBuilds = 0;
+    this.GroupMembers = 0;
+    this.GroupFallbacks = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -276,5 +295,16 @@ export class SceneReadLedger {
     this.GaussianBuilds++;
     this.GaussianPasses += passes;
   };
+  /** One pyramid built for a group of glass siblings under `?glass-group`. */
+  NoteGroupBuild = (): void => { this.GroupBuilds++; };
+
+  /** One surface TOOK a group's pyramid. Counted per take rather than added in a lump off the
+   *  plan's member count, so `GroupMembers` names surfaces that actually sampled a shared backdrop
+   *  and not surfaces a planner hoped would -- a member the walk culls after the plan scan saw it
+   *  is the difference, and it is exactly the kind of gap a lump count hides. */
+  NoteGroupMember = (): void => { this.GroupMembers++; };
+
+  /** `n` glass fills no group covered, which built one at a time exactly as they do today. */
+  NoteGroupFallback = (n: number): void => { this.GroupFallbacks += n; };
 }
 

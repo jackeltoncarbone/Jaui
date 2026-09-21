@@ -783,6 +783,13 @@ export class WebGL2Renderer implements Renderer {
     const pass = this._blur as BlurPass | undefined;
     return pass === undefined ? { Count: 0, Sizes: '', Mb: 0 } : pass.GaussTempCensus;
   }
+  /** `?glass-group`'s effect field, and it has to be read as a TRIPLE. `GroupBuilds` alone cannot
+   *  distinguish a page that grouped twenty cards into one pyramid from a page that grouped two
+   *  and left eighteen alone; `GroupFallbacks` is the column that says so. All three are 0 on
+   *  every unflagged frame, because the planner is not consulted at all unless the arm asked. */
+  get GroupBuilds(): number { return this._sceneLedger.GroupBuilds; }
+  get GroupMembers(): number { return this._sceneLedger.GroupMembers; }
+  get GroupFallbacks(): number { return this._sceneLedger.GroupFallbacks; }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
   get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number; EndsByKey: Record<string, number> } {
     const l = this._sceneLedger;
@@ -3004,6 +3011,65 @@ export class WebGL2Renderer implements Renderer {
   /** Surfaces the atlas plan refused, which built one at a time through `ComputeBlur` exactly as
    *  they do today. Booked by the walk, because only the walk knows how many it handed over. */
   NoteAtlasSolo = (n: number): void => { this._sceneLedger.NoteAtlasSolo(n); };
+
+  /** THE GROUP BUILD: one pyramid for a whole run of glass siblings, taken at the walk's entry to
+   *  the group and sampled by every member of it.
+   *
+   *  ONE HANDLE COMES BACK, not one per member, and that is the whole difference from
+   *  `ComputeBlurAtlas`. A `BackdropRegion` is a map from SCREEN UV into the pyramid
+   *  (`BlurPass._region`: `screenUv * width/rect.W - rect.X/rect.W`), so it is a function of the
+   *  built RECT alone -- it says nothing about who is sampling. Every member of a group therefore
+   *  wants the same map, and `Jiv.Panel.frag`'s two mads land each member's own fragments on its
+   *  own part of the union without anyone cropping anything. The atlas needed a region per member
+   *  because its members live in different SLOTS of one texture; a union's members live in one
+   *  continuous pyramid at their true screen positions.
+   *
+   *  `baseFactor` PINS the sigma-adaptive downsample to the MEMBERS' `k`, and it is not optional:
+   *  `glass-grid`'s union is 2456x1452 against a 2560x1600 canvas, which is 87% of it, so
+   *  `BaseDownsampleFactor`'s 15%-of-canvas gate -- which every 6% card sits below -- would hand
+   *  the union `k = 2` and a phase of 8 where the members resolved on a phase of 4. Different
+   *  phase, different texels, and the crop argument that makes a union faithful is gone.
+   *  `PlanBackdropUnion` computes the pin from `members[0]` and checks every other member agrees.
+   *
+   *  The LEDGER is booked exactly as ONE build books it -- one read, one `blur` target bind -- and
+   *  that is the honest count: the group reads the scene once and ends the scene's encoder once,
+   *  which is the whole claim. On `glass-grid` `EndsByKey.blur` goes 20 -> 1: the rims are already
+   *  on the fill's handle (`?border-source=fill`, the default since Jaui `f1834cf`), and the
+   *  twenty fill builds become one.
+   *
+   *  No diagnostic rides across this one. `?no-blur`, `?blur-dummy`, `?blur-src-*` and the card
+   *  composite each have a per-surface answer this would have to reproduce twenty times over one
+   *  texture; `Core/Jaui.ts` refuses the arm by NAME beside each of them, and the throw below is
+   *  the belt on that brace rather than a silent degradation. */
+  ComputeBlurGroup = (
+    input: GpuTextureHandle, width: number, height: number, radius: number,
+    region: { x: number; y: number; w: number; h: number }, baseFactor: number, members: number,
+  ): GpuTextureHandle => {
+    if (radius <= 0) throw new Error('[Jaui] ComputeBlurGroup is the dual-filter path: radius must be > 0');
+    if (members < 2) throw new Error(`[Jaui] ComputeBlurGroup needs at least two members, got ${members}`);
+    if (this.DiagNoBlur || this.DiagBlurDummy || this.DiagBlurSrc !== null || this._activeCard !== null) {
+      throw new Error('[Jaui] ?glass-group must be refused beside the source diagnostics and the card composite');
+    }
+    this._backdropBuildSeq++;
+    if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
+    this._reconcileBlurPool();
+    const pass = this._blur;
+    this._lastBlur = pass;
+    this._sceneLedger.NoteTargetBind('blur');
+    const result = pass.Blur(_unwrap(input), width, height, radius, 0, region, baseFactor, false);
+    this._sceneLedger.NoteGroupBuild();
+    // BlurPass bound its own programs; invalidate the cache exactly as `ComputeBlur` does.
+    this._lastProgram = null;
+    return _wrap(result, pass.LastRegion);
+  };
+
+  /** One surface took a group's pyramid. Booked by the WALK and once per take, because only the
+   *  walk knows which members it actually reached -- see `SceneLedger.NoteGroupMember`. */
+  NoteGroupMember = (): void => { this._sceneLedger.NoteGroupMember(); };
+
+  /** Glass fills no group covered, which built one at a time through `ComputeBlur` exactly as they
+   *  do today. Booked by the walk, because only the walk knows how many it handed over. */
+  NoteGroupFallback = (n: number): void => { this._sceneLedger.NoteGroupFallback(n); };
 
   // -- THE GLASS BORDER'S BACKDROP, WITHOUT A PYRAMID -------------------------------------------
   //

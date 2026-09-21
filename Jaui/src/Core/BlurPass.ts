@@ -748,6 +748,12 @@ export interface BackdropUnionPlan {
   K: number;
   Depth: number;
   Phase: number;
+  /** The union's RESOLVED extent -- what `ResolveRegionRect` snaps `Region` to at this phase, and
+   *  therefore the size level 0 actually comes back at and the size `Fill` is counted over. On the
+   *  plan rather than re-derived by a reader, so a gate line and the pyramid it describes cannot
+   *  quote two different rectangles. */
+  RectW: number;
+  RectH: number;
   /** Destination pixels the union writes once. */
   Fill: number;
   /** Destination pixels the members write between them today. */
@@ -790,21 +796,31 @@ export interface BackdropUnionPlan {
  * place. That is a question about DRAW ORDER — a surface's backdrop contains everything drawn
  * before it, including earlier glass — and only the render walk knows the walk.
  *
- * NOTHING IN src CALLS THIS, AND THAT IS THE FINDING RATHER THAN AN OMISSION. Wired to the walk
- * it is correct and it is nearly worthless, because the two conditions a union must satisfy pull
- * against each other. It saves in proportion to how much the member regions OVERLAP, so it wants
- * a pitch below a region's own width; it is only legal where an earlier surface's paint stays out
- * of a later one's sample margin, so it needs a pitch above the box plus one margin plus that
- * paint's outset. Those two bounds are `margin - outset` apart — about 16pt of pitch for
- * JwiftGlass — and the saving has decayed to nothing by the time the pitch clears the lower one.
- * `tests/Blur.Union.test.ts` sweeps it: on glass-grid's own cards the union becomes legal at a
- * 52pt gap and has stopped paying by 68pt, and is worth at most 1.12x in between. glass-grid ships
- * a 20pt gap, where it is worth 1.385x and is not available.
+ * -- THE SEPARATION LAW THAT BLOCKED THIS, AND THE RULING THAT REPEALED IT --------------------
  *
- * It is kept, with its test, because the question gets asked about once a quarter and the answer
- * is arithmetic that takes a day to re-derive and five minutes to run. It becomes live code the
- * day someone decides glass should stop refracting the glass BESIDE it — which is a change to the
- * picture, so it is not a decision this file gets to make.
+ * This function shipped INERT, and `Perf/PyramidUnion.Finding.md` is why. A backdrop is not only
+ * a place, it is a TIME: `renderNode` walks the tree once and each glass surface's pyramid is
+ * built from the scene as of its OWN draw, so two same-class surfaces could share one only where
+ * the gap between them cleared the later one's sample margin plus the earlier one's paint outset
+ * -- about 97 device px for JwiftGlass. A union SAVES in proportion to how much the member
+ * regions OVERLAP, so it wants a pitch BELOW a region's own width. Those two bounds are
+ * `margin - outset` apart (about 16pt of pitch) and the saving has decayed to nothing by the time
+ * the pitch clears the lower one: legal only where it is worthless, 1.12x at the best legal pitch
+ * on glass-grid's own cards.
+ *
+ * On 2026-09-20 Jack ruled Apple's rule into the engine (WWDC25: "glass can not sample other
+ * glass ... a glass container allows these elements to share their sampling region"), and the
+ * separation law is REPEALED FOR SIBLINGS: a run of glass siblings under one parent shares ONE
+ * backdrop, captured at the walk's entry to the group, and no member ever refracts another
+ * member's paint. It is KEPT ACROSS GROUPS, and for free rather than by a check -- a group
+ * entered later in the walk captures the scene later, with the earlier group's glass in it.
+ *
+ * So `Core/Jaui.ts` calls this under `?glass-group`, over the members of ONE group, and the
+ * arithmetic the finding swept is the arithmetic of a live path: glass-grid's twenty cards are
+ * one group under `PerfGrid`, the union resolves to 2456x1456, and `Fill` is 5,587,400 against a
+ * `MemberFill` of 7,739,000 -- the 1.385x the sweep priced at a 20pt gap and could not then take.
+ * `tests/Blur.Union.test.ts` still pins the sweep, because the arithmetic did not change; what
+ * changed is which half of it the engine is allowed to stand in.
  */
 export const PlanBackdropUnion = (
   members: readonly BackdropRect[], width: number, height: number, radius: number,
@@ -844,7 +860,10 @@ export const PlanBackdropUnion = (
   const fill = PyramidFill(u.W, u.H, k, depth);
   if (fill >= memberFill) return null;                                        // (5)
 
-  return { Region: region, K: k, Depth: depth, Phase: phase, Fill: fill, MemberFill: memberFill };
+  return {
+    Region: region, K: k, Depth: depth, Phase: phase,
+    RectW: u.W, RectH: u.H, Fill: fill, MemberFill: memberFill,
+  };
 };
 
 /** The five kernels only an ATLAS ARM ever binds: the two slot kernels (`TAP_SLOT`, one slot of an
@@ -1298,8 +1317,10 @@ export class BlurPass {
    * and the crop argument that makes a union identical is gone. Lowering it is never a fidelity
    * loss (see the re-base note below: it discards only what the blur was about to erase), it
    * costs fill and buys correctness. A value that is not a power of two is a caller bug and
-   * throws rather than quietly rounding into a third rendering. No caller passes it today; see
-   * `PlanBackdropUnion` for the one that would, and for why it does not exist yet.
+   * throws rather than quietly rounding into a third rendering. ONE caller passes it --
+   * `WebGL2Renderer.ComputeBlurGroup`, under `?glass-group`, with `PlanBackdropUnion`'s pinned
+   * `K` -- and on `glass-grid` it is load bearing: the union is 87% of the canvas, so the
+   * 15%-of-canvas gate would hand it `k = 2` where every 6% member resolved at `k = 1`.
    *
    * `presample` is `?glass-presample`, and it asks ONE thing: lift `BaseDownsampleFactor`'s
    * 15%-of-canvas gate for THIS build, so a small region whose own sigma earns k > 1 re-bases
