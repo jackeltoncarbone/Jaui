@@ -4090,7 +4090,36 @@ export class WebGL2Renderer implements Renderer {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(backdrop));
     gl.bindVertexArray(this._quad.Vao);
-    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    // THE SNAP IS THE SHADOW'S, NOT THE MATERIAL'S. One texel carries three readings -- R the shadow's
+    // factor, G and B the backdrop's mean and peak -- and the ease above is a CONSTANT_ALPHA blend, which
+    // is one alpha across all three channels. So the park snap, which is right for R (a parked frame must
+    // carry no history, or the shadow it parks on is a blend of where it has been), was also being applied
+    // to G and B. The glass grade divides by the peak (`Glass.Adapt.ts`, `opened = ground + (far - ground)
+    // / peak`), so a stepped peak is a stepped MATERIAL.
+    //
+    // Jack found it by using it, and every part of his description is this: "Immediately upon hover,
+    // there's more saturation. It snaps, not animates. When I unhover, it stays saturated throughout the
+    // duration of the unhover animations. But then it instantly, at the end, just cuts out." Held through
+    // the animation because the probe was easing; cut at the end because the park took the whole reading
+    // again. `?glass-adapt=off` removed it, which is what named the lane.
+    //
+    // So on a SNAP frame the write is split: R takes the whole reading, G and B keep easing. Two 1x1 draws
+    // on park frames only -- never on an ordinary frame, and never when `fresh`, where a surface with no
+    // history must take all three whole.
+    if (snap && !fresh) {
+      gl.colorMask(true, false, false, false);
+      gl.disable(gl.BLEND);
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      const gbEase = 1 - Math.exp(-Math.max(0, dtSeconds) / SHADOW_EASE_SECONDS);
+      gl.colorMask(false, true, true, false);
+      gl.enable(gl.BLEND);
+      gl.blendColor(0, 0, 0, gbEase);
+      gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      gl.colorMask(true, true, true, true);
+    } else {
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    }
     gl.blendColor(0, 0, 0, 0);
     if (!batched) this.RebindSceneTarget();
     if (timed) this._pass!.End();

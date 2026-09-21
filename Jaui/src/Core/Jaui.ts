@@ -1138,6 +1138,24 @@ export class Canvas implements DirtyTracker {
    *  room. `off` hands none: every batch uploads slot -1 and the vertex stage takes the authored grade
    *  untouched, today's engine byte for byte. The probe writes its luma channels on BOTH arms (they
    *  cost it one `max` and nothing reads them on `off`), so the arms differ in the draw and nowhere else. */
+  // DEFAULT OFF, and this is a retreat, not a decision about the idea.
+  //
+  // The adaptive far end is right and it measurably works: on the drill page it probes, opens the far
+  // end to 1.015 and reports Lifted, which is what stops dark glass sitting at half its backdrop's luma.
+  // But it makes the glass grade ride the adaptive SHADOW probe's texel, and that texel has a park snap
+  // -- the last render before the loop parks takes the whole reading again so the parked frame carries
+  // no history. Right for a shadow. Wrong for a material, because the grade divides by that reading, so
+  // the material steps whenever the page parks.
+  //
+  // Jack, using it: "Immediately upon hover, there's more saturation. It snaps, not animates. When I
+  // unhover, it stays saturated throughout the duration of the unhover animations. But then it instantly,
+  // at the end, just cuts out." `?glass-adapt=off` removed it; `=on` brought it back. That is the whole
+  // attribution and it took one flag to get.
+  //
+  // Splitting the park write per channel (R whole, G and B still easing, WebGL2.Renderer) did not settle
+  // it, so the lane goes back to off until it does. A feature that is known-wrong stays off while it is
+  // being fixed rather than shipping its artefact to the person using the app. `?glass-adapt=on` still
+  // arms it for whoever is working on it.
   private _glassAdapt: 'on' | 'off' = 'on';
   private _glassAdaptRefused = '';
   /** This frame's adapted draws, for the census; and draws that wanted to adapt but had no probe. */
