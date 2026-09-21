@@ -194,7 +194,7 @@ describe('?blur-first — ONE piece of arithmetic, not two copies of it', () => 
 
   it('the adaptive-shadow probe stays in the walk, where it always ran', () => {
     // It reads the pyramid, which now exists earlier — fine. Moving it would move a scene READ.
-    expect(jaui).toContain('const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt);');
+    expect(jaui).toContain('const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt, inputsSame);');
   });
 
   it('runs before the walk, and rebinds the scene so the first draw lands where it always did', () => {

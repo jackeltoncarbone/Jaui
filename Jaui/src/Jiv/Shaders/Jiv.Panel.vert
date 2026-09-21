@@ -40,6 +40,32 @@ float AdaptiveShadowAlpha(float authoredAlpha, float backdropFactor, float adapt
     return authoredAlpha * mix(1.0, backdropFactor, adaptive);
 }
 
+// Adaptive glass (`?glass-adapt`). u_GlassAdapt = (slot, openFar): the surface's texel in the same state
+// row (its B is the brightest local backdrop luma under the footprint) and its AdaptiveFar. Slot -1, or
+// openFar 0, leaves the authored grade untouched.
+uniform vec2 u_GlassAdapt;
+
+// The authored grade is one affine ramp in luma: over black it lands at `ground`, over white at `far`,
+// and `far` is where the ink sits exactly on its legibility floor (Jwift.Glass.jss, the far-end solve).
+// Over a backdrop whose brightest part is `peak`, the body never gets past ground + (far - ground) * peak,
+// so the ramp can OPEN until that point reaches `far` again -- and no further than openFar, Apple's own
+// far end. Ground and the colour carried (c * s * (1 - t)) stay put; only the range and the tint move.
+// Returns (brightness, saturation, contrast, signed tint). Past a tint of zero the body is lifted by a
+// brightness above 1 instead, which is the same (1 - t) scale applyTint cannot write with a negative t.
+// A ramp that does not open returns the authored numbers themselves, so nothing is re-derived.
+vec4 GlassAdaptGrade(vec4 grading, float bodyTint, float peak, float openFar) {
+    float t = -bodyTint;
+    float contrast = grading.z;
+    float ground = (1.0 - t) * (1.0 - contrast) * 0.5;
+    float far = (1.0 - t) * (1.0 + contrast) * 0.5;
+    float opened = min(openFar, ground + (far - ground) / max(peak, 1.0 / 1023.0));
+    if (!(opened > far)) return vec4(grading.xyz, bodyTint);
+    float range = opened - ground;
+    float keep = ground + opened;
+    float carry = contrast * grading.y * (1.0 - t);
+    return vec4(max(keep, 1.0), carry / range, range / keep, -max(1.0 - keep, 0.0));
+}
+
 out vec2 v_PixelPos;
 flat out vec4 v_PanelGeom;
 flat out vec4 v_Rot;        // cosθ, sinθ, centerX, centerY (device px)
@@ -78,6 +104,13 @@ void main() {
     v_RimEdge = a_RimEdge;
     v_Outline = a_Outline;
     v_BorderFilter = a_BorderFilter;
+    // Only a body tinted toward black, at brightness 1, is on the ramp GlassAdaptGrade inverts.
+    if (u_GlassAdapt.x >= 0.0 && u_GlassAdapt.y > 0.0 && a_Lighting.y < 0.0 && a_Grading.x == 1.0) {
+        float peak = texelFetch(u_ShadowState, ivec2(int(u_GlassAdapt.x), 0), 0).b;
+        vec4 adapted = GlassAdaptGrade(a_Grading, a_Lighting.y, peak, u_GlassAdapt.y);
+        v_Grading.xyz = adapted.xyz;
+        v_Lighting.y = adapted.w;
+    }
 
     // cos can only be in [-1, 1]; the CPU stores 2.0 to flag a projective panel.
     if (a_PanelGeom.x > 1.5) {

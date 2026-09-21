@@ -80,7 +80,8 @@ export const loadShadowModel = (): ShadowModel => {
 
   const mainBody = functionBody(measure, /void\s+main\s*\(/, 'main');
   need(mainBody, /sharp\s*=\s*dot\(\s*textureLod\(\s*u_Scene\s*,\s*uv\s*,\s*0\.0\s*\)\.rgb\s*,\s*LUMA\s*\)/, 'the sharp tap');
-  need(mainBody, /local\s*=\s*dot\(\s*textureLod\(\s*u_Backdrop\s*,\s*uv\s*,\s*u_DetailLod\s*\)\.rgb\s*,\s*LUMA\s*\)/, 'the local tap');
+  // The pyramid is sized to the surface, so the screen UV goes through its region map first.
+  need(mainBody, /local\s*=\s*dot\(\s*textureLod\(\s*u_Backdrop\s*,\s*uv\s*\*\s*u_BackdropXf\.xy\s*\+\s*u_BackdropXf\.zw\s*,\s*u_DetailLod\s*\)\.rgb\s*,\s*LUMA\s*\)/, 'the local tap');
   need(mainBody, /detail\s*\+=\s*abs\(\s*sharp\s*-\s*local\s*\)/, 'the detail sum');
   need(mainBody, /cell\s*=\s*fract\(\s*0\.5\s*\+\s*float\(\s*k\s*\+\s*1\s*\)\s*\*\s*SHADOW_R2\s*\)/, 'the R2 tap sequence');
   need(mainBody, /pixel\s*=\s*u_Rect\.xy\s*\+\s*cell\s*\*\s*u_Rect\.zw/, 'the tap placement');

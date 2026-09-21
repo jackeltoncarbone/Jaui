@@ -104,7 +104,7 @@ describe('nothing but the backdrop decides: no theme input anywhere on the path'
   const THEME_WORDS = /\b(Dark|Light|Theme|Tint|TintTone|Ground|Ink)\b/;
 
   it('the measurement reads only the backdrop, the footprint and the blur level', () => {
-    expect(uniformNames(readMeasure()).sort()).toEqual(['u_Backdrop', 'u_DetailLod', 'u_Rect', 'u_Resolution', 'u_Scene']);
+    expect(uniformNames(readMeasure()).sort()).toEqual(['u_Backdrop', 'u_BackdropXf', 'u_DetailLod', 'u_Rect', 'u_Resolution', 'u_Scene']);
     const code = readMeasure().replace(/\/\/[^\n]*/g, '');
     expect(code).not.toMatch(THEME_WORDS);
   });

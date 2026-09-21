@@ -5,6 +5,10 @@ precision highp float;
 // Apple's rule (WWDC25 "Meet Liquid Glass"): the shadow grows more opaque over text and busy content and
 // less opaque over a solid light ground. Only the backdrop decides; nothing here knows the theme.
 // The renderer blends each write into the previous value, so the result eases over a few frames.
+//
+// One texel, three readings, all eased alike: R is the shadow's factor; G and B are the backdrop's own
+// luma under the footprint, its mean and its brightest local tap, which the adaptive glass grade reads
+// (`?glass-adapt`, Jiv.Panel.vert GlassAdaptGrade). The shadow reads R alone, so G and B cost it nothing.
 
 // Sharp snapshot of what lies behind the surface.
 uniform sampler2D u_Scene;
@@ -49,6 +53,7 @@ void main() {
     float count = float(SHADOW_TAPS);
     float sum = 0.0;
     float detail = 0.0;
+    float peak = 0.0;
     for (int k = 0; k < SHADOW_TAPS; k++) {
         vec2 cell = fract(0.5 + float(k + 1) * SHADOW_R2);
         vec2 pixel = u_Rect.xy + cell * u_Rect.zw;
@@ -57,7 +62,8 @@ void main() {
         float sharp = dot(textureLod(u_Scene, uv, 0.0).rgb, LUMA);
         float local = dot(textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, u_DetailLod).rgb, LUMA);
         sum += local;
+        peak = max(peak, local);
         detail += abs(sharp - local);
     }
-    fragColor = vec4(ShadowBackdropFactor(sum / count, detail / count), 0.0, 0.0, 1.0);
+    fragColor = vec4(ShadowBackdropFactor(sum / count, detail / count), sum / count, peak, 1.0);
 }

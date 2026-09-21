@@ -21,7 +21,8 @@ import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, mat
 import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
 import { XformBuffer, XFORM_FLOATS_PER_ENTRY } from '../Transform/Xform.Buffer';
-import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop, type ProgressiveBlurParams } from './Renderer';
+import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop, type GlassAdapt, type ProgressiveBlurParams } from './Renderer';
+import { EmptyGlassAdaptCensus, GlassAdaptCensusOf, GlassAdaptLine, type GlassAdaptCensus, type GlassAdaptDraw } from './Glass.Adapt';
 // `?blur-first` names the pyramid pool's own chain key so the report can say how many chains
 // forty builds actually resolve to. These three are the exact functions `BlurPass.Blur` uses to
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
@@ -70,6 +71,9 @@ const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 /** The finest blur (pt) an adaptive shadow compares the sharp backdrop against, so clear glass still sees
  *  its text as detail. */
 const SHADOW_DETAIL_MIN_PT = 4;
+/** `?glass-adapt`'s census reads the probe state row back once per this many rendered frames (and on every
+ *  snap frame). A pack-buffer copy of 256 bytes behind a fence; see `_glassAdaptEndFrame`. */
+const GLASS_ADAPT_CENSUS_FRAMES = 30;
 
 /** Headroom for the shader's fwidth-driven refraction-footprint LOD, which rises where a strong bend
  *  FOLDS the backdrop and the caustic has to dissolve into blur (Jiv.Panel.frag, `refractLod`). It has
@@ -422,7 +426,7 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
-import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS, GLASS_GATE_PROGRAMS } from './WebGL2.Renderer';
+import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS, GLASS_GATE_PROGRAMS, SHADOW_STATE_SLOTS } from './WebGL2.Renderer';
 import type { ShadowProbe, BlurCacheSlot } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
@@ -1080,6 +1084,33 @@ export class Canvas implements DirtyTracker {
    *  capture whose walk rect differed, or who fell back off the group after it was probed -- it
    *  must read 0; a non-zero reading voids the cell. */
   private _shadowProbeStats = { Grouped: 0, Moved: 0 };
+  /** `?glass-adapt=on|off` -- THE GLASS GRADE OPENS WITH ITS BACKDROP (`Core/Glass.Adapt.ts`).
+   *
+   *  `on` (default) hands every glass draw that authors an `AdaptiveFar` its probe slot, and the panel
+   *  vertex stage opens the body's range as far as the texel's brightest backdrop luma leaves the ink
+   *  room. `off` hands none: every batch uploads slot -1 and the vertex stage takes the authored grade
+   *  untouched, today's engine byte for byte. The probe writes its luma channels on BOTH arms (they
+   *  cost it one `max` and nothing reads them on `off`), so the arms differ in the draw and nowhere else. */
+  private _glassAdapt: 'on' | 'off' = 'on';
+  private _glassAdaptRefused = '';
+  /** This frame's adapted draws, for the census; and draws that wanted to adapt but had no probe. */
+  private _glassAdaptDraws: GlassAdaptDraw[] = [];
+  private _glassAdaptUnprobed = 0;
+  /** The fill's adapt, for the same surface's rim overlay later in the frame: the rim looks through the
+   *  body's slab, so it takes the body's grade. */
+  private _glassAdaptRim = new Map<Jiv, GlassAdapt>();
+  private _glassAdaptCensus: GlassAdaptCensus = EmptyGlassAdaptCensus('on', '');
+  /** The draws of the frame whose state row is in flight. */
+  private _glassAdaptPending: GlassAdaptDraw[] = [];
+  private _glassAdaptPendingUnprobed = 0;
+  private _glassAdaptPendingFrame = -1;
+  private _glassAdaptRow = new Uint8Array(SHADOW_STATE_SLOTS * 4);
+  private _glassAdaptFrame = 0;
+  private _glassAdaptLastLine = '';
+  /** `?blur-cache`'s last FILL verdict, for the probe that follows it: a clean fill is a probe whose
+   *  pyramid and sharp tap are last frame's (`Shadow.Texel`). And each surface's last probe rect. */
+  private _bcFillClean: Jiv | null = null;
+  private _probeLast = new WeakMap<Jiv, { x: number; y: number; w: number; h: number; Lod: number }>();
   /** `?glass-skip` -- THE GLASS DRAW'S STAGE ABLATIONS. `null` is unarmed (today's engine, no
    *  census); a number is the `u_GlassSkip` mask every glass draw uploads, 0 for `none`, the control
    *  that prints the census at no GPU cost. Picture-DIFFERENT instruments by design; default off.
@@ -2649,6 +2680,10 @@ export class Canvas implements DirtyTracker {
   private _render = (dt: number): void => {
     const r = this._renderer;
     this._adaptiveShadowsDrawn = false;
+    this._glassAdaptDraws = [];
+    this._glassAdaptUnprobed = 0;
+    this._glassAdaptRim.clear();
+    this._bcFillClean = null;
     const w = Math.round(this._width * this._dpr);
     const h = Math.round(this._height * this._dpr);
     // Retained-mode layer cache: the capture path redirects the panel/text
@@ -3080,12 +3115,21 @@ export class Canvas implements DirtyTracker {
           r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
           const glassBgPaint = this._computeBgPaint(node);
+          const rimAdapt = this._glassAdaptRim.get(node);
           if (this._bcOn) {
             this._bcNoteBgPaint(glassBgPaint);
             this._bc.Sig.Number(lastBaseFrostLod);
             this._bc.Sig.Word(sceneSnap !== null ? 1 : 0);
+            // The rim reads its body's texel: moved there is moved here.
+            if (rimAdapt !== undefined) {
+              this._bc.Sig.Number(rimAdapt.Slot);
+              this._bc.Sig.Number(rimAdapt.OpenFar);
+              if (!(r instanceof WebGL2Renderer) || r.ShadowTexelMoved(node)) this._bc.Fresh('shadow');
+            }
           }
-          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, true, sceneSnap, glassBgPaint);
+          // Without an adapt this is the call it always was, so `off` issues the folded engine's calls.
+          if (rimAdapt === undefined) r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, true, sceneSnap, glassBgPaint);
+          else r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, true, sceneSnap, glassBgPaint, undefined, rimAdapt);
           this._counts.Glass++;
           this._panelBuffer.Begin();
         } else {
@@ -3691,7 +3735,13 @@ export class Canvas implements DirtyTracker {
           this._adaptiveShadowsDrawn = true;
         } else if (_rsAdaptiveShadow && lastBackdrop) {
           const detailLod = Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod;
-          const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt);
+          // The reading is provably last frame's only when the blur cache just called this surface's
+          // fill clean AND the probe reads the same rect at the same level; otherwise it is unknown.
+          const last = this._probeLast.get(node);
+          const sameRect = last !== undefined && last.x === px && last.y === py && last.w === pw && last.h === ph && last.Lod === detailLod;
+          this._probeLast.set(node, { x: px, y: py, w: pw, h: ph, Lod: detailLod });
+          const inputsSame = this._bcOn && this._bcFillClean === node && sameRect;
+          const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt, inputsSame);
           if (slot >= 0) {
             shadowBackdrop = { Slot: slot, Adaptive: _rs.ShadowAdaptive };
             this._adaptiveShadowsDrawn = true;
@@ -3760,11 +3810,21 @@ export class Canvas implements DirtyTracker {
           sig.Number(lastBaseFrostLod);
           sig.Word(sceneSnap !== null ? 1 : 0);
           sig.Word(_isGlass(material) ? 1 : 0);
-          if (shadowBackdrop !== undefined) { sig.Number(shadowBackdrop.Slot); this._bc.Fresh('shadow'); }
+          // The probe DECLARES whether its texel moved (`Shadow.Texel`): fresh, snapped, or an ease step
+          // that can reach half an LSB. Only a moved texel makes the record fresh; a still one is the
+          // same input as last frame, and the slot in the signature carries the rest.
+          if (shadowBackdrop !== undefined) {
+            sig.Number(shadowBackdrop.Slot);
+            if (!(r instanceof WebGL2Renderer) || r.ShadowTexelMoved(node)) this._bc.Fresh('shadow');
+          }
         }
+        // `?glass-adapt`: the grade reads the SAME texel the shadow does, so it rides the probe's slot,
+        // its snap and its declaration, and costs the draw one uniform.
+        const glassAdapt = this._glassAdaptFor(node, shadowBackdrop);
+        if (glassAdapt !== undefined && this._bcOn) this._bc.Sig.Number(glassAdapt.OpenFar);
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
-          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop);
+          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop, glassAdapt);
         }
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
@@ -4523,6 +4583,7 @@ export class Canvas implements DirtyTracker {
       r.InvalidateFrameTransients();
     }
 
+    if (r instanceof WebGL2Renderer) this._glassAdaptEndFrame(r);
     r.EndShadowBackdropFrame();
     r.EndFrame();
   };
@@ -4811,6 +4872,7 @@ export class Canvas implements DirtyTracker {
       + `|${presample ? 1 : 0}${gaussian ? 1 : 0}|${w}x${h}`;
     const v = bc.Reader(owner, kind, key, GuardedRect(region.x, region.y, region.w, region.h, BLUR_READ_GUARD_PX));
     bc.Sig.Number(v.Token);
+    if (kind === READER_FILL) this._bcFillClean = v.Why === 'clean' ? owner : null;
     const st = v.State;
     const stats = this._bcStats;
     stats.Surfaces++;
@@ -4919,6 +4981,7 @@ export class Canvas implements DirtyTracker {
       + ` dirtyPieces=${reg.Full ? 'full' : reg.Count} dirtyPx=${(reg.Px / 1e6).toFixed(1)}M`
       + ` changed=${st.Changed} new=${st.New} gone=${st.Gone}`
       + ` fresh=janvas:${st.Fresh.janvas},shadow:${st.Fresh.shadow},group:${st.Fresh.group}`
+      + ` shadowStill=${r.ShadowStill}`
       + ` untracked=${st.Untracked} dup=${st.Duplicate} seeded=${st.Seeded ? 1 : 0}`
       + ` resting=${resting ? 1 : 0} vacuous=${vacuous ? 1 : 0}`
       + (this._blurCache === 'verify' ? ` verified=${c.Verified} mismatches=${c.Mismatches} read=${r.BlurCacheReadKind}` : '')
@@ -6416,6 +6479,49 @@ export class Canvas implements DirtyTracker {
     st.Members++;
     r.NoteGroupMember();
     return handle;
+  };
+
+  /** `?glass-adapt`: this glass draw's adapt, or undefined for the authored grade. A surface that authors
+   *  an `AdaptiveFar` but was not probed (no adaptive shadow, no frost, no free slot) has no reading to
+   *  open by, keeps the authored grade, and is counted as `unprobed` rather than silently static. */
+  private _glassAdaptFor = (node: Jiv, shadow: ShadowBackdrop | undefined): GlassAdapt | undefined => {
+    if (this._glassAdapt !== 'on') return undefined;
+    const rs = node.RenderStyle;
+    if (!(rs.AdaptiveFar > 0)) return undefined;
+    if (shadow === undefined || shadow.Slot < 0) { this._glassAdaptUnprobed++; return undefined; }
+    const adapt: GlassAdapt = { Slot: shadow.Slot, OpenFar: rs.AdaptiveFar };
+    this._glassAdaptRim.set(node, adapt);
+    this._glassAdaptDraws.push({
+      Slot: shadow.Slot, OpenFar: rs.AdaptiveFar,
+      Grade: { Brightness: rs.BackdropBrightness, Saturation: rs.BackdropSaturation, Contrast: rs.BackdropContrast, Tint: rs.Tint },
+    });
+    return adapt;
+  };
+
+  /** `?glass-adapt`'s census, at the end of a rendered frame, before the probe slots are released.
+   *
+   *  Collects a state row whose fence has signalled and resolves it against the draws of the frame it
+   *  was read on; then, every `GLASS_ADAPT_CENSUS_FRAMES` rendered frames and on every snap frame (the
+   *  frame a page parks on), issues the next read. One pack-buffer copy of a 64-texel row per read,
+   *  never a wait, and never on `off`, which is the engine without this lane. */
+  private _glassAdaptEndFrame = (r: WebGL2Renderer): void => {
+    if (this._glassAdapt !== 'on') return;
+    const c = this._glassAdaptCensus;
+    if (this._glassAdaptPendingFrame >= 0 && r.PollShadowStateRead(this._glassAdaptRow)) {
+      c.Frame = this._glassAdaptPendingFrame;
+      c.Reads = r.ShadowStateReads;
+      GlassAdaptCensusOf(c, this._glassAdaptPending, this._glassAdaptPendingUnprobed, this._glassAdaptRow);
+      this._glassAdaptPendingFrame = -1;
+      const line = GlassAdaptLine(c);
+      if (line !== this._glassAdaptLastLine) { this._glassAdaptLastLine = line; JTrace(line); }
+    }
+    const frame = this._glassAdaptFrame++;
+    const due = frame % GLASS_ADAPT_CENSUS_FRAMES === 0 || r.ShadowSnap;
+    if (due && this._glassAdaptPendingFrame < 0 && r.RequestShadowStateRead()) {
+      this._glassAdaptPending = this._glassAdaptDraws;
+      this._glassAdaptPendingUnprobed = this._glassAdaptUnprobed;
+      this._glassAdaptPendingFrame = frame;
+    }
   };
 
   /** `?shadow-probe=group`: THE GROUP'S ADAPTIVE-SHADOW PROBES, taken at its capture.
@@ -8926,6 +9032,42 @@ export class Canvas implements DirtyTracker {
           Refused: this._shadowProbeRefused,
         };
       };
+    }
+
+    // `?glass-adapt=on|off` -- THE GLASS GRADE OPENS WITH ITS BACKDROP. DEFAULT `on`; `off` is the
+    // folded static law byte for byte (every batch uploads slot -1). See `_glassAdapt`.
+    //
+    // COMPOSES with `?glass-group` and both `?shadow-probe` arms (each hands the draw a slot, walked
+    // or captured, and the grade reads whichever texel that slot names), `?blur-phased` (its probe
+    // pass is the same probe), `?shadow-snap=off` (the grade eases with the texel either way; only the
+    // parked frame's exactness is the snap's), and `?blur-cache` (the slot, the far end and the
+    // probe's own moved-declaration are in the record). REFUSED BY NAME where there is no texel:
+    //   `?no-shadow`          zeroes the adaptive shadow, and with it the probe the grade reads;
+    //   a non-WebGL2 backend  keeps no probe state at all (`MeasureShadowBackdrop` returns -1).
+    if (params.has('glass-adapt')) {
+      const raw = (params.get('glass-adapt') ?? '').trim();
+      if (raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?glass-adapt takes 'on' or 'off', got '${raw}'`);
+      }
+      this._glassAdapt = raw;
+    }
+    if (this._glassAdapt === 'on') {
+      const why =
+        params.has('no-shadow') ? 'no-shadow-removes-the-probe-the-grade-reads'
+        : !(this._renderer instanceof WebGL2Renderer) ? 'no-probe-state-off-webgl2'
+        : null;
+      if (why !== null) {
+        this._glassAdapt = 'off';
+        this._glassAdaptRefused = why;
+      }
+    }
+    this._glassAdaptCensus = EmptyGlassAdaptCensus(this._glassAdapt, this._glassAdaptRefused);
+    JTrace(`jaui:glass-adapt armed=${this._glassAdapt} default=${!params.has('glass-adapt')}`
+      + ` pixels=${this._glassAdapt === 'on' ? 'DIFFERENT' : 'SAME'}`
+      + (this._glassAdaptRefused !== '' ? ` reason=${this._glassAdaptRefused}` : ''));
+    {
+      const g = globalThis as unknown as { __jauiGlassAdapt?: () => GlassAdaptCensus };
+      g.__jauiGlassAdapt = () => ({ ...this._glassAdaptCensus, Per: this._glassAdaptCensus.Per.map((s) => ({ ...s })) });
     }
 
     // `?glass-skip=<stage>[,<stage>...] | all | none | off` -- THE GLASS DRAW, STAGE BY STAGE.

@@ -253,7 +253,7 @@ describe('?blur-phased — the walk\'s own functions, and the pre-pass\'s own bu
     // `?blur-first`'s contract: the probe stays in the walk, verbatim. This lane does not edit that
     // line — it adds a branch AHEAD of it that takes phase 2's reading, and the phased probe is in
     // its own function so the pre-pass bodies stay free of it (`Blur.First.test.ts` asserts that).
-    expect(jaui).toContain('const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt);');
+    expect(jaui).toContain('const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt, inputsSame);');
     const probes = arrowBody(jaui, '_phasedShadowProbes');
     expect(probes).toContain('r.MeasureShadowBackdrop(');
     expect(probes).toContain('if (!b.Plan.AdaptiveShadow) continue;');

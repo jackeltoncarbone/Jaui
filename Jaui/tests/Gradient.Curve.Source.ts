@@ -37,7 +37,8 @@ export const tsNoise = (): string => body(readCurveTs(), /export const GradientN
 /** The gradient dither branch of the panel's final composite. */
 export const glslDitherBranch = (): string => {
   const src = readPanelGlsl();
-  const at = src.indexOf('else if (u_BgMode >= 2)');
+  // A dangling `else` behind MATERIAL_FLAT's `#endif`, so the branch reads as a bare `if` in the source.
+  const at = src.indexOf('    if (u_BgMode >= 2) {');
   if (at < 0) throw new Error('no gradient dither branch');
   return src.slice(at, src.indexOf('\n    }', at));
 };
