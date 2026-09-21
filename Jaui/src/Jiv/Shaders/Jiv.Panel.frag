@@ -63,6 +63,40 @@ flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lod
 // NOT admitted — `SS_PillSDF` and `SS_PillEval` are different function bodies, and a CPU port
 // proving their distances bit-equal cannot speak for a GPU compiler's freedom to contract
 // `a + t*ab` differently in a loop that also tracks a closest point.
+//
+// ── THE GLASS PROGRAM'S OWN VARIANTS (lane glassreg) ──
+//
+// Each is defined only TOGETHER with MATERIAL_GLASS, and each is a batch-level define routed by
+// `WebGL2Renderer._glassBatchKind` off the packed instance floats, every instance of the batch
+// answering yes or the batch taking the full program (and being counted as a fallback).
+//
+//   GLASS_BORDER_ONLY   every instance is a rim overlay (`v_StyleParams.x < 0`). The body's tap
+//                       chain, its grade, the absorption, the shadow, the fill composite, the rim
+//                       glow, the hemispherical ambient and the catchlight are excluded. Each is
+//                       either runtime-dead on such an instance (the body taps, the rim glow, the
+//                       shadow at alpha 0) or composites into a `result` that is exactly vec4(+0)
+//                       with `fillAlpha` exactly 0, where `r*(1-e) + c*e` and `r + x*0` return +0
+//                       for every finite x, c and e. The border zone and everything it reads stay.
+//   GLASS_NO_GLOW       every instance has FresnelStrength exactly +0: the wide rim glow's block
+//                       is excluded, so `edgeLightAlpha` / `edgeLightRgb` keep their 0.0 initialisers
+//                       where the block would have produced +0 and a finite colour. The composite
+//                       stays, and is `r*1 + (+0)` on both sides.
+//   GLASS_NO_SPEC       every instance has SpecularIntensity exactly +0: the catchlight and the
+//                       rim-specular line are excluded. `specAlpha` would have been +-0 and
+//                       `rimSpecAlpha > 0.0` false.
+//   GLASS_REG           register-LIFETIME hygiene: the same statements in a different order, so
+//                       the drop shadow's corner field runs beside the main one, the fill
+//                       composite runs straight after the taps (the backdrop dies there), and the
+//                       chain the border and the rim glow read is computed after both. No
+//                       expression is rewritten; `tests/Glass.Reg.test.ts` holds the two programs
+//                       to being permutations of each other's lines.
+//   GLASS_REG_REMAT     on top of GLASS_REG: three cheap values RECOMPUTED where they are next
+//                       needed instead of held (`pLocal`, `edgeDist`, `glassiness`), each by a
+//                       second copy of its own defining statement.
+//   GLASS_NO_SKIP_GATES `?glass-skip`'s ten uniform gates folded to false: the glass program as
+//                       it was before lane glassdraw added them, keeping that lane's moved lines.
+//                       The arm that says whether the -43% of 62cfb35 was its line moves or its
+//                       branches.
 #if !defined(MATERIAL_FLAT)
 // Dual-filter blurred backdrop pyramid (base sigma = u_BaseFrostLod equivalent).
 // Mipmapped — each integer LOD above the base ≈ doubles the effective sigma.
@@ -132,7 +166,7 @@ const int GLASS_SKIP_SHADOW   = 128;   // the drop shadow as 0
 const int GLASS_SKIP_SKIRT    = 256;   // discard outside the face's padded box, before anything
 const int GLASS_SKIP_CLIP     = 512;   // the clip stack as "inside everything"
 const vec3 GLASS_SKIP_FLAT = vec3(0.5);
-#if defined(MATERIAL_GLASS)
+#if defined(MATERIAL_GLASS) && !defined(GLASS_NO_SKIP_GATES)
 bool GlassSkips(int bit) { return (u_GlassSkip & bit) != 0; }
 #else
 bool GlassSkips(int bit) { return false; }
@@ -1121,7 +1155,9 @@ void main() {
     float refractionStrength = v_Refraction.z;
     float bezelScale = max(v_Refraction.w, 0.05);
 
+#if !defined(GLASS_REG)
     vec2 lightDir = vec2(cos(v_Lighting.x), -sin(v_Lighting.x));
+#endif
     float bodyTint = v_Lighting.y;
     float lightIntensity = v_Lighting.z;
     float fresnelStrength = v_Lighting.w;
@@ -1165,6 +1201,18 @@ void main() {
     vec2 normal;
     ShapeEval(p, panelHalfSize, v_Radii, effectiveSmooth, mode, dist, normal);
 #endif
+#if defined(GLASS_REG) && !defined(GLASS_BORDER_ONLY)
+    // GLASS_REG: the drop shadow (below, after the rim glow, is where the other programs have it)
+    // runs HERE, beside the main corner field, while almost nothing else is live. What it hands
+    // on is one float; what it used to hold across its own corner field was the whole body.
+    float shadowAlpha = 0.0;
+    if (GlassSkips(GLASS_SKIP_SHADOW)) {} else
+    if (v_ShadowColor.a > 1e-4) {
+        vec2 sp = p - shadowOffset;
+        float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
+        shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
+    }
+#endif
     float edgeDist = max(-dist, 0.0);                 // positive inside
 
     // ── Bezel hump (pincushion profile) ──
@@ -1197,7 +1245,9 @@ void main() {
     // smoothsteps. Floor at a tiny epsilon so BorderBlur=0 still yields a
     // valid (hard-step) smoothstep.
     float fillAlpha = 1.0 - smoothstep(-0.5, 0.5, dist);
+#if !defined(GLASS_REG)
     float aa = max(borderEdgeAa, 1e-4);
+#endif
 
     // ── Backdrop sample with refraction + chromatic aberration + variable LOD ──
     //
@@ -1278,20 +1328,32 @@ void main() {
         float _offLen = length(refractOffset);
         if (_offLen > _maxOff) refractOffset *= _maxOff / _offLen;
 
+        // The body's tap coordinates. A rim overlay (GLASS_BORDER_ONLY) takes no body tap and no
+        // rim-specular tap, the only two readers of all five, so it computes none of them.
+        // GLASS_REG computes the two chromatic ones inside the 3-tap branch below, their only
+        // reader, instead of holding four floats across the LOD computation.
+#if !defined(GLASS_BORDER_ONLY)
+#if !defined(GLASS_REG)
         // CA spread along normal, scaled by hump and ca
         float caPx = chromaticAberration * hump * 3.0;
         vec2 caStep = normal * caPx;
+#endif
 
         // FBO has top-of-scene at UV.y=1 (panel/text shaders flip Y in clip space).
         // Flip Y here so each fragment samples the pixel directly behind it.
         // `baseUv` was hoisted to the outer scope — assign instead of redeclare
         // so the border-zone refilter can reuse the same refracted UV.
         baseUv = (v_PixelPos + refractOffset) / u_Resolution;
+#if !defined(GLASS_REG)
         vec2 uvR = (v_PixelPos + refractOffset + caStep) / u_Resolution;
         vec2 uvB = (v_PixelPos + refractOffset - caStep) / u_Resolution;
+#endif
         baseUv.y = 1.0 - baseUv.y;
+#if !defined(GLASS_REG)
         uvR.y = 1.0 - uvR.y;
         uvB.y = 1.0 - uvB.y;
+#endif
+#endif
 
         // Backdrop is the Dual-Filter PRE-BLURRED FBO with mipmaps generated.
         // Apple's blur is NON-UNIFORM — stronger at the rim, weaker at the
@@ -1337,6 +1399,7 @@ void main() {
         // identical output, but 2 fewer mipmapped backdrop samples on millions
         // of interior fragments (the dominant cost of a full-screen glass modal).
         // The full 3-tap CA still runs in the thin rim band where it's visible.
+#if !defined(GLASS_BORDER_ONLY)
         float caSpreadPx = chromaticAberration * hump * 3.0; // = length(caStep)
         if (GlassSkips(GLASS_SKIP_CA)) caSpreadPx = 0.0;
         // A border-only pass throws `backdrop` away: it only reaches `fillRgb`, and the
@@ -1351,6 +1414,14 @@ void main() {
             if (caSpreadPx < 0.5) {
                 backdrop = sampleBackdrop(baseUv, lodBoost, frostLod);
             } else {
+#if defined(GLASS_REG)
+                float caPx = chromaticAberration * hump * 3.0;
+                vec2 caStep = normal * caPx;
+                vec2 uvR = (v_PixelPos + refractOffset + caStep) / u_Resolution;
+                vec2 uvB = (v_PixelPos + refractOffset - caStep) / u_Resolution;
+                uvR.y = 1.0 - uvR.y;
+                uvB.y = 1.0 - uvB.y;
+#endif
                 vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
                 vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
                 vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
@@ -1359,6 +1430,7 @@ void main() {
             if (GlassSkips(GLASS_SKIP_GRADE)) {} else
             backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);
         }
+#endif
     } else if (hasBackdropFilter && borderOnly == 0.0) {
         // Flat panel backdrop sampling — no refraction, no CA, no rim boost.
         vec3 s = sampleBackdrop(baseUv, 0.0, frostLod);
@@ -1373,11 +1445,64 @@ void main() {
     // composite below takes over instead. Together with that composite,
     // the glass material treatment is visually continuous as Thickness
     // springs to/from zero (no seam at the variant boundary).
+    // A rim overlay's `backdrop` reaches nothing (GLASS_BORDER_ONLY excludes the fill composite).
+#if !defined(GLASS_BORDER_ONLY)
     if (materialType == 1.0 && v_Tint.a > 0.001 && glassiness > 0.001) {
+#if defined(GLASS_REG_REMAT)
+        edgeDist = max(-dist, 0.0);
+#endif
         float pathLength = mix(0.3, 1.0, smoothstep(0.0, bezelWidth * 2.0, edgeDist)) * glassiness;
         vec3 absorb = pow(max(v_Tint.rgb, vec3(0.0001)), vec3(pathLength * v_Tint.a));
         backdrop *= absorb;
     }
+#endif
+
+#if defined(GLASS_REG)
+    // GLASS_REG: the fill composite and the border-only reset, moved up from below the rim glow
+    // and the shadow (neither of which it reads, and neither of which reads anything it writes
+    // but `fillAlpha`, which the rim glow reads only where `borderOnly == 0.0` and the reset
+    // never ran). `backdrop` dies here instead of being held across the rim glow's tap and the
+    // shadow's corner field. The statements are the ones below, character for character.
+#if defined(GLASS_BORDER_ONLY)
+    vec4 result = vec4(0.0);
+#else
+#if defined(GLASS_REG_REMAT)
+    if (v_Is3D > 0.5) {
+        pLocal = panelCenter + v_Local;
+    } else {
+        vec2 _rel = v_PixelPos - v_Rot.zw;
+        pLocal = vec2(
+            _rel.x * v_Rot.x + _rel.y * v_Rot.y,
+            -_rel.x * v_Rot.y + _rel.y * v_Rot.x
+        ) + v_Rot.zw;
+    }
+#endif
+    vec2 panelLocal = (pLocal - (panelCenter - panelHalfSize))
+                    / max(panelHalfSize * 2.0, vec2(1.0));
+    vec4 fillSrc = resolveBgFill(panelLocal);
+    vec3 fillRgb;
+    float fillA;
+    if (materialType == 1.0 || hasBackdropFilter) {
+        float tA = fillSrc.a;
+        fillRgb = fillSrc.rgb * tA + backdrop * (1.0 - tA);
+        fillA = fillAlpha;
+    } else {
+        fillRgb = fillSrc.rgb;
+        fillA = fillAlpha * fillSrc.a;
+    }
+    float outA = fillA + shadowAlpha * (1.0 - fillA);
+    vec3 outRGB = outA > 1e-5
+        ? (fillRgb * fillA + v_ShadowColor.rgb * shadowAlpha * (1.0 - fillA)) / outA
+        : vec3(0.0);
+    vec4 result = vec4(outRGB, outA);
+#endif
+    if (borderOnly == 1.0) {
+        result = vec4(0.0);
+        fillAlpha = 0.0;
+    }
+    // First read: the border chain just below.
+    vec2 lightDir = vec2(cos(v_Lighting.x), -sin(v_Lighting.x));
+#endif
 
     // ── Variable border width along perimeter ──
     //
@@ -1455,7 +1580,11 @@ void main() {
     // border-only pass is entitled to paint. `FresnelStrength` is the BODY's fresnel
     // and a border-only pass has no body — same reason the hemispherical ambient below
     // is multiplied by `fillAlpha`.
-#if !defined(MATERIAL_FLAT)
+    //
+    // GLASS_NO_GLOW excludes the block for a batch whose every instance has FresnelStrength +0, and
+    // GLASS_BORDER_ONLY for a batch of rim overlays, where `borderOnly == 0.0` is false on every
+    // fragment. Either way the two initialisers above are what the composite reads.
+#if !defined(MATERIAL_FLAT) && !defined(GLASS_NO_GLOW) && !defined(GLASS_BORDER_ONLY)
     if (GlassSkips(GLASS_SKIP_RIM)) {} else
     if (materialType == 1.0 && borderOnly == 0.0 && fillAlpha > 0.0 && dist > -max(bezelWidth * 0.75, 6.0)) {
         // Wide rim band — at LEAST 6 px so the glow is actually visible,
@@ -1512,6 +1641,11 @@ void main() {
     // across the quads of any one panel instance (which is what matters
     // for GPU divergence cost). Panels without shadows (most things
     // except Cards on Home) skip an entire ShapeSDF call per fragment.
+    //
+    // GLASS_REG runs this beside the main corner field instead (above); GLASS_BORDER_ONLY never
+    // runs it, because a rim overlay's shadow alpha is 0 (`Jiv.InstanceBuffer.Push`) and its only
+    // reader, the fill composite, is excluded with it.
+#if !defined(GLASS_REG) && !defined(GLASS_BORDER_ONLY)
     float shadowAlpha = 0.0;
 #if !defined(MATERIAL_FLAT)
     if (GlassSkips(GLASS_SKIP_SHADOW)) {} else
@@ -1521,6 +1655,7 @@ void main() {
         float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
         shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
     }
+#endif
 
     // ── Fill: source composited over the (refracted, filtered, absorbed) backdrop.
     //
@@ -1533,6 +1668,14 @@ void main() {
     // applies. Image-Background panels reuse the entire material treatment
     // (border, shadow, refraction, frost, rim-spec) for free — there is no
     // separate "image draw" pipeline, image is just one of many fill modes.
+    //
+    // GLASS_REG runs this and the reset below straight after the taps (above). A rim overlay
+    // (GLASS_BORDER_ONLY) composites nothing here: the reset below overwrites `result` with
+    // exactly vec4(0.0) on every one of its fragments, so that is what it starts from.
+#if !defined(GLASS_REG)
+#if defined(GLASS_BORDER_ONLY)
+    vec4 result = vec4(0.0);
+#else
     vec2 panelLocal = (pLocal - (panelCenter - panelHalfSize))
                     / max(panelHalfSize * 2.0, vec2(1.0));
     vec4 fillSrc = resolveBgFill(panelLocal);
@@ -1557,6 +1700,7 @@ void main() {
         ? (fillRgb * fillA + v_ShadowColor.rgb * shadowAlpha * (1.0 - fillA)) / outA
         : vec3(0.0);
     vec4 result = vec4(outRGB, outA);
+#endif
 
     // Border-only overlay (BorderLayer glass rim drawn OVER children): start
     // from a fully transparent interior — no fill, no shadow — and zero the
@@ -1569,6 +1713,10 @@ void main() {
         result = vec4(0.0);
         fillAlpha = 0.0;
     }
+#else
+    // GLASS_REG: first read, the rim-specular line and the border zone just below.
+    float aa = max(borderEdgeAa, 1e-4);
+#endif
 
     // Composite order for glass:
     //   1) Wide rim glow (vibrant backdrop pickup, inward fade) — the optical
@@ -1592,6 +1740,10 @@ void main() {
         // normal.y > 0. Mix between EdgeLightTop and EdgeLightBottom by the
         // vertical normal component. Modulated by edge proximity so it only
         // shows in the rim band, not the flat interior.
+        //
+        // A rim overlay (GLASS_BORDER_ONLY) adds `rimAmbientRgb * 0.0` to an rgb of exactly +0,
+        // which is +0 for every finite ambient: excluded, ambient and all.
+#if !defined(GLASS_BORDER_ONLY)
         float hemiTop = max(-normal.y, 0.0);
         float hemiBottom = max(normal.y, 0.0);
         float hemiAmbient = (edgeLightTop * hemiTop + edgeLightBottom * hemiBottom);
@@ -1606,10 +1758,18 @@ void main() {
         //   4) Blinn-Phong specular catchlight (additive bright)
         //   5) hairline silhouette stroke
         result.rgb += rimAmbientRgb * fillAlpha;
+#endif
         result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
         result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;
 
+        // GLASS_NO_SPEC: SpecularIntensity is +0 on every instance, so `specAlpha` is +-0 (every
+        // other factor is finite) and `rimSpecAlpha > 0.0` is false. GLASS_BORDER_ONLY: `fillAlpha`
+        // is 0, so the same two facts hold at any intensity. Excluded whole in both.
+#if !defined(GLASS_NO_SPEC) && !defined(GLASS_BORDER_ONLY)
         if (!GlassSkips(GLASS_SKIP_SPECULAR)) {
+#if defined(GLASS_REG_REMAT)
+            glassiness = smoothstep(0.0, 1.0, thickness);
+#endif
             // ── Blinn-Phong specular catchlight on the bevel ──
             // The bevel has a 3D normal: 2D outward normal (when on the bevel)
             // tilted toward +Z (out of screen) at the flat center. We model this
@@ -1679,6 +1839,7 @@ void main() {
                 result.a = result.a * (1.0 - rimSpecAlpha) + rimSpecAlpha;
             }
         }
+#endif
 
         // ── Border zone backdrop refilter ───────────────────────────────
         // Apple's glass rim isn't a flat color — it's an optical zone where

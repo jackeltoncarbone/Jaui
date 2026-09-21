@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BlurPass, BLUR_PROGRAMS_BOOT, BLUR_PROGRAMS_ATLAS } from '../src/Core/BlurPass';
-import { PANEL_PROGRAM_COUNT, PANEL_PROGRAM_BORDER_DIRECT } from '../src/Core/WebGL2.Renderer';
+import {
+  PANEL_PROGRAM_COUNT, PANEL_PROGRAM_BORDER_DIRECT, GLASS_VARIANT_PROGRAMS, GLASS_REG_PROGRAMS,
+} from '../src/Core/WebGL2.Renderer';
 import { FakeGl } from './Blur.Chains.Source';
 import { arrowBody, readRenderer, readJaui } from './Scene.ReadAfterWrite.Source';
 
@@ -281,17 +283,19 @@ describe('the boot set is every program an unflagged page can bind, and only tho
     expect(borderAdds[0]).toContain('if (this.DiagBorderDirect)');
   });
 
-  it('the boot set is SIXTEEN, and the three places that say so agree', () => {
-    // Five panel variants, the eight singles (text, stroke, two SVG, blit, clip mask, progressive
+  it('the boot set is EIGHTEEN, and the three places that say so agree', () => {
+    // Seven panel variants, the eight singles (text, stroke, two SVG, blit, clip mask, progressive
     // blur, adaptive-shadow probe), and a `BlurPass`'s three. Arithmetic rather than a literal so
-    // that a variant added anywhere has to move this line too.
+    // that a variant added anywhere has to move this line too -- as lane glassreg's two
+    // `?glass-programs` cuts did (sixteen -> eighteen): the default binds them on glass-grid.
     const SINGLES = 8;
-    expect(PANEL_PROGRAM_COUNT + SINGLES + BLUR_PROGRAMS_BOOT).toBe(16);
-    expect(INIT).toContain('SIXTEEN programs stand between a cold tab and its first pixel');
+    expect(PANEL_PROGRAM_COUNT + SINGLES + BLUR_PROGRAMS_BOOT).toBe(18);
+    expect(GLASS_VARIANT_PROGRAMS).toBe(2);
+    expect(INIT).toContain('EIGHTEEN programs stand between a cold tab and its first pixel');
     expect(readFileSync(join(__dirname, '../src/Core/Shader.Compiler.ts'), 'utf8'))
-      .toContain('SIXTEEN IS THE UNFLAGGED SET');
-    // And the six that are NOT in it are exactly the two flags' sets.
-    expect(BLUR_PROGRAMS_ATLAS + PANEL_PROGRAM_BORDER_DIRECT).toBe(6);
+      .toContain('EIGHTEEN IS THE UNFLAGGED SET');
+    // And the nine that are NOT in it are exactly the three flags' sets.
+    expect(BLUR_PROGRAMS_ATLAS + PANEL_PROGRAM_BORDER_DIRECT + GLASS_REG_PROGRAMS).toBe(9);
   });
 
   it('the restart probe and the instanced VAO stay where they are: off the boot batch', () => {

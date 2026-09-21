@@ -246,7 +246,9 @@ describe('border-direct > the wiring, read off the source', () => {
     // the argument that `?border-direct` changes routing and not the boot -- sound while the flag
     // defaulted ON, and false since `2bb107f` flipped it OFF: an unflagged page was compiling a
     // sixth copy of the biggest fragment program in the engine and never binding it.
-    expect(PANEL_PROGRAM_COUNT).toBe(5);
+    // Seven at boot since lane glassreg added the glass program's two `?glass-programs` cuts;
+    // this variant is still the one on the arm.
+    expect(PANEL_PROGRAM_COUNT).toBe(7);
     expect(PANEL_PROGRAM_BORDER_DIRECT).toBe(1);
     expect(RENDERER).toContain('{ MATERIAL_GLASS: true, BORDER_DIRECT: true }');
     // The defines are unchanged text; only which `ShaderBatch` calls `Add` moved. The boot batch's
@@ -297,7 +299,8 @@ describe('border-direct > the wiring, read off the source', () => {
     expect(arm).toContain(
       'const border = this.DiagBorderDirect ? this.EnsurePanelBorderDirectProgram() : 0;');
     expect(arm).toContain("border > 0 ? 'border-direct' : null,");
-    expect(arm).toContain('const late = pool + atlas + border + gauss;');
+    // `+ reg` since lane glassreg: `?glass-reg`'s family arms through the same method.
+    expect(arm).toContain('const late = pool + atlas + border + gauss + reg;');
     // Init's copy is main-thread order only, where the parse runs first and it joins the boot batch.
     expect(RENDERER).toContain('if (this.DiagBorderDirect) this.EnsurePanelBorderDirectProgram(batch);');
     // The renderer's own default must AGREE with the flag's, or the worker path -- where Init runs
