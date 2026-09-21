@@ -202,6 +202,26 @@ export class SceneReadLedger {
   GlassNoGlowBatches = 0;
   GlassNoSpecBatches = 0;
   GlassProgramFallbacks = 0;
+  /** `?blur-cache`, per frame. `Hits` are builds a clean backdrop let the walk skip (under `verify`,
+   *  builds it WOULD have skipped -- the build runs anyway and is compared). `Misses` are builds that
+   *  ran, cold or dirty. `Stores` copied a clean-but-cold build into the cache, `Evictions` made room
+   *  for one, `Refused` could not be made room for without evicting a slot this frame still binds.
+   *  `Verified` / `Mismatches` are the verify arm's comparisons and the ones that differed: a
+   *  mismatch is a producer of visible change the damage audit missed, never a picture question. */
+  BlurCacheHits = 0;
+  BlurCacheMisses = 0;
+  BlurCacheStores = 0;
+  BlurCacheEvictions = 0;
+  BlurCacheRefused = 0;
+  BlurCacheVerified = 0;
+  BlurCacheMismatches = 0;
+  /** The same since boot, because the verify arm's evidence is a LONG session reading
+   *  `mismatches=0` with `hits>0`, not one frame. Never reset. */
+  TotalBlurCacheHits = 0;
+  TotalBlurCacheMisses = 0;
+  TotalBlurCacheEvictions = 0;
+  TotalBlurCacheVerified = 0;
+  TotalBlurCacheMismatches = 0;
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -247,6 +267,13 @@ export class SceneReadLedger {
     this.GlassNoGlowBatches = 0;
     this.GlassNoSpecBatches = 0;
     this.GlassProgramFallbacks = 0;
+    this.BlurCacheHits = 0;
+    this.BlurCacheMisses = 0;
+    this.BlurCacheStores = 0;
+    this.BlurCacheEvictions = 0;
+    this.BlurCacheRefused = 0;
+    this.BlurCacheVerified = 0;
+    this.BlurCacheMismatches = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -351,6 +378,20 @@ export class SceneReadLedger {
   NoteGlassDraw = (census: GlassFragCensus): void => {
     this.GlassDraws++;
     AddGlassFragCensus(this.GlassCensus, census);
+  };
+
+  /** `?blur-cache`: a build skipped (or, under verify, that would have been). */
+  NoteBlurCacheHit = (): void => { this.BlurCacheHits++; this.TotalBlurCacheHits++; };
+  /** `?blur-cache`: a build that ran because its backdrop changed or nothing was cached. */
+  NoteBlurCacheMiss = (): void => { this.BlurCacheMisses++; this.TotalBlurCacheMisses++; };
+  NoteBlurCacheStore = (): void => { this.BlurCacheStores++; };
+  NoteBlurCacheEviction = (): void => { this.BlurCacheEvictions++; this.TotalBlurCacheEvictions++; };
+  NoteBlurCacheRefused = (): void => { this.BlurCacheRefused++; };
+  /** `?blur-cache=verify`: one hit's cached pyramid compared against a fresh build of it. */
+  NoteBlurCacheVerify = (mismatch: boolean): void => {
+    this.BlurCacheVerified++;
+    this.TotalBlurCacheVerified++;
+    if (mismatch) { this.BlurCacheMismatches++; this.TotalBlurCacheMismatches++; }
   };
 
   /** One glass batch took `kind` under an armed `?glass-programs`. */

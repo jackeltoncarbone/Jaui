@@ -21,6 +21,7 @@ import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
 import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 import { SceneReadLedger } from './Scene.Ledger';
+import { BLUR_CACHE_BUDGET_BYTES, ChainBytesFor, PickEvictions } from './Blur.Cache';
 import { EmptyGlassFragCensus, AddGlassFragCensus, GlassInstanceCensus, type GlassFragCensus } from './Glass.Skip';
 import {
   GLASS_PROGRAM_KINDS, GLASS_REG_DEFINES, GLASS_VARIANT_DEFINES, GlassBatchPredicates, GlassProgramFor,
@@ -196,6 +197,21 @@ const _unwrap = (handle: GpuTextureHandle): WebGLTexture =>
  *  that covers the whole canvas (the raw scene, the shared backdrop, the ?no-blur passthrough). */
 const _regionOf = (handle: GpuTextureHandle | null | undefined): BackdropRegion =>
   handle?.Region ?? BACKDROP_REGION_FULL;
+
+/** `?blur-cache`: one cached pyramid. `Handle` binds exactly like the build it was copied from --
+ *  same region map, same level count, same filter -- and is null once the slot has been released. */
+export interface BlurCacheSlot {
+  Texture: WebGLTexture | null;
+  Width: number;
+  Height: number;
+  Levels: number;
+  Format: number;
+  Bytes: number;
+  /** The last frame this slot was stored or bound; never evicted in that frame. */
+  LastUse: number;
+  Valid: boolean;
+  Handle: GpuTextureHandle | null;
+}
 
 /**
  * Can this draw's fill reach `sampleBgGradient`'s knot loop past `i == 1`?
@@ -3248,6 +3264,236 @@ export class WebGL2Renderer implements Renderer {
   /** The number of pyramid-writing calls this renderer has served. A handle is still the texture it
    *  named exactly while this has not moved since the handle was taken. */
   get BackdropBuildSeq(): number { return this._backdropBuildSeq; }
+
+  // ── `?blur-cache`: the cached pyramids ────────────────────────────────────────────────────────
+  //
+  // The walk decides WHETHER a surface's backdrop changed (`Core/Blur.Cache.ts`, `PaintLedger`);
+  // this is only where the answer is kept. A slot is a COPY of every level a build left in its
+  // level-0 texture, in that texture's own format, with its own sampler state mirrored, so binding
+  // the slot is binding the same texels through the same filter -- and a hit issues no pass at all.
+  //
+  // A copy rather than a handle into the chain pool because the pool is rewritten by the very next
+  // build of the same size: twenty cards share one chain (`BlurPass._useChain`). The copy is taken
+  // only when the walk says the surface was CLEAN and merely cold, so a surface whose backdrop moves
+  // every frame (a scroll, a video under it) never pays for it.
+
+  /** Resident bytes the slots may hold. See `BLUR_CACHE_BUDGET_BYTES`. */
+  BlurCacheBudgetBytes = BLUR_CACHE_BUDGET_BYTES;
+  private readonly _bcSlots = new Set<BlurCacheSlot>();
+  private _bcBytes = 0;
+  private _bcRead: WebGLFramebuffer | null = null;
+  private _bcDraw: WebGLFramebuffer | null = null;
+  /** How the last verify comparison read its texels back, for the gate line. `u8` would be a
+   *  comparison that cannot see a one-step difference in a 10-bit pyramid, so it is named. */
+  BlurCacheReadKind = 'none';
+
+  get BlurCacheBytes(): number { return this._bcBytes; }
+  get BlurCacheSlots(): number { return this._bcSlots.size; }
+  get BlurCacheCensus(): {
+    Hits: number; Misses: number; Stores: number; Evictions: number; Refused: number;
+    Verified: number; Mismatches: number; TotalHits: number; TotalMisses: number; TotalEvictions: number;
+    TotalVerified: number; TotalMismatches: number;
+  } {
+    const l = this._sceneLedger;
+    return {
+      Hits: l.BlurCacheHits, Misses: l.BlurCacheMisses, Stores: l.BlurCacheStores,
+      Evictions: l.BlurCacheEvictions, Refused: l.BlurCacheRefused,
+      Verified: l.BlurCacheVerified, Mismatches: l.BlurCacheMismatches,
+      TotalHits: l.TotalBlurCacheHits, TotalMisses: l.TotalBlurCacheMisses,
+      TotalEvictions: l.TotalBlurCacheEvictions, TotalVerified: l.TotalBlurCacheVerified,
+      TotalMismatches: l.TotalBlurCacheMismatches,
+    };
+  }
+  NoteBlurCacheHit = (): void => { this._sceneLedger.NoteBlurCacheHit(); };
+  NoteBlurCacheMiss = (): void => { this._sceneLedger.NoteBlurCacheMiss(); };
+  NoteBlurCacheVerify = (mismatch: boolean): void => { this._sceneLedger.NoteBlurCacheVerify(mismatch); };
+
+  /**
+   * Copy the pyramid `src` names into `slot` (or a new slot), every level, and hand the slot back.
+   *
+   * Called right after `GenerateBlurMipmap` and BEFORE the walk's `RebindSceneTarget`, so the copy
+   * rides the encoder end the build already paid and adds none. `null` when the budget cannot take
+   * it without evicting a slot this frame still binds: the store is refused and counted, never
+   * squeezed in.
+   */
+  BlurCacheStore = (src: GpuTextureHandle, slot: BlurCacheSlot | null, frame: number): BlurCacheSlot | null => {
+    const gl = this._gl;
+    const region = src.Region;
+    if (region === undefined || region.TexelsX <= 0 || region.TexelsY <= 0) {
+      throw new Error('[Jaui] blur-cache: a pyramid handle that does not say its level-0 size');
+    }
+    const w = region.TexelsX, h = region.TexelsY;
+    const srcTex = _unwrap(src);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    const minFilter = gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER) as number;
+    const maxLevel = gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL) as number;
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    const mipmapped = minFilter !== gl.LINEAR && minFilter !== gl.NEAREST;
+    let depth = 0;
+    for (let lw = w, lh = h; lw > 1 || lh > 1; lw = Math.max(1, lw >> 1), lh = Math.max(1, lh >> 1)) depth++;
+    const levels = mipmapped ? Math.min(maxLevel, depth) + 1 : 1;
+
+    const read = this._bcRead ?? (this._bcRead = gl.createFramebuffer());
+    const draw = this._bcDraw ?? (this._bcDraw = gl.createFramebuffer());
+    if (read === null || draw === null) throw new Error('[Jaui] blur-cache: failed to create a copy framebuffer');
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex, 0);
+    const fmt = this._bcFormatOf(gl.READ_FRAMEBUFFER);
+    const bytes = ChainBytesFor(w, h, levels, fmt.Bpp);
+
+    let s = slot;
+    const fits = s !== null && s.Texture !== null
+      && s.Width === w && s.Height === h && s.Levels === levels && s.Format === fmt.Internal;
+    if (!fits) {
+      const others = [...this._bcSlots].filter((x) => x !== s);
+      const freed = s !== null ? s.Bytes : 0;
+      const evict = PickEvictions(others, this._bcBytes - freed, bytes, this.BlurCacheBudgetBytes, frame);
+      if (evict === null) {
+        gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+        if (s !== null) this.BlurCacheRelease(s);
+        this._sceneLedger.NoteBlurCacheRefused();
+        return null;
+      }
+      for (const e of evict) { this.BlurCacheRelease(e); this._sceneLedger.NoteBlurCacheEviction(); }
+      if (s !== null) this.BlurCacheRelease(s);
+      const tex = gl.createTexture();
+      if (tex === null) throw new Error('[Jaui] blur-cache: failed to create a slot texture');
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texStorage2D(gl.TEXTURE_2D, levels, fmt.Internal, w, h);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, levels - 1);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      s = s ?? { Texture: null, Width: 0, Height: 0, Levels: 0, Format: 0, Bytes: 0, LastUse: 0, Valid: false, Handle: null };
+      s.Texture = tex;
+      s.Width = w; s.Height = h; s.Levels = levels; s.Format = fmt.Internal; s.Bytes = bytes;
+      this._bcSlots.add(s);
+      this._bcBytes += bytes;
+    }
+
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, draw);
+    this._tgt('blur-cache');
+    for (let i = 0, lw = w, lh = h; i < levels; i++, lw = Math.max(1, lw >> 1), lh = Math.max(1, lh >> 1)) {
+      gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex, i);
+      gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, s!.Texture, i);
+      gl.blitFramebuffer(0, 0, lw, lh, 0, 0, lw, lh, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+    gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    this._tgt('default');
+    s!.Valid = true;
+    s!.LastUse = frame;
+    s!.Handle = _wrap(s!.Texture!, region);
+    this._sceneLedger.NoteBlurCacheStore();
+    return s;
+  };
+
+  /** Drop a slot and its texture. Its reader will build next time it is drawn. */
+  BlurCacheRelease = (slot: BlurCacheSlot): void => {
+    if (slot.Texture !== null) {
+      this._gl.deleteTexture(slot.Texture);
+      this._bcBytes -= slot.Bytes;
+    }
+    this._bcSlots.delete(slot);
+    slot.Texture = null;
+    slot.Handle = null;
+    slot.Valid = false;
+    slot.Bytes = 0;
+  };
+
+  /** Forget every slot without deleting anything: the context that owned the textures is gone. */
+  BlurCacheClear = (): void => {
+    for (const s of this._bcSlots) { s.Texture = null; s.Handle = null; s.Valid = false; s.Bytes = 0; }
+    this._bcSlots.clear();
+    this._bcBytes = 0;
+    this._bcRead = null;
+    this._bcDraw = null;
+  };
+
+  /**
+   * `?blur-cache=verify`: how many level-0 texels of `a` and `b` differ, or -1 when their sizes do.
+   *
+   * A READBACK, deliberately, and not a difference pass on the GPU. Two reasons. The comparison is
+   * exact over every texel rather than a signature of some -- a stale pixel in one corner of one
+   * card is precisely the bug this arm exists to find -- and it needs no new program, which this lane
+   * may not add. The price is a pipeline stall per hit, which is why verify is a diagnostic that is
+   * never timed. Level 0 only: every deeper level is `GenerateOutputMipmap`'s deterministic function
+   * of level 0 at the same depth, and the depth is in the key.
+   */
+  BlurCacheCompare = (a: GpuTextureHandle, b: GpuTextureHandle): number => {
+    const ra = a.Region, rb = b.Region;
+    if (ra === undefined || rb === undefined || ra.TexelsX !== rb.TexelsX || ra.TexelsY !== rb.TexelsY) return -1;
+    const w = ra.TexelsX, h = ra.TexelsY;
+    const pa = this._bcReadLevel0(_unwrap(a), w, h);
+    const pb = this._bcReadLevel0(_unwrap(b), w, h);
+    if (pa.length !== pb.length) return -1;
+    const per = pa.length / (w * h);
+    let diff = 0;
+    for (let t = 0; t < pa.length; t += per) {
+      for (let c = 0; c < per; c++) {
+        if (pa[t + c] !== pb[t + c]) { diff++; break; }
+      }
+    }
+    return diff;
+  };
+
+  private _bcReadLevel0 = (tex: WebGLTexture, w: number, h: number): ArrayLike<number> => {
+    const gl = this._gl;
+    const read = this._bcRead ?? (this._bcRead = gl.createFramebuffer());
+    if (read === null) throw new Error('[Jaui] blur-cache: failed to create a copy framebuffer');
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    const format = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) as number;
+    const type = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) as number;
+    let out: Uint8Array | Uint16Array | Uint32Array | Float32Array;
+    let readFormat = gl.RGBA, readType: number;
+    if (format === gl.RGBA && type === gl.UNSIGNED_INT_2_10_10_10_REV) {
+      out = new Uint32Array(w * h); readType = type; this.BlurCacheReadKind = 'rgb10a2';
+    } else if (format === gl.RGBA && type === gl.HALF_FLOAT) {
+      out = new Uint16Array(w * h * 4); readType = type; this.BlurCacheReadKind = 'f16';
+    } else if (format === gl.RGBA && type === gl.FLOAT) {
+      out = new Float32Array(w * h * 4); readType = type; this.BlurCacheReadKind = 'f32';
+    } else {
+      // The two pairs WebGL2 always accepts: RGBA/UNSIGNED_BYTE for a normalized attachment,
+      // RGBA/FLOAT for a float one. The first quantizes a 10-bit pyramid to 8 and says so.
+      const ct = gl.getFramebufferAttachmentParameter(
+        gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE) as number;
+      if (ct === gl.FLOAT) { out = new Float32Array(w * h * 4); readType = gl.FLOAT; this.BlurCacheReadKind = 'f32'; }
+      else { out = new Uint8Array(w * h * 4); readType = gl.UNSIGNED_BYTE; this.BlurCacheReadKind = 'u8'; }
+      readFormat = gl.RGBA;
+    }
+    gl.readPixels(0, 0, w, h, readFormat, readType, out);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    return out;
+  };
+
+  /** The sized internal format of whatever is attached to `target`'s colour 0, and its bytes per
+   *  texel. A format this cannot name is a THROW: copying into a narrower one would be a cache that
+   *  quietly changes the picture, which is the one thing it may not do. */
+  private _bcFormatOf = (target: number): { Internal: number; Bpp: number } => {
+    const gl = this._gl;
+    const q = (p: number): number =>
+      gl.getFramebufferAttachmentParameter(target, gl.COLOR_ATTACHMENT0, p) as number;
+    const r = q(gl.FRAMEBUFFER_ATTACHMENT_RED_SIZE), g = q(gl.FRAMEBUFFER_ATTACHMENT_GREEN_SIZE);
+    const b = q(gl.FRAMEBUFFER_ATTACHMENT_BLUE_SIZE), a = q(gl.FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE);
+    const type = q(gl.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE);
+    const srgb = q(gl.FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING) === gl.SRGB;
+    if (type === gl.UNSIGNED_NORMALIZED) {
+      if (r === 10 && g === 10 && b === 10 && a === 2) return { Internal: gl.RGB10_A2, Bpp: 4 };
+      if (r === 8 && g === 8 && b === 8 && a === 8) return { Internal: srgb ? gl.SRGB8_ALPHA8 : gl.RGBA8, Bpp: 4 };
+    } else if (type === gl.FLOAT) {
+      if (r === 16 && g === 16 && b === 16 && a === 16) return { Internal: gl.RGBA16F, Bpp: 8 };
+      if (r === 32 && g === 32 && b === 32 && a === 32) return { Internal: gl.RGBA32F, Bpp: 16 };
+      if (r === 11 && g === 11 && b === 10 && a === 0) return { Internal: gl.R11F_G11F_B10F, Bpp: 4 };
+    }
+    throw new Error(`[Jaui] blur-cache: cannot mirror a pyramid format R${r}G${g}B${b}A${a} type 0x${type.toString(16)}`);
+  };
 
   /** Copy this border's source rect out of the scene, or `null` when the direct path cannot
    *  reproduce this build's kernel and the caller must take today's pyramid.

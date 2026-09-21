@@ -573,7 +573,9 @@ describe('the walk, and the flag', () => {
     // Re-aimed by lane presample: the call gained `?glass-presample`'s seventh argument and wrapped
     // onto a second line. The pin follows the arguments that decide the BUILD -- the live scene
     // texture, this node's own region -- and stops before the arm, which is off by default.
-    expect(render).toContain('lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,');
+    // Re-aimed by lane blurcache: the build moved into the closure `_bcBuild` calls, so a
+    // `?blur-cache` hit can skip it; the arguments that decide the build did not move.
+    expect(render).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, gaussian)');
     const solo = render.slice(0, render.indexOf('this._atlasWalkSolo++;'));
     expect(solo.lastIndexOf('} else {')).toBeGreaterThan(solo.lastIndexOf('if (direct !== null) {'));
   });
