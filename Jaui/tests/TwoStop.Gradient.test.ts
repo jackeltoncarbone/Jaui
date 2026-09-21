@@ -34,6 +34,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PROGRAMS, programCode, preprocess, codeLines, braceBalance, linesNotIn,
   readPanelFrag, readRenderer, readJaui, stripTsComments,
+  NONE_ONLY_LINES, GLASS_ONLY_LINES,
 } from './Flat.Program.Source';
 import { PANEL_PROGRAM_COUNT } from '../src/Core/WebGL2.Renderer';
 import { GradientCurveOf } from '../src/Core/Gradient.Curve';
@@ -171,8 +172,8 @@ describe('the two-stop program is a BOUND SUBSTITUTION, not a rewrite', () => {
     // The new `#if` must be invisible to every program that does not define TWO_STOP_GRADIENT:
     // those are the `?flat-program=off` arm, the `?borderless-program=off` arm and every glass
     // scene, and all three are gated by a pixel-zero claim of their own.
-    expect(linesNotIn(none, glass).map((l) => l.Text)).toEqual(['const float materialType = 0.0;']);
-    expect(linesNotIn(glass, none).map((l) => l.Text)).toEqual(['const float materialType = 1.0;']);
+    expect(linesNotIn(none, glass).map((l) => l.Text)).toEqual(NONE_ONLY_LINES);
+    expect(linesNotIn(glass, none).map((l) => l.Text)).toEqual(GLASS_ONLY_LINES);
     expect(linesNotIn(flat, none).map((l) => l.Text)).toEqual(['const bool hasBackdropFilter = false;']);
     expect(linesNotIn(borderless, flat).map((l) => l.Text))
       .toEqual(['dist = CornerDist(p, panelHalfSize, v_Radii, effectiveSmooth);']);

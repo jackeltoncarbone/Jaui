@@ -5,6 +5,7 @@
  * it can be unit-tested without pulling in `WebGL2.Renderer`, whose shader imports only resolve
  * after a build. `WebGL2.Renderer` owns the ONE instance and every call site.
  */
+import { AddGlassFragCensus, EmptyGlassFragCensus, type GlassFragCensus } from './Glass.Skip';
 
 /**
  * How many times a frame READS the scene target after WRITING into it.
@@ -176,6 +177,15 @@ export class SceneReadLedger {
   GroupBuilds = 0;
   GroupMembers = 0;
   GroupFallbacks = 0;
+  /** `?glass-skip`: GLASS DRAWS this frame (panel batches shaded by the glass program), and the
+   *  fragment census of every instance they drew -- `frags=` and `taps=` on the gate line, the
+   *  denominator the M4's per-fragment reading needs. Booked only while the flag is armed (`none`
+   *  included), so the unflagged engine pays nothing for it.
+   *
+   *  `GlassDraws` is the control invariant: every stage arm must read the same number as `none`,
+   *  because every arm draws the same draw. So must `Frags`; `Taps` is the column a stage moves. */
+  GlassDraws = 0;
+  GlassCensus: GlassFragCensus = EmptyGlassFragCensus();
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -213,6 +223,8 @@ export class SceneReadLedger {
     this.GroupBuilds = 0;
     this.GroupMembers = 0;
     this.GroupFallbacks = 0;
+    this.GlassDraws = 0;
+    this.GlassCensus = EmptyGlassFragCensus();
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -306,5 +318,11 @@ export class SceneReadLedger {
 
   /** `n` glass fills no group covered, which built one at a time exactly as they do today. */
   NoteGroupFallback = (n: number): void => { this.GroupFallbacks += n; };
+
+  /** One glass batch drew; `census` is its instances' fragment census under the armed mask. */
+  NoteGlassDraw = (census: GlassFragCensus): void => {
+    this.GlassDraws++;
+    AddGlassFragCensus(this.GlassCensus, census);
+  };
 }
 

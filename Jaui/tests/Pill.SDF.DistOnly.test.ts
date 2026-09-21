@@ -170,7 +170,10 @@ describe('CornerDist vs CornerEval on the pill leg: the distance is the SAME flo
     }
     // Non-vacuity: the early return really is the path being walked.
     expect(taken).toBeGreaterThan(100_000);
-  });
+    // ~200k scans with two `expect`s each: ~3 s alone and 4.8 s inside the parallel suite at Jaui
+    // d97b405, against the 5 s default - it failed one whole-suite run in two there. The work is
+    // the point of the case, so the budget is stated rather than the grid thinned.
+  }, 20_000);
 
   it('polyline vertices ±0.001 px — where the winning segment changes', () => {
     const halfX = 220, halfY = 30;

@@ -25,6 +25,7 @@ import { describe, it, expect } from 'vitest';
 import {
   VARIANTS, preprocess, codeLines, braceBalance, variantCode, linesNotIn,
   readPanelFrag, readRenderer, readJaui, readInstanceBuffer, stripTsComments,
+  NONE_ONLY_LINES, GLASS_ONLY_LINES,
 } from './Flat.Program.Source';
 import { PANEL_PROGRAM_COUNT, PANEL_PROGRAM_BORDER_DIRECT } from '../src/Core/WebGL2.Renderer';
 
@@ -77,13 +78,14 @@ describe('the flat program is a DELETION, not a second shader', () => {
     expect(added.map((l) => l.Text)).toEqual(['const bool hasBackdropFilter = false;']);
   });
 
-  it('the non-glass and glass programs still differ in exactly ONE line — the constant', () => {
+  it('the non-glass and glass programs differ in exactly the constant and the glass-skip gate', () => {
     // MATERIAL_NONE and MATERIAL_GLASS must come out of the guarded source exactly as they did
     // before it was guarded. They are the `?flat-program=off` arm and every glass scene, and the
     // `#elif` this lane widened to `defined(MATERIAL_NONE) || defined(MATERIAL_FLAT)` sits right
-    // between them. Their whole difference is still the one constant that names them.
-    expect(linesNotIn(none, glass).map((l) => l.Text)).toEqual(['const float materialType = 0.0;']);
-    expect(linesNotIn(glass, none).map((l) => l.Text)).toEqual(['const float materialType = 1.0;']);
+    // between them. Their whole difference is the constant that names them and `?glass-skip`'s
+    // `GlassSkips`, which is a constant false in the non-glass program (Flat.Program.Source).
+    expect(linesNotIn(none, glass).map((l) => l.Text)).toEqual(NONE_ONLY_LINES);
+    expect(linesNotIn(glass, none).map((l) => l.Text)).toEqual(GLASS_ONLY_LINES);
     expect(none.length).toBe(glass.length);
   });
 

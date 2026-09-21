@@ -32,6 +32,7 @@ import {
   GAUSS_PASSES, GAUSS_MATCH_SIGMA, type GaussianMode,
   type AtlasBuildMember, type BackdropUnionPlan,
 } from './BlurPass';
+import { EmptyGlassFragCensus, GlassSkipNames, ParseGlassSkip, type GlassFragCensus } from './Glass.Skip';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
 import {
   BORDER_DIRECT_L2_WINDOW, BORDER_DIRECT_PHASE, type BorderDirectArm,
@@ -271,6 +272,21 @@ export interface GlassGroupCensus {
   /** One `WxH@k/depth` per group, in walk order. */
   Rects: string;
   /** Empty unless a flag refused the lever outright, in which case it names which. */
+  Refused: string;
+}
+
+/** `?glass-skip`, per rendered frame. `Draws` and `Census.Frags` must read the same on every arm
+ *  as on `none` -- the arms change what a glass fragment DOES, never which draws run or how big
+ *  they are -- and `Census.Taps` against `Census.TapsFull` is what a stage removed. */
+export interface GlassSkipCensus {
+  Armed: boolean;
+  /** The `u_GlassSkip` value every glass draw uploads: 0 on `none` and unflagged. */
+  Mask: number;
+  Stages: string[];
+  /** Glass batches drawn this frame. */
+  Draws: number;
+  Census: GlassFragCensus;
+  /** Empty unless a flag refused the arm outright, in which case it names which. */
   Refused: string;
 }
 import { DirtyFlag } from './Types';
@@ -882,6 +898,14 @@ export class Canvas implements DirtyTracker {
   private _glassGroupStats = {
     Groups: 0, Builds: 0, Members: 0, Fallbacks: 0, Solo: 0, MaxLod: 0, Unplanned: 0, Rects: '',
   };
+  /** `?glass-skip` -- THE GLASS DRAW'S STAGE ABLATIONS. `null` is unarmed (today's engine, no
+   *  census); a number is the `u_GlassSkip` mask every glass draw uploads, 0 for `none`, the control
+   *  that prints the census at no GPU cost. Picture-DIFFERENT instruments by design; default off.
+   *  See `Glass.Skip.ts` for the stages and `Jiv.Panel.frag` for what each one removes. */
+  private _glassSkip: number | null = null;
+  private _glassSkipRefused = '';
+  /** The last `jaui:glass-skip` gate line, printed on a SHAPE change like every gate above it. */
+  private _glassSkipLastLine = '';
   /** `?emptypanels` -- A PANEL THAT PAINTS NOTHING IS NOT PUSHED. Default ON.
    *
    *  A fully transparent background with no painted border and no shadow shades its whole quad to
@@ -3914,6 +3938,28 @@ export class Canvas implements DirtyTracker {
         this._glassGroupLastLine = line;
         for (const l of lines) JTrace(l);
       }
+    }
+
+    // `?glass-skip`'s gate, on the same terms as the ones above: a SHAPE change, not a frame (a
+    // static page prints it once; a line per frame would read the same numbers sixty times).
+    //
+    // `draws` and `frags` are the control invariant -- the same on every arm as on `none`, because
+    // every arm draws the same draws over the same quads. `taps` is the armed count and `full` the
+    // same frame's count with nothing skipped, so a stage that removed its taps reads below `full`
+    // and one that removed nothing (a gate no fragment reaches) reads equal to it. `face`, `band`,
+    // `border`, `skirt` and `cut` are the regions the stages live in, for the per-fragment reading.
+    if (this._glassSkip !== null && this._renderer instanceof WebGL2Renderer) {
+      const c = this._renderer.GlassCensus;
+      const mask = this._glassSkip;
+      const names = GlassSkipNames(mask);
+      const line = `jaui:glass-skip mask=${mask} stages=${names.length === 0 ? 'none' : names.join(',')}`
+        + ` draws=${this._renderer.GlassDraws} instances=${c.Instances}`
+        + ` frags=${c.Frags} face=${c.Face} band=${c.Band} border=${c.Border}`
+        + ` skirt=${c.Skirt} cut=${c.Cut} ca3=${c.Ca3}`
+        + ` taps=${c.Taps} full=${c.TapsFull} clipFetches=${c.ClipFetches}`
+        + ` pill=${c.PillApprox} projective=${c.Projective}`
+        + ` pixels=${mask === 0 ? 'SAME' : 'DIFFERENT'}`;
+      if (line !== this._glassSkipLastLine) { this._glassSkipLastLine = line; JTrace(line); }
     }
 
     // `?border-direct`'s gate, on the same terms as the three above: a SHAPE change, not a frame.
@@ -7914,6 +7960,71 @@ export class Canvas implements DirtyTracker {
           Blur: on ? (r.SceneEndsByKey['blur'] ?? 0) : 0,
           Rects: st.Rects,
           Refused: this._glassGroupRefused,
+        };
+      };
+    }
+
+    // `?glass-skip=<stage>[,<stage>...] | all | none | off` -- THE GLASS DRAW, STAGE BY STAGE.
+    //
+    // DEFAULT OFF, picture-DIFFERENT on every non-zero mask by design: each stage bit removes one
+    // stage of the glass fragment (`Glass.Skip.GLASS_SKIP_STAGES`) through ONE uniform, in the same
+    // program, with the same draws, extents and blend. `none` arms it at mask 0 -- the control, the
+    // unflagged pixels, the census on. Parsed after every blur arm so the refusals can read them.
+    //
+    // Three refusals BY NAME keep a cell one-variable. `?glass-gaussian` changes the SOURCE of the
+    // sample, not the draw. `?border-direct` sends every rim through the sixth program, whose border
+    // zone gathers sixty-four taps where this arm's `border` bit prices one. `?border-source=scene`
+    // splits each card's draw in two across a second build. And `?no-glass-draw` / `?no-glass` /
+    // `?no-ui` remove the draws this arm is about: every stage would price nothing.
+    //
+    // `?glass-group` (the default) COMPOSES: it changes how the backdrop is BUILT and hands every
+    // member the same draw with a different pyramid handle, so the draws this arm gates are the ones
+    // it would gate without it. `tests/Glass.Skip.test.ts` walks both and asserts it.
+    if (params.has('glass-skip')) {
+      this._glassSkip = ParseGlassSkip(params.get('glass-skip') ?? '');
+    }
+    if (this._glassSkip !== null) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._glassGaussian !== 'off' ? 'glass-gaussian-changes-the-source-of-the-sample-not-the-draw'
+        : this._borderDirect ? 'border-direct-draws-the-rim-with-the-sixth-program-and-a-64-tap-gather'
+        : !this._borderSourceFill ? 'border-source-scene-splits-the-card-draw-across-a-second-build'
+        : this._diagNoGlassDraw || this._diagNoGlass || this._diagNoUi
+          ? 'a-no-star-diagnostic-removes-the-glass-draws-this-arm-prices'
+        : null;
+      if (why !== null) {
+        this._glassSkip = null;
+        this._glassSkipRefused = why;
+        JTrace(`jaui:glass-skip armed=off reason=${why}`);
+      }
+    }
+    if (this._renderer instanceof WebGL2Renderer) {
+      this._renderer.DiagGlassSkip = this._glassSkip ?? 0;
+      this._renderer.DiagGlassSkipCensus = this._glassSkip !== null;
+    }
+    // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
+    // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
+    // parsed, so a mark taken there would print `off` on every arm however the URL read.
+    {
+      const mask = this._glassSkip ?? 0;
+      const names = GlassSkipNames(mask);
+      JTrace(`jaui:glass-skip armed=${this._glassSkip === null ? 'off' : names.length === 0 ? 'none' : names.join(',')}`
+        + ` mask=${mask} default=${!params.has('glass-skip')}`
+        + ` pixels=${mask === 0 ? 'SAME' : 'DIFFERENT'}`
+        + (this._glassSkipRefused !== '' ? ` reason=${this._glassSkipRefused}` : ''));
+      const g = globalThis as unknown as { __jauiGlassSkip?: () => GlassSkipCensus };
+      g.__jauiGlassSkip = () => {
+        const rr = this._renderer;
+        const on = rr instanceof WebGL2Renderer;
+        const m = this._glassSkip ?? 0;
+        return {
+          Armed: this._glassSkip !== null,
+          Mask: m,
+          Stages: GlassSkipNames(m),
+          Draws: on ? rr.GlassDraws : 0,
+          Census: on ? { ...rr.GlassCensus } : EmptyGlassFragCensus(),
+          Refused: this._glassSkipRefused,
         };
       };
     }

@@ -23,6 +23,16 @@ export const readRenderer = (): string => src('Core', 'WebGL2.Renderer.ts');
 export const readJaui = (): string => src('Core', 'Jaui.ts');
 export const readInstanceBuffer = (): string => src('Jiv', 'Jiv.InstanceBuffer.ts');
 
+/**
+ * Every line that separates MATERIAL_NONE from MATERIAL_GLASS, in file order: `?glass-skip`'s gate
+ * helper, which is a constant `false` in the non-glass program (so every gate folds away there and
+ * it compiles to the program it was), and the constant that names the two. Anything else appearing
+ * on either side is a line some lane wrote into one program and not the other, and has to be
+ * justified by name here.
+ */
+export const NONE_ONLY_LINES = ['bool GlassSkips(int bit) { return false; }', 'const float materialType = 0.0;'];
+export const GLASS_ONLY_LINES = ['bool GlassSkips(int bit) { return (u_GlassSkip & bit) != 0; }', 'const float materialType = 1.0;'];
+
 /** The three SINGLE defines `_compilePanelShader` builds a panel program from. */
 export const VARIANTS = ['MATERIAL_GLASS', 'MATERIAL_NONE', 'MATERIAL_FLAT'] as const;
 export type Variant = (typeof VARIANTS)[number];

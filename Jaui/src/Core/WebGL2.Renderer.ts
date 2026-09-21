@@ -20,6 +20,7 @@ import { QuadGeometry } from './Geometry.Quad';
 import { PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG } from '../ProgressiveBlur/ProgressiveBlur.Shader';
 import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 import { SceneReadLedger } from './Scene.Ledger';
+import { EmptyGlassFragCensus, AddGlassFragCensus, GlassInstanceCensus, type GlassFragCensus } from './Glass.Skip';
 import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
 import { PACE_FENCE_RING, type PaceFenceSample } from './Tick.Pace';
 import {
@@ -111,6 +112,9 @@ interface _PanelLocs {
   borderTexels:   WebGLUniformLocation | null;
   borderTap:      WebGLUniformLocation | null;
   borderGather:   WebGLUniformLocation | null;
+  // ── `?glass-skip`'s mask. Declared by the glass and non-glass programs, read only by the glass
+  // one (`GlassSkips` is a constant false in the other, so it compiles out and this is null there).
+  glassSkip:      WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -147,6 +151,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   borderTexels:   gl.getUniformLocation(p, 'u_BorderTexels'),
   borderTap:      gl.getUniformLocation(p, 'u_BorderTap'),
   borderGather:   gl.getUniformLocation(p, 'u_BorderGather'),
+  glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -558,6 +563,13 @@ export class WebGL2Renderer implements Renderer {
    *  `Border.Direct.BorderDirectArm`, which is where the decomposition is written down. Set by
    *  `Jaui._initDebugFromUrl` beside `DiagBorderDirect`; inert while that is false. */
   DiagBorderArm: BorderDirectArm = 'on';
+  /** `?glass-skip`'s mask: the `Glass.Skip.GLASS_SKIP_STAGES` bits the glass program skips. 0 is
+   *  today's engine, and it is uploaded as 0 on every non-glass draw whatever this holds. Set by
+   *  `Jaui._initDebugFromUrl`, which owns the flag and its refusals. */
+  DiagGlassSkip = 0;
+  /** `?glass-skip` armed (`none` included): book every glass draw's fragment census on the ledger.
+   *  Off unflagged, so today's engine does not pay for the walk. */
+  DiagGlassSkipCensus = false;
   /** `?flat-program=off` sends every panel back through the full program. Default ON: the flat
    *  program is pixel-identical by construction, so the only reason to hold the old routing is to
    *  measure the two arms against each other in ONE binary. Set by `Jaui._initDebugFromUrl`. */
@@ -790,6 +802,8 @@ export class WebGL2Renderer implements Renderer {
   get GroupBuilds(): number { return this._sceneLedger.GroupBuilds; }
   get GroupMembers(): number { return this._sceneLedger.GroupMembers; }
   get GroupFallbacks(): number { return this._sceneLedger.GroupFallbacks; }
+  get GlassDraws(): number { return this._sceneLedger.GlassDraws; }
+  get GlassCensus(): GlassFragCensus { return this._sceneLedger.GlassCensus; }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
   get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number; EndsByKey: Record<string, number> } {
     const l = this._sceneLedger;
@@ -1645,6 +1659,11 @@ export class WebGL2Renderer implements Renderer {
     // whole measurement: what differs between `on` and `skipgather` is the band work and nothing
     // else in the frame.
     gl.uniform1f(locs.borderGather, this.DiagBorderArm === 'skipgather' ? 0 : 1);
+    // `?glass-skip`: unconditional, for the reason `borderGather` is -- every arm issues the SAME
+    // call stream, and the value is the only thing that differs. 0 on a non-glass draw whatever the
+    // flag holds, so the mask can never reach a program the arm is not about.
+    gl.uniform1i(locs.glassSkip, isGlass ? this.DiagGlassSkip : 0);
+    if (isGlass && this.DiagGlassSkipCensus) this._noteGlassFragments();
     // On EVERY armed arm, `nogather` included: the fragment counts are a property of the rim's
     // geometry and not of which program shades it, and two arms whose census disagreed could not be
     // compared at all.
@@ -3243,6 +3262,18 @@ export class WebGL2Renderer implements Renderer {
    * the batch anyway: a count that silently read instance 0 of a batch of twenty would be the
    * vacuous-success shape this ledger keeps getting bitten by.
    */
+  /** `?glass-skip`'s census: every instance of the glass batch about to draw, walked through
+   *  `Glass.Skip.GlassInstanceCensus` under the armed mask. Cached per surface shape there, so a
+   *  static page walks its twenty cards' two shapes once. */
+  private _noteGlassFragments = (): void => {
+    const sum = EmptyGlassFragCensus();
+    for (let i = 0; i < this._panelInstanceCount; i++) {
+      AddGlassFragCensus(sum,
+        GlassInstanceCensus(this._panelInstanceData, i * PANEL_FLOATS_PER_INSTANCE, this.DiagGlassSkip));
+    }
+    this._sceneLedger.NoteGlassDraw(sum);
+  };
+
   private _noteBorderFragments = (): void => {
     const d = this._panelInstanceData;
     for (let i = 0; i < this._panelInstanceCount; i++) {

@@ -40,6 +40,7 @@ import { describe, it, expect } from 'vitest';
 import {
   PROGRAMS, programCode, preprocess, codeLines, braceBalance, linesNotIn,
   readPanelFrag, readRenderer, readJaui, readInstanceBuffer, stripTsComments,
+  NONE_ONLY_LINES, GLASS_ONLY_LINES,
 } from './Flat.Program.Source';
 import { PANEL_PROGRAM_COUNT } from '../src/Core/WebGL2.Renderer';
 
@@ -215,8 +216,8 @@ describe('the borderless program is a deletion from the flat program, plus one l
   it('leaves MATERIAL_NONE and MATERIAL_GLASS exactly where flatprogram left them', () => {
     // The new guards must be invisible to every program that does not define NO_SHAPE_GRADIENT.
     // These two are the `?flat-program=off` arm and every glass scene.
-    expect(linesNotIn(none, glass).map((l) => l.Text)).toEqual(['const float materialType = 0.0;']);
-    expect(linesNotIn(glass, none).map((l) => l.Text)).toEqual(['const float materialType = 1.0;']);
+    expect(linesNotIn(none, glass).map((l) => l.Text)).toEqual(NONE_ONLY_LINES);
+    expect(linesNotIn(glass, none).map((l) => l.Text)).toEqual(GLASS_ONLY_LINES);
     expect(none.length).toBe(glass.length);
     expect(linesNotIn(flat, none).map((l) => l.Text)).toEqual(['const bool hasBackdropFilter = false;']);
   });

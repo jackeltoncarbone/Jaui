@@ -100,6 +100,78 @@ uniform sampler2D u_ClipTex;
 uniform vec2 u_SpecularTilt;
 #endif
 
+#if !defined(MATERIAL_FLAT)
+// ── ?glass-skip: THE GLASS DRAW PRICED STAGE BY STAGE ──────────────────────────────────────────
+//
+// ONE uniform bitmask, 0 on every draw the flag did not arm, and 0 on every non-glass draw
+// whatever the flag says (`WebGL2Renderer.PanelDrawBatch` uploads it). Each set bit removes exactly
+// one stage of the glass fragment and substitutes the cheapest constant that keeps the draw's
+// extent, blend and everything else where it was, so a stage arm against `?glass-skip=none` prices
+// that one stage. A uniform and not a define: both arms run the SAME compiled program, and the
+// only thing that differs between them is which side of a coherent branch every thread takes.
+//
+// Every gate below is a pure INSERTION -- a dangling `else`, an early `return`, or a brace pair
+// around statements whose locals die inside it -- so with the mask at 0 not one expression of the
+// glass path is moved or rewritten. The one exception is the Blinn-Phong catchlight, whose three
+// composite lines move up past the declarations above them (they read none of them), so the
+// catchlight and its own composite sit in one block.
+//
+// `GlassSkips` is a constant `false` in the non-glass program, so every gate folds away there and
+// MATERIAL_NONE compiles to the program it was; MATERIAL_FLAT deletes the whole apparatus. The bit
+// values are `Core/Glass.Skip.ts`'s GLASS_SKIP_STAGES, and `tests/Glass.Skip.test.ts` holds the two
+// tables to each other.
+uniform int u_GlassSkip;
+const int GLASS_SKIP_BACKDROP = 1;     // every backdrop tap returns GLASS_SKIP_FLAT
+const int GLASS_SKIP_CA       = 2;     // chromatic spread off: the 3-tap fill path becomes 1
+const int GLASS_SKIP_RIM      = 4;     // the wide rim glow: its tap and its lighting math
+const int GLASS_SKIP_SPECULAR = 8;     // the Blinn-Phong catchlight and the rim-specular line + tap
+const int GLASS_SKIP_BORDER   = 16;    // the border zone: its band shape, its tap, its Fresnel
+const int GLASS_SKIP_SDF      = 32;    // every corner-field evaluation becomes a sharp-rect distance
+const int GLASS_SKIP_GRADE    = 64;    // the body grade + tint as identity (the border zone grades under border)
+const int GLASS_SKIP_SHADOW   = 128;   // the drop shadow as 0
+const int GLASS_SKIP_SKIRT    = 256;   // discard outside the face's padded box, before anything
+const int GLASS_SKIP_CLIP     = 512;   // the clip stack as "inside everything"
+const vec3 GLASS_SKIP_FLAT = vec3(0.5);
+#if defined(MATERIAL_GLASS)
+bool GlassSkips(int bit) { return (u_GlassSkip & bit) != 0; }
+#else
+bool GlassSkips(int bit) { return false; }
+#endif
+
+// The `sdf` arm's substitute: the exact distance to the SHARP rectangle of the same half-size, and
+// its outward normal. One length and one normalize where the corner field pays up to seven pow()s.
+void GlassRectEval(vec2 p, vec2 halfSize, out float distOut, out vec2 gradOut) {
+    vec2 q = abs(p) - halfSize;
+    vec2 qo = max(q, vec2(0.0));
+    float lo = length(qo);
+    distOut = lo + min(max(q.x, q.y), 0.0);
+    vec2 g = lo > 0.0 ? qo / lo : (q.x > q.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+    gradOut = vec2(p.x < 0.0 ? -g.x : g.x, p.y < 0.0 ? -g.y : g.y);
+}
+
+float GlassRectDist(vec2 p, vec2 halfSize) {
+    vec2 q = abs(p) - halfSize;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+}
+
+// The `skirt` arm's test: is this fragment outside the face's box grown by 2 px plus the border
+// feather? A BOX, not the SDF, because the arm exists to price what the outside fragments cost and
+// an SDF evaluated to decide that would be the cost it is pricing. The corner pockets between the
+// superellipse and the box are therefore NOT cut; `Core/Glass.Skip.ts` counts them apart. The 2 px
+// keeps every 2x2 quad that holds a face fragment whole, so `fwidth` on the face never reads a
+// discarded neighbour. `pLocal - panelCenter`, computed exactly as main computes it.
+bool GlassSkirtCut() {
+    vec2 pl;
+    if (v_Is3D > 0.5) {
+        pl = v_Local;
+    } else {
+        vec2 r = v_PixelPos - v_Rot.zw;
+        pl = vec2(r.x * v_Rot.x + r.y * v_Rot.y, -r.x * v_Rot.y + r.y * v_Rot.x);
+    }
+    return any(greaterThan(abs(pl), v_PanelGeom.zw + vec2(2.0 + abs(v_StyleParams.x))));
+}
+#endif
+
 // ── Background fill mode ────────────────────────────────────────────────
 // Per-draw uniforms that select what kind of fill paints inside this
 // panel's silhouette. The CPU groups panels into batches by mode + bound
@@ -660,6 +732,9 @@ void CornerParams(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
 // wider one. This returns the same float with none of that. Same expressions, same order,
 // so the number is the one CornerEval would have handed back.
 float CornerDist(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
+#if !defined(MATERIAL_FLAT)
+    if (GlassSkips(GLASS_SKIP_SDF)) return GlassRectDist(p, halfSize);
+#endif
     float pillW, n, rCorner;
     CornerParams(p, halfSize, radii, smoothness, pillW, n, rCorner);
     if (pillW >= 1.0) return SS_PillSDF(p, halfSize);
@@ -671,6 +746,9 @@ float CornerDist(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {
 #if !defined(NO_SHAPE_GRADIENT)
 void CornerEval(vec2 p, vec2 halfSize, vec4 radii, float smoothness,
                 out float distOut, out vec2 gradOut) {
+#if !defined(MATERIAL_FLAT)
+    if (GlassSkips(GLASS_SKIP_SDF)) { GlassRectEval(p, halfSize, distOut, gradOut); return; }
+#endif
     float pillW, n, rCorner;
     CornerParams(p, halfSize, radii, smoothness, pillW, n, rCorner);
     float dSuper = ShapeSDF_inner(p, halfSize, vec2(rCorner), n);
@@ -748,6 +826,7 @@ vec3 applyTint(vec3 color, float tint) {
 // inner-blur additions. One textureLod call = one Gaussian; one texture
 // call = no filter.
 vec3 sampleBackdrop(vec2 uv, float extraLod, float frostLod) {
+    if (GlassSkips(GLASS_SKIP_BACKDROP)) return GLASS_SKIP_FLAT;
     float lod = max(0.0, frostLod - u_BaseFrostLod) + extraLod;
     // Every displaced/rim/CA tap comes through here, so the region map is applied ONCE, in one
     // place: two mads. `uv` stays the screen UV every caller computed, which is also what the
@@ -939,6 +1018,9 @@ const int MAX_CLIP_DEPTH = 16;
 // Intersection of a clip stack — a pixel is inside the combined clip iff
 // it's inside every individual clip. Signed distance = max of per-clip SDFs.
 float clipStackDistance(vec2 pixel, int offset, int count) {
+#if !defined(MATERIAL_FLAT)
+    if (GlassSkips(GLASS_SKIP_CLIP)) return -1e20;
+#endif
     float d = -1e20;
     for (int i = 0; i < MAX_CLIP_DEPTH; i++) {
         if (i >= count) break;
@@ -961,6 +1043,9 @@ float clipStackDistance(vec2 pixel, int offset, int count) {
 }
 
 void main() {
+#if !defined(MATERIAL_FLAT)
+    if (GlassSkips(GLASS_SKIP_SKIRT) && GlassSkirtCut()) discard;
+#endif
     // CSS-style overflow clipping — inherited rounded-rect clip stack. The
     // meta is packed into v_Outline.zw to stay within WebGL2's 16-attribute
     // cap (a 17th slot would overflow MAX_VERTEX_ATTRIBS on many drivers).
@@ -1253,6 +1338,7 @@ void main() {
         // of interior fragments (the dominant cost of a full-screen glass modal).
         // The full 3-tap CA still runs in the thin rim band where it's visible.
         float caSpreadPx = chromaticAberration * hump * 3.0; // = length(caStep)
+        if (GlassSkips(GLASS_SKIP_CA)) caSpreadPx = 0.0;
         // A border-only pass throws `backdrop` away: it only reaches `fillRgb`, and the
         // borderOnly block below resets `result` to a transparent interior. So the one
         // to three MIPMAPPED, REFRACTED, chromatically-split taps here were paid on every
@@ -1270,6 +1356,7 @@ void main() {
                 vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
                 backdrop = vec3(sR.r, sG.g, sB.b);
             }
+            if (GlassSkips(GLASS_SKIP_GRADE)) {} else
             backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);
         }
     } else if (hasBackdropFilter && borderOnly == 0.0) {
@@ -1369,6 +1456,7 @@ void main() {
     // and a border-only pass has no body — same reason the hemispherical ambient below
     // is multiplied by `fillAlpha`.
 #if !defined(MATERIAL_FLAT)
+    if (GlassSkips(GLASS_SKIP_RIM)) {} else
     if (materialType == 1.0 && borderOnly == 0.0 && fillAlpha > 0.0 && dist > -max(bezelWidth * 0.75, 6.0)) {
         // Wide rim band — at LEAST 6 px so the glow is actually visible,
         // scaled up with bezelWidth (the optical "thickness" of the glass).
@@ -1425,6 +1513,9 @@ void main() {
     // for GPU divergence cost). Panels without shadows (most things
     // except Cards on Home) skip an entire ShapeSDF call per fragment.
     float shadowAlpha = 0.0;
+#if !defined(MATERIAL_FLAT)
+    if (GlassSkips(GLASS_SKIP_SHADOW)) {} else
+#endif
     if (v_ShadowColor.a > 1e-4) {
         vec2 sp = p - shadowOffset;
         float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
@@ -1509,24 +1600,6 @@ void main() {
             : pow(clamp(1.0 + dist / max(bezelWidth, 0.5), 0.0, 1.0), 2.0);
         vec3 rimAmbientRgb = vec3(hemiAmbient) * rimMask;
 
-
-        // ── Blinn-Phong specular catchlight on the bevel ──
-        // The bevel has a 3D normal: 2D outward normal (when on the bevel)
-        // tilted toward +Z (out of screen) at the flat center. We model this
-        // as `(normal * hump, 1 - hump*0.7)`: mostly +Z at the center where
-        // the surface is flat (hump=0), tilted outward at the rim (hump=1).
-        // View direction is +Z (orthographic). Light direction in 3D adds an
-        // elevation + the SpecularTilt offset — this reproduces Apple's
-        // gyro-driven catchlight (tilt device → specular slides across rim).
-        vec3 N3 = normalize(vec3(normal * hump, 1.0 - hump * 0.7));
-        vec2 specLightDir = normalize(lightDir + u_SpecularTilt);
-        vec3 L3 = normalize(vec3(specLightDir, 0.6));
-        vec3 V3 = vec3(0.0, 0.0, 1.0);
-        vec3 H3 = normalize(L3 + V3);
-        float specBase = pow(max(dot(N3, H3), 0.0), specSharpness);
-        float specAlpha = specBase * specIntensity * hump * fillAlpha * lightIntensity;
-        vec3 specRgb = vec3(1.0);  // bright white catchlight
-
         // Composite order:
         //   1) hemispherical rim ambient (additive, sub-rim)
         //   2) wide rim glow (vibrant backdrop pickup)
@@ -1535,57 +1608,76 @@ void main() {
         result.rgb += rimAmbientRgb * fillAlpha;
         result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
         result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;
-        result.rgb = result.rgb * (1.0 - specAlpha) + specRgb * specAlpha;
-        result.a = result.a * (1.0 - specAlpha) + specAlpha;
 
-        // ── Rim specular highlight (Apple's chrome-edge catchlight) ─────
-        // A SECOND very thin bright line right at the silhouette, on the LIT
-        // side only — sharper directional falloff than the main border, and
-        // picks up vibrant color from the backdrop. Distinct from:
-        //   - Blinn-Phong catchlight (on the bevel SURFACE, not the silhouette)
-        //   - Main border stroke (uniform around the perimeter)
-        //   - Wide rim glow (soft inward fade, not pinned at the edge)
-        // This is the "variable vibrant rim line" that reads as chrome-like
-        // specular reflection off the glass rim, brightest where the rim's
-        // outward normal points toward the light.
-        //
-        // Width is PHYSICAL — proportional to perceived glass thickness. A
-        // thicker slab shows a wider rim edge-on. Floor at 0.75 px so the
-        // highlight never disappears on thin glass.
-        // Floor scales with glassiness so the highlight band collapses to 0
-        // as Thickness fades, preventing a hard pop at the variant flip.
-        float rimSpecW = max(thickness * 0.18, 0.75 * glassiness);
-        // Thin band between the outline (dist=0) and rimSpecW inside (dist=-rimSpecW).
-        // Previous subtraction formulation left the second term at 0 deep inside
-        // while the first stayed at 1, so the "thin line" was actually a 55%
-        // wash over the entire lit-side interior. Now: inside-outline mask
-        // multiplied by a reverse ramp that goes to 0 past rimSpecW inward.
-        float insideOutline = 1.0 - smoothstep(-aa, aa, dist);
-        float withinBand = smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
-        float rimSpecBand = insideOutline * withinBand;
-        // Directional alignment uses the TILTED light direction so the
-        // rim-spec line slides around the perimeter as pointer/gyro moves.
-        // The ambient, edge-light, and border directionality stay fixed to
-        // the stylesheet-set LightAngle (via `alignment` above).
-        vec2 specLightDirRim = normalize(lightDir + u_SpecularTilt);
-        float rimSpecKey = dot(normal, specLightDirRim);
-        float rimSpecAlign = max(rimSpecKey, -rimSpecKey * GROUND_BOUNCE);
-        float rimSpecDir = pow(max(rimSpecAlign, 0.0), 3.0);
-        float rimSpecAlpha = rimSpecBand * rimSpecDir * specIntensity * fillAlpha;
-        // rimSpecAlpha is 0 once dist <= -rimSpecW (the thin rim band) — i.e. the
-        // entire interior. Skip the vibrant-rim backdrop tap + composite there:
-        // a no-op composite anyway. Pixel-identical, saves the second per-pixel
-        // backdrop read across the whole interior.
-        if (rimSpecAlpha > 0.0) {
-            // Color: vibrant-boosted backdrop (sampled at the rim) mixed toward white.
-            // LOD offset slightly sharper than the panel so the rim highlight reads
-            // as "specular reflection of crisper nearby content."
-            vec3 rimSpecBackdrop = sampleBackdrop(baseUv, max(0.0, lodBoost - 0.5), frostLod);
-            float rimSpecLuma = dot(rimSpecBackdrop, LUMA);
-            vec3 rimSpecVibrant = clamp(mix(vec3(rimSpecLuma), rimSpecBackdrop, 1.8) * 1.4, 0.0, 1.0);
-            vec3 rimSpecRgb = mix(rimSpecVibrant, vec3(1.0), 0.45);
-            result.rgb = result.rgb * (1.0 - rimSpecAlpha) + rimSpecRgb * rimSpecAlpha;
-            result.a = result.a * (1.0 - rimSpecAlpha) + rimSpecAlpha;
+        if (!GlassSkips(GLASS_SKIP_SPECULAR)) {
+            // ── Blinn-Phong specular catchlight on the bevel ──
+            // The bevel has a 3D normal: 2D outward normal (when on the bevel)
+            // tilted toward +Z (out of screen) at the flat center. We model this
+            // as `(normal * hump, 1 - hump*0.7)`: mostly +Z at the center where
+            // the surface is flat (hump=0), tilted outward at the rim (hump=1).
+            // View direction is +Z (orthographic). Light direction in 3D adds an
+            // elevation + the SpecularTilt offset — this reproduces Apple's
+            // gyro-driven catchlight (tilt device → specular slides across rim).
+            vec3 N3 = normalize(vec3(normal * hump, 1.0 - hump * 0.7));
+            vec2 specLightDir = normalize(lightDir + u_SpecularTilt);
+            vec3 L3 = normalize(vec3(specLightDir, 0.6));
+            vec3 V3 = vec3(0.0, 0.0, 1.0);
+            vec3 H3 = normalize(L3 + V3);
+            float specBase = pow(max(dot(N3, H3), 0.0), specSharpness);
+            float specAlpha = specBase * specIntensity * hump * fillAlpha * lightIntensity;
+            vec3 specRgb = vec3(1.0);  // bright white catchlight
+            result.rgb = result.rgb * (1.0 - specAlpha) + specRgb * specAlpha;
+            result.a = result.a * (1.0 - specAlpha) + specAlpha;
+
+            // ── Rim specular highlight (Apple's chrome-edge catchlight) ─────
+            // A SECOND very thin bright line right at the silhouette, on the LIT
+            // side only — sharper directional falloff than the main border, and
+            // picks up vibrant color from the backdrop. Distinct from:
+            //   - Blinn-Phong catchlight (on the bevel SURFACE, not the silhouette)
+            //   - Main border stroke (uniform around the perimeter)
+            //   - Wide rim glow (soft inward fade, not pinned at the edge)
+            // This is the "variable vibrant rim line" that reads as chrome-like
+            // specular reflection off the glass rim, brightest where the rim's
+            // outward normal points toward the light.
+            //
+            // Width is PHYSICAL — proportional to perceived glass thickness. A
+            // thicker slab shows a wider rim edge-on. Floor at 0.75 px so the
+            // highlight never disappears on thin glass.
+            // Floor scales with glassiness so the highlight band collapses to 0
+            // as Thickness fades, preventing a hard pop at the variant flip.
+            float rimSpecW = max(thickness * 0.18, 0.75 * glassiness);
+            // Thin band between the outline (dist=0) and rimSpecW inside (dist=-rimSpecW).
+            // Previous subtraction formulation left the second term at 0 deep inside
+            // while the first stayed at 1, so the "thin line" was actually a 55%
+            // wash over the entire lit-side interior. Now: inside-outline mask
+            // multiplied by a reverse ramp that goes to 0 past rimSpecW inward.
+            float insideOutline = 1.0 - smoothstep(-aa, aa, dist);
+            float withinBand = smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
+            float rimSpecBand = insideOutline * withinBand;
+            // Directional alignment uses the TILTED light direction so the
+            // rim-spec line slides around the perimeter as pointer/gyro moves.
+            // The ambient, edge-light, and border directionality stay fixed to
+            // the stylesheet-set LightAngle (via `alignment` above).
+            vec2 specLightDirRim = normalize(lightDir + u_SpecularTilt);
+            float rimSpecKey = dot(normal, specLightDirRim);
+            float rimSpecAlign = max(rimSpecKey, -rimSpecKey * GROUND_BOUNCE);
+            float rimSpecDir = pow(max(rimSpecAlign, 0.0), 3.0);
+            float rimSpecAlpha = rimSpecBand * rimSpecDir * specIntensity * fillAlpha;
+            // rimSpecAlpha is 0 once dist <= -rimSpecW (the thin rim band) — i.e. the
+            // entire interior. Skip the vibrant-rim backdrop tap + composite there:
+            // a no-op composite anyway. Pixel-identical, saves the second per-pixel
+            // backdrop read across the whole interior.
+            if (rimSpecAlpha > 0.0) {
+                // Color: vibrant-boosted backdrop (sampled at the rim) mixed toward white.
+                // LOD offset slightly sharper than the panel so the rim highlight reads
+                // as "specular reflection of crisper nearby content."
+                vec3 rimSpecBackdrop = sampleBackdrop(baseUv, max(0.0, lodBoost - 0.5), frostLod);
+                float rimSpecLuma = dot(rimSpecBackdrop, LUMA);
+                vec3 rimSpecVibrant = clamp(mix(vec3(rimSpecLuma), rimSpecBackdrop, 1.8) * 1.4, 0.0, 1.0);
+                vec3 rimSpecRgb = mix(rimSpecVibrant, vec3(1.0), 0.45);
+                result.rgb = result.rgb * (1.0 - rimSpecAlpha) + rimSpecRgb * rimSpecAlpha;
+                result.a = result.a * (1.0 - rimSpecAlpha) + rimSpecAlpha;
+            }
         }
 
         // ── Border zone backdrop refilter ───────────────────────────────
@@ -1595,125 +1687,127 @@ void main() {
         // overlaid on top with its alpha as a tint, NOT a solid stroke.
         // This is what gives Apple's rim its "light-gathering" quality
         // without the static UI-border feel.
-        float borderOuter = smoothstep(-aa, aa, dist);
-        // The inner edge eases over BorderFade (scaled with the width) past the stroke; with no fade it
-        // feathers by the same aa as the outer edge.
-        float fadeIn = max(borderFade * widthScale, aa);
-        float borderInner = smoothstep(-drawnBorderWidth - fadeIn, -drawnBorderWidth + aa, dist);
-        // Drawn at the hairline floor, inked by the width it actually has.
-        float borderBase = (1.0 - borderOuter) * borderInner * borderCoverage;
+        if (!GlassSkips(GLASS_SKIP_BORDER)) {
+            float borderOuter = smoothstep(-aa, aa, dist);
+            // The inner edge eases over BorderFade (scaled with the width) past the stroke; with no fade it
+            // feathers by the same aa as the outer edge.
+            float fadeIn = max(borderFade * widthScale, aa);
+            float borderInner = smoothstep(-drawnBorderWidth - fadeIn, -drawnBorderWidth + aa, dist);
+            // Drawn at the hairline floor, inked by the width it actually has.
+            float borderBase = (1.0 - borderOuter) * borderInner * borderCoverage;
 
-        if (borderBase > 0.001) {
-            // Re-sample backdrop with border-zone grading. Apply LOD offset for
-            // sharper or blurrier border vs the panel.
-            float bLod = max(0.0, lodBoost + v_BorderFilter.w);
-            // SOLID-slab rim gather. A slab with Refraction 0 renders a SOLID
-            // (opaque) fill, so it OCCLUDES whatever is behind the card — the rim
-            // must gather from the card's OWN content at the edge, not the scene
-            // behind it. Sampling straight down (baseUv) lets the rim's tap —
-            // especially a blurred BorderFilter — straddle the silhouette and pull
-            // in the occluded exterior, which BorderFilter Brightness/Saturate then
-            // amplifies (a black card over a green field gets a bright green rim).
-            // Offset the tap INWARD along the normal so it lands fully inside the
-            // content, mirroring the wide rim glow's inward `rimUv`. Scaled by
-            // `solidness` so refractive (see-through) glass is byte-identical: its
-            // rim legitimately gathers from behind via the refracted baseUv.
-            // The rim gathers what lies straight under it, never the panel's own content: the bezel's inward
-            // displacement (baseUv) would pull a BorderLayer overlay's glyphs and text into the stroke.
-            vec2 straightUv = v_PixelPos / u_Resolution;
-            straightUv.y = 1.0 - straightUv.y;
-            float solidness = 1.0 - smoothstep(0.0, 4.0, refractionStrength);
-            float borderInset = (max(bezelWidth * 0.75, 6.0) * 1.2 + localBorderWidth) * solidness;
-            vec2 bUv = straightUv + vec2(-normal.x, normal.y) * (borderInset / u_Resolution);
-            // THE ONE BACKDROP TAP A BORDER-ONLY PASS MAKES, and the whole reason the rim needed a
-            // pyramid of its own. Under BORDER_DIRECT it is computed from a blit of the scene with
-            // the pyramid's own kernel; the pyramid arm's arithmetic below is untouched.
+            if (borderBase > 0.001) {
+                // Re-sample backdrop with border-zone grading. Apply LOD offset for
+                // sharper or blurrier border vs the panel.
+                float bLod = max(0.0, lodBoost + v_BorderFilter.w);
+                // SOLID-slab rim gather. A slab with Refraction 0 renders a SOLID
+                // (opaque) fill, so it OCCLUDES whatever is behind the card — the rim
+                // must gather from the card's OWN content at the edge, not the scene
+                // behind it. Sampling straight down (baseUv) lets the rim's tap —
+                // especially a blurred BorderFilter — straddle the silhouette and pull
+                // in the occluded exterior, which BorderFilter Brightness/Saturate then
+                // amplifies (a black card over a green field gets a bright green rim).
+                // Offset the tap INWARD along the normal so it lands fully inside the
+                // content, mirroring the wide rim glow's inward `rimUv`. Scaled by
+                // `solidness` so refractive (see-through) glass is byte-identical: its
+                // rim legitimately gathers from behind via the refracted baseUv.
+                // The rim gathers what lies straight under it, never the panel's own content: the bezel's inward
+                // displacement (baseUv) would pull a BorderLayer overlay's glyphs and text into the stroke.
+                vec2 straightUv = v_PixelPos / u_Resolution;
+                straightUv.y = 1.0 - straightUv.y;
+                float solidness = 1.0 - smoothstep(0.0, 4.0, refractionStrength);
+                float borderInset = (max(bezelWidth * 0.75, 6.0) * 1.2 + localBorderWidth) * solidness;
+                vec2 bUv = straightUv + vec2(-normal.x, normal.y) * (borderInset / u_Resolution);
+                // THE ONE BACKDROP TAP A BORDER-ONLY PASS MAKES, and the whole reason the rim needed a
+                // pyramid of its own. Under BORDER_DIRECT it is computed from a blit of the scene with
+                // the pyramid's own kernel; the pyramid arm's arithmetic below is untouched.
 #if defined(BORDER_DIRECT)
-            // The branch is on a UNIFORM, so it is coherent across every wavefront and costs one
-            // compare; `u_BorderGather` is 1.0 on the arm that draws, and the `else` exists only so
-            // that `=skipgather` can take the program's cost without the gather's.
-            vec3 bSample;
-            if (u_BorderGather > 0.5) bSample = sampleBackdropDirect(bUv, bLod, frostLod);
-            else bSample = sampleBackdrop(bUv, bLod, frostLod);
+                // The branch is on a UNIFORM, so it is coherent across every wavefront and costs one
+                // compare; `u_BorderGather` is 1.0 on the arm that draws, and the `else` exists only so
+                // that `=skipgather` can take the program's cost without the gather's.
+                vec3 bSample;
+                if (u_BorderGather > 0.5) bSample = sampleBackdropDirect(bUv, bLod, frostLod);
+                else bSample = sampleBackdrop(bUv, bLod, frostLod);
 #else
-            vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);
+                vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);
 #endif
-            // The rim looks through the same slab as the body, so it carries the body's tint: a rim
-            // brighter than the body stays brighter in both themes, lifted by BorderFilter and BorderColor.
-            vec3 borderBackdrop = applyTint(applyGrading(
-                bSample,
-                brightness * v_BorderFilter.x,
-                saturation * v_BorderFilter.y,
-                contrast * v_BorderFilter.z
-            ), bodyTint);
+                // The rim looks through the same slab as the body, so it carries the body's tint: a rim
+                // brighter than the body stays brighter in both themes, lifted by BorderFilter and BorderColor.
+                vec3 borderBackdrop = applyTint(applyGrading(
+                    bSample,
+                    brightness * v_BorderFilter.x,
+                    saturation * v_BorderFilter.y,
+                    contrast * v_BorderFilter.z
+                ), bodyTint);
 
-            // Optional tint stroke from BorderColor — alpha controls strength
-            // of the colored overlay on top of the refiltered backdrop.
-            // Directional brightness from BorderAlphaVariance / BorderFresnelStrength. Both are
-            // amounts sharing v_Outline.x (11 bits over [0,1] and 12 over [0,2]); v_Outline.y
-            // carries the Fresnel's own grade (BorderFresnelFilter) at 10 bits each. Named
-            // `border*` because the body has its own, different fresnel in v_Lighting.w.
-            float lightFacing = max(alignment, 0.0);
-            float avCode = floor(v_Outline.x / 4096.0);
-            float borderAlphaVariance = avCode / 2047.0;
-            float borderFresnelStrength = (v_Outline.x - avCode * 4096.0) / 1024.0;
-            float fbCode = floor(v_Outline.y / 1024.0);
-            float borderFresnelBrightness = fbCode / 256.0;
-            float borderFresnelSaturation = (v_Outline.y - fbCode * 1024.0) / 256.0;
-            float alphaFloor = 1.0 - borderAlphaVariance;
-            float strokeBrightness = mix(alphaFloor, 1.0, pow(lightFacing, 2.0));
-            // ── What the Fresnel converges on ──
-            // The lit side of a real bevel INTENSIFIES what is behind it; it does not turn white.
-            // White is only the right answer where the backdrop has no colour, because the most
-            // intense form of a neutral IS white. So the target is the rim's own gather driven to
-            // full value: hue and saturation kept, value pinned to 1, then pushed past the hue —
-            // and blended back to white by how little chroma the gather actually has.
-            //
-            // This is the same operation the wide rim glow already performs a hundred lines up
-            // (`rimVibrant`: saturate 1.6, brighten 1.25), which is where the DEFAULT Saturate(1.6)
-            // comes from rather than an invented number.
-            //
-            // It saturates about WHITE, not about luma, and that is the whole difference from the
-            // attempt that was backed out. applyGrading's saturation is a lerp about luma, so any
-            // saturation above 1 drives the channels BELOW luma down — over the border's alpha fade
-            // that reads as a darker ring inside the stroke. Here every target has max channel 1.0,
-            // so the stroke can never land dimmer in value than the white it replaces; only the
-            // off-hue channels come down, which IS the colour being carried.
-            //
-            // Over a neutral gather (grey, black, white) chroma is 0, carry is 0 and the target is
-            // exactly vec3(1.0) — byte-identical to the old line, so every sheet calibrated over
-            // black keeps its measured numbers.
-            //
-            // Both knobs are authored PER CLASS as `BorderFresnelFilter: Brightness(b) Saturate(s)`.
-            // The gain was a hard-coded RIM_CHROMA_GAIN = 1.6 here until it became authorable, which
-            // meant every glass class in the app carried the same edge saturation and no sheet could
-            // see it, let alone change it. 1.6 is now only the default (Jiv.Defaults), so nothing
-            // moved when the constant left.
-            vec3 gather = clamp(borderBackdrop, 0.0, 1.0);
-            float gatherHi = max(max(gather.r, gather.g), gather.b);
-            float gatherLo = min(min(gather.r, gather.g), gather.b);
-            vec3 huedTarget = gather / max(gatherHi, 0.001);
-            huedTarget = clamp(mix(vec3(1.0), huedTarget, borderFresnelSaturation), 0.0, 1.0);
-            // Carry colour only where there IS colour, and only where the gather is bright enough
-            // for its hue to be trustworthy — normalising a near-black pixel amplifies noise.
-            float rimCarry = smoothstep(0.0, 0.18, gatherHi - gatherLo)
-                           * smoothstep(0.015, 0.09, gatherHi);
-            // Brightness() is the last word on the highlight's value, applied after its hue is
-            // settled. The target is pinned to full value by construction, so this is the only way
-            // to author a cooler flare (below 1) or burn a hued one back toward white (above 1).
-            vec3 fresnelTarget = clamp(mix(vec3(1.0), huedTarget, rimCarry) * borderFresnelBrightness, 0.0, 1.0);
-            vec3 strokeTint = mix(v_BorderColor.rgb, fresnelTarget, pow(lightFacing, 3.0) * borderFresnelStrength);
-            vec3 borderRgb = mix(borderBackdrop, strokeTint, v_BorderColor.a * strokeBrightness);
+                // Optional tint stroke from BorderColor — alpha controls strength
+                // of the colored overlay on top of the refiltered backdrop.
+                // Directional brightness from BorderAlphaVariance / BorderFresnelStrength. Both are
+                // amounts sharing v_Outline.x (11 bits over [0,1] and 12 over [0,2]); v_Outline.y
+                // carries the Fresnel's own grade (BorderFresnelFilter) at 10 bits each. Named
+                // `border*` because the body has its own, different fresnel in v_Lighting.w.
+                float lightFacing = max(alignment, 0.0);
+                float avCode = floor(v_Outline.x / 4096.0);
+                float borderAlphaVariance = avCode / 2047.0;
+                float borderFresnelStrength = (v_Outline.x - avCode * 4096.0) / 1024.0;
+                float fbCode = floor(v_Outline.y / 1024.0);
+                float borderFresnelBrightness = fbCode / 256.0;
+                float borderFresnelSaturation = (v_Outline.y - fbCode * 1024.0) / 256.0;
+                float alphaFloor = 1.0 - borderAlphaVariance;
+                float strokeBrightness = mix(alphaFloor, 1.0, pow(lightFacing, 2.0));
+                // ── What the Fresnel converges on ──
+                // The lit side of a real bevel INTENSIFIES what is behind it; it does not turn white.
+                // White is only the right answer where the backdrop has no colour, because the most
+                // intense form of a neutral IS white. So the target is the rim's own gather driven to
+                // full value: hue and saturation kept, value pinned to 1, then pushed past the hue —
+                // and blended back to white by how little chroma the gather actually has.
+                //
+                // This is the same operation the wide rim glow already performs a hundred lines up
+                // (`rimVibrant`: saturate 1.6, brighten 1.25), which is where the DEFAULT Saturate(1.6)
+                // comes from rather than an invented number.
+                //
+                // It saturates about WHITE, not about luma, and that is the whole difference from the
+                // attempt that was backed out. applyGrading's saturation is a lerp about luma, so any
+                // saturation above 1 drives the channels BELOW luma down — over the border's alpha fade
+                // that reads as a darker ring inside the stroke. Here every target has max channel 1.0,
+                // so the stroke can never land dimmer in value than the white it replaces; only the
+                // off-hue channels come down, which IS the colour being carried.
+                //
+                // Over a neutral gather (grey, black, white) chroma is 0, carry is 0 and the target is
+                // exactly vec3(1.0) — byte-identical to the old line, so every sheet calibrated over
+                // black keeps its measured numbers.
+                //
+                // Both knobs are authored PER CLASS as `BorderFresnelFilter: Brightness(b) Saturate(s)`.
+                // The gain was a hard-coded RIM_CHROMA_GAIN = 1.6 here until it became authorable, which
+                // meant every glass class in the app carried the same edge saturation and no sheet could
+                // see it, let alone change it. 1.6 is now only the default (Jiv.Defaults), so nothing
+                // moved when the constant left.
+                vec3 gather = clamp(borderBackdrop, 0.0, 1.0);
+                float gatherHi = max(max(gather.r, gather.g), gather.b);
+                float gatherLo = min(min(gather.r, gather.g), gather.b);
+                vec3 huedTarget = gather / max(gatherHi, 0.001);
+                huedTarget = clamp(mix(vec3(1.0), huedTarget, borderFresnelSaturation), 0.0, 1.0);
+                // Carry colour only where there IS colour, and only where the gather is bright enough
+                // for its hue to be trustworthy — normalising a near-black pixel amplifies noise.
+                float rimCarry = smoothstep(0.0, 0.18, gatherHi - gatherLo)
+                               * smoothstep(0.015, 0.09, gatherHi);
+                // Brightness() is the last word on the highlight's value, applied after its hue is
+                // settled. The target is pinned to full value by construction, so this is the only way
+                // to author a cooler flare (below 1) or burn a hued one back toward white (above 1).
+                vec3 fresnelTarget = clamp(mix(vec3(1.0), huedTarget, rimCarry) * borderFresnelBrightness, 0.0, 1.0);
+                vec3 strokeTint = mix(v_BorderColor.rgb, fresnelTarget, pow(lightFacing, 3.0) * borderFresnelStrength);
+                vec3 borderRgb = mix(borderBackdrop, strokeTint, v_BorderColor.a * strokeBrightness);
 
-            // Replace the panel result in the border zone (alpha-blended by mask).
-            // borderBase is the antialiased annulus. Normally the rim alpha
-            // follows the panel fill (so a rim never extends past a faded panel);
-            // but in border-only mode the fill is intentionally transparent, so
-            // drive the rim straight from borderBase — that's the whole point of
-            // the overlay (a glass rim floating over the children).
-            float borderZoneAlpha = mix(fillAlpha, 1.0, borderOnly);
-            result.rgb = mix(result.rgb, borderRgb, borderBase);
-            result.a = max(result.a, borderBase * borderZoneAlpha);
+                // Replace the panel result in the border zone (alpha-blended by mask).
+                // borderBase is the antialiased annulus. Normally the rim alpha
+                // follows the panel fill (so a rim never extends past a faded panel);
+                // but in border-only mode the fill is intentionally transparent, so
+                // drive the rim straight from borderBase — that's the whole point of
+                // the overlay (a glass rim floating over the children).
+                float borderZoneAlpha = mix(fillAlpha, 1.0, borderOnly);
+                result.rgb = mix(result.rgb, borderRgb, borderBase);
+                result.a = max(result.a, borderBase * borderZoneAlpha);
+            }
         }
     } else
 #endif
