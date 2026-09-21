@@ -30,7 +30,7 @@ import { EmptyGlassAdaptCensus, GlassAdaptCensusOf, GlassAdaptLine, type GlassAd
 import {
   BlurPass, BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, PlanBackdropUnion,
   RegionExtentSnap,
-  MAX_CHAINS, CHAIN_BUDGET_BYTES,
+  MAX_CHAINS, CHAIN_BUDGET_BYTES, PlanReadLevel,
   GAUSS_PASSES, GAUSS_MATCH_SIGMA, type GaussianMode,
   type AtlasBuildMember, type BackdropUnionPlan,
 } from './BlurPass';
@@ -989,6 +989,14 @@ export class Canvas implements DirtyTracker {
    *  width. `?blur-chain=on` is the control: the dual-filter chain byte for byte. */
   private _blurSeparable = true;
   private _blurSeparableRefused = '';
+  /** `?blur-level`: a glass rim that reads ONE constant LOD gets that level built and nothing else
+   *  (`BlurPass.PlanReadLevel`). DEFAULT ON; `=off` is the chain plus its mip stack, byte for byte. */
+  private _blurLevel = true;
+  private _blurLevelRefused = '';
+  /** Per frame, both arms: rims whose read the walk proved constant (`Eligible`, by class and LOD),
+   *  and the reasons `PlanReadLevel` refused the ones it could not build. */
+  private _blurLevelStats = { Eligible: 0, Classes: new Map<string, number>(), Refused: new Map<string, number>() };
+  private _blurLevelLastLine = '';
   /** `?blur-sigma=delivered|authored`. */
   private _blurSigma: SeparableSigma = 'delivered';
   /** `?blur-fetches=<n>`: every separable build runs exactly `n` fetches at its own sigma. */
@@ -3091,7 +3099,13 @@ export class Canvas implements DirtyTracker {
               if (this._borderDirect) (r as WebGL2Renderer).NoteBorderPyramid();
               const presample = this._mayPresample(plan);
               const separable = this._maySeparable(plan);
+              const readLod = this._rimReadLevel(node, plan, w, h);
               lastBackdrop = this._bcBuild(node, READER_RIM, region, plan.Radius, plan.MaxLod, presample, separable, w, h, () => {
+                // `?blur-level`: the one level this rim reads, with no Up pass and no mip stack below
+                // it. A null is a refusal that touched nothing, and today's two calls follow.
+                const level = readLod === null ? null
+                  : (r as WebGL2Renderer).ComputeBlurReadLevel(r.SceneTexture, w, h, plan.Radius, region, readLod);
+                if (level !== null) return level;
                 const built = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
                 r.GenerateBlurMipmap(plan.MaxLod);
                 return built;
@@ -4526,6 +4540,30 @@ export class Canvas implements DirtyTracker {
         + ` resizes=${c.Resizes} firstAllocs=${c.FirstAllocs} mipAllocs=${c.MipAllocs}`
         + ` chainPool=${c.ChainPool} extentSnap=${RegionExtentSnap.Unit} surfaces=${c.Surfaces}`;
       if (line !== this._blurPlanLastLine) { this._blurPlanLastLine = line; JTrace(line); }
+    }
+
+    // `?blur-level`'s gate, on a SHAPE change, both arms. `eligible=` is the walk's count of rims
+    // whose read it proved constant (class, LOD, level-0 rect); `built=` is how many took the plan.
+    // `chain*=` is what the chain plus its mip stack cost for those SAME builds, so one armed drag
+    // reads both sides. `eligible=0` means the page never exercised this arm and its pixels say
+    // nothing about it.
+    {
+      const s = this._blurLevelStats;
+      if (!this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+        const c = this._renderer.ReadLevelCensus;
+        const map = (m: Map<string, number>): string =>
+          m.size === 0 ? 'none' : [...m].sort().map(([k, n]) => `${k}x${n}`).join(',');
+        const line = `jaui:blur-level armed=${this._blurLevel ? 'on' : 'off'}`
+          + ` eligible=${s.Eligible} built=${c.Builds}`
+          + ` passes=${c.Passes} fill=${c.Fill} texelsRead=${c.Reads} blit=${c.Blit}`
+          + ` chainPasses=${c.ChainPasses} chainFill=${c.ChainFill} chainTexelsRead=${c.ChainReads}`
+          + ` chainBlit=${c.ChainBlit}`
+          + ` classes=${map(s.Classes)} planRefused=${map(s.Refused)} buildRefused=${c.Refused}`;
+        if (line !== this._blurLevelLastLine) { this._blurLevelLastLine = line; JTrace(line); }
+      }
+      s.Eligible = 0;
+      s.Classes.clear();
+      s.Refused.clear();
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -6255,6 +6293,33 @@ export class Canvas implements DirtyTracker {
    *  is `PlanGaussian`'s, asked inside the pass so there is one answer and not two. */
   private _maySeparable = (plan: GlassBlurPlan): boolean =>
     (this._glassGaussian !== 'off' || this._blurSeparable) && plan.MaxLod === 0;
+
+  /** `?blur-level`: the ONE LOD this RIM reads, or null. Booked on the census under both arms, so the
+   *  control drag names the same surfaces the armed one builds for.
+   *
+   *  The proof is the shader's, and it needs one fact: an instance frost LOD of 0. The rim draws a
+   *  border-only pass, and in `Jiv.Panel.frag` that pass's one pyramid tap is
+   *  `sampleBackdrop(bUv, max(0, lodBoost + BorderBackdropBlur), frostLod)`. `lodBoost` is a product
+   *  with `frostReq = clamp((frostLod - u_BaseFrostLod) * 4, 0, 1)`, and `u_BaseFrostLod` is
+   *  `log2(max(1, ...)) >= 0`, so frost 0 makes it exactly 0 and every fragment reads LOD
+   *  `BorderBackdropBlur` -- which is `plan.MaxLod`, by `_backdropMaxLod`'s own arithmetic on the same
+   *  inputs. Every other `sampleBackdrop` in the pass then has `frostLod` and `extraLod` both 0 and
+   *  reads `u_Scene`, the snapshot, not the pyramid. `JwiftSolidGlass` and its children are the
+   *  classes that ship this shape: `BorderFilter: Blur(4pt)` over no frost. */
+  private _rimReadLevel = (node: Jiv, plan: GlassBlurPlan, w: number, h: number): number | null => {
+    if (plan.InstFrostLod !== 0 || !(plan.MaxLod > 0)) return null;
+    const s = this._blurLevelStats;
+    const p = PlanReadLevel(plan.Radius, w, h, plan.Region, plan.MaxLod);
+    if (!p.Ok) {
+      s.Refused.set(p.Why, (s.Refused.get(p.Why) ?? 0) + 1);
+      return null;
+    }
+    s.Eligible++;
+    const key = `${node.Classes.length === 0 ? '?' : node.Classes.join('.')}@L${Math.round(plan.MaxLod * 100) / 100}`
+      + `:${p.Rect.W}x${p.Rect.H}`;
+    s.Classes.set(key, (s.Classes.get(key) ?? 0) + 1);
+    return this._blurLevel ? plan.MaxLod : null;
+  };
 
   /** Issue ONE per-surface build: the walk's two calls, and the pool bookkeeping. This is the
    *  path `?blur-first`, `?blur-phased` and every atlas REFUSAL take, and it is the engine as it
@@ -8864,6 +8929,42 @@ export class Canvas implements DirtyTracker {
     }
     BlurPass.ForceFetches = this._blurFetches;
     BlurPass.GaussUploadPrefix = this._gaussUploadPrefix;
+
+    // `?blur-level=on|off` -- A RIM THAT READS ONE LOD GETS ONE LEVEL (`BlurPass.PlanReadLevel`).
+    //
+    // DEFAULT ON. `=off` is the chain plus `GenerateOutputMipmap`, byte for byte: the rim site then
+    // issues exactly today's two calls. Refused by name beside `?blur-chain=on`, which is the whole
+    // pre-blurfast chain control and must stay that, and beside the arms calibrated on the chain's
+    // pass count. The pixels move INSIDE the rim band of the classes `_rimReadLevel` admits and
+    // nowhere else: no perf scene carries one, so the seven-shot gate reads 0 px on this arm by
+    // construction, and the gate line's `eligible=` is what says whether a page exercised it.
+    if (params.has('blur-level')) {
+      const raw = (params.get('blur-level') ?? '').trim();
+      if (raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?blur-level takes 'on' or 'off', got '${raw}'`);
+      }
+      this._blurLevel = raw === 'on';
+    }
+    if (this._blurLevel) {
+      const chainOn = params.has('blur-chain') && (params.get('blur-chain') ?? '').trim() !== 'off';
+      const why =
+        !(this._renderer instanceof WebGL2Renderer) ? 'webgl2-only'
+        : chainOn ? 'blur-chain-on-is-the-chain-control-byte-for-byte'
+        : this._pyramidAtlas ? 'pyramid-atlas-was-calibrated-on-the-chain-s-pass-count'
+        : params.has('blur-phased') ? 'blur-phased-was-calibrated-on-the-chain-s-pass-count'
+        : params.has('blur-first') ? 'blur-first-was-calibrated-on-the-chain-s-pass-count'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-at-a-build-whose-pass-count-this-plan-moves'
+        : null;
+      if (why !== null) {
+        this._blurLevel = false;
+        this._blurLevelRefused = why;
+      }
+    }
+    JTrace(`jaui:blur-level armed=${this._blurLevel ? 'on' : 'off'}`
+      + ` default=${!params.has('blur-level')}`
+      + (this._blurLevel ? ' pixels=DIFFERENT' : ' pixels=SAME')
+      + (this._blurLevelRefused !== '' ? ` reason=${this._blurLevelRefused}` : ''));
 
     // `?gauss-debug` rides a separable path and means nothing without one: asked where neither is
     // armed it is refused by name rather than silently doing nothing ("no magenta, clean").

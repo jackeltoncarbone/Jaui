@@ -642,7 +642,7 @@ describe('Jaui only composites what it can reproduce exactly', () => {
     // The FILL's build, which is the one after the open -- the rim overlay's identical call sits
     // earlier in the file, inside `descendChildren`.
     // Re-aimed by lane blurcache: the build is the closure `_bcBuild` runs; same call, same arguments.
-    expect(body.indexOf('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, gaussian)', open)).toBeGreaterThan(open);
+    expect(body.indexOf('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable)', open)).toBeGreaterThan(open);
     expect(body.indexOf('r.PanelDrawBatch(w, h, lastBackdrop', open)).toBeGreaterThan(open);
   });
 
