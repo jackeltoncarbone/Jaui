@@ -856,7 +856,7 @@ export class Canvas implements DirtyTracker {
    *  "phased" on `glass-grid`: 34,830 px (0.85%), max 12, mean 2.1, a card no longer refracting
    *  its earlier neighbour's glass in the gap band -- but the gate still has to see it on seven
    *  shots before the default moves. */
-  private _glassGroup: boolean = false;
+  private _glassGroup: boolean = true;
   /** The last `jaui:glass-group` gate line, printed on a SHAPE change rather than per frame. */
   private _glassGroupLastLine = '';
   /** Empty unless a flag refused the arm outright, in which case it names which. */
@@ -7830,7 +7830,8 @@ export class Canvas implements DirtyTracker {
       + (this._glassGaussianRefused !== '' ? ` reason=${this._glassGaussianRefused}` : ''));
     // `?glass-group=on|off` -- THE CONTAINER-SCOPED SHARED BACKDROP.
     //
-    // DEFAULT OFF. It changes a picture and Jack has ruled the picture, not the gate: the change
+    // DEFAULT ON since 2026-09-20 (Jack: "Adopt Apple's rule"; the seven-shot gate saw the phased
+    // picture on fb52642: 30,102 px, max 12, mean 2.25). `=off` is yesterday's per-card picture. The change
     // is the one already shot as "phased" on `glass-grid` (34,830 px, 0.85%, max 12, mean 2.1 --
     // a card no longer refracting its earlier neighbour's glass in the 24 px gap band), and the
     // default moves when seven shots match it. See `_glassGroup` for the law.
@@ -7896,7 +7897,7 @@ export class Canvas implements DirtyTracker {
     // parsed, so a mark taken there would print `off` on every arm however the URL read.
     JTrace(`jaui:glass-group armed=${this._glassGroup ? 'on' : 'off'}`
       + ` default=${!params.has('glass-group')}`
-      + (this._glassGroup ? ' pixels=DIFFERENT' : ' pixels=SAME')
+      + (this._glassGroup ? ' pixels=SAME' : ' pixels=DIFFERENT')
       + (this._glassGroupRefused !== '' ? ` reason=${this._glassGroupRefused}` : ''));
     {
       const g = globalThis as unknown as { __jauiGlassGroup?: () => GlassGroupCensus };
