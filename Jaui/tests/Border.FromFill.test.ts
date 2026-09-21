@@ -116,7 +116,7 @@ describe('borderfromfill > the admission rule', () => {
     const ask = JAUI.indexOf('const fromFill = this._borderReadsFill(node, plan);');
     const snap = JAUI.indexOf('const sceneSnap = plan.InstFrostLod < SCENE_TAP_FROST_LOD');
     // Re-aimed by lane blurcache: the build is the closure `_bcBuild` runs; same call, same arguments.
-    const build = JAUI.indexOf('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, gaussian)');
+    const build = JAUI.indexOf('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable)');
     expect(ask).toBeGreaterThan(0);
     expect(ask).toBeLessThan(snap);
     expect(ask).toBeLessThan(build);

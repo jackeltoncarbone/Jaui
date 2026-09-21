@@ -403,7 +403,7 @@ export const GAUSS_TEMP_BUDGET_BYTES = 8 * 1024 * 1024;
 
 /** ONE build, in the census's currency. `Plan` names which path ran it. */
 export interface BlurBuildRecord {
-  Plan: 'none' | 'chain' | 'separable' | 'gaussian' | 'root';
+  Plan: 'none' | 'chain' | 'separable' | 'gaussian' | 'root' | 'level';
   Passes: number;
   K: number;
   /** The chain's depth, or 0 for a single-level plan. */
@@ -791,6 +791,118 @@ export const PyramidFill = (rectW: number, rectH: number, k: number, depth: numb
   for (let i = 1; i <= depth; i++) fill += lw[i] * lh[i];          // DOWN chain
   for (let i = depth - 1; i >= 0; i--) fill += lw[i] * lh[i];      // UP chain
   return fill;
+};
+
+/** -- THE LEVEL PLAN: A READER OF ONE LOD GETS THAT LOD, NOT A PYRAMID -------------------------
+ *
+ *  Some consumers sample a mip chain at a single, constant LOD. The one that ships is a glass RIM
+ *  over a surface with no frost -- `JwiftSolidGlass` and everything that extends it (`CardGlass`,
+ *  `EdCard`, `DocCardGlass`, `Itm_ShotFrame`), whose `BorderFilter: Blur(4pt)` is a LOD OFFSET of
+ *  4. `Jiv.Panel.frag` reads it as `bLod = max(0, lodBoost + BorderBackdropBlur)`, and `lodBoost`
+ *  is multiplied by `frostReq = clamp((frostLod - u_BaseFrostLod) * 4, 0, 1)`, which is exactly 0
+ *  for an instance frost LOD of 0. So every fragment of the rim taps LOD 4.0 and nothing else; its
+ *  other taps fall through `sampleBackdrop` to `u_Scene`. The walk proves the precondition
+ *  (`Core/Jaui.ts`, `_rimReadLevel`); this function only needs the LOD.
+ *
+ *  What the engine built for that one tap was the full chain: a Down/Up pair at the region's own
+ *  resolution (the frost floors at 1pt, so radius 2 at dpr 2, depth 1), then `GenerateOutputMipmap`
+ *  building levels 1..5 back down from the Up pass's output. The Up pass alone is a full-resolution
+ *  8-tap write over the whole rim region -- 73% of the build's reads and 63% of its fill -- and it
+ *  exists to be box-averaged 16x straight back down.
+ *
+ *  THE PLAN: the chain's own first Down hop (same program, same uniforms, so level 1 is the chain's
+ *  level 1), then box hops (`DOWN_FRAG` at `u_Offset` 1.0, `GenerateOutputMipmap`'s hop) down to the
+ *  deepest level the chain would have had, and a blit of ONLY the levels the read can reach into
+ *  the output's mip slots. No Up pass, no level-0 write. Level `i` is `box(2^i)` of the region,
+ *  because a Down hop at any `t <= 1` is an exact 2x2 box (its four corner taps each land inside
+ *  the same 2x2 cell and sum to it); the chain's level `i` was `box(2^i)` of the Up pass's output.
+ *  The difference is the Up pass's own smoothing, about sigma 1.15 device px, in front of a 16 px
+ *  box. That is a change of picture inside the rim band and it is predicted, not claimed away.
+ *
+ *  Which levels a read reaches. `LINEAR_MIPMAP_LINEAR` at LOD `L` reads `floor(L)` and the level
+ *  above it. `L` reaches the shader as a varying, so it can land a few ulp either side of an
+ *  integer, and the sampler quantises it to a few fractional bits; `READ_LEVEL_EPS` covers both.
+ *  So `Lo = floor(L - eps)` and every level from `Lo` to `Stop` is blitted, where `Stop` is the
+ *  depth `GenerateOutputMipmap` would build (`ceil(L) + 1`) and `TEXTURE_MAX_LEVEL` is set to it
+ *  exactly as today. Levels `0..Lo-1` of the output keep whatever they held: nothing reads them,
+ *  which is why `L` must clear `1 + eps` for the plan to apply at all.
+ *
+ *  Refused by name wherever the identity above does not hold: a re-based build (`k > 1`), a chain
+ *  deeper than one pair (the pre-blur is then no longer negligible against the read level), a
+ *  full-canvas region, a LOD under `1 + eps`, and a region that reaches 1x1 before `Stop`. */
+export const READ_LEVEL_EPS = 1 / 64;
+
+export interface ReadLevelPlan {
+  Ok: true;
+  /** The chain's resolved rect -- `LastRegion` maps the same screen rect either way. */
+  Rect: RegionRect;
+  /** The chain's tap offset, so hop 1 is the chain's hop 1. */
+  TapOffset: number;
+  /** The constant LOD the consumer reads. */
+  Lod: number;
+  /** The shallowest level the read can reach; levels below it are never written. */
+  Lo: number;
+  /** The deepest level built and blitted: `GenerateOutputMipmap`'s `stopLevel` for this LOD. */
+  Stop: number;
+  /** Level sizes 0..Stop, from the same `Math.floor` halvings both paths allocate. */
+  W: number[];
+  H: number[];
+}
+export interface ReadLevelRefusal { Ok: false; Why: string }
+
+export const PlanReadLevel = (
+  radius: number, width: number, height: number, region: BackdropRect | undefined, lod: number,
+): ReadLevelPlan | ReadLevelRefusal => {
+  if (!(radius > 0)) return { Ok: false, Why: 'root' };
+  if (region === undefined) return { Ok: false, Why: 'full-canvas' };
+  if (!(lod >= 1 + READ_LEVEL_EPS)) return { Ok: false, Why: 'lod-under-1' };
+  const k = BaseDownsampleFactor(radius, width, height, region);
+  if (k !== 1) return { Ok: false, Why: `k${k}` };
+  const depth = PyramidDepth(radius, 0);
+  if (depth !== 1) return { Ok: false, Why: `depth${depth}` };
+  const rect = ResolveRegionRect(region, width, height, 1 << depth);
+  if (rect.Full) return { Ok: false, Why: 'full-canvas' };
+  // `Blur`'s own expression at k = 1: the coarse radius is the radius.
+  const tapOffset = Math.max(0.7, Math.min(1.3, Math.max(1, radius) / (3 * Math.pow(2, depth))));
+  const stop = Math.min(MAX_LEVELS - 1, Math.max(1, Math.ceil(lod) + 1));
+  const lo = Math.max(1, Math.floor(lod - READ_LEVEL_EPS));
+  const lw = [rect.W], lh = [rect.H];
+  for (let i = 1; i <= stop; i++) {
+    const w = Math.max(1, Math.floor(lw[i - 1] / 2));
+    const h = Math.max(1, Math.floor(lh[i - 1] / 2));
+    // `GenerateOutputMipmap` stops at 1x1 and would leave the deeper slots unbuilt.
+    if (w === lw[i - 1] && h === lh[i - 1]) return { Ok: false, Why: `1x1-before-level${stop}` };
+    lw.push(w); lh.push(h);
+  }
+  return { Ok: true, Rect: rect, TapOffset: tapOffset, Lod: lod, Lo: lo, Stop: stop, W: lw, H: lh };
+};
+
+/** One side of `ReadLevelCost`: render passes, destination px, bilinear fetches, and texels blitted
+ *  into the output's mip slots. */
+export interface ReadLevelSide { Passes: number; Fill: number; Reads: number; Blit: number }
+
+/** Both sides of a level-plan build in one currency, off the plan's own level sizes: the plan, and
+ *  what the chain plus `GenerateOutputMipmap` cost for the same build today. The chain side is the
+ *  whole of it -- `ChainCost` stops at level 0 and never saw the mip chain, which is why the
+ *  phone's `chainTexelsRead=` could not show where these builds' work went. */
+export const ReadLevelCost = (plan: ReadLevelPlan): { Level: ReadLevelSide; Chain: ReadLevelSide } => {
+  const chain = ChainCost(plan.W[0], plan.H[0], 1, 1);
+  let hopFill = 0, blitAll = 0, blitRead = 0;
+  for (let i = 1; i <= plan.Stop; i++) {
+    const px = plan.W[i] * plan.H[i];
+    hopFill += px;
+    blitAll += px;
+    if (i >= plan.Lo) blitRead += px;
+  }
+  // The level plan's hop 1 IS the chain's Down hop, so both sides share it; everything the chain did
+  // after it (the Up pass, then Stop hops from level 0) is what the plan replaces with Stop - 1 hops.
+  return {
+    Level: { Passes: plan.Stop, Fill: hopFill, Reads: hopFill * 5, Blit: blitRead },
+    Chain: {
+      Passes: chain.Passes + plan.Stop, Fill: chain.Fill + hopFill, Reads: chain.Reads + hopFill * 5,
+      Blit: blitAll,
+    },
+  };
 };
 
 /** One pyramid serving a whole (σ, k) CLASS of surfaces, instead of one per surface. */
@@ -2522,9 +2634,12 @@ export class BlurPass {
     }
 
     if (extendedDepth === 0) return;
+    this._blitMips(out, 1, extendedDepth);
+  };
 
-    // Blit each generated level into the corresponding mip slot of the
-    // output texture.
+  /** Blit `_levels[from..to]` into the same mip slots of `out`. */
+  private _blitMips = (out: Framebuffer, from: number, to: number): void => {
+    const gl = this._gl;
     if (!this._mipBlitFbo) {
       const fbo = gl.createFramebuffer();
       if (!fbo) throw new Error('[Jaui] Failed to create mip-blit FBO');
@@ -2537,7 +2652,7 @@ export class BlurPass {
     const prevKey = this.Timers === null ? '' : this.Timers.Target;
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._mipBlitFbo);
     if (this.Timers !== null) this.Timers.SetTarget(`${this.TimerTag}:mipblit`);
-    for (let i = 1; i <= extendedDepth; i++) {
+    for (let i = from; i <= to; i++) {
       const src = this._levels[i];
       gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, out.Texture, i);
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, src.Framebuffer);
@@ -2552,6 +2667,79 @@ export class BlurPass {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, prevDraw);
     if (this.Timers !== null) this.Timers.SetTarget(prevKey);
+  };
+
+  /**
+   * THE LEVEL PLAN'S BUILD (`PlanReadLevel`): the chain's first Down hop, box hops to `Stop`, and a
+   * blit of levels `Lo..Stop` into the output's mip slots. Returns level 0's texture -- the handle a
+   * chain build returns -- with `LastRegion` the chain's map, so the consumer's `u_BackdropXf` and
+   * `TEXTURE_MAX_LEVEL` are what `Blur` + `GenerateOutputMipmap(plan.Lod)` would have left. The
+   * caller does NOT follow it with `GenerateOutputMipmap`: that would rebuild the stack from a level
+   * 0 this plan never wrote.
+   *
+   * Hop 1 is issued with the chain's program, tap offset, source rect and half-texel, in the
+   * chain's order, so level 1 holds the chain's level-1 texels. From hop 2 on it is
+   * `_generateOutputMipmap`'s hop, reading a level of this chain instead of the output.
+   */
+  BlurReadLevel = (input: WebGLTexture, width: number, height: number, radius: number,
+    plan: ReadLevelPlan): WebGLTexture => {
+    const gl = this._gl;
+    this._lastGaussian = false;
+    this._lastGaussianSigma = 0;
+    this._lastGaussianFetches = 0;
+    this._lastGaussianRefusal = '';
+    this._lastSeparableRefusal = '';
+    this._lastPresampled = false;
+    this._lastPresampleK = 1;
+    const rect = plan.Rect;
+
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindVertexArray(this._quad.Vao);
+
+    this._useChain(rect.W, rect.H);
+    for (let i = 0; i <= plan.Stop; i++) this._levels[i].Resize(plan.W[i], plan.H[i]);
+
+    const timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
+    gl.useProgram(this._down.Program);
+    gl.uniform1i(this._downTexLoc, 0);
+    gl.uniform1f(this._downOffLoc, plan.TapOffset);
+    this._bindTarget(this._levels[1], 'l1');
+    this._setSrcRect(this._downSrcLoc, rect, width, height);
+    gl.bindTexture(gl.TEXTURE_2D, input);
+    gl.uniform2f(this._downHpLoc, 0.5 / width, 0.5 / height);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    this._draws++;
+    if (timedDown) this.Timers!.End();
+
+    const timedMip = this.Timers !== null && this.Timers.Begin('blur-mip');
+    gl.uniform1f(this._downOffLoc, 1.0);
+    this._setSrcRect(this._downSrcLoc, null, 1, 1);
+    for (let i = 2; i <= plan.Stop; i++) {
+      const src = this._levels[i - 1];
+      this._bindTarget(this._levels[i], `mip${i}`);
+      gl.uniform2f(this._downHpLoc, 0.5 / src.Width, 0.5 / src.Height);
+      gl.bindTexture(gl.TEXTURE_2D, src.Texture);
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      this._draws++;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._target('default');
+
+    const out = this._levels[0];
+    out.EnsureMipLevels(plan.Stop);
+    this._blitMips(out, plan.Lo, plan.Stop);
+    if (timedMip) this.Timers!.End();
+
+    const cost = ReadLevelCost(plan);
+    this._lastBuild = {
+      ...NO_BUILD, Plan: 'level', Passes: cost.Level.Passes, K: 1, Depth: 1, SigmaAuthored: radius,
+      SigmaTarget: NaN, TapOffset: plan.TapOffset, Fill: cost.Level.Fill, Reads: cost.Level.Reads,
+    };
+    this._lastDepth = 1;
+    this._lastRegion = this._region(rect, width / rect.W, height / rect.H);
+    return out.Texture;
   };
 
   // ── Region plumbing ───────────────────────────────────────────────────────

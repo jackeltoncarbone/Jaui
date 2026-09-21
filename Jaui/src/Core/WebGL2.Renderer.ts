@@ -14,7 +14,7 @@ import { Framebuffer, FramebufferPool } from './Framebuffer';
 import {
   BlurPass, PyramidDepth, ChainBytes, BLUR_PROGRAMS_BOOT, GAUSS_PASSES, type GaussianMode,
   type GaussTempCensus, type BlurBuildRecord,
-  type ChainLimits, type AtlasBuildMember, type BackdropRect,
+  type ChainLimits, type AtlasBuildMember, type BackdropRect, PlanReadLevel, ReadLevelCost,
 } from './BlurPass';
 import { ChainDeliveredSigma, type SeparableKRule, type SeparableRequest, type SeparableSigma } from './Blur.Separable';
 import { PassTimers, type PassProfile } from './Pass.Timers';
@@ -3145,6 +3145,63 @@ export class WebGL2Renderer implements Renderer {
     return _wrap(result, pass.LastRegion);
   };
 
+  /** `?blur-level`: ONE BUILD FOR A CONSUMER THAT READS ONE CONSTANT LOD -- `ComputeBlur` and
+   *  `GenerateBlurMipmap(lod)` in one call, as `BlurPass.PlanReadLevel` describes. The walk has
+   *  already proved the read is constant (`Jaui._rimReadLevel`); this side only plans the build.
+   *
+   *  Returns null having touched NOTHING -- no sequence bump, no ledger entry, no GL -- when the
+   *  plan refuses or a source diagnostic owns the build, and the caller then issues exactly today's
+   *  two calls. So a refusal is today's engine, not a third path. The card composite is refused for
+   *  the same reason: its canvas-sized resolve lives in `ComputeBlur`. */
+  ComputeBlurReadLevel = (
+    input: GpuTextureHandle, width: number, height: number, radius: number,
+    region: BackdropRect, lod: number,
+  ): GpuTextureHandle | null => {
+    const why = this.DiagNoBlur || this.DiagBlurDummy || this.DiagBlurSrc !== null ? 'source-diagnostic'
+      : this._activeCard !== null && _unwrap(input) === this._activeCard.Fbo.Texture ? 'card-composite'
+      : null;
+    const plan = why === null ? PlanReadLevel(radius, width, height, region, lod) : null;
+    if (plan === null || !plan.Ok) {
+      const reason = plan === null ? why! : plan.Why;
+      this._readLevelRefusals.set(reason, (this._readLevelRefusals.get(reason) ?? 0) + 1);
+      return null;
+    }
+    this._backdropBuildSeq++;
+    if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
+    this._reconcileBlurPool();
+    const pass = this._blur;
+    this._lastBlur = pass;
+    this._sceneLedger.NoteTargetBind('blur');
+    const result = pass.BlurReadLevel(_unwrap(input), width, height, radius, plan);
+    const cost = ReadLevelCost(plan);
+    this._sceneLedger.NoteReadLevel(cost.Level, cost.Chain);
+    this._noteSurfaceBuild(pass, false);
+    this._lastProgram = null;
+    return _wrap(result, pass.LastRegion);
+  };
+
+  /** Level-plan builds the renderer refused this frame, by reason. Cleared with the plan census. */
+  private _readLevelRefusals = new Map<string, number>();
+  get ReadLevelRefusals(): string {
+    return this._readLevelRefusals.size === 0 ? 'none'
+      : [...this._readLevelRefusals].sort().map(([k, n]) => `${k}x${n}`).join(',');
+  }
+
+  /** The frame's level-plan builds and what the chain would have cost for them. */
+  get ReadLevelCensus(): {
+    Builds: number; Passes: number; Fill: number; Reads: number; Blit: number;
+    ChainPasses: number; ChainFill: number; ChainReads: number; ChainBlit: number; Refused: string;
+  } {
+    const l = this._sceneLedger;
+    return {
+      Builds: l.ReadLevelBuilds, Passes: l.ReadLevelPasses, Fill: l.ReadLevelFill,
+      Reads: l.ReadLevelReads, Blit: l.ReadLevelBlit,
+      ChainPasses: l.ReadLevelChainPasses, ChainFill: l.ReadLevelChainFill,
+      ChainReads: l.ReadLevelChainReads, ChainBlit: l.ReadLevelChainBlit,
+      Refused: this.ReadLevelRefusals,
+    };
+  }
+
   /** THE ATLAS BUILD: one `ComputeBlur` for a whole phase of surfaces.
    *
    *  Every member's pyramid, built from ONE scene state into one texture, one slot each -- so a
@@ -3668,6 +3725,7 @@ export class WebGL2Renderer implements Renderer {
   private _blurPlanBeginFrame = (): void => {
     this._blurClasses.clear();
     this._blurRefusals.clear();
+    this._readLevelRefusals.clear();
     this._blurDrawsAt.clear();
     for (const p of this._blurPasses()) this._blurDrawsAt.set(p, p.Draws);
   };

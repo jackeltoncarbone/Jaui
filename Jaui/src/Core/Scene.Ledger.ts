@@ -176,6 +176,20 @@ export class SceneReadLedger {
   SurfaceChainPasses = 0;
   SurfaceChainFill = 0;
   SurfaceChainReads = 0;
+  /** `?blur-level`, per rendered frame: builds that took the LEVEL PLAN (`BlurPass.PlanReadLevel`,
+   *  a consumer that reads one constant LOD) in the plan's currency -- passes, destination px,
+   *  bilinear fetches, texels blitted into the output's mip slots -- and beside it what the chain
+   *  plus `GenerateOutputMipmap` cost for the SAME builds (`ReadLevelChain*`). Not booked on the
+   *  `SurfaceChain*` side, which counts the chain's own passes and never saw its mip chain. */
+  ReadLevelBuilds = 0;
+  ReadLevelPasses = 0;
+  ReadLevelFill = 0;
+  ReadLevelReads = 0;
+  ReadLevelBlit = 0;
+  ReadLevelChainPasses = 0;
+  ReadLevelChainFill = 0;
+  ReadLevelChainReads = 0;
+  ReadLevelChainBlit = 0;
   /** `?glass-group`: the container-scoped shared backdrop, per rendered frame.
    *
    *  `GroupBuilds` is pyramids built for a GROUP of glass siblings; `GroupMembers` is how many
@@ -278,6 +292,15 @@ export class SceneReadLedger {
     this.SurfaceChainPasses = 0;
     this.SurfaceChainFill = 0;
     this.SurfaceChainReads = 0;
+    this.ReadLevelBuilds = 0;
+    this.ReadLevelPasses = 0;
+    this.ReadLevelFill = 0;
+    this.ReadLevelReads = 0;
+    this.ReadLevelBlit = 0;
+    this.ReadLevelChainPasses = 0;
+    this.ReadLevelChainFill = 0;
+    this.ReadLevelChainReads = 0;
+    this.ReadLevelChainBlit = 0;
     this.GroupBuilds = 0;
     this.GroupMembers = 0;
     this.GroupFallbacks = 0;
@@ -392,6 +415,21 @@ export class SceneReadLedger {
     this.SurfaceChainPasses += passes;
     this.SurfaceChainFill += fill;
     this.SurfaceChainReads += reads;
+  };
+  /** One level-plan build: what it cost, and what the chain would have cost for it. */
+  NoteReadLevel = (
+    level: { Passes: number; Fill: number; Reads: number; Blit: number },
+    chain: { Passes: number; Fill: number; Reads: number; Blit: number },
+  ): void => {
+    this.ReadLevelBuilds++;
+    this.ReadLevelPasses += level.Passes;
+    this.ReadLevelFill += level.Fill;
+    this.ReadLevelReads += level.Reads;
+    this.ReadLevelBlit += level.Blit;
+    this.ReadLevelChainPasses += chain.Passes;
+    this.ReadLevelChainFill += chain.Fill;
+    this.ReadLevelChainReads += chain.Reads;
+    this.ReadLevelChainBlit += chain.Blit;
   };
   /** One pyramid built for a group of glass siblings under `?glass-group`. */
   NoteGroupBuild = (): void => { this.GroupBuilds++; };

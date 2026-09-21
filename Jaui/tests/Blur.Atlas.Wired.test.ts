@@ -575,7 +575,7 @@ describe('the walk, and the flag', () => {
     // texture, this node's own region -- and stops before the arm, which is off by default.
     // Re-aimed by lane blurcache: the build moved into the closure `_bcBuild` calls, so a
     // `?blur-cache` hit can skip it; the arguments that decide the build did not move.
-    expect(render).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, gaussian)');
+    expect(render).toContain('r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable)');
     const solo = render.slice(0, render.indexOf('this._atlasWalkSolo++;'));
     expect(solo.lastIndexOf('} else {')).toBeGreaterThan(solo.lastIndexOf('if (direct !== null) {'));
   });
