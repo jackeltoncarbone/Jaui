@@ -287,7 +287,7 @@ interface GroupShape {
 
 interface Stats {
   Groups: number; Builds: number; Members: number; Fallbacks: number;
-  Solo: number; MaxLod: number; Unplanned: number; Rects: string;
+  Solo: number; MaxLod: number; Unplanned: number; Rects: string; Why: string;
 }
 
 interface Walked {
@@ -375,7 +375,7 @@ describe('?glass-group on glass-grid - the grouping the tree produces', () => {
     expect(on.Census.Refused).toBe('');
     expect(on.Stats).toEqual({
       Groups: 1, Builds: 1, Members: 20, Fallbacks: 0,
-      Solo: 0, MaxLod: 0, Unplanned: 0, Rects: '2456x1456@k1/d2x20',
+      Solo: 0, MaxLod: 0, Unplanned: 0, Rects: '2456x1456@k1/d2x20', Why: 'none',
     });
     // THE VACUOUS-SUCCESS GUARD. `groups=0 members=0 fallbacks=20` is the engine this lane
     // inherited wearing the flag's name, and it would pass every timing comparison by having done

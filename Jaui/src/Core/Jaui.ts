@@ -29,12 +29,14 @@ import { EmptyGlassAdaptCensus, GlassAdaptCensusOf, GlassAdaptLine, type GlassAd
 // copy of the rule would be a count that can silently disagree with the pass it is counting.
 import {
   BlurPass, BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, PlanBackdropUnion,
+  RegionExtentSnap,
   MAX_CHAINS, CHAIN_BUDGET_BYTES,
   GAUSS_PASSES, GAUSS_MATCH_SIGMA, type GaussianMode,
   type AtlasBuildMember, type BackdropUnionPlan,
 } from './BlurPass';
 import { RadiusForFetches, type SeparableKRule, type SeparableSigma } from './Blur.Separable';
 import { EmptyGlassFragCensus, GlassSkipNames, ParseGlassSkip, GLASS_SKIP_STAGES, type GlassFragCensus } from './Glass.Skip';
+import { GlassSoloReasonAt, GlassSoloTally, type GlassSoloReason } from './Glass.Group.Why';
 import {
   GLASS_PROGRAMS_PREEMPT, ParseGlassPrograms, ParseGlassReg, ParseGlassGates,
   type GlassProgramsArm, type GlassRegArm, type GlassGatesArm,
@@ -1053,7 +1055,7 @@ export class Canvas implements DirtyTracker {
   /** The frame's group census, for the gate line. `Fallbacks` is the one to read beside `Members`:
    *  a plan that grouped nothing and fell back on everything is the unflagged engine. */
   private _glassGroupStats = {
-    Groups: 0, Builds: 0, Members: 0, Fallbacks: 0, Solo: 0, MaxLod: 0, Unplanned: 0, Rects: '',
+    Groups: 0, Builds: 0, Members: 0, Fallbacks: 0, Solo: 0, MaxLod: 0, Unplanned: 0, Rects: '', Why: 'none',
   };
   /** `?shadow-probe=walk|group` -- WHERE A GROUP MEMBER'S ADAPTIVE-SHADOW PROBE RUNS.
    *
@@ -4304,7 +4306,7 @@ export class Canvas implements DirtyTracker {
       }
       lines.push(`jaui:glass-group groups=${st.Groups} builds=${st.Builds} members=${st.Members}`
         + ` fallbacks=${st.Fallbacks} solo=${st.Solo} maxLod=${st.MaxLod} unplanned=${st.Unplanned}`
-        + ` rects=${st.Rects}`
+        + ` rects=${st.Rects} why=${st.Why}`
         + ` blur=${gl2 === null ? -1 : (gl2.SceneEndsByKey['blur'] ?? 0)}`
         + ` switches=${gl2 === null ? -1 : gl2.SceneSwitches} pixels=DIFFERENT`);
       const line = lines.join('\n');
@@ -4514,7 +4516,15 @@ export class Canvas implements DirtyTracker {
         // arm-time mark where a counter would read 0 for ever. `clears=0` under `=clear` means the
         // arm never reached a bound target, so its pixel reading says nothing.
         + ` temp=${this._blurTemp}${this._blurTemp === 'clear' ? ` clears=${c.TempClears}` : ''}`
-        + ` planRefused=${c.Refused}`;
+        + ` planRefused=${c.Refused}`
+        // THE EXTENT CENSUS. `distinctExtents=` is level-0 sizes (chains the pass must hold, against
+        // `chainPool=` resident/max); `extentAllocs=` is what the builds themselves allocated, and
+        // `resizes=` / `firstAllocs=` / `mipAllocs=` every texture allocation in the frame so far. A
+        // distinct size costs a re-allocation only if these move: on a steady frame whose sizes fit
+        // the pools they read 0 whatever `distinctExtents=` says.
+        + ` distinctExtents=${c.DistinctExtents} extents=${c.Extents} extentAllocs=${c.ExtentAllocs}`
+        + ` resizes=${c.Resizes} firstAllocs=${c.FirstAllocs} mipAllocs=${c.MipAllocs}`
+        + ` chainPool=${c.ChainPool} extentSnap=${RegionExtentSnap.Unit} surfaces=${c.Surfaces}`;
       if (line !== this._blurPlanLastLine) { this._blurPlanLastLine = line; JTrace(line); }
     }
 
@@ -6306,7 +6316,7 @@ export class Canvas implements DirtyTracker {
     this._shadowProbeStats.Moved = 0;
     const st = this._glassGroupStats;
     st.Groups = 0; st.Builds = 0; st.Members = 0; st.Fallbacks = 0;
-    st.Solo = 0; st.MaxLod = 0; st.Unplanned = 0; st.Rects = '';
+    st.Solo = 0; st.MaxLod = 0; st.Unplanned = 0; st.Rects = ''; st.Why = 'none';
     const scan: { Node: Jiv; Parent: Jiv | null; Plan: GlassBlurPlan }[] = [];
     this._glassGroupScan = scan;
     this._glassGroupParent = null;
@@ -6386,15 +6396,27 @@ export class Canvas implements DirtyTracker {
   ): void => {
     const st = this._glassGroupStats;
     const rects: string[] = [];
+    // Every fallback's reason, by name: see `Glass.Group.Why.ts`.
+    const why: GlassSoloReason[] = [];
+    const entries = scan.map((c) => ({ Parent: c.Parent, Radius: c.Plan.Radius, MaxLod: c.Plan.MaxLod }));
+    const at = new Map(scan.map((c, i) => [c, i]));
     let run: { Node: Jiv; Parent: Jiv | null; Plan: GlassBlurPlan }[] = [];
     const flush = (): void => {
       if (run.length === 0) return;
       const members = run;
       run = [];
-      if (members.length < 2) { st.Solo += members.length; st.Fallbacks += members.length; return; }
+      if (members.length < 2) {
+        st.Solo += members.length; st.Fallbacks += members.length;
+        why.push(GlassSoloReasonAt(entries, at.get(members[0])!));
+        return;
+      }
       const radius = members[0].Plan.Radius;
       const plan = PlanBackdropUnion(members.map((m) => m.Plan.Region), w, h, radius);
-      if (plan === null) { st.Unplanned += members.length; st.Fallbacks += members.length; return; }
+      if (plan === null) {
+        st.Unplanned += members.length; st.Fallbacks += members.length;
+        for (let i = 0; i < members.length; i++) why.push('planner-refused');
+        return;
+      }
       const group: GlassGroup = {
         Members: members.map((m) => m.Node), Plans: members.map((m) => m.Plan), Radius: radius, Plan: plan,
       };
@@ -6403,17 +6425,18 @@ export class Canvas implements DirtyTracker {
       rects.push(`${plan.RectW}x${plan.RectH}@k${plan.K}/d${plan.Depth}x${members.length}`);
     };
     for (const c of scan) {
-      if (c.Plan.MaxLod > 0) { st.MaxLod++; st.Fallbacks++; continue; }
+      if (c.Plan.MaxLod > 0) { st.MaxLod++; st.Fallbacks++; why.push('mip-consumer'); continue; }
       const head = run.length === 0 ? null : run[0];
       if (head !== null
           && (c.Parent === null || c.Parent !== head.Parent || c.Plan.Radius !== head.Plan.Radius)) {
         flush();
       }
-      if (c.Parent === null) { st.Solo++; st.Fallbacks++; continue; }
+      if (c.Parent === null) { st.Solo++; st.Fallbacks++; why.push('no-parent'); continue; }
       run.push(c);
     }
     flush();
     st.Rects = rects.length === 0 ? 'none' : rects.join('+');
+    st.Why = GlassSoloTally(why);
   };
 
   /** `?glass-group`: THE CAPTURE, and the handle every member of the group takes from it.
@@ -8804,6 +8827,17 @@ export class Canvas implements DirtyTracker {
       this._blurTemp = raw;
     }
     BlurPass.TempLoad = this._blurTemp;
+    // `?extent-snap=N`: every blur extent rounds up to a multiple of N (a power of two), so surfaces
+    // of nearly-equal size share one level-0 size. Holds the builds and `k`; moves only the page's
+    // count of distinct extents (`distinctExtents=` on the plan's gate line). Absent is 1, the engine.
+    if (params.has('extent-snap')) {
+      const raw = (params.get('extent-snap') ?? '').trim();
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 256 || (n & (n - 1)) !== 0) {
+        throw new Error(`[Jaui] ?extent-snap takes a power of two in 1..256, got '${raw}'`);
+      }
+      RegionExtentSnap.Unit = n;
+    }
     if (this._blurSeparable) {
       const r = this._renderer;
       const why =

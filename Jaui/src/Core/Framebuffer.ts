@@ -51,10 +51,23 @@ export class Framebuffer {
   get Width(): number { return this._width; }
   get Height(): number { return this._height; }
 
+  /** Base-level `texImage2D`s issued by `Resize` in this context, since boot. Counted HERE, at the one
+   *  line that allocates, because every pool above this class keys on size and a pool that thrashed
+   *  would be invisible from its own census: it holds the same sizes at the end of the frame whether
+   *  it re-allocated them or not. A reader samples it twice and subtracts. Never reset. */
+  static Allocations = 0;
+  /** Of those, the FIRST allocations -- the ones that also pay `checkFramebufferStatus`, which the
+   *  comment in `Resize` measured as a full GPU sync. */
+  static FirstAllocations = 0;
+  /** Mip-level `texImage2D`s issued by `EnsureMipLevels`. */
+  static MipAllocations = 0;
+
   /** Resize the FBO's texture. Safe to call repeatedly; no-op if already at given size. */
   Resize = (width: number, height: number): void => {
     if (width === this._width && height === this._height) return;
     const firstAlloc = this._width === 0 && this._height === 0;
+    Framebuffer.Allocations++;
+    if (firstAlloc) Framebuffer.FirstAllocations++;
     // Base level is about to be reallocated, so every mip above it is orphaned
     // at the old size — the texture is mip-INCOMPLETE until they are re-made.
     this._mipLevels = 0;
@@ -127,6 +140,7 @@ export class Framebuffer {
     const want = Math.max(0, Math.min(this._mipDepth(), Math.floor(levels)));
     gl.bindTexture(gl.TEXTURE_2D, this.Texture);
     for (let i = this._mipLevels + 1; i <= want; i++) {
+      Framebuffer.MipAllocations++;
       const lw = Math.max(1, this._width >> i);
       const lh = Math.max(1, this._height >> i);
       if (this._highPrecision) {

@@ -8,6 +8,9 @@
 import { AddGlassFragCensus, EmptyGlassFragCensus, type GlassFragCensus } from './Glass.Skip';
 import type { GlassProgramKind } from './Glass.Programs';
 
+/** One per-surface build's level-0 size, factor and own allocations. See `SceneLedger.SurfaceExtents`. */
+export interface SurfaceExtent { W: number; H: number; K: number; Allocs: number }
+
 /**
  * How many times a frame READS the scene target after WRITING into it.
  *
@@ -176,6 +179,16 @@ export class SceneReadLedger {
   SurfaceChainPasses = 0;
   SurfaceChainFill = 0;
   SurfaceChainReads = 0;
+  /** THE EXTENT CENSUS, per rendered frame: one entry per per-surface build (solo fills, rims that
+   *  built, group unions), in walk order. `W x H` is the LEVEL-0 size the build left in its chain --
+   *  the key `BlurPass._useChain` pools on, so two builds with the same `W x H` share one chain and two
+   *  with different ones hold two. `Allocs` is how many texture ALLOCATIONS the build itself issued
+   *  (`Framebuffer.Allocations` across the call), which is what a distinct size costs if it costs
+   *  anything: a size the pools already hold re-allocates nothing, and only this column can say so.
+   *
+   *  NOT the `targets=` pool census. That counts the separable plan's hop and temp as two sizes, so a
+   *  single k = 2 build reads `2:` there -- the dpr-3 union's `1840x1106+1858x1106` is ONE extent. */
+  SurfaceExtents: SurfaceExtent[] = [];
   /** `?glass-group`: the container-scoped shared backdrop, per rendered frame.
    *
    *  `GroupBuilds` is pyramids built for a GROUP of glass siblings; `GroupMembers` is how many
@@ -278,6 +291,7 @@ export class SceneReadLedger {
     this.SurfaceChainPasses = 0;
     this.SurfaceChainFill = 0;
     this.SurfaceChainReads = 0;
+    this.SurfaceExtents = [];
     this.GroupBuilds = 0;
     this.GroupMembers = 0;
     this.GroupFallbacks = 0;
@@ -393,6 +407,34 @@ export class SceneReadLedger {
     this.SurfaceChainFill += fill;
     this.SurfaceChainReads += reads;
   };
+  /** One per-surface build left a `w x h` level 0 at factor `k`, issuing `allocs` allocations. */
+  NoteSurfaceExtent = (w: number, h: number, k: number, allocs: number): void => {
+    this.SurfaceExtents.push({ W: w, H: h, K: k, Allocs: allocs });
+  };
+
+  /** Distinct level-0 sizes this frame -- the number of chains the per-surface pass has to hold. */
+  get DistinctExtents(): number {
+    return new Set(this.SurfaceExtents.map((e) => `${e.W}x${e.H}`)).size;
+  }
+
+  /** Allocations the per-surface builds issued this frame. 0 on a steady frame whose sizes all fit. */
+  get ExtentAllocations(): number {
+    return this.SurfaceExtents.reduce((n, e) => n + e.Allocs, 0);
+  }
+
+  /** `WxH#n+...`, sorted, or `none`: each distinct extent and how many builds landed on it. */
+  get ExtentCensus(): string {
+    const m = new Map<string, number>();
+    for (const e of this.SurfaceExtents) m.set(`${e.W}x${e.H}`, (m.get(`${e.W}x${e.H}`) ?? 0) + 1);
+    return m.size === 0 ? 'none' : [...m].sort().map(([k, n]) => `${k}#${n}`).join('+');
+  }
+
+  /** Walk order, one token per build: `WxH@k<K>:<allocs>`, or `none`. */
+  get SurfaceExtentList(): string {
+    return this.SurfaceExtents.length === 0 ? 'none'
+      : this.SurfaceExtents.map((e) => `${e.W}x${e.H}@k${e.K}:${e.Allocs}`).join(',');
+  }
+
   /** One pyramid built for a group of glass siblings under `?glass-group`. */
   NoteGroupBuild = (): void => { this.GroupBuilds++; };
 

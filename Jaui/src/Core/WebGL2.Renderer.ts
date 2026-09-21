@@ -3121,11 +3121,12 @@ export class WebGL2Renderer implements Renderer {
       // the two arms is the read. Reassigned rather than wrapped into the call, so the call below
       // stays the byte-for-byte baseline call the card composite's own gates pin.
       src = this._blurSrcFor(src);
+      const allocsAt = Framebuffer.Allocations;
       const result = pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined,
         rebase, gaussMode, sepReq);
       this._notePresampled(pass);
       this._noteGaussian(pass);
-      if (radius > 0) this._noteSurfaceBuild(pass, sepReq !== null);
+      if (radius > 0) this._noteSurfaceBuild(pass, sepReq !== null, Framebuffer.Allocations - allocsAt);
       this._lastProgram = null;
       return _wrap(result, pass.LastRegion);
     }
@@ -3133,11 +3134,14 @@ export class WebGL2Renderer implements Renderer {
     // the build: the DOWN pass reads the stand-in instead of `input`. The HANDLE is swapped, not the
     // call, so the region rides across unchanged and `pass.Blur` below is the baseline line.
     if (this.DiagBlurSrc !== null) input = _wrap(this._blurSrcFor(_unwrap(input)), _regionOf(input));
+    const allocsAt = Framebuffer.Allocations;
     const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined,
       rebase, gaussMode, sepReq);
     this._notePresampled(pass);
     this._noteGaussian(pass);
-    if (radius > 0 && region !== undefined) this._noteSurfaceBuild(pass, sepReq !== null);
+    if (radius > 0 && region !== undefined) {
+      this._noteSurfaceBuild(pass, sepReq !== null, Framebuffer.Allocations - allocsAt);
+    }
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
     // draw re-binds its program correctly.
@@ -3245,10 +3249,11 @@ export class WebGL2Renderer implements Renderer {
     // `baseFactor` is the CHAIN's k, which is what the delivered sigma is measured at.
     const sepReq: SeparableRequest | null = this.DiagBlurSeparable
       ? { Sigma: this.DiagBlurSigma, Fetches: this.DiagBlurFetches, KRule: this.DiagBlurKRule } : null;
+    const allocsAt = Framebuffer.Allocations;
     const result = pass.Blur(_unwrap(input), width, height, radius, 0, region, baseFactor, false,
       'off', sepReq);
     this._sceneLedger.NoteGroupBuild();
-    this._noteSurfaceBuild(pass, sepReq !== null);
+    this._noteSurfaceBuild(pass, sepReq !== null, Framebuffer.Allocations - allocsAt);
     // BlurPass bound its own programs; invalidate the cache exactly as `ComputeBlur` does.
     this._lastProgram = null;
     return _wrap(result, pass.LastRegion);
@@ -3644,14 +3649,23 @@ export class WebGL2Renderer implements Renderer {
   // `chain:a<authored>@k<k>d<depth>t<tap>>s<delivered>`) so a page with several glass classes says
   // which one costs what.
   private _blurClasses = new Map<string, number>();
+  /** `Framebuffer`'s allocation counters at this frame's start, so the gate can print the frame's own. */
+  private _frameAllocsAt = 0;
+  private _frameFirstAllocsAt = 0;
+  private _frameMipAllocsAt = 0;
   private _blurRefusals = new Map<string, number>();
   private _blurDrawsAt = new Map<BlurPass, number>();
 
-  private _noteSurfaceBuild = (pass: BlurPass, asked: boolean): void => {
+  private _noteSurfaceBuild = (pass: BlurPass, asked: boolean, allocs: number): void => {
     const b: BlurBuildRecord = pass.LastBuild;
     if (b.Plan === 'separable' || b.Plan === 'chain') {
       this._sceneLedger.NoteSurfaceBuild(b.Plan === 'separable', b.Passes, b.Fill, b.Reads);
     }
+    // Level 0 of the chain the build just used: the size `_useChain` pooled it under. Read after the
+    // build, off the framebuffer itself, so the census quotes the texture that exists rather than a
+    // second derivation of the rect. A `?glass-gaussian` build lands here too and is an extent as well.
+    const l0 = pass.DiagLevel0;
+    if (l0 !== null) this._sceneLedger.NoteSurfaceExtent(l0.Width, l0.Height, b.K, allocs);
     const key = b.Plan === 'separable'
       ? `sep:a${_r2(b.SigmaAuthored)}>t${_r2(b.SigmaTarget)}@k${b.K}r${_r2(b.SigmaResidual)}f${b.Fetches}`
       : b.Plan === 'chain'
@@ -3666,6 +3680,9 @@ export class WebGL2Renderer implements Renderer {
   };
 
   private _blurPlanBeginFrame = (): void => {
+    this._frameAllocsAt = Framebuffer.Allocations;
+    this._frameFirstAllocsAt = Framebuffer.FirstAllocations;
+    this._frameMipAllocsAt = Framebuffer.MipAllocations;
     this._blurClasses.clear();
     this._blurRefusals.clear();
     this._blurDrawsAt.clear();
@@ -3690,6 +3707,8 @@ export class WebGL2Renderer implements Renderer {
     ChainBuilds: number; ChainPasses: number; ChainFill: number; ChainReads: number;
     Classes: string; Refused: string; Targets: string; Draws: string; DrawsTotal: number;
     Compile: string; TempClears: number;
+    DistinctExtents: number; Extents: string; Surfaces: string; ExtentAllocs: number;
+    Resizes: number; FirstAllocs: number; MipAllocs: number; ChainPool: string;
   } {
     const l = this._sceneLedger;
     const draws: string[] = [];
@@ -3714,6 +3733,14 @@ export class WebGL2Renderer implements Renderer {
       // Effect field for ?blur-temp=clear: zero on an armed clear run means the arm never reached a
       // bound target and its 0-px reading is vacuous rather than evidence of complete coverage.
       TempClears: this._blurPasses().reduce((n, p) => n + p.TempClears, 0),
+      DistinctExtents: l.DistinctExtents, Extents: l.ExtentCensus, Surfaces: l.SurfaceExtentList,
+      ExtentAllocs: l.ExtentAllocations,
+      // EVERY base-level allocation in this context so far this frame -- blur pools, card composites,
+      // a resized scene -- so a re-allocation the per-build column cannot see still shows here.
+      Resizes: Framebuffer.Allocations - this._frameAllocsAt,
+      FirstAllocs: Framebuffer.FirstAllocations - this._frameFirstAllocsAt,
+      MipAllocs: Framebuffer.MipAllocations - this._frameMipAllocsAt,
+      ChainPool: main === undefined ? '0/0' : `${main.ChainCensus.Resident}/${main.ChainCensus.Max}`,
     };
   }
 

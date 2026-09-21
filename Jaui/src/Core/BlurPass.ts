@@ -751,7 +751,19 @@ export const PyramidDepth = (radius: number, minDepth: number): number => {
  *  frame. (glass-grid's twenty cards sit on a 236pt pitch — 472 device px at DPR 2, a multiple
  *  of the depth-2 phase of 4 — so every one of them lands on exactly 568x436.) A page whose
  *  glass surfaces genuinely differ in size pays one `Resize` per distinct size per frame, which
- *  is a texture allocation against 47MB of attachment traffic saved. */
+ *  is a texture allocation against 47MB of attachment traffic saved.
+ *
+ *  THAT LAST SENTENCE PREDATES THE POOLS and is true only when they overflow. `_useChain` keys a
+ *  chain on its level-0 size and `_useSeparableTarget` a target on its size, so a distinct size
+ *  allocates on the frame that introduces it and never again while it stays resident (six chains,
+ *  sixteen targets). `jaui:blur-plan`'s `extentAllocs=` / `resizes=` count what really allocated.
+ *
+ *  The EXTENT (never the origin) rounds up to `max(phase, RegionExtentSnap.Unit)`. The unit is 1
+ *  unless `?extent-snap=N` sets it, and then every extent is a multiple of it, so surfaces whose
+ *  sizes differ by less than a unit land on one level-0 size with the grid and the halvings intact.
+ *  A diagnostic: it holds the build count and `k` and moves only how many extents a page has. */
+export const RegionExtentSnap = { Unit: 1 };
+
 export const ResolveRegionRect = (
   region: BackdropRect | undefined, width: number, height: number, phase: number,
 ): RegionRect => {
@@ -764,8 +776,9 @@ export const ResolveRegionRect = (
 
   const x0 = Math.floor(rx / phase) * phase;
   const y0 = Math.floor(ryb / phase) * phase;
-  const w = Math.min(width - x0, Math.ceil((rx + rw - x0) / phase) * phase);
-  const h = Math.min(height - y0, Math.ceil((ryb + rh - y0) / phase) * phase);
+  const unit = Math.max(phase, RegionExtentSnap.Unit);
+  const w = Math.min(width - x0, Math.ceil((rx + rw - x0) / unit) * unit);
+  const h = Math.min(height - y0, Math.ceil((ryb + rh - y0) / unit) * unit);
   const full = x0 === 0 && y0 === 0 && w === width && h === height;
   return { X: x0, YBottom: y0, W: w, H: h, Full: full };
 };
