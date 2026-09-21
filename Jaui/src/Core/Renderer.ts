@@ -112,6 +112,14 @@ export interface ShadowBackdrop {
   Adaptive: number;
 }
 
+/** `?glass-adapt` for a single-surface glass draw: the surface's state slot (the same texel its adaptive
+ *  shadow reads; its B channel is the brightest backdrop luma under the footprint) and its resolved
+ *  `AdaptiveFar`. The body's grade opens toward that far end as far as the authored ink allows. */
+export interface GlassAdapt {
+  Slot: number;
+  OpenFar: number;
+}
+
 /**
  * Per-draw background paint selection for `PanelDrawBatch`. Tagged-union
  * shape mirrors `BackgroundValue` on the data side, but flattened to the
@@ -282,13 +290,16 @@ export interface Renderer {
     scene?: GpuTextureHandle | null,
     bgPaint?: BgPaint,
     shadowBackdrop?: ShadowBackdrop,
+    glassAdapt?: GlassAdapt,
   ): void;
 
   /** Measure the backdrop under an adaptive-shadow surface (`ShadowAdaptive > 0`) into that surface's eased
    *  state, after its backdrop pyramid is built and before its draw. `key` identifies the surface across
    *  frames; `dtSeconds` sets how far this frame eases toward the new reading. Returns the state slot to
    *  hand PanelDrawBatch, or -1 when the backend keeps no state (the shadow then stays at its authored alpha).
-   *  Leaves the scene target bound. */
+   *  Leaves the scene target bound. `inputsSame` says the reading is provably last frame's (the blur
+   *  cache called the fill clean and the rect did not move), which is what lets the probe declare its
+   *  texel still (`Shadow.Texel`); omitted, the reading is unknown and the texel is declared moved. */
   MeasureShadowBackdrop(
     key: object,
     rect: { x: number; y: number; w: number; h: number },
@@ -296,6 +307,7 @@ export interface Renderer {
     backdrop: GpuTextureHandle,
     scene: GpuTextureHandle,
     dtSeconds: number,
+    inputsSame?: boolean,
   ): number;
 
   /** Release the state of every surface that was not measured since the previous call. Once per render. */

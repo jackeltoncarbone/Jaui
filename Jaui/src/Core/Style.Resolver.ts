@@ -235,6 +235,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     Fillet: Resolve(s.Fillet, ctx, 'W'),
     Refraction: Resolve(s.Refraction, ctx, 'W'),
     Tint: _resolveTint(s, ctx),
+    AdaptiveFar: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.AdaptiveFar, ctx), ctx, 'W'))),
     BackdropBrightness: backdrop.Brightness,
     BackdropSaturation: backdrop.Saturation,
     BackdropContrast: backdrop.Contrast,

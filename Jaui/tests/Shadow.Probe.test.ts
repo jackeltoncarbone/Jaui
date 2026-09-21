@@ -29,6 +29,7 @@ import type { Renderer } from '@jaui/Core/Renderer';
 import { WebGL2Renderer, type ShadowProbe } from '@jaui/Core/WebGL2.Renderer';
 import { BrowserPlatform } from '@jaui/Core/Platform';
 import { Jiv } from '@jaui/Jiv/Jiv';
+import { JivInstanceBuffer } from '@jaui/Jiv/Jiv.InstanceBuffer';
 import { OnJauiTrace } from '@jaui/Diagnostics/Jaui.Trace';
 import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber } from './Scene.ReadAfterWrite.Source';
 
@@ -68,7 +69,7 @@ type Event =
   | { Kind: 'group'; Handle: object }
   | { Kind: 'probe'; Key: object; Rect: Rect; DetailLod: number; Backdrop: unknown; Scene: unknown; Batched: boolean }
   | { Kind: 'batch'; Count: number }
-  | { Kind: 'draw'; Site: 'fill' | 'rim' | 'panel'; Quads: number[][]; Instances: number[]; Shadow: unknown }
+  | { Kind: 'draw'; Site: 'fill' | 'rim' | 'panel'; Quads: number[][]; Instances: number[]; Shadow: unknown; Adapt?: unknown }
   | { Kind: 'text'; Quads: number[][] }
   | { Kind: 'other-draw'; Name: string };
 
@@ -123,10 +124,15 @@ const recorder = (log: Event[]) => {
       for (let i = 0; i < count; i++) panel.push(data[offset + i]);
     },
     PanelDrawBatch: (...args: unknown[]): void => {
-      const site = args.length >= 10 ? 'fill' : args[6] === true ? 'rim' : 'panel';
+      // A fill passes its shadow (10th) and, under `?glass-adapt`, its adapt (11th); a rim passes an
+      // adapt with no shadow, which no fill can (an adapt rides the fill's own probe slot).
+      const rimAdapt = args[9] === undefined && args[10] !== undefined;
+      const site = args.length >= 10 && !rimAdapt ? 'fill' : args[6] === true ? 'rim' : 'panel';
       const quads: number[][] = [];
       for (let o = 0; o + 60 <= panel.length; o += 60) quads.push(panel.slice(o, o + 4));
-      log.push({ Kind: 'draw', Site: site, Quads: quads, Instances: [...panel], Shadow: args[9] });
+      const ev: Event = { Kind: 'draw', Site: site, Quads: quads, Instances: [...panel], Shadow: args[9] };
+      if (args[10] !== undefined) ev.Adapt = args[10];
+      log.push(ev);
     },
     TextBeginBatch: (): void => { text = []; },
     TextAddInstance: (data: Float32Array, offset: number, count: number): void => {
@@ -166,7 +172,7 @@ const recorder = (log: Event[]) => {
 const OPAQUE = { Opacity: '1' } as const;
 const CLEAR = 'rgba(0, 0, 0, 0)';
 
-const buildGlassGrid = (c: Canvas): Jiv[] => {
+const buildGlassGrid = (c: Canvas, adaptiveFar?: string): Jiv[] => {
   const page = new Jiv({
     Overflow: 'Hidden',
     ChildLayout: { FlexGrow: jssNumber(PAGE, 'FlexGrow') },
@@ -218,6 +224,7 @@ const buildGlassGrid = (c: Canvas): Jiv[] => {
         ShadowColor: glassRaw('ShadowColor'), ShadowBlur: glassRaw('ShadowBlur'), ShadowOffsetY: glassRaw('ShadowOffsetY'),
         // The clause this file is about: every JwiftGlass surface probes its backdrop.
         ShadowAdaptive: glassRaw('ShadowAdaptive'),
+        ...(adaptiveFar !== undefined ? { AdaptiveFar: adaptiveFar } : {}),
         BorderRadius: jssValue(CARD, 'BorderRadius'), ...OPAQUE,
       },
     });
@@ -247,16 +254,16 @@ interface Walked {
   Plans: { InstFrostLod: number; AdaptiveShadow: boolean }[];
 }
 
-const walk = (search: string): Walked => {
+const walk = (search: string, adaptiveFar?: string, markPrefix = 'jaui:shadow-probe'): Walked => {
   const log: Event[] = [];
   const marks: string[] = [];
-  OnJauiTrace((name) => { if (name.startsWith('jaui:shadow-probe')) marks.push(name); });
+  OnJauiTrace((name) => { if (name.startsWith(markPrefix)) marks.push(name); });
   try {
     const platform = { ...BrowserPlatform, GetUrlSearch: (): string => search };
     const c = new Canvas(new OffscreenCanvas(CANVAS_W, CANVAS_H) as unknown as HTMLCanvasElement, recorder(log), platform);
     c.SetSizePx(VIEW_W, VIEW_H);
     (c as unknown as { _dpr: number })._dpr = DPR;
-    const cards = buildGlassGrid(c);
+    const cards = buildGlassGrid(c, adaptiveFar);
     c.RenderHeadless(1000);
     const priv = c as unknown as { _glassGroups: Map<Jiv, { Plans: { InstFrostLod: number; AdaptiveShadow: boolean }[] }> };
     const g = priv._glassGroups.get(cards[0]);
@@ -318,7 +325,7 @@ describe('?shadow-probe - the flag, its mark and its refusals', () => {
     expect(w.Marks).toContain('jaui:shadow-probe armed=group default=true pixels=SAME');
   });
 
-  it('`walk` is the control arm: yesterday's per-card probe, byte for byte', () => {
+  it("`walk` is the control arm: yesterday's per-card probe, byte for byte", () => {
     const w = walk('?shadow-probe=walk');
     expect(w.Census.Mode).toBe('walk');
     expect(w.Marks).toContain('jaui:shadow-probe armed=walk default=false pixels=SAME');
@@ -616,5 +623,52 @@ describe('MeasureShadowBackdrops on the real renderer - one bind, each probe unc
     (m.R as unknown as { _cardStack: unknown[] })._cardStack.push({});
     expect(() => m.R.MeasureShadowBackdrops([{ Key: {}, Rect: rectOf(0), DetailLod: 1 }], pyramid, scene, 0.016))
       .toThrow(/card target is open/);
+  });
+});
+
+// -- 5. `?glass-adapt` rides the probe ------------------------------------------------------------
+
+describe('?glass-adapt on glass-grid - the grade rides the probe slot, and `off` is the folded engine', () => {
+  /** Resolved `@JwiftGlassOpenFar` in dark; this tree carries no vars, so the number is written here. */
+  const OPEN = String(258.9 / 255);
+  const rims = (w: Walked) => w.Log.filter((e): e is Extract<Event, { Kind: 'draw' }> => e.Kind === 'draw' && e.Site === 'rim');
+
+  it('every fill hands the vertex stage its OWN probe slot and its far end, and its rim the same', () => {
+    const w = walk('', OPEN);
+    const f = fills(w);
+    expect(f.length).toBe(20);
+    for (const d of f) {
+      const shadow = d.Shadow as { Slot: number };
+      expect(d.Adapt).toEqual({ Slot: shadow.Slot, OpenFar: parseFloat(OPEN) });
+    }
+    const r = rims(w);
+    expect(r.length).toBe(20);
+    for (let i = 0; i < 20; i++) expect(r[i].Adapt).toEqual(f[i].Adapt);
+  });
+
+  it('`off` hands no draw an adapt, and its whole draw stream is the stream of a sheet that never authored one', () => {
+    const off = walk('?glass-adapt=off', OPEN);
+    expect(fills(off).every((d) => d.Adapt === undefined)).toBe(true);
+    expect(rims(off).every((d) => d.Adapt === undefined)).toBe(true);
+    expect(drawStream(off)).toEqual(drawStream(walk('')));
+  });
+
+  it('a class that authors no far end is untouched on `on`: same stream as `off`', () => {
+    expect(drawStream(walk(''))).toEqual(drawStream(walk('?glass-adapt=off')));
+  });
+
+  it('marks itself, and refuses `?no-shadow` by name', () => {
+    expect(walk('', OPEN, 'jaui:glass-adapt').Marks).toContain('jaui:glass-adapt armed=on default=true pixels=DIFFERENT');
+    expect(walk('?glass-adapt=off', OPEN, 'jaui:glass-adapt').Marks).toContain('jaui:glass-adapt armed=off default=false pixels=SAME');
+    // `?no-shadow` is a static of the instance buffer, so it is put back or every later walk loses its probes.
+    let refused: Walked;
+    try { refused = walk('?no-shadow', OPEN, 'jaui:glass-adapt'); } finally { JivInstanceBuffer.DiagNoShadow = false; }
+    expect(refused.Marks).toContain('jaui:glass-adapt armed=off default=true pixels=SAME reason=no-shadow-removes-the-probe-the-grade-reads');
+    expect(fills(refused).every((d) => d.Adapt === undefined)).toBe(true);
+  });
+
+  it('rides `?shadow-probe=walk` too: the slot is the one the walked probe returned', () => {
+    const w = walk('?shadow-probe=walk', OPEN);
+    for (const d of fills(w)) expect((d.Adapt as { Slot: number }).Slot).toBe((d.Shadow as { Slot: number }).Slot);
   });
 });

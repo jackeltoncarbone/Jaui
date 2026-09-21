@@ -214,6 +214,12 @@ export interface JivStyle {
   Tint: string;
   /** Which neutral `Tint` pulls toward. Default `Ground` (black in dark, white in light). */
   TintTone: TintTone;
+  /** A luma, 0..2: the far end of the greyscale ramp (the body over white) this glass OPENS to when
+   *  what is behind it leaves the ink room, as Apple's does ("the amount of tint and the dynamic range
+   *  shift"). Read per surface from the adaptive-shadow probe's backdrop luma; never past the far end
+   *  the authored grade already reaches over white, so the ink is never less legible than the static
+   *  grade made it. Only a body tinted toward black opens. Default 0, the authored grade. */
+  AdaptiveFar: string;
 
   // Refraction band geometry
   BezelWidth: string;
@@ -362,6 +368,8 @@ export interface JivRenderStyle {
   /** Signed body tint: negative pulls toward black, positive toward white, magnitude = strength.
    *  Signed so a theme flip springs through clear glass rather than through grey. */
   Tint: number;
+  /** The resolved `AdaptiveFar`, 0 when the grade stays as authored. */
+  AdaptiveFar: number;
   BackdropBrightness: number;
   BackdropSaturation: number;
   BackdropContrast: number;

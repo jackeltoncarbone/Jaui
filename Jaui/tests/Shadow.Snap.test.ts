@@ -379,7 +379,7 @@ describe('the loop really is wired this way (the real source, not the model)', (
     // The walk probes each adaptive-shadow surface just before its own draw; `?blur-phased` hoists
     // those probes into `_phasedShadowProbes` over `_phasedBuilt`, which is that frame's FILL builds
     // -- every adaptive-shadow surface in it, because a rim plan carries `AdaptiveShadow: false`.
-    expect(JAUI).toContain('const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt);');
+    expect(JAUI).toContain('const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt, inputsSame);');
     const probes = JAUI.slice(JAUI.indexOf('private _phasedShadowProbes'));
     expect(probes.slice(0, 900)).toContain('r.MeasureShadowBackdrop(');
     expect(probes.slice(0, 900)).toContain('if (!b.Plan.AdaptiveShadow) continue;');

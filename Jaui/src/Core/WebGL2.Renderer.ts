@@ -7,7 +7,7 @@
  * backend — works on every browser, every GPU, every driver.
  */
 
-import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop } from './Renderer';
+import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop, type GlassAdapt } from './Renderer';
 import { ShaderBatch, ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
@@ -29,6 +29,7 @@ import {
   GLASS_GATE_OPEN, GlassGatesDefines,
   type GlassProgramKind, type GlassProgramsArm, type GlassRegArm, type GlassGatesArm,
 } from './Glass.Programs';
+import { ShadowTexelStep } from './Shadow.Texel';
 import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
 import { PACE_FENCE_RING, type PaceFenceSample } from './Tick.Pace';
 import {
@@ -115,6 +116,7 @@ interface _PanelLocs {
   xformTex:     WebGLUniformLocation | null;
   shadowState:    WebGLUniformLocation | null;
   shadowBackdrop: WebGLUniformLocation | null;
+  glassAdapt:     WebGLUniformLocation | null;
   // ── BORDER_DIRECT only: null on every other variant, which is why they are set
   // unconditionally beside the rest (a null location is a specified no-op).
   borderTexels:   WebGLUniformLocation | null;
@@ -159,6 +161,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   xformTex:     gl.getUniformLocation(p, 'u_XformTex'),
   shadowState:    gl.getUniformLocation(p, 'u_ShadowState'),
   shadowBackdrop: gl.getUniformLocation(p, 'u_ShadowBackdrop'),
+  glassAdapt:     gl.getUniformLocation(p, 'u_GlassAdapt'),
   borderTexels:   gl.getUniformLocation(p, 'u_BorderTexels'),
   borderTap:      gl.getUniformLocation(p, 'u_BorderTap'),
   borderGather:   gl.getUniformLocation(p, 'u_BorderGather'),
@@ -444,7 +447,7 @@ void main() {
 `;
 
 /** Surfaces whose adaptive shadow can be measured at once; past this a surface keeps its authored shadow. */
-const SHADOW_STATE_SLOTS = 64;
+export const SHADOW_STATE_SLOTS = 64;
 
 const BLIT_VERT = `#version 300 es
 precision highp float;
@@ -1110,6 +1113,8 @@ export class WebGL2Renderer implements Renderer {
     this._shadowStateFbo = null;
     this._shadowSlots.clear();
     this._shadowFreeSlots.length = 0;
+    this._stateReadPbo = null;
+    this._stateReadFence = null;
     // The restart probe's program and its two 1x1 targets belonged to the dead context too. Dropped
     // rather than rebuilt here: the probe is built ON FIRST USE (`_ensureRestartProbe`), so a
     // restore re-arms it at the next `BeginFrame` without Init needing to know the flags at all.
@@ -1409,6 +1414,7 @@ export class WebGL2Renderer implements Renderer {
     // the previous frame's restarts.
     this._sceneLedger.BeginFrame();
     this._blurPlanBeginFrame();
+    this._shadowStill = 0;
     // Same reason: these are per-frame counts, and the gate line at the end of the walk reports the
     // frame that just ran. Reset here rather than in `DiagRestartFrameEnd`, which the trace reads.
     this._sceneRestartSpread.BeginFrame();
@@ -1666,6 +1672,7 @@ export class WebGL2Renderer implements Renderer {
     scene: GpuTextureHandle | null = null,
     bgPaint?: BgPaint,
     shadowBackdrop?: ShadowBackdrop,
+    glassAdapt?: GlassAdapt,
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
@@ -1830,6 +1837,10 @@ export class WebGL2Renderer implements Renderer {
     const shadowSlot = shadowBackdrop && this._shadowStateTex ? shadowBackdrop.Slot : -1;
     gl.uniform1i(locs.shadowState, 5);
     gl.uniform2f(locs.shadowBackdrop, shadowSlot, shadowSlot >= 0 ? shadowBackdrop!.Adaptive : 0);
+    // `?glass-adapt`: set on EVERY batch, because a uniform outlives the draw that set it and the next
+    // batch on this program must not inherit a surface's slot. -1 is the authored grade.
+    const adaptSlot = glassAdapt && this._shadowStateTex && glassAdapt.Slot >= 0 && glassAdapt.OpenFar > 0 ? glassAdapt.Slot : -1;
+    gl.uniform2f(locs.glassAdapt, adaptSlot, adaptSlot >= 0 ? glassAdapt!.OpenFar : 0);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
 
@@ -3863,8 +3874,9 @@ export class WebGL2Renderer implements Renderer {
   } | null = null;
   private _shadowStateTex: WebGLTexture | null = null;
   private _shadowStateFbo: WebGLFramebuffer | null = null;
-  /** Surface → its texel in the state row, and the frame it was last measured in. */
-  private _shadowSlots = new Map<object, { Slot: number; Frame: number }>();
+  /** Surface → its texel in the state row, the frame it was last measured in, and whether that write
+   *  may have moved the texel (`Shadow.Texel`: `Gap` bounds |reading - stored| in LSBs, `Frozen` the ease it is proven still under). */
+  private _shadowSlots = new Map<object, { Slot: number; Frame: number; Gap: number; Frozen: number; Moved: boolean }>();
   private _shadowFreeSlots: number[] = [];
   private _shadowFrame = 0;
 
@@ -3897,6 +3909,7 @@ export class WebGL2Renderer implements Renderer {
     backdrop: GpuTextureHandle,
     scene: GpuTextureHandle,
     dtSeconds: number,
+    inputsSame = false,
   ): number => {
     const gl = this._gl;
     let entry = this._shadowSlots.get(key);
@@ -3904,7 +3917,7 @@ export class WebGL2Renderer implements Renderer {
     if (!entry) {
       const slot = this._shadowFreeSlots.pop();
       if (slot === undefined) return -1;
-      entry = { Slot: slot, Frame: this._shadowFrame };
+      entry = { Slot: slot, Frame: this._shadowFrame, Gap: 0, Frozen: 0, Moved: true };
       this._shadowSlots.set(key, entry);
     }
     entry.Frame = this._shadowFrame;
@@ -3944,6 +3957,12 @@ export class WebGL2Renderer implements Renderer {
     const snap = this.ShadowSnap;
     if (snap) this.ShadowSnapped++;
     const ease = fresh || snap ? 1 : 1 - Math.exp(-Math.max(0, dtSeconds) / SHADOW_EASE_SECONDS);
+    // The declaration `?blur-cache` reads (`ShadowTexelMoved`). Bookkeeping only: nothing below reads it.
+    const step = ShadowTexelStep(fresh, entry.Gap, entry.Frozen, ease, inputsSame);
+    entry.Gap = step.Gap;
+    entry.Frozen = step.Frozen;
+    entry.Moved = step.Moved;
+    if (!step.Moved) this._shadowStill++;
     if (ease >= 1) {
       gl.disable(gl.BLEND);
     } else {
@@ -4015,6 +4034,67 @@ export class WebGL2Renderer implements Renderer {
     if (timed) this._pass!.End();
     return slots;
   };
+
+  /** Did `key`'s probe write this frame possibly move its texel? True for a surface not probed this
+   *  frame, which has no bound to offer. See `Shadow.Texel`. */
+  ShadowTexelMoved = (key: object): boolean => {
+    const entry = this._shadowSlots.get(key);
+    return entry === undefined || entry.Frame !== this._shadowFrame || entry.Moved;
+  };
+
+  /** Probe writes this frame that provably left their texel where it was. */
+  get ShadowStill(): number { return this._shadowStill; }
+  private _shadowStill = 0;
+
+  // ── `?glass-adapt`'s census: the state row, read back without a stall ──
+  //
+  // The grade itself never leaves the GPU (the panel vertex stage reads the texel). Only the census
+  // wants the numbers on the CPU, so the row is copied into a pixel-pack buffer behind a fence and
+  // collected on a later frame once the fence has signalled: no `readPixels` into client memory, no
+  // wait. RGBA8, the one read format GLES guarantees for a normalized target, so each reading is to
+  // 1/255 where the texel holds 1/1023.
+  private _stateReadPbo: WebGLBuffer | null = null;
+  private _stateReadFence: WebGLSync | null = null;
+  private _stateReads = 0;
+
+  /** Copy the state row into the pack buffer, unless one is still in flight. False when nothing was
+   *  issued. Called after the frame's last draw, so it reads the texels that frame drew with. */
+  RequestShadowStateRead = (): boolean => {
+    if (this._stateReadFence !== null || this._shadowStateFbo === null) return false;
+    const gl = this._gl;
+    if (this._stateReadPbo === null) {
+      this._stateReadPbo = gl.createBuffer()!;
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this._stateReadPbo);
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, SHADOW_STATE_SLOTS * 4, gl.STREAM_READ);
+    } else {
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this._stateReadPbo);
+    }
+    const prevRead = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._shadowStateFbo);
+    gl.readPixels(0, 0, SHADOW_STATE_SLOTS, 1, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this._stateReadFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    return true;
+  };
+
+  /** Collect the read into `out` (SHADOW_STATE_SLOTS * 4 bytes) if its fence has signalled. */
+  PollShadowStateRead = (out: Uint8Array): boolean => {
+    const fence = this._stateReadFence;
+    if (fence === null) return false;
+    const gl = this._gl;
+    const status = gl.getSyncParameter(fence, gl.SYNC_STATUS) as number;
+    if (status !== gl.SIGNALED) return false;
+    gl.deleteSync(fence);
+    this._stateReadFence = null;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this._stateReadPbo);
+    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out, 0, SHADOW_STATE_SLOTS * 4);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    this._stateReads++;
+    return true;
+  };
+
+  get ShadowStateReads(): number { return this._stateReads; }
 
   EndShadowBackdropFrame = (): void => {
     for (const [key, entry] of this._shadowSlots) {

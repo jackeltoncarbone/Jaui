@@ -308,7 +308,7 @@ describe('the flag', () => {
   });
 
   it('reports the program count from the renderer, never a literal', () => {
-    expect(JAUI).toContain("import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS, GLASS_GATE_PROGRAMS } from './WebGL2.Renderer';");
+    expect(JAUI).toContain("import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS, GLASS_GATE_PROGRAMS, SHADOW_STATE_SLOTS } from './WebGL2.Renderer';");
     expect(JAUI).not.toMatch(/jaui:flat-program[^`]*programs=3/);
   });
 });

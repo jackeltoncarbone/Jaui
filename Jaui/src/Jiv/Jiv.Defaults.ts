@@ -33,6 +33,7 @@ export const DefaultJivStyle: JivStyle = {
   Refraction: '0',
   Tint: '0',
   TintTone: 'Ground',
+  AdaptiveFar: '0',
   BezelWidth: '12',
   BezelScale: '0.35',
   LightAngle: '-45',
