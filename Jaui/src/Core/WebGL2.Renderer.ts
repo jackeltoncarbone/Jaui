@@ -12,7 +12,7 @@ import { ShaderBatch, ShaderCompiler, type ShaderProgram } from './Shader.Compil
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
 import {
-  BlurPass, PyramidDepth, ChainBytes, BLUR_PROGRAMS_BOOT,
+  BlurPass, PyramidDepth, ChainBytes, BLUR_PROGRAMS_BOOT, GAUSS_PASSES, type GaussianMode,
   type ChainLimits, type AtlasBuildMember, type BackdropRect,
 } from './BlurPass';
 import { PassTimers, type PassProfile } from './Pass.Timers';
@@ -770,6 +770,19 @@ export class WebGL2Renderer implements Renderer {
    *  source, and the `k` the last of them took. 0 and 1 on every unflagged frame. */
   get PresampledBuilds(): number { return this._sceneLedger.PresampledBuilds; }
   get LastPresampleK(): number { return this._lastPresampleK; }
+  /** `?glass-gaussian`'s effect fields: builds this frame produced by the separable Gaussian, and
+   *  the render PASSES they issued. `GaussianPasses` is the one a pass-count prediction must be
+   *  read against -- `EndsByKey.blur` books one end per BUILD and cannot see a pass. 0 unflagged. */
+  get GaussianBuilds(): number { return this._sceneLedger.GaussianBuilds; }
+  get GaussianPasses(): number { return this._sceneLedger.GaussianPasses; }
+  get LastGaussianSigma(): number { return this._lastGaussianSigma; }
+  get LastGaussianFetches(): number { return this._lastGaussianFetches; }
+  get LastGaussianRefusal(): string { return this._lastGaussianRefusal; }
+  /** The Gaussian arm's temp pool, straight off the pass that holds it. */
+  get GaussTempCensus(): { Count: number; Sizes: string; Mb: number } {
+    const pass = this._blur as BlurPass | undefined;
+    return pass === undefined ? { Count: 0, Sizes: '', Mb: 0 } : pass.GaussTempCensus;
+  }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
   get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number; EndsByKey: Record<string, number> } {
     const l = this._sceneLedger;
@@ -836,6 +849,10 @@ export class WebGL2Renderer implements Renderer {
     const batch = new ShaderBatch(this._gl);
     const pass = this._tagBlur(new BlurPass(this._gl, batch, chains, limits ?? undefined), 'blur');
     const atlas = this.DiagPyramidAtlas ? pass.EnsureAtlasPrograms(batch) : 0;
+    // A REBUILT pass has no Gaussian kernel either, and `ArmFlaggedPrograms` reconciles the pool
+    // BEFORE it arms -- so without this line the arm would compile onto a pass about to be
+    // dropped and the first Gaussian build would throw.
+    const gauss = this.DiagGlassGaussian !== 'off' ? pass.EnsureGaussianProgram(batch) : 0;
     batch.Resolve();
     pass.WireLocations();
     this._blur = pass;
@@ -846,7 +863,7 @@ export class WebGL2Renderer implements Renderer {
     JTrace(`jaui:blur-pool rearmed chains=${now.Asked} max=${now.Max} budget=${now.BudgetMb}MB`
       + ` was=chains=${was.Asked},max=${was.Max},budget=${was.BudgetMb}MB`
       + ` phased=${this.DiagBlurPhased}`);
-    return BLUR_PROGRAMS_BOOT + atlas;
+    return BLUR_PROGRAMS_BOOT + atlas + gauss;
   };
 
   /** How many programs `Init`'s batch carried -- the BOOT SET, and on an unflagged page the whole
@@ -889,12 +906,17 @@ export class WebGL2Renderer implements Renderer {
     // `card-composite-backdrop-is-not-in-the-scene-target` (or any of the other seven) all leave
     // it uncompiled. Its own batch, issued and resolved here, exactly like the atlas kernels'.
     const border = this.DiagBorderDirect ? this.EnsurePanelBorderDirectProgram() : 0;
-    const late = pool + atlas + border;
+    // `_reconcileBlurPool` above compiles it onto a pass it REBUILT; this is the other case, a
+    // pool that did not move. `EnsureGaussianProgram` returns 0 when the pass already has it, so
+    // the two cannot double-count.
+    const gauss = this.DiagGlassGaussian !== 'off' ? this._blur.EnsureGaussianProgram() : 0;
+    const late = pool + atlas + border + gauss;
     if (late === 0) return;
     const reason = [
       pool > 0 ? 'blur-pool' : null,
       this.DiagPyramidAtlas ? 'pyramid-atlas' : null,
       border > 0 ? 'border-direct' : null,
+      this.DiagGlassGaussian !== 'off' ? 'glass-gaussian' : null,
     ].filter((r) => r !== null).join('+');
     JTrace(`jaui:shaders:issued n=${this._bootShaderCount} +${late}`
       + ` reason=${reason} ${JMs(performance.now() - t0)}ms`);
@@ -1022,6 +1044,8 @@ export class WebGL2Renderer implements Renderer {
     // harness's) this is false however the URL read, and `ArmFlaggedPrograms` issues them after the
     // parse instead. Either way an unflagged page never issues them. See `BlurPass._atlas`.
     if (this.DiagPyramidAtlas) this._blur.EnsureAtlasPrograms(batch);
+    // Same MAIN-THREAD-ORDER-ONLY story for `?glass-gaussian`'s single kernel.
+    if (this.DiagGlassGaussian !== 'off') this._blur.EnsureGaussianProgram(batch);
     this._compilePanelShader(batch);
     // Same MAIN-THREAD-ORDER-ONLY story, for the sixth panel variant: on that path the flag is
     // already parsed and the program joins the boot batch for free; on the worker path
@@ -2265,6 +2289,21 @@ export class WebGL2Renderer implements Renderer {
    *  bilinear, which is a picture question and Jack's to rule on. See `PresamplePlanFor`. */
   DiagGlassPresample = false;
 
+  /** `?glass-gaussian=on|off|match` -- THE PER-SURFACE GLASS BUILD AS A TWO-PASS SEPARABLE
+   *  GAUSSIAN INSTEAD OF A FOUR-HOP DUAL-FILTER CHAIN.
+   *
+   *  At the sigma a glass card authors, the field builds no pyramid (Skia, Impeller, Strugar,
+   *  Nehab all converge; `Perf/BlurLiterature.Finding.md`), and the dual filter is an
+   *  APPROXIMATION of the Gaussian this runs exactly. Half the passes, more taps -- which is
+   *  precisely why it discriminates between the two live cost models: the literature's per-PASS
+   *  one and this ledger's own per-build-sum cells.
+   *
+   *  Default `off`: it is a picture change, and a bigger one than the lane expected -- today's
+   *  chain runs at an effective sigma of 2.80 device px against an authored 8 (`GAUSS_MATCH_SIGMA`
+   *  and the kernel note beside it), so `on` is ~2.9x wider and `match` is the width-held control.
+   *  Jack has not seen either. */
+  DiagGlassGaussian: GaussianMode = 'off';
+
 
   /** Per-pass residency ceilings for the three `BlurPass` instances, or `null` for the shipped
    *  `MAX_CHAINS` / `CHAIN_BUDGET_BYTES`. Only `?blur-phased` sets it, and only because twenty
@@ -2815,12 +2854,18 @@ export class WebGL2Renderer implements Renderer {
     radius: number, minDepth?: number,
     region?: { x: number; y: number; w: number; h: number },
     presample?: boolean,
+    gaussian?: boolean,
   ): GpuTextureHandle => {
     // `?glass-presample`: the caller says whether THIS surface may re-base, because the one
     // clause `BlurPass` cannot see -- `MaxLod == 0` -- lives in the walk's `GlassBlurPlan`. The
     // flag is ANDed in here rather than trusted from the caller so a site that forgets to ask
     // can only under-arm, never over-arm; and `false` here is the unflagged call byte for byte.
     const rebase = presample === true && this.DiagGlassPresample;
+    // `?glass-gaussian`: the same shape, and the flag is ANDed in HERE rather than trusted from
+    // the caller for the same reason -- a site that forgets to ask can only under-arm, never
+    // over-arm, and `'off'` here is the unflagged call byte for byte. The walk owns the one
+    // clause this method cannot see (`MaxLod == 0`), exactly as it does for `presample`.
+    const gaussMode: GaussianMode = gaussian === true ? this.DiagGlassGaussian : 'off';
     // Bumped FIRST, before the two diagnostics return their stand-ins, so that a handle held across
     // this call reads as stale on every arm and not only on the arms that reach a `BlurPass`.
     this._backdropBuildSeq++;
@@ -2887,8 +2932,10 @@ export class WebGL2Renderer implements Renderer {
       // the two arms is the read. Reassigned rather than wrapped into the call, so the call below
       // stays the byte-for-byte baseline call the card composite's own gates pin.
       src = this._blurSrcFor(src);
-      const result = pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined, rebase);
+      const result = pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined,
+        rebase, gaussMode);
       this._notePresampled(pass);
+      this._noteGaussian(pass);
       this._lastProgram = null;
       return _wrap(result, pass.LastRegion);
     }
@@ -2896,8 +2943,10 @@ export class WebGL2Renderer implements Renderer {
     // the build: the DOWN pass reads the stand-in instead of `input`. The HANDLE is swapped, not the
     // call, so the region rides across unchanged and `pass.Blur` below is the baseline line.
     if (this.DiagBlurSrc !== null) input = _wrap(this._blurSrcFor(_unwrap(input)), _regionOf(input));
-    const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined, rebase);
+    const result = pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined,
+      rebase, gaussMode);
     this._notePresampled(pass);
+    this._noteGaussian(pass);
     // BlurPass calls `gl.useProgram` internally with its own shaders,
     // bypassing our program cache. Invalidate so the next Panel/Text
     // draw re-binds its program correctly.
@@ -3026,7 +3075,8 @@ export class WebGL2Renderer implements Renderer {
     // today its frost is 0 too, so the depth clause would have refused it anyway -- which is luck,
     // and luck is not a guard.
     if (!(refraction >= BORDER_STRAIGHT_GATHER_REFRACTION)) return null;
-    const plan = PlanBorderDirect(region, width, height, radius, maxLod, this.DiagGlassPresample);
+    const plan = PlanBorderDirect(region, width, height, radius, maxLod, this.DiagGlassPresample,
+      this.DiagGlassGaussian !== 'off');
     if (!plan.Ok) return null;
     return this._borderCopy(plan, width, height);
   };
@@ -3079,6 +3129,24 @@ export class WebGL2Renderer implements Renderer {
     this._lastPresampleK = pass.LastPresampleK;
   };
   private _lastPresampleK = 1;
+
+  /** `?glass-gaussian`: book the build the pass just ran, off what the PASS says it did rather
+   *  than off what the flag asked for. A build the plan refused (a re-based k, a kernel past the
+   *  uniform table, a `match` arm on a chain it was not calibrated against) leaves the counters at
+   *  0 and puts its reason on `LastGaussianRefusal`, so an arm that refused everything reads as
+   *  the unflagged engine instead of reading like a win. */
+  private _noteGaussian = (pass: BlurPass): void => {
+    if (!pass.LastGaussian) {
+      if (pass.LastGaussianRefusal !== '') this._lastGaussianRefusal = pass.LastGaussianRefusal;
+      return;
+    }
+    this._sceneLedger.NoteGaussian(GAUSS_PASSES);
+    this._lastGaussianSigma = pass.LastGaussianSigma;
+    this._lastGaussianFetches = pass.LastGaussianFetches;
+  };
+  private _lastGaussianSigma = 0;
+  private _lastGaussianFetches = 0;
+  private _lastGaussianRefusal = '';
 
   /** The rim built a pyramid after all - the direct path refused, or the flag is off. Booked by
    *  the walk, beside `NoteAtlasSolo`, because only the walk knows which branch it took. */

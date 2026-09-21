@@ -141,6 +141,25 @@ export class SceneReadLedger {
    *  `max(1, BackdropFrostBlur) * dpr` = 8 device px, both at `MaxLod` 0, and both regions --
    *  568x436 and 480x348 -- are far under the canvas's 15%). */
   PresampledBuilds = 0;
+  /** `?glass-gaussian`: builds this frame whose backdrop was produced by the two-pass separable
+   *  Gaussian instead of the four-hop dual-filter chain.
+   *
+   *  Booked off `BlurPass.LastGaussian` after the call rather than off the flag, for the reason
+   *  `PresampledBuilds` is: an arm in which every build hit a refusal reads 0 here instead of
+   *  reading like a win. 0 unflagged by construction -- the plan is not consulted unless the arm
+   *  asked for it. On `glass-grid` at dpr 2 it is 20 under the shipped `?border-source=fill` (the
+   *  twenty FILL builds; each rim reads its own fill's level 0 and builds nothing) and 40 under
+   *  `?border-source=scene`, where every rim builds again. */
+  GaussianBuilds = 0;
+  /** RENDER PASSES those builds issued: `GAUSS_PASSES` each, so 40 where the twenty chains they
+   *  replaced would have issued 80.
+   *
+   *  A column of its own because `EndsByKey.blur` CANNOT carry it. That counter books ONE encoder
+   *  end per build by design -- `NoteTargetBind` is called once from `ComputeBlur` and the level
+   *  binds inside a build never reach this ledger at all -- so it reads 20 on `glass-grid` under
+   *  both arms and a pass-count prediction quoted against it would be reading a column this lever
+   *  cannot move. This is the one that moves. */
+  GaussianPasses = 0;
   /** Cumulative since boot, for a reader that samples at two instants and subtracts (the `?trace`
    *  gesture meter does exactly this with the pass profile). Never reset. */
   TotalReads = 0;
@@ -173,6 +192,8 @@ export class SceneReadLedger {
     this.BorderQuadFragments = 0;
     this.AtlasDraws = 0;
     this.PresampledBuilds = 0;
+    this.GaussianBuilds = 0;
+    this.GaussianPasses = 0;
     this._written = false;
     this._writtenSinceSwitch = false;
     this.TotalFrames++;
@@ -249,5 +270,11 @@ export class SceneReadLedger {
 
   /** One build re-based onto a pre-downsampled source under `?glass-presample`. */
   NotePresampled = (): void => { this.PresampledBuilds++; };
+
+  /** One build produced its backdrop as a separable Gaussian, in `passes` render passes. */
+  NoteGaussian = (passes: number): void => {
+    this.GaussianBuilds++;
+    this.GaussianPasses += passes;
+  };
 }
 

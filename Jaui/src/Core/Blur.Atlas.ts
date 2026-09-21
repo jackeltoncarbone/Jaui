@@ -290,8 +290,16 @@ export interface AtlasCandidate {
  */
 export const AtlasAdmitsMember = (
   c: AtlasCandidate, width: number, height: number, presample: boolean = false,
+  gaussian: boolean = false,
 ): boolean => {
   if (c.Radius <= 0) return false;
+  // `?glass-gaussian` and the atlas cannot both own how a member's backdrop is produced. The
+  // atlas relocates the CHAIN's texels -- its slot grid, its `u_Slot` / `u_Clamp` and its
+  // `PyramidPasses` all assume four hops into levels it packed -- and a Gaussian build has no
+  // levels above 0 and no hops to pack. Refused here as well as by name in the flag block, on
+  // this file's own principle: an admission rule that consults a different plan than the pass it
+  // is planning for is the bug `BaseDownsampleFactor`'s module comment warns about.
+  if (gaussian) return false;
   if (c.MaxLod > 0) return false;
   if (BaseDownsampleFactor(c.Radius, width, height, c.Region) !== 1) return false;
   // Refusal 2 again, asked of the plan the build will actually take. `?glass-presample` lifts
@@ -332,10 +340,17 @@ export const AtlasAdmitsMember = (
 export const PlanBackdropAtlas = (
   members: readonly BackdropAtlasMember[],
   width: number, height: number, radius: number,
-  opts?: { IgnoreSeparation?: boolean; Limits?: AtlasLimits; MaxLod?: number; Presample?: boolean },
+  opts?: {
+    IgnoreSeparation?: boolean; Limits?: AtlasLimits; MaxLod?: number; Presample?: boolean;
+    Gaussian?: boolean;
+  },
 ): BackdropAtlasPlan | null => {
   if (members.length < 2) return null;
   if (radius <= 0) return null;
+  // Refused for the WHOLE plan rather than per member, for the reason `Presample` is three lines
+  // below: one member taking a Gaussian and its neighbours taking the chain is a mixed backdrop
+  // across a class this planner exists to keep uniform.
+  if (opts?.Gaussian === true) return null;
   // `?glass-presample` and the atlas cannot both own a member's k. Refused for the whole plan
   // rather than per member, because one member re-basing and its neighbours not is a MIXED k
   // across the class, which this planner refuses three lines below for the union's own reason.

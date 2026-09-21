@@ -371,6 +371,7 @@ export interface Renderer {
     minDepth?: number,
     region?: { x: number; y: number; w: number; h: number },
     presample?: boolean,
+    gaussian?: boolean,
   ): GpuTextureHandle;
 
   /** Generate mipmaps on the blur output so glass + progressive blur can

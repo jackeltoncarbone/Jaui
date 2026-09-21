@@ -232,6 +232,216 @@ void main() {
 }
 `;
 
+// ── `?glass-gaussian`: THE TWO-PASS SEPARABLE GAUSSIAN, LINEAR-SAMPLED ────────────────────────
+//
+// The dual filter above is an APPROXIMATION of a Gaussian (Bjørge measures 49.78 dB PSNR against
+// one, at a 97 px kernel) engineered for LARGE radii, where eight passes amortise a kernel a
+// direct convolution could not reach. At the sigma a glass card actually authors -- 8 device px
+// at dpr 2 -- the field does not build a pyramid at all: Skia downsamples only above sigma 4 and
+// below that does ONE pass "rather than pay the cost of render pass switches", Impeller returns
+// scale 1.0 at sigma <= 4, Strugar finds downsampling worth it only "for 7x7 and above", Nehab
+// finds direct convolution fastest at <= 65 taps. See `Perf/BlurLiterature.Finding.md`.
+//
+// So this kernel is the thing the chain approximates, run in two passes instead of four: a true
+// Gaussian at the surface's own sigma, radius `ceil(3 * sigma)`, with Rakos linear sampling (one
+// bilinear fetch placed between a texel PAIR at `w2 / (w1 + w2)` returns their weighted sum, so a
+// 49-tap kernel is 25 fetches). It is ONE program for both directions: `u_Step` is the axis, one
+// source texel long, and the fetch table arrives as two uniform arrays.
+//
+// WHY A UNIFORM-BOUNDED LOOP RATHER THAN A PROGRAM PER KERNEL WIDTH. A program per width would be
+// a compile on the first frame that has glass -- the frame every boot measurement reads -- for a
+// table that changes only when the authored blur or the dpr does. GLSL ES 3.00 allows a loop
+// bounded by a uniform int and dynamic indexing of a uniform array, so one program covers every
+// sigma this engine can produce and the table is three `uniform*v` calls per build.
+//
+// EVERY TAP IS `textureLod(..., 0.0)` for the reason the note above `DOWN_FRAG` gives, and it is
+// load-bearing here for a second reason: the V pass reads a temp this pass just wrote, and a
+// derivative-selected LOD on a non-mip-complete source is exactly the black fixed point that note
+// describes.
+const GAUSS_FRAG = (maxFetches: number): string => `#version 300 es
+precision highp float;
+in vec2 v_Uv;
+uniform sampler2D u_Tex;
+uniform vec2 u_Step;                 // ONE source texel along this pass's axis, and zero across it
+uniform int u_Fetches;               // how many of the tables below are live
+uniform float u_Off[${maxFetches}];  // signed fetch offsets, in SOURCE texels
+uniform float u_Wt[${maxFetches}];   // fetch weights, summing to 1
+out vec4 fragColor;
+void main() {
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < u_Fetches; i++) {
+        sum += textureLod(u_Tex, v_Uv + u_Step * u_Off[i], 0.0).rgb * u_Wt[i];
+    }
+    fragColor = vec4(sum, 1.0);
+}
+`;
+
+/** Fetches ONE 1D Gaussian pass may issue, and therefore the size of the two uniform arrays.
+ *
+ *  64 fetches is `ceil(3 * sigma) <= 62`, i.e. sigma up to 20.67 device px -- `Blur(10.3pt)` at
+ *  dpr 2, well past the 4pt every glass class in this app authors. A kernel
+ *  that needs more is REFUSED by name (`PlanGaussian`) and the build takes the chain, rather than
+ *  silently running a truncated Gaussian: a clipped kernel is a different blur wearing this
+ *  arm's number.
+ *
+ *  It is a ceiling on the ARRAY, not on the loop: the loop runs `u_Fetches` times, which at a
+ *  card's sigma is 25. */
+export const GAUSS_MAX_FETCHES = 64;
+
+/** Programs only a `?glass-gaussian` arm compiles. One, and it serves both directions. */
+export const BLUR_PROGRAMS_GAUSSIAN = 1;
+
+/** A 1D Gaussian reduced to bilinear fetches. `Offsets` and `Weights` are `GAUSS_MAX_FETCHES`
+ *  long whatever `Fetches` says, because they are uploaded whole and the shader reads the live
+ *  prefix -- a shorter array would leave the driver's copy holding the previous build's tail. */
+export interface GaussianKernel {
+  /** The sigma the kernel was built at, in SOURCE texels. */
+  Sigma: number;
+  /** `ceil(3 * sigma)` -- the furthest texel the kernel reads, and the temp's vertical padding. */
+  Radius: number;
+  /** `2 * Radius + 1`: the DISCRETE taps a naive convolution would take. */
+  Taps: number;
+  /** `1 + 2 * ceil(Radius / 2)`: the bilinear fetches this kernel actually issues. */
+  Fetches: number;
+  Offsets: Float32Array;
+  Weights: Float32Array;
+}
+
+/**
+ * The linear-sampled Gaussian for one sigma (Rakos, rastergrid 2010).
+ *
+ * The discrete kernel is `w(i) = exp(-i^2 / 2 sigma^2)` over `i = -R..R`, normalised to sum 1.
+ * Texel 0 is fetched alone; texels are then PAIRED outward `(1,2), (3,4), ...`, and a pair is one
+ * bilinear fetch at `o = (i*w_i + (i+1)*w_{i+1}) / (w_i + w_{i+1})` weighted by `w_i + w_{i+1}`,
+ * because a bilinear fetch at `o` returns `(1 - (o - i)) * T[i] + (o - i) * T[i+1]` -- which at
+ * that `o` is exactly the pair's weighted mean. An odd `R` leaves the outermost texel unpaired and
+ * it is fetched on its own centre.
+ *
+ * The weights sum to 1 by construction (the fetch weights are a partition of the tap weights), so
+ * the pass is a convex combination and cannot leave [0, 1] -- which is what makes an RGB10_A2
+ * intermediate safe between the two passes.
+ *
+ * EXPORTED AND PURE because the CPU port in `tests/` has to model THIS table rather than a second
+ * derivation of it: the picture prediction is only worth reading if the kernel it predicts for is
+ * the kernel the GPU runs.
+ */
+export const GaussianKernelFor = (sigma: number): GaussianKernel => {
+  if (!(sigma > 0)) throw new Error(`[Jaui] GaussianKernelFor needs sigma > 0, got ${sigma}`);
+  const R = Math.ceil(3 * sigma);
+  const w: number[] = [];
+  let total = 0;
+  for (let i = 0; i <= R; i++) {
+    const v = Math.exp(-(i * i) / (2 * sigma * sigma));
+    w.push(v);
+    total += i === 0 ? v : 2 * v;
+  }
+  for (let i = 0; i <= R; i++) w[i] /= total;
+
+  const offsets = new Float32Array(GAUSS_MAX_FETCHES);
+  const weights = new Float32Array(GAUSS_MAX_FETCHES);
+  let n = 0;
+  offsets[n] = 0; weights[n] = w[0]; n++;
+  for (let i = 1; i <= R; i += 2) {
+    const pair = i + 1 <= R;
+    const wt = pair ? w[i] + w[i + 1] : w[i];
+    const off = pair ? (i * w[i] + (i + 1) * w[i + 1]) / wt : i;
+    offsets[n] = off; weights[n] = wt; n++;
+    offsets[n] = -off; weights[n] = wt; n++;
+  }
+  return { Sigma: sigma, Radius: R, Taps: 2 * R + 1, Fetches: n, Offsets: offsets, Weights: weights };
+};
+
+/** `?glass-gaussian`'s three arms. `match` is the DIAGNOSTIC one -- see `PlanGaussian`. */
+export type GaussianMode = 'off' | 'on' | 'match';
+
+export interface GaussianBuildPlan { Ok: true; Sigma: number; Kernel: GaussianKernel }
+export interface GaussianRefusal { Ok: false; Why: string }
+
+/** The depth and tap offset `?glass-gaussian=match`'s calibration was fitted at: a glass card at
+ *  dpr 2 or dpr 1.5 (`PyramidDepth(8) == PyramidDepth(6) == 2`, tap offset pinned by the 0.7
+ *  floor at both). Any other shape is REFUSED under `match` rather than silently given a ratio
+ *  fitted to a chain it is not running. */
+export const GAUSS_MATCH_DEPTH = 2;
+export const GAUSS_MATCH_TAP_OFFSET = 0.7;
+
+/** WHAT TODAY'S CHAIN ACTUALLY DELIVERS AT `(depth 2, t 0.7)`, IN DEVICE PX. **NOT the authored
+ *  radius, and not a fraction of it: an ABSOLUTE sigma, because the chain's operator is a
+ *  function of the depth and the tap offset ALONE.** Radius reaches it only through those two,
+ *  and across the whole band `3 < radius <= 8.4` both are pinned (`PyramidDepth` returns 2 for
+ *  `3 < radius <= 9`; the tap offset is held at its own 0.7 FLOOR up to `radius = 8.4`). So every
+ *  glass card in this app, at dpr 2 (radius 8) and at dpr 1.5 (radius 6) alike, is blurred by the
+ *  SAME kernel -- and it is this one, not the one its sheet asked for.
+ *
+ *  Measured on the CPU port (`tests/Gaussian.Kernel.Source.ts`, `ChainKernel1D`) as the second
+ *  central moment of the chain's own effective 1D kernel, recovered from four impulse responses
+ *  by the operator's 4-periodicity rather than fitted. `tests/Glass.Gaussian.test.ts` recomputes
+ *  it and pins this constant, so it cannot drift away from the kernel it describes.
+ *
+ *  THE KERNEL IS NOT A GAUSSIAN AND NOT CLOSE TO ONE. It is a symmetric four-step STAIRCASE with
+ *  4-device-px treads -- weights `0.129023, 0.098841, 0.016454, 0.005681` outward -- of finite
+ *  support +-8 px, kurtosis 2.78 against a Gaussian's 3. Its four output phases share mass, mean
+ *  and variance exactly but NOT shape (peak 0.1290 on two phases and 0.1470 on the other two, a
+ *  difference of 63% of peak), so the blur a fragment receives beats with a period of 4 device px
+ *  across the card. That is the "more smoothly" half of Jack's question with a number on it.
+ *
+ *  It is why the picture change this arm makes has TWO parts and they are shot separately:
+ *  `on` runs the AUTHORED radius as sigma -- the blur the sheet asked for, and ~2.9x WIDER than
+ *  what ships -- while `match` runs this sigma so the SHAPE difference can be measured with the
+ *  width held. See `Perf/BlurGaussian.Finding.md`. */
+export const GAUSS_MATCH_SIGMA = 2.798809271;
+
+/**
+ * May THIS build run as a separable Gaussian, and at what sigma?
+ *
+ * Every refusal is NAMED and the build takes the chain, which is the shipped picture -- a
+ * refusal costs the arm a build, never a rendering. The names reach the gate line, because an
+ * arm in which every build refused is the vacuous shape this ledger keeps being bitten by.
+ *
+ * `depth` and `tapOffset` are the chain's, and only `match` reads them: `on` runs the sigma the
+ * sheet authored and does not care what the chain would have done with it.
+ */
+export const PlanGaussian = (
+  radius: number, mode: GaussianMode, depth: number, tapOffset: number,
+): GaussianBuildPlan | GaussianRefusal => {
+  if (mode === 'off') return { Ok: false, Why: 'mode-off' };
+  if (!(radius > 0)) return { Ok: false, Why: 'sharp-root' };
+  if (mode === 'match') {
+    if (depth !== GAUSS_MATCH_DEPTH) return { Ok: false, Why: `match-depth${depth}` };
+    if (tapOffset !== GAUSS_MATCH_TAP_OFFSET) {
+      return { Ok: false, Why: `match-tap-offset-${tapOffset}` };
+    }
+  }
+  const sigma = mode === 'match' ? GAUSS_MATCH_SIGMA : radius;
+  const radiusPx = Math.ceil(3 * sigma);
+  const fetches = 1 + 2 * Math.ceil(radiusPx / 2);
+  if (fetches > GAUSS_MAX_FETCHES) {
+    return { Ok: false, Why: `kernel-${fetches}-fetches-over-${GAUSS_MAX_FETCHES}` };
+  }
+  return { Ok: true, Sigma: sigma, Kernel: GaussianKernelFor(sigma) };
+};
+
+/** Passes ONE Gaussian build issues: horizontal, then vertical. The number the whole hypothesis
+ *  test turns on -- today's chain issues four for the same level 0. */
+export const GAUSS_PASSES = 2;
+
+/** Destination pixels and bilinear fetches one Gaussian build writes and reads, against
+ *  `PyramidFill` / the chain's tap arithmetic. The H pass writes a temp padded by the kernel
+ *  radius top and bottom (see `_blurGaussian`); the V pass writes level 0 at the rect's own size.
+ *  Both issue `Fetches` bilinear reads per destination pixel. */
+export const GaussianCost = (
+  rectW: number, rectH: number, tempH: number, fetches: number,
+): { Fill: number; Reads: number } => {
+  const fill = rectW * tempH + rectW * rectH;
+  return { Fill: fill, Reads: fill * fetches };
+};
+
+/** Distinct temp sizes the Gaussian arm keeps a framebuffer for, and the storage they may hold
+ *  between them. `glass-grid` needs ONE (twenty fills at 568x484); a page whose glass surfaces
+ *  genuinely differ in size gets four before the oldest is dropped, on the same argument
+ *  `_prePairs` makes -- a shared temp would `Resize` (a full `texImage2D`) at every build. */
+export const GAUSS_TEMPS_MAX = 4;
+export const GAUSS_TEMP_BUDGET_BYTES = 8 * 1024 * 1024;
+
 // 9 levels: covers LOD 0..8 with dual-filter quality. Progressive blur
 // samples up to LOD ~6 for heavy BackdropFrostBlur settings; extra headroom
 // keeps the smooth mipmap chain populated deeper than we'll typically read.
@@ -677,6 +887,12 @@ export class BlurPass {
    *  unflagged page never issues them at all. */
   private _atlas: _AtlasPrograms | null = null;
   private _atlasWired = false;
+  /** The separable-Gaussian kernel, or null on every pass that has not been asked for it -- which
+   *  is EVERY pass on an unflagged page, for the reason `_atlas` is null there. Compiled by
+   *  `EnsureGaussianProgram` when `?glass-gaussian` arms, off `WebGL2Renderer.ArmFlaggedPrograms`,
+   *  which is after the URL is parsed and before the first tick. */
+  private _gauss: ShaderProgram | null = null;
+  private _gaussWired = false;
   private _quad: QuadGeometry;
   /** The instanced path's own VAO, its own copy of the unit quad, and the instance buffer. Its own
    *  copy because `QuadGeometry` is shared by every draw site in the engine and attributes 1..5 at
@@ -730,6 +946,21 @@ export class BlurPass {
   private _lastPresampleK: number = 1;
   get LastPresampled(): boolean { return this._lastPresampled; }
   get LastPresampleK(): number { return this._lastPresampleK; }
+  /** `?glass-gaussian`: did the LAST `Blur` call take the two-pass separable Gaussian? Read by
+   *  the renderer on the line after the call and booked to the ledger there, on the same terms as
+   *  `LastPresampled`: the counter names builds that actually ran the Gaussian rather than builds
+   *  that asked to, so an arm every build refused reads 0 instead of reading like a win. */
+  private _lastGaussian: boolean = false;
+  /** The sigma and fetch count of the last Gaussian build, and -- when a build ASKED and was
+   *  turned down -- the clause that refused it. The gate line prints all three: a refusal that
+   *  only shows up as `builds=0` does not say which of the five clauses produced it. */
+  private _lastGaussianSigma: number = 0;
+  private _lastGaussianFetches: number = 0;
+  private _lastGaussianRefusal: string = '';
+  get LastGaussian(): boolean { return this._lastGaussian; }
+  get LastGaussianSigma(): number { return this._lastGaussianSigma; }
+  get LastGaussianFetches(): number { return this._lastGaussianFetches; }
+  get LastGaussianRefusal(): string { return this._lastGaussianRefusal; }
   /** Single FBO reused for the attach-mip-and-blit dance in
    *  GenerateOutputMipmap. Created lazily on first use. */
   private _mipBlitFbo: WebGLFramebuffer | null = null;
@@ -749,6 +980,17 @@ export class BlurPass {
    *  surfaces genuinely differ in size falls back to today's behaviour (a resize per build)
    *  rather than growing a map that outlives the flag. */
   private _prePairs = new Map<string, [Framebuffer, Framebuffer]>();
+  /** `?glass-gaussian`'s intermediate: the horizontal pass's destination, ONE PER SIZE, keyed
+   *  `WxH` on the TALL rect (the region padded by the kernel radius top and bottom). Same
+   *  argument as `_prePairs` one line up -- a shared temp would `Resize`, and `Resize` is a whole
+   *  `texImage2D`, at every build whose region differs. `glass-grid` needs exactly one.
+   *
+   *  Beside the chain pool rather than inside it because it is not a chain: it holds one level,
+   *  it is never sampled by a consumer, and it is dead the instant the vertical pass has read it.
+   *  Its bytes are accounted and capped on the same two ceilings the chain pool uses
+   *  (`GAUSS_TEMPS_MAX`, `GAUSS_TEMP_BUDGET_BYTES`) and evicted least-recently-used, so an arm
+   *  cannot grow storage the census cannot see. */
+  private _gaussTemps = new Map<string, { Fb: Framebuffer; Bytes: number; Used: number }>();
   /** Where the last pyramid's texels sit on screen. Consumers read it off the returned
    *  texture handle and map their screen UV through it before sampling. */
   private _lastRegion: BackdropRegion = BACKDROP_REGION_FULL;
@@ -788,6 +1030,12 @@ export class BlurPass {
   private _usiTexLoc: WebGLUniformLocation | null = null;
   private _usiOffLoc: WebGLUniformLocation | null = null;
   private _usiDstLoc: WebGLUniformLocation | null = null;
+  private _gTexLoc: WebGLUniformLocation | null = null;
+  private _gSrcLoc: WebGLUniformLocation | null = null;
+  private _gStepLoc: WebGLUniformLocation | null = null;
+  private _gFetchLoc: WebGLUniformLocation | null = null;
+  private _gOffLoc: WebGLUniformLocation | null = null;
+  private _gWtLoc: WebGLUniformLocation | null = null;
 
   /**
    * `batch` joins the blur's three programs to a caller's compile batch so all of them reach the
@@ -912,6 +1160,56 @@ export class BlurPass {
     return BLUR_PROGRAMS_ATLAS;
   };
 
+  /** Has the separable-Gaussian kernel been compiled on this pass? */
+  get GaussianProgramCompiled(): boolean { return this._gauss !== null; }
+
+  /**
+   * Compile the ONE kernel a `?glass-gaussian` arm binds, and return how many were issued (0 if
+   * this pass already has it, so the caller's mark cannot double-count).
+   *
+   * Same placement argument as `EnsureAtlasPrograms`, and for the same three reasons: not at boot
+   * (the flag is off by default and the program is dead on an unflagged page), not on first use
+   * (that lands on the first frame that has glass -- the frame every boot measurement reads), but
+   * at the moment the flag ARMS, from `WebGL2Renderer.ArmFlaggedPrograms`.
+   */
+  EnsureGaussianProgram = (batch?: ShaderBatch): number => {
+    if (this._gauss !== null) return 0;
+    const b = batch ?? new ShaderBatch(this._gl);
+    this._gauss = b.Add(VERT, GAUSS_FRAG(GAUSS_MAX_FETCHES));
+    if (batch === undefined) { b.Resolve(); this._wireGaussianLocations(); }
+    return BLUR_PROGRAMS_GAUSSIAN;
+  };
+
+  /** The Gaussian kernel, or a throw naming exactly what was not armed. A silent fallback to the
+   *  chain would hand the arm the unflagged picture under the arm's own name -- the vacuous shape
+   *  this ledger keeps being bitten by -- and price it as though two passes had run. */
+  private _gaussianProgramOrThrow = (): ShaderProgram => {
+    const g = this._gauss;
+    if (g === null) {
+      throw new Error('[Jaui] a Gaussian build ran on a BlurPass whose Gaussian kernel was never'
+        + ' compiled. It is issued when ?glass-gaussian arms, not at boot:'
+        + ' call EnsureGaussianProgram (WebGL2Renderer.ArmFlaggedPrograms does it off the flag).');
+    }
+    return g;
+  };
+
+  private _wireGaussianLocations = (): void => {
+    const gl = this._gl;
+    const g = this._gauss;
+    if (g === null) return;
+    this._gaussWired = true;
+    this._gTexLoc = gl.getUniformLocation(g.Program, 'u_Tex');
+    this._gSrcLoc = gl.getUniformLocation(g.Program, 'u_SrcRect');
+    this._gStepLoc = gl.getUniformLocation(g.Program, 'u_Step');
+    this._gFetchLoc = gl.getUniformLocation(g.Program, 'u_Fetches');
+    // An ARRAY uniform's location is the location of its element 0, and `uniform1fv` against it
+    // writes the whole array from there. `u_Off[0]` is the name GL ES 3.0 guarantees resolves;
+    // the bare `u_Off` is permitted and resolves to the same place on every implementation this
+    // engine runs on, but the guaranteed spelling is the one that cannot come back null.
+    this._gOffLoc = gl.getUniformLocation(g.Program, 'u_Off[0]');
+    this._gWtLoc = gl.getUniformLocation(g.Program, 'u_Wt[0]');
+  };
+
   /** The atlas kernels, or a throw naming exactly what was not armed. A silent fallback to the
    *  plain kernels would paint one member's pyramid over the whole atlas and read as a blur bug. */
   private _atlasProgramsOrThrow = (): _AtlasPrograms => {
@@ -942,6 +1240,7 @@ export class BlurPass {
     // the programs joined a batch the RENDERER resolves, and this is the call that follows it.
     const atlas = this._atlas;
     if (atlas !== null && !this._atlasWired) this._wireAtlasLocations(atlas);
+    if (this._gauss !== null && !this._gaussWired) this._wireGaussianLocations();
   };
 
   private _wireAtlasLocations = (a: _AtlasPrograms): void => {
@@ -1008,6 +1307,16 @@ export class BlurPass {
    * (`PresamplePlanFor`), and refused outright when `baseFactor` pins k -- a pin and a lifted
    * gate are two answers to the same number. The caller is responsible for the one clause this
    * method cannot see, `MaxLod == 0`; see `PresamplePlanFor`.
+   *
+   * `gaussian` is `?glass-gaussian`, and it replaces the CHAIN -- not the region, not the rect,
+   * not the pool and not what the consumer reads. The rect is resolved on the chain's own phase
+   * above, level 0 comes back the same size out of the same pooled chain, and `LastRegion` is the
+   * same map, so `Jiv.Panel.frag` takes the identical single bilinear tap it always did. What
+   * moves is between those two facts: two passes at native resolution with a true Gaussian
+   * instead of four hops of the dual filter. Refused by name (`PlanGaussian`, and the two clauses
+   * below) with the build falling back to the chain, which is the shipped picture. The caller is
+   * responsible for `MaxLod == 0`, which this method cannot see: a Gaussian build writes level 0
+   * and nothing above it.
    */
   Blur = (
     input: WebGLTexture,
@@ -1018,8 +1327,13 @@ export class BlurPass {
     region?: BackdropRect,
     baseFactor?: number,
     presample: boolean = false,
+    gaussian: GaussianMode = 'off',
   ): WebGLTexture => {
     const gl = this._gl;
+    this._lastGaussian = false;
+    this._lastGaussianSigma = 0;
+    this._lastGaussianFetches = 0;
+    this._lastGaussianRefusal = '';
 
     // The σ-adaptive factor and the pyramid depth both have to be known BEFORE the region is
     // resolved: together they set the downsample grid the region's origin must land on.
@@ -1094,6 +1408,30 @@ export class BlurPass {
     // Keep tap-offset near 1.0 — wider offsets create the visible "oil pastel"
     // striations (tap centers drift apart faster than the overlap can cover).
     const tapOffset = Math.max(0.7, Math.min(1.3, Math.max(1, coarseRadius) / baseSigma));
+
+    // ── `?glass-gaussian`: TWO PASSES AT NATIVE RESOLUTION INSTEAD OF THE CHAIN ────────────────
+    //
+    // HERE, and not earlier, because `depth` and `tapOffset` are what the diagnostic `match` arm
+    // is calibrated against, and `k` is what the two clauses below refuse on. Everything above
+    // this line -- the plan, the factor, the depth, the rect, the scale -- is the unflagged
+    // build's, deliberately: the arm must not be able to move the region a consumer maps through.
+    //
+    // The two clauses are the ones a Gaussian cannot honour rather than merely cost fill:
+    //   - `k > 1`: the build re-bases onto a pre-downsampled source and level 0 comes back at
+    //     `1/k` resolution. This kernel writes level 0 at the RECT's own density; running it on a
+    //     coarse base would be a different sigma AND a different level-0 size than the rect says.
+    //   - a presample plan: the same thing, asked of `?glass-presample`'s lifted gate rather than
+    //     of the shipped one. Refused here as well as in the flag block, on the principle
+    //     `Border.Direct` already carries -- an admission rule that consults a different k than
+    //     the pass it is planning for is the bug `BaseDownsampleFactor`'s comment warns about.
+    if (gaussian !== 'off') {
+      const plan = k !== 1 ? { Ok: false as const, Why: `pre-downsample-k${k}` }
+        : pre !== null ? { Ok: false as const, Why: `presample-k${pre.K}` }
+        : PlanGaussian(radius, gaussian, depth, tapOffset);
+      if (plan.Ok) return this._blurGaussian(input, width, height, rect, scaleX, scaleY, plan);
+      this._lastGaussianRefusal = plan.Why;
+    }
+
     // One bracket spans the pre-downsample AND the pyramid's down hops: they are one chain, and
     // splitting them would put a query boundary in the middle of a ping-pong whose tile work
     // resolves at the far end of it.
@@ -1193,6 +1531,105 @@ export class BlurPass {
     if (timedUp) this.Timers!.End();
     this._lastRegion = this._region(rect, scaleX, scaleY);
 
+    return this._levels[0].Texture;
+  };
+
+  /**
+   * ── THE TWO PASSES ──────────────────────────────────────────────────────────────────────────
+   *
+   * Pass H reads the LIVE SCENE through `u_SrcRect`, exactly as the chain's first DOWN hop does,
+   * and writes a temp of the region's WIDTH and the region's height PADDED by the kernel radius
+   * top and bottom. Pass V reads the temp and writes level 0 of the pooled chain the consumer
+   * already samples. Two passes, two binds, one scene read -- against the chain's four, four and
+   * one.
+   *
+   * WHY THE TEMP IS TALLER THAN THE REGION. The horizontal pass reads the canvas, so its taps at
+   * +-R leave the region and land on real scene texels for free. The vertical pass reads the
+   * TEMP, so its taps at +-R leave the temp -- and a temp sized to the region would hand them
+   * CLAMP_TO_EDGE's replicated border row instead of the scene. Padding the temp by R makes the
+   * vertical taps read filtered scene everywhere the canvas has scene to give, and the padding is
+   * clamped to the canvas so that at a screen edge the fallback is the same edge replication the
+   * chain's region-sized levels already take there.
+   *
+   * WHY THE MAPPING IS EXACT, which Rakos's linear sampling REQUIRES (Skia will not linear-sample
+   * under anything but an identity or an integer translation, because a fractional one moves the
+   * pair's bilinear weight off the weight the table computed):
+   *
+   *   H: destination pixel i, source u = `rect.X/width + ((i+0.5)/rect.W) * (rect.W/width)`
+   *      = `(rect.X + i + 0.5) / width` -- source texel centre `rect.X + i`, and `rect.X` is an
+   *      integer because `ResolveRegionRect` floors it onto the phase grid. Identity plus an
+   *      integer translation, exactly. Likewise `y0`, an integer by construction below.
+   *   V: destination pixel j, source v = `padBelow/tempH + ((j+0.5)/rect.H) * (rect.H/tempH)`
+   *      = `(padBelow + j + 0.5) / tempH` -- temp texel centre `padBelow + j`, `padBelow` an
+   *      integer, and x is `(i+0.5)/rect.W` because the temp is the region's own width.
+   *
+   * Asserted arithmetically in `tests/Glass.Gaussian.test.ts` rather than left to this comment.
+   *
+   * THE TIMER BRACKETS ARE THE CHAIN'S, `blur-down` and `blur-up`, because `PassClass` is a
+   * closed union this lane does not own. The mapping is "the pass that reads the scene" and "the
+   * pass that writes level 0", which is what those two rows mean on the chain as well.
+   */
+  private _blurGaussian = (
+    input: WebGLTexture, width: number, height: number,
+    rect: RegionRect, scaleX: number, scaleY: number, plan: GaussianBuildPlan,
+  ): WebGLTexture => {
+    const gl = this._gl;
+    const prog = this._gaussianProgramOrThrow();
+    const k = plan.Kernel;
+
+    // The tall rect, clamped to the canvas. Integers throughout: `rect.YBottom` and `rect.H` are
+    // on the phase grid and `k.Radius` is a `ceil`.
+    const y0 = Math.max(0, rect.YBottom - k.Radius);
+    const y1 = Math.min(height, rect.YBottom + rect.H + k.Radius);
+    const tempH = y1 - y0;
+    const padBelow = rect.YBottom - y0;
+
+    // ALLOCATE BOTH TARGETS BEFORE EITHER PASS. `_useChain` can build a whole chain and
+    // `_useGaussTemp` a whole texture, and doing that between the two draws would put an
+    // allocation inside the bracket that is measuring them.
+    this._useChain(rect.W, rect.H);
+    this._levels[0].Resize(rect.W, rect.H);
+    const temp = this._useGaussTemp(rect.W, tempH);
+
+    gl.useProgram(prog.Program);
+    gl.uniform1i(this._gTexLoc, 0);
+    gl.uniform1i(this._gFetchLoc, k.Fetches);
+    // THE LIVE PREFIX, as a view rather than a copy. Uploading all `GAUSS_MAX_FETCHES` would
+    // match the declared array size exactly and be legal -- but only while the linker keeps the
+    // array at its declared size, and a driver that shrank it to the elements it could prove were
+    // read would turn the call into an INVALID_OPERATION and leave the kernel holding the
+    // previous build's table. A count at or under the active size is legal under every reading of
+    // GL ES 3.0, and the loop runs `u_Fetches` times, so the tail is never read either way.
+    gl.uniform1fv(this._gOffLoc, k.Offsets.subarray(0, k.Fetches));
+    gl.uniform1fv(this._gWtLoc, k.Weights.subarray(0, k.Fetches));
+
+    const timedH = this.Timers !== null && this.Timers.Begin('blur-down');
+    this._bindTarget(temp, 'gauss-h');
+    gl.uniform4f(this._gSrcLoc, rect.X / width, y0 / height, rect.W / width, tempH / height);
+    gl.uniform2f(this._gStepLoc, 1 / width, 0);
+    gl.bindTexture(gl.TEXTURE_2D, input);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    if (timedH) this.Timers!.End();
+
+    const timedV = this.Timers !== null && this.Timers.Begin('blur-up');
+    this._bindTarget(this._levels[0], 'l0');
+    gl.uniform4f(this._gSrcLoc, 0, padBelow / tempH, 1, rect.H / tempH);
+    gl.uniform2f(this._gStepLoc, 0, 1 / tempH);
+    gl.bindTexture(gl.TEXTURE_2D, temp.Texture);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._target('default');
+    if (timedV) this.Timers!.End();
+
+    // DEPTH 0, and it is the truth rather than a placeholder: this build wrote level 0 and no
+    // level above it. The caller's `GenerateBlurMipmap(0)` takes its `maxLod <= 0` branch and
+    // calls `DisableMipmap`, which is what it already did for every glass build.
+    this._lastDepth = 0;
+    this._lastGaussian = true;
+    this._lastGaussianSigma = plan.Sigma;
+    this._lastGaussianFetches = k.Fetches;
+    this._lastRegion = this._region(rect, scaleX, scaleY);
     return this._levels[0].Texture;
   };
 
@@ -1827,6 +2264,48 @@ export class BlurPass {
     }
     return pair;
   };
+
+  /** The Gaussian arm's horizontal-pass temp for a tall rect, allocated once and kept.
+   *  See `_gaussTemps`: one per size, LRU over the same two kinds of ceiling the chain pool uses,
+   *  and never the one just handed out. */
+  private _useGaussTemp = (w: number, h: number): Framebuffer => {
+    const key = `${w}x${h}`;
+    const tick = ++this._tick;
+    const hit = this._gaussTemps.get(key);
+    if (hit !== undefined) { hit.Used = tick; hit.Fb.Resize(w, h); return hit.Fb; }
+    const fb = new Framebuffer(this._gl, { highPrecision: true });
+    fb.Resize(w, h);
+    const fresh = { Fb: fb, Bytes: w * h * 4, Used: tick };
+    this._gaussTemps.set(key, fresh);
+    for (;;) {
+      let total = 0;
+      for (const t of this._gaussTemps.values()) total += t.Bytes;
+      if (this._gaussTemps.size <= 1) return fb;
+      if (this._gaussTemps.size <= GAUSS_TEMPS_MAX && total <= GAUSS_TEMP_BUDGET_BYTES) return fb;
+      let lruKey: string | null = null, lru = Infinity;
+      for (const [kk, t] of this._gaussTemps) {
+        if (t === fresh) continue;
+        if (t.Used < lru) { lru = t.Used; lruKey = kk; }
+      }
+      if (lruKey === null) return fb;
+      this._gaussTemps.get(lruKey)!.Fb.Dispose();
+      this._gaussTemps.delete(lruKey);
+    }
+  };
+
+  /** What the Gaussian arm's temp pool holds. Printed on the flag's gate line, because an arm
+   *  that quietly grew a second megabyte of attachment per card is an arm whose timing cell is
+   *  measuring storage as well as passes. */
+  get GaussTempCensus(): { Count: number; Sizes: string; Mb: number } {
+    let bytes = 0;
+    const sizes: string[] = [];
+    for (const [key, t] of this._gaussTemps) { bytes += t.Bytes; sizes.push(key); }
+    return {
+      Count: this._gaussTemps.size,
+      Sizes: sizes.sort().join('+'),
+      Mb: Math.round(bytes / (1024 * 1024) * 10) / 10,
+    };
+  }
 
   private _findChain = (w: number, h: number, slot: number): LevelChain | null => {
     for (let i = 0; i < this._chains.length; i++) {

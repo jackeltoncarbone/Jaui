@@ -28,6 +28,7 @@ import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, 
 // copy of the rule would be a count that can silently disagree with the pass it is counting.
 import {
   BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, MAX_CHAINS, CHAIN_BUDGET_BYTES,
+  GAUSS_PASSES, GAUSS_MATCH_SIGMA, type GaussianMode,
   type AtlasBuildMember,
 } from './BlurPass';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
@@ -207,6 +208,32 @@ export interface EmptyPanelCensus {
   /** Device pixels of those quads, clipped to the drawing buffer. THE effect field. */
   Px: number;
   /** Empty unless a flag refused the lever outright, in which case it names which. */
+  Refused: string;
+}
+
+/** `?glass-gaussian`, per rendered frame. Read `Builds` first, then `PlanRefused` -- 0 under the
+ *  flag is the unflagged engine wearing the flag's name, and the clause that produced it is the
+ *  difference between "this scene has no glass" and "every build was turned down". */
+export interface GlassGaussianCensus {
+  Armed: GaussianMode;
+  /** Builds this frame produced by the two separable passes. THE effect field. */
+  Builds: number;
+  /** `GAUSS_PASSES` -- the passes ONE such build issues, against the chain's four. */
+  Passes: number;
+  /** `Builds * Passes`: the frame's Gaussian render passes, against the 80 that twenty chains
+   *  issue. The column `EndsByKey.blur` cannot carry -- see `Scene.Ledger.GaussianPasses`. */
+  TotalPasses: number;
+  /** The sigma and the bilinear fetches per direction of the last such build. */
+  Sigma: number;
+  Fetches: number;
+  /** `EndsByKey.blur` beside it -- the control invariant. The arm removes no BUILD, so this must
+   *  read exactly what the off arm reads; a number that moved means something else moved too. */
+  Blur: number;
+  /** Megabytes of horizontal-pass temp the arm holds. Storage the arm added, on the gate. */
+  TempMb: number;
+  /** The last clause inside `PlanGaussian` that turned a build down, or empty. */
+  PlanRefused: string;
+  /** Empty unless a FLAG refused the arm outright, in which case it names which. */
   Refused: string;
 }
 
@@ -752,6 +779,20 @@ export class Canvas implements DirtyTracker {
    *  half resolution, so the final 2x reconstruction is the consumer's hardware bilinear instead
    *  of the pyramid's 8-tap tent hop. The lane does not decide that; Jack does, with images. */
   private _glassPresample: boolean = false;
+  /** `?glass-gaussian=on|off|match` -- THE PER-SURFACE GLASS BUILD AS TWO SEPARABLE PASSES.
+   *
+   *  `on` runs a true Gaussian at the AUTHORED sigma. `match` runs it at `GAUSS_MATCH_SIGMA`, the
+   *  sigma today's chain is measured to actually deliver, so the KERNEL SHAPE difference can be
+   *  shot with the width held -- the two halves of the picture change, separated, because they
+   *  turned out to be very different sizes. `off` is the engine as it ships, byte for byte.
+   *
+   *  DEFAULT OFF, and a bigger picture change than the brief anticipated: see `GAUSS_MATCH_SIGMA`
+   *  in `Core/BlurPass.ts`. Jack has not seen either arm. */
+  private _glassGaussian: GaussianMode = 'off';
+  /** The last `jaui:glass-gaussian` gate line, printed on a SHAPE change rather than per frame. */
+  private _glassGaussianLastLine = '';
+  /** Empty unless a flag refused the arm outright, in which case it names which. */
+  private _glassGaussianRefused = '';
   /** The last `jaui:glass-presample` gate line, printed on a SHAPE change rather than per frame. */
   private _glassPresampleLastLine = '';
   /** Empty unless a flag refused the arm outright, in which case it names which -- so a control
@@ -2651,7 +2692,7 @@ export class Canvas implements DirtyTracker {
               if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }
               if (this._borderDirect) (r as WebGL2Renderer).NoteBorderPyramid();
               lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,
-                this._mayPresample(plan));
+                this._mayPresample(plan), this._mayGaussian(plan));
               r.GenerateBlurMipmap(plan.MaxLod);
               r.RebindSceneTarget();
               // `?scene-restarts` / `?small-restarts`: the RIM build's insertion point, taken HERE
@@ -3171,7 +3212,7 @@ export class Canvas implements DirtyTracker {
             if (this._blurFirst || this._phasedWalk) this._blurFirstStats.Missed++;
             const _tBlur = performance.now();
             lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,
-              this._mayPresample(plan));
+              this._mayPresample(plan), this._mayGaussian(plan));
             const _tMip = performance.now();
             this._opMs.Blur += _tMip - _tBlur;
             r.GenerateBlurMipmap(plan.MaxLod);
@@ -3832,6 +3873,30 @@ export class Canvas implements DirtyTracker {
         + ` reads=${gl2.SceneReads} restarts=${gl2.SceneRestarts}`
         + ' pixels=DIFFERENT';
       if (line !== this._glassPresampleLastLine) { this._glassPresampleLastLine = line; JTrace(line); }
+    }
+
+    // `?glass-gaussian`'s gate, on the same terms: a SHAPE change, not a frame.
+    //
+    // `builds=` FIRST, for the reason the presample gate prints it first: `builds=0` under the
+    // flag is the unflagged engine wearing the flag's name, and `planRefused=` beside it names
+    // WHICH of `PlanGaussian`'s clauses produced that. `totalPasses=` is the effect field the
+    // whole hypothesis test is read against -- 40 on `glass-grid` where the twenty chains it
+    // replaced issued 80 -- and it is a column of its own because `blur=` (`EndsByKey.blur`)
+    // books one encoder end per BUILD, not per pass, so it reads 20 on BOTH arms by design and a
+    // pass prediction quoted against it would be reading a column this lever cannot move.
+    if (this._glassGaussian !== 'off' && !this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+      const gl2 = this._renderer;
+      const tmp = gl2.GaussTempCensus;
+      const line = `jaui:glass-gaussian armed=${this._glassGaussian}`
+        + ` builds=${gl2.GaussianBuilds} passes=${GAUSS_PASSES}`
+        + ` totalPasses=${gl2.GaussianPasses}`
+        + ` sigma=${gl2.LastGaussianSigma} fetches=${gl2.LastGaussianFetches}`
+        + ` blur=${gl2.SceneEndsByKey['blur'] ?? 0} switches=${gl2.SceneSwitches}`
+        + ` reads=${gl2.SceneReads} restarts=${gl2.SceneRestarts}`
+        + ` temps=${tmp.Count}:${tmp.Sizes}:${tmp.Mb}MB`
+        + ` planRefused=${gl2.LastGaussianRefusal === '' ? 'none' : gl2.LastGaussianRefusal}`
+        + ' pixels=DIFFERENT';
+      if (line !== this._glassGaussianLastLine) { this._glassGaussianLastLine = line; JTrace(line); }
     }
 
     // Every card target still holding a region of the frame lands in the scene now. The drain is
@@ -4778,14 +4843,19 @@ export class Canvas implements DirtyTracker {
     for (const c of collected) {
       // The admission rule is the PLANNER's, not a private copy here: a walk with its own idea
       // of what an atlas can hold is a walk that can hand over a member the atlas cannot build.
-      if (!AtlasAdmitsMember(c.Plan, w, h, this._glassPresample)) { a.Refused++; solo.push(c); continue; }
+      if (!AtlasAdmitsMember(c.Plan, w, h, this._glassPresample, this._glassGaussian !== 'off')) {
+        a.Refused++; solo.push(c); continue;
+      }
       const cls = byRadius.get(c.Plan.Radius);
       if (cls === undefined) byRadius.set(c.Plan.Radius, [c]); else cls.push(c);
     }
     for (const [radius, cls] of byRadius) {
       const plan = cls.length < 2 ? null : PlanBackdropAtlas(
         cls.map((c) => ({ Region: c.Plan.Region, Paint: c.Plan.Region })), w, h, radius,
-        { IgnoreSeparation: true, Limits: ATLAS_LIMITS_WIRED, MaxLod: 0, Presample: this._glassPresample },
+        {
+          IgnoreSeparation: true, Limits: ATLAS_LIMITS_WIRED, MaxLod: 0,
+          Presample: this._glassPresample, Gaussian: this._glassGaussian !== 'off',
+        },
       );
       // `K !== 1` is the pre-downsample ping-pong, which is NOT slotted and which this lane did
       // not design. Refused loudly and wholesale rather than slotting only the pyramid, which
@@ -5229,6 +5299,19 @@ export class Canvas implements DirtyTracker {
   private _mayPresample = (plan: GlassBlurPlan): boolean =>
     this._glassPresample && plan.MaxLod === 0;
 
+  /** `?glass-gaussian`: may THIS surface's backdrop be produced as a separable Gaussian?
+   *
+   *  ONE clause, and it is the same one `_mayPresample` carries and for a stronger reason: a
+   *  Gaussian build writes LEVEL 0 and nothing above it, so a consumer that samples a mip would
+   *  read whatever the chain left in the level FBOs on some earlier frame. At `MaxLod == 0`
+   *  `GenerateBlurMipmap` only ever calls `DisableMipmap` and `Jiv.Panel.frag`'s `textureLod`
+   *  resolves to level 0 whatever LOD it works out -- which is every glass surface in this app.
+   *
+   *  Everything else -- the sigma, the kernel's size, the `match` arm's calibration, the k --
+   *  is `PlanGaussian`'s, asked inside the pass so there is one answer and not two. */
+  private _mayGaussian = (plan: GlassBlurPlan): boolean =>
+    this._glassGaussian !== 'off' && plan.MaxLod === 0;
+
   /** Issue ONE per-surface build: the walk's two calls, and the pool bookkeeping. This is the
    *  path `?blur-first`, `?blur-phased` and every atlas REFUSAL take, and it is the engine as it
    *  ships -- which is why a refusal is safe rather than a degradation. */
@@ -5239,7 +5322,7 @@ export class Canvas implements DirtyTracker {
     const st = this._blurFirstStats;
     const t0 = performance.now();
     const handle = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, plan.Region,
-      this._mayPresample(plan));
+      this._mayPresample(plan), this._mayGaussian(plan));
     const t1 = performance.now();
     r.GenerateBlurMipmap(plan.MaxLod);
     this._opMs.Blur += t1 - t0;
@@ -7340,6 +7423,60 @@ export class Canvas implements DirtyTracker {
       + (this._glassPresample ? ' pixels=DIFFERENT' : '')
       + (this._glassPresampleRefused !== '' ? ` reason=${this._glassPresampleRefused}` : ''));
 
+    // `?glass-gaussian=on|off|match` -- THE CHAIN REPLACED BY TWO SEPARABLE PASSES.
+    //
+    // DEFAULT OFF, and it is a picture change on BOTH live arms. Parsed LAST of the blur arms
+    // because it interacts with every one of them at the same build sites, and refused beside
+    // each of them by NAME rather than left to the per-member clauses in `PlanBorderDirect` /
+    // `AtlasAdmitsMember`. Those clauses exist and are tested -- they are what stops a future
+    // caller combining the two in code -- but a flag arm in which every member of the other
+    // flag's plan refuses is the vacuous shape this ledger keeps being bitten by.
+    //
+    // `?border-source=fill` (the default since Jack's ruling) is NOT refused: it COMPOSES. The
+    // rim reads the handle its own fill took, and this arm changes what produced the texels
+    // behind that handle without changing the handle, the region or the map -- so the twenty
+    // rims read a Gaussian fill's level 0 exactly as they read a chain's, and `GaussianBuilds`
+    // reads 20 rather than 40. Under `?border-source=scene` every rim builds again and it reads
+    // 40. Both are correct; the gate line prints the number so the arm cannot be misread.
+    if (params.has('glass-gaussian')) {
+      const raw = (params.get('glass-gaussian') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off' && raw !== 'match') {
+        throw new Error(`[Jaui] ?glass-gaussian takes 'on', 'off' or 'match', got '${raw}'`);
+      }
+      this._glassGaussian = raw === 'off' ? 'off' : raw === 'match' ? 'match' : 'on';
+    }
+    if (this._glassGaussian !== 'off') {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-build-no-backdrop-to-replace'
+        : r.DiagBlurSrc !== null ? 'blur-src-swaps-the-sampled-texture-under-both-arms'
+        : this._sharedBackdrop ? 'shared-backdrop-is-one-full-canvas-mip-consumer-not-a-per-surface-build'
+        : r.CardCompositeEnabled ? 'card-composite-pins-the-build-to-the-canvas-sized-snapshot'
+        : this._glassPresample ? 'glass-presample-re-bases-a-chain-this-arm-does-not-build'
+        : this._borderDirect ? 'border-direct-gathers-the-chain-s-four-hops-and-refuses-a-gaussian-rim'
+        : this._pyramidAtlas ? 'pyramid-atlas-packs-chain-levels-and-a-gaussian-build-has-none'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-at-a-build-whose-pass-count-this-arm-moves'
+        : null;
+      if (why !== null) {
+        this._glassGaussian = 'off';
+        this._glassGaussianRefused = why;
+        JTrace(`jaui:glass-gaussian armed=off reason=${why}`);
+      }
+    }
+    if (this._renderer instanceof WebGL2Renderer) {
+      this._renderer.DiagGlassGaussian = this._glassGaussian;
+    }
+    // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
+    // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
+    // parsed, so a mark taken there would print `off` on every arm however the URL read.
+    JTrace(`jaui:glass-gaussian armed=${this._glassGaussian}`
+      + ` default=${!params.has('glass-gaussian')}`
+      + (this._glassGaussian === 'off' ? ' pixels=SAME' : ' pixels=DIFFERENT')
+      + (this._glassGaussian === 'match' ? ` sigma=${GAUSS_MATCH_SIGMA}` : '')
+      + (this._glassGaussianRefused !== '' ? ` reason=${this._glassGaussianRefused}` : ''));
+
     // `?atlas-instanced` -- how the atlas's hops are ISSUED, and nothing else. Parsed after the
     // atlas and its refusals so the mark can say whether there is an atlas to instance at all: it
     // is inert under `off`, which since Jack's fourth ruling is the unflagged engine. On/off by
@@ -7499,6 +7636,25 @@ export class Canvas implements DirtyTracker {
     {
       const g = globalThis as unknown as { __jauiEmptyPanels?: () => EmptyPanelCensus };
       g.__jauiEmptyPanels = () => ({ Armed: this._emptyPanelCull, ...this._emptyPanelStats });
+    }
+    {
+      const g = globalThis as unknown as { __jauiGlassGaussian?: () => GlassGaussianCensus };
+      g.__jauiGlassGaussian = () => {
+        const r = this._renderer;
+        const on = r instanceof WebGL2Renderer;
+        return {
+          Armed: this._glassGaussian,
+          Builds: on ? r.GaussianBuilds : 0,
+          Passes: GAUSS_PASSES,
+          TotalPasses: on ? r.GaussianPasses : 0,
+          Sigma: on ? r.LastGaussianSigma : 0,
+          Fetches: on ? r.LastGaussianFetches : 0,
+          Blur: on ? (r.SceneEndsByKey['blur'] ?? 0) : 0,
+          TempMb: on ? r.GaussTempCensus.Mb : 0,
+          PlanRefused: on ? r.LastGaussianRefusal : '',
+          Refused: this._glassGaussianRefused,
+        };
+      };
     }
     {
       const g = globalThis as unknown as { __jauiGlassPresample?: () => GlassPresampleCensus };

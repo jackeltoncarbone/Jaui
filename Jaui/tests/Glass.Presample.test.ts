@@ -465,9 +465,14 @@ describe('glass-presample > the two planners that refuse k > 1 refuse this too',
   });
 
   it('the walk hands its own arm to both, rather than each keeping a copy of the flag', () => {
-    expect(JAUI).toContain('AtlasAdmitsMember(c.Plan, w, h, this._glassPresample)');
+    // `?glass-gaussian` threaded its own arm through the same two call sites, so each pin now
+    // carries both flags -- which is the point of the pin: ONE place hands the planners the
+    // arms, and a second flag that kept a private copy would show up here as a missing argument.
+    expect(JAUI).toContain(
+      "AtlasAdmitsMember(c.Plan, w, h, this._glassPresample, this._glassGaussian !== 'off')");
     expect(JAUI).toContain('Presample: this._glassPresample');
-    expect(RENDERER).toContain('PlanBorderDirect(region, width, height, radius, maxLod, this.DiagGlassPresample)');
+    expect(RENDERER).toContain(
+      'PlanBorderDirect(region, width, height, radius, maxLod, this.DiagGlassPresample,');
   });
 });
 
@@ -626,8 +631,10 @@ describe('glass-presample > the flag, the counter and the gate', () => {
   it('the renderer ANDs the caller`s request with its own arm, so a site can only under-arm', () => {
     const body = arrowBody(RENDERER, 'ComputeBlur');
     expect(body).toContain('const rebase = presample === true && this.DiagGlassPresample;');
-    expect(body).toContain('pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined, rebase)');
-    expect(body).toContain('pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined, rebase)');
+    expect(body).toContain('pass.Blur(_unwrap(input), width, height, radius, minDepth, region, undefined,'
+      + '\n      rebase, gaussMode)');
+    expect(body).toContain('pass.Blur(src, this._width, this._height, radius, minDepth, region, undefined,'
+      + '\n        rebase, gaussMode)');
   });
 
   it('all three per-surface glass build sites ask, and they ask the same question', () => {

@@ -103,9 +103,15 @@ export interface BorderDirectRefusal { Ok: false; Why: string }
  */
 export const PlanBorderDirect = (
   region: BackdropRect | undefined, width: number, height: number, radius: number, maxLod: number,
-  presample: boolean = false,
+  presample: boolean = false, gaussian: boolean = false,
 ): BorderDirectPlan | BorderDirectRefusal => {
   if (region === undefined) return { Ok: false, Why: 'full-canvas' };
+  // `?glass-gaussian`: the gather in `Jiv.Panel.frag` reproduces a k=1 dual-filter chain's four
+  // hops EXACTLY and has no term for any other kernel, so a rim whose fill is a Gaussian cannot
+  // be substituted for by it. Refused here as well as by name in the flag block, for the reason
+  // the `presample` clause below gives: this rule has to be asked of the plan the build will
+  // actually take.
+  if (gaussian) return { Ok: false, Why: 'glass-gaussian-is-not-the-chain-this-gather-reproduces' };
   if (!(radius > 0)) return { Ok: false, Why: 'sharp-root' };
   if (maxLod > 0) return { Ok: false, Why: 'mip-consumer' };
   const k = BaseDownsampleFactor(radius, width, height, region);

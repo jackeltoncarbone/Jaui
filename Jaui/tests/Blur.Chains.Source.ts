@@ -241,6 +241,11 @@ export class FakeGl {
   uniform2f = (loc: object | null, a: number, b: number): void => this._uniform(loc, `${a},${b}`);
   uniform4f = (loc: object | null, a: number, b: number, c: number, d: number): void =>
     this._uniform(loc, `${a},${b},${c},${d}`);
+  /** The Gaussian kernel's two tables. Recorded as their LIVE PREFIX is recorded by the shader --
+   *  the whole array, joined -- so a draw's symbolic value composes the actual kernel and two
+   *  builds at different sigmas cannot come out equal here. */
+  uniform1fv = (loc: object | null, v: Float32Array | number[]): void =>
+    this._uniform(loc, Array.from(v).join(','));
 
   // ── Geometry and state ──
   createBuffer = (): FakeBuffer => ({ Id: this._nextId++, Data: null });

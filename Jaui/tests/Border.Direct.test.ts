@@ -297,7 +297,7 @@ describe('border-direct > the wiring, read off the source', () => {
     expect(arm).toContain(
       'const border = this.DiagBorderDirect ? this.EnsurePanelBorderDirectProgram() : 0;');
     expect(arm).toContain("border > 0 ? 'border-direct' : null,");
-    expect(arm).toContain('const late = pool + atlas + border;');
+    expect(arm).toContain('const late = pool + atlas + border + gauss;');
     // Init's copy is main-thread order only, where the parse runs first and it joins the boot batch.
     expect(RENDERER).toContain('if (this.DiagBorderDirect) this.EnsurePanelBorderDirectProgram(batch);');
     // The renderer's own default must AGREE with the flag's, or the worker path -- where Init runs
