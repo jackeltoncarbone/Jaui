@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  BlurPass, GaussianKernelFor, PlanGaussian, GaussianCost, PyramidDepth, PyramidFill,
+  BlurPass, GaussianKernelFor, PlanGaussian, PlanGaussianTemp, GaussianCost, PyramidDepth, PyramidFill,
   ResolveRegionRect, BaseDownsampleFactor, PresamplePlanFor,
   GAUSS_MAX_FETCHES, GAUSS_MATCH_SIGMA, GAUSS_MATCH_DEPTH, GAUSS_MATCH_TAP_OFFSET, GAUSS_PASSES,
   GAUSS_TEMPS_MAX, BLUR_PROGRAMS_GAUSSIAN, type BackdropRect,
@@ -212,16 +212,19 @@ describe('glass-gaussian > the source-to-destination map is an identity plus an 
     }
   });
 
-  it('the temp is the region PADDED by the kernel radius, and clamped at the canvas edge', () => {
+  it('the temp is the region PADDED by the kernel radius -- at the canvas edge too (lane gaussian2)', () => {
     expect(tempH).toBe(RECT0.H + 2 * k.Radius);
-    // A card at the very top of the canvas has nowhere to pad into, and then the padding is
-    // short on that side and the vertical taps fall back on CLAMP_TO_EDGE -- which is exactly
-    // what the chain's region-sized levels already do there, so the two arms degrade alike.
+    // A card at the very top of the canvas still gets its whole pad: the H pass addresses rows
+    // above the canvas and the SCENE sampler's CLAMP_TO_EDGE replicates the edge row into them,
+    // which is what the chain's region-sized levels do there. The clamp lives in the READ, so the
+    // temp has no row the V pass can address and the H pass does not write. See
+    // `Glass.Gaussian.Cover.test.ts`.
     const top = ResolveRegionRect({ x: 100, y: 0, w: 400, h: 300 }, CANVAS_W, CANVAS_H, PHASE);
-    const ty1 = Math.min(CANVAS_H, top.YBottom + top.H + k.Radius);
-    const ty0 = Math.max(0, top.YBottom - k.Radius);
-    expect(ty1).toBe(CANVAS_H);
-    expect(ty1 - ty0).toBeLessThan(top.H + 2 * k.Radius);
+    const t = PlanGaussianTemp(top, k);
+    expect(t.Ok).toBe(true);
+    if (!t.Ok) return;
+    expect(t.Y0 + t.H).toBeGreaterThan(CANVAS_H);
+    expect([t.H, t.PadBelow, t.Written]).toEqual([top.H + 2 * k.Radius, k.Radius, t.Readable]);
   });
 
   it('on glass-grid NO card is clamped: all twenty pad fully, both arms, both dprs', () => {

@@ -27,7 +27,7 @@ import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, 
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
 // copy of the rule would be a count that can silently disagree with the pass it is counting.
 import {
-  BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, PlanBackdropUnion,
+  BlurPass, BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, PlanBackdropUnion,
   MAX_CHAINS, CHAIN_BUDGET_BYTES,
   GAUSS_PASSES, GAUSS_MATCH_SIGMA, type GaussianMode,
   type AtlasBuildMember, type BackdropUnionPlan,
@@ -233,6 +233,12 @@ export interface GlassGaussianCensus {
   Blur: number;
   /** Megabytes of horizontal-pass temp the arm holds. Storage the arm added, on the gate. */
   TempMb: number;
+  /** The last build's temp texels WRITTEN by the H pass and ADDRESSABLE by the V pass
+   *  (`PlanGaussianTemp`). Must be equal: a texel read and never written is DontCare garbage. */
+  TempCoverWritten: number;
+  TempCoverReadable: number;
+  /** `?gauss-debug` armed: the targets are cleared to magenta, and the pixels are a diagnostic. */
+  Debug: boolean;
   /** The last clause inside `PlanGaussian` that turned a build down, or empty. */
   PlanRefused: string;
   /** Empty unless a FLAG refused the arm outright, in which case it names which. */
@@ -845,6 +851,9 @@ export class Canvas implements DirtyTracker {
   private _glassGaussianLastLine = '';
   /** Empty unless a flag refused the arm outright, in which case it names which. */
   private _glassGaussianRefused = '';
+  /** `?gauss-debug` beside an armed `?glass-gaussian`: both Gaussian targets are CLEARED to magenta
+   *  instead of invalidated, so a texel either pass leaves unwritten is visible in one shot. */
+  private _gaussDebug = false;
   /** The last `jaui:glass-presample` gate line, printed on a SHAPE change rather than per frame. */
   private _glassPresampleLastLine = '';
   /** Empty unless a flag refused the arm outright, in which case it names which -- so a control
@@ -4080,6 +4089,8 @@ export class Canvas implements DirtyTracker {
         + ` blur=${gl2.SceneEndsByKey['blur'] ?? 0} switches=${gl2.SceneSwitches}`
         + ` reads=${gl2.SceneReads} restarts=${gl2.SceneRestarts}`
         + ` temps=${tmp.Count}:${tmp.Sizes}:${tmp.Mb}MB`
+        + ` tempCover=${tmp.CoverWritten}/${tmp.CoverReadable}`
+        + (this._gaussDebug ? ` debugClears=${tmp.DebugClears}` : '')
         + ` planRefused=${gl2.LastGaussianRefusal === '' ? 'none' : gl2.LastGaussianRefusal}`
         + ' pixels=DIFFERENT';
       if (line !== this._glassGaussianLastLine) { this._glassGaussianLastLine = line; JTrace(line); }
@@ -7866,6 +7877,13 @@ export class Canvas implements DirtyTracker {
     if (this._renderer instanceof WebGL2Renderer) {
       this._renderer.DiagGlassGaussian = this._glassGaussian;
     }
+    // `?gauss-debug` rides the arm and means nothing without it: asked on an unarmed page it is
+    // refused by name rather than silently doing nothing, which would read as "no magenta, clean".
+    if (params.has('gauss-debug')) {
+      this._gaussDebug = this._glassGaussian !== 'off';
+      if (!this._gaussDebug) JTrace('jaui:gauss-debug armed=off reason=glass-gaussian-is-off');
+    }
+    BlurPass.GaussDebugMagenta = this._gaussDebug;
     // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
     // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
     // parsed, so a mark taken there would print `off` on every arm however the URL read.
@@ -7873,6 +7891,7 @@ export class Canvas implements DirtyTracker {
       + ` default=${!params.has('glass-gaussian')}`
       + (this._glassGaussian === 'off' ? ' pixels=SAME' : ' pixels=DIFFERENT')
       + (this._glassGaussian === 'match' ? ` sigma=${GAUSS_MATCH_SIGMA}` : '')
+      + (this._gaussDebug ? ' debug=magenta' : '')
       + (this._glassGaussianRefused !== '' ? ` reason=${this._glassGaussianRefused}` : ''));
     // `?glass-group=on|off` -- THE CONTAINER-SCOPED SHARED BACKDROP.
     //
@@ -8203,6 +8222,9 @@ export class Canvas implements DirtyTracker {
           Fetches: on ? r.LastGaussianFetches : 0,
           Blur: on ? (r.SceneEndsByKey['blur'] ?? 0) : 0,
           TempMb: on ? r.GaussTempCensus.Mb : 0,
+          TempCoverWritten: on ? r.GaussTempCensus.CoverWritten : 0,
+          TempCoverReadable: on ? r.GaussTempCensus.CoverReadable : 0,
+          Debug: this._gaussDebug,
           PlanRefused: on ? r.LastGaussianRefusal : '',
           Refused: this._glassGaussianRefused,
         };
