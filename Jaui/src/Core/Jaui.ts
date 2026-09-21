@@ -9574,7 +9574,22 @@ export class Canvas implements DirtyTracker {
       + (Lift.Mode === 'on' ? '' : ' pixels=DIFFERENT'));
     {
       const g = globalThis as unknown as { __jauiLift?: () => unknown };
-      g.__jauiLift = () => ({ Armed: Lift.Mode, ...this._liftStats, Refused: { ...this._liftStats.Refused } });
+      // The blend counters live on the RENDERER, not in _liftStats, because they are counted at the
+      // draw call. They belong here anyway: the census is the attributable half of this lane's gate,
+      // and without them the element blend has no evidence at all -- a page whose BlendMode silently
+      // did nothing would read identically to one where it worked. Draws and Switches, the same two
+      // the gate line prints, so the two instruments cannot disagree.
+      g.__jauiLift = () => {
+        const gl2 = this._renderer instanceof WebGL2Renderer ? this._renderer : null;
+        return {
+          Armed: Lift.Mode,
+          ...this._liftStats,
+          LiftDraws: gl2 === null ? 0 : gl2.LiftDraws,
+          Blends: gl2 === null ? 0 : gl2.BlendDraws,
+          BlendSwitches: gl2 === null ? 0 : gl2.BlendSwitches,
+          Refused: { ...this._liftStats.Refused },
+        };
+      };
     }
     // `?blur-cache=on|off|verify` -- A CLEAN BACKDROP DOES NOT REBUILD ITS BLUR. Default OFF.
     //
