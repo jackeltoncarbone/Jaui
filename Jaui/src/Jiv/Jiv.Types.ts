@@ -74,10 +74,19 @@ export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRigh
  *    • Dark / Light: always black / always white, whatever the theme (glass over video or a camera). */
 export type TintTone = 'Ground' | 'Ink' | 'Dark' | 'Light';
 
-export type BlendMode =
-  | 'Normal' | 'Multiply' | 'Screen' | 'Overlay'
-  | 'Darken' | 'Lighten' | 'ColorDodge' | 'ColorBurn'
-  | 'SoftLight' | 'HardLight' | 'Difference' | 'Exclusion';
+/** How this element's OWN paint (fill, border, shadow, its own text) composes onto everything already
+ *  painted beneath it: CSS `mix-blend-mode`, PascalCased.
+ *    • Normal       source-over.
+ *    • PlusLighter  additive: `dst + src * coverage` per channel, clipping at white (CSS `plus-lighter`,
+ *                   Canvas 2D `lighter`). For LIGHT: a glow, a specular, an emissive sprite.
+ *    • Screen       `1 - (1 - dst)(1 - src)` at coverage: lightens like an add but rolls off into white
+ *                   instead of clipping. Refused on an element that paints text (the text program has
+ *                   no premultiplied output, and screen cannot be coverage-correct without one).
+ *  Not a group: descendants paint Normal unless they say otherwise, and the element's own layers blend
+ *  one draw at a time. No other CSS mode is admitted, because a value that reached no draw call would
+ *  be a silent no-op. Distinct from `BackdropFilter: Lift(n)`, which adds a constant UNDER the element
+ *  and never touches its ink. */
+export type BlendMode = 'Normal' | 'PlusLighter' | 'Screen';
 
 /**
  * Authorable style — every numeric / dimensional / color / transform field is
@@ -170,7 +179,10 @@ export interface JivStyle {
   Filter: string;
   /** Backdrop filter — frost + grade on the glass/backdrop behind this box
    *  (CSS `backdrop-filter`). Per-box; never inherited. `Blur(len)` is the
-   *  frost radius. */
+   *  frost radius. `Lift(n)` adds a signed constant `n` (of 255) to every
+   *  channel of the backdrop inside this box's shape, carrying its colour at 1
+   *  and never touching this element's own ink; see `Core/Lift.ts` for the
+   *  two implementations the engine picks between. */
   BackdropFilter: string;
   /** Border-zone backdrop filter — frost LOD offset + grade applied in the
    *  rim region only. Per-box. `Blur(len)` is the LOD octave offset vs the
@@ -373,6 +385,10 @@ export interface JivRenderStyle {
   BackdropBrightness: number;
   BackdropSaturation: number;
   BackdropContrast: number;
+  /** `BackdropFilter: Lift(n)`, as a fraction of full scale (n / 255), signed. The grade above is the
+   *  AUTHORED one; whether the lift is drawn under the element or folded into that grade is decided at
+   *  draw time (`Core/Lift.ts`), because it depends on the cascaded foreground grade. */
+  BackdropLift: number;
 
   BezelWidth: number;
   BezelScale: number;

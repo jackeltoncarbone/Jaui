@@ -49,6 +49,7 @@ import svgFillFragSrc from '../Svg/Shaders/Svg.Fill.frag.gen';
 import svgStrokeVertSrc from '../Svg/Shaders/Svg.Stroke.vert.gen';
 import svgStrokeFragSrc from '../Svg/Shaders/Svg.Stroke.frag.gen';
 import type { StrokeStyle } from './Renderer';
+import type { CompositeBlend } from './Lift';
 
 // ─── Jline (stroke) uniform-location bundle ─────────────────────────────────
 interface _StrokeLocs {
@@ -126,6 +127,8 @@ interface _PanelLocs {
   // one (`GlassSkips` is a constant false in the other, so it compiles out and this is null there).
   glassSkip:      WebGLUniformLocation | null;
   glassGate:      WebGLUniformLocation | null;
+  // `BlendMode: Screen`'s premultiplied output. Declared by every panel program; 0 on every other draw.
+  premulOut:      WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -167,6 +170,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   borderGather:   gl.getUniformLocation(p, 'u_BorderGather'),
   glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
   glassGate:      gl.getUniformLocation(p, 'u_GlassGate'),
+  premulOut:      gl.getUniformLocation(p, 'u_PremulOut'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -884,6 +888,16 @@ export class WebGL2Renderer implements Renderer {
   get GroupBuilds(): number { return this._sceneLedger.GroupBuilds; }
   get GroupMembers(): number { return this._sceneLedger.GroupMembers; }
   get GroupFallbacks(): number { return this._sceneLedger.GroupFallbacks; }
+  /** Lift under-draws, element-blend draws and the blend-state changes they took, this frame. */
+  get LiftDraws(): number { return this._sceneLedger.LiftDraws; }
+  get BlendDraws(): number { return this._sceneLedger.BlendDraws; }
+  get BlendSwitches(): number { return this._sceneLedger.BlendSwitches; }
+  /** Every pyramid build this frame, whichever pass built it: the lift census reads this before and
+   *  after an under-drawn element's own paint, and any difference is the lane failing. */
+  get PyramidBuilds(): number {
+    const l = this._sceneLedger;
+    return l.SeparableBuilds + l.SurfaceChainBuilds + l.GaussianBuilds + l.PresampledBuilds + l.GroupBuilds;
+  }
   /** `?shadow-probe`'s effect field: probes drawn, and state-target binds they took. */
   get ShadowProbes(): number { return this._sceneLedger.ShadowProbes; }
   get ShadowProbeBinds(): number { return this._sceneLedger.ShadowProbeBinds; }
@@ -1803,6 +1817,8 @@ export class WebGL2Renderer implements Renderer {
     // `?glass-gates`' new gates: every bit set on a glass draw, so every one of them is TRUE and
     // runs the code it fences. A null location (every program but a `+<gate>` cut) is a no-op.
     gl.uniform1i(locs.glassGate, isGlass ? GLASS_GATE_OPEN : 0);
+    // Set on every batch for the reason `glassAdapt` is: a uniform outlives the draw that set it.
+    gl.uniform1f(locs.premulOut, this._premulOut);
     if (isGlass && this.DiagGlassSkipCensus) this._noteGlassFragments();
     // On EVERY armed arm, `nogather` included: the fragment counts are a property of the rim's
     // geometry and not of which program shades it, and two arms whose census disagreed could not be
@@ -4894,6 +4910,62 @@ export class WebGL2Renderer implements Renderer {
   DisableBlend = (): void => {
     this._gl.disable(this._gl.BLEND);
   };
+
+  /** 1 while a Screen draw is in flight: the panel program multiplies its rgb by its alpha on the way
+   *  out, because screen's destination factor needs `src * srcA` and no blend factor forms a product. */
+  private _premulOut = 0;
+
+  /** The blend for ONE draw that composes against the destination rather than over it. Every mode keeps
+   *  the destination's ALPHA except PlusLighter and Screen, which accumulate coverage the way
+   *  `EnableBlend` does. The panel and text programs write STRAIGHT alpha (rgb, coverage), so the
+   *  coverage is applied by the SRC_ALPHA factor and a half-covered edge pixel gets half:
+   *
+   *    LiftAdd       FUNC_ADD                rgb  dst + src*srcA            (Lift(n), n > 0)
+   *    LiftSubtract  FUNC_REVERSE_SUBTRACT   rgb  dst - src*srcA            (Lift(n), n < 0)
+   *    PlusLighter   FUNC_ADD                rgb  dst + src*srcA
+   *    Screen        FUNC_ADD, premul src    rgb  src*srcA + dst*(1 - src*srcA)
+   *
+   *  A premultiplied source would take ONE where these take SRC_ALPHA; given one with SRC_ALPHA it would
+   *  be scaled by its coverage twice and every antialiased edge would come out thin. Undone by
+   *  `RestoreBlend`, which the caller owes before anything else draws. */
+  SetCompositeBlend = (kind: CompositeBlend): void => {
+    const gl = this._gl;
+    gl.enable(gl.BLEND);
+    switch (kind) {
+      case 'LiftAdd':
+        gl.blendEquation(gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);
+        break;
+      case 'LiftSubtract':
+        gl.blendEquationSeparate(gl.FUNC_REVERSE_SUBTRACT, gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);
+        break;
+      case 'PlusLighter':
+        gl.blendEquation(gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        break;
+      case 'Screen':
+        gl.blendEquation(gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        this._premulOut = 1;
+        break;
+    }
+    this._sceneLedger.BlendSwitches++;
+  };
+
+  /** Back to the state every other draw in the walk assumes: `FUNC_ADD` on both halves, `EnableBlend`'s
+   *  factors, straight output. */
+  RestoreBlend = (): void => {
+    const gl = this._gl;
+    gl.blendEquation(gl.FUNC_ADD);
+    this.EnableBlend();
+    this._premulOut = 0;
+    this._sceneLedger.BlendSwitches++;
+  };
+
+  /** Count what a composite blend drew, so the census can price it against the switches. */
+  NoteLiftDraw = (): void => { this._sceneLedger.LiftDraws++; };
+  NoteBlendDraw = (): void => { this._sceneLedger.BlendDraws++; };
 
   BindDefaultTarget = (clear?: { R: number; G: number; B: number }): void => {
     const gl = this._gl;

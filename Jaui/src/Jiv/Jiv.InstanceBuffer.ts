@@ -1,5 +1,6 @@
 import type { Jiv } from './Jiv';
 import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
+import { FoldLift, LiftGraded } from '../Core/Lift';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -104,6 +105,8 @@ const _packFgGrade = (brightness: number, saturation: number, contrast: number):
   return b * 16384 + s * 128 + c;
 };
 
+const _FG_GRADE_IDENTITY = _packFgGrade(1, 1, 1);
+
 /**
  * CPU-side instance data packer for Jiv panels. Reads from Jiv.RenderStyle
  * and packs 60 floats per instance into a Float32Array. Backend-agnostic —
@@ -158,10 +161,16 @@ export class JivInstanceBuffer {
    *                      fill + shadow; the shader's border-only flag (signalled
    *                      by a NEGATIVE borderEdgeAa) skips interior fill/effects
    *                      but still runs the glass border zone. Drawn with the
-   *                      glass shader + a real scene snapshot by emitBorderOverlay. */
+   *                      glass shader + a real scene snapshot by emitBorderOverlay.
+   *    • 'LiftOnly'    — `BackdropFilter: Lift(n)`'s under-draw (Core/Lift.ts): the element's
+   *                      SHAPE (radii, smoothness, clip stack, opacity) filled with |n| / 255 on
+   *                      every channel at alpha 1, and nothing else — no border, no shadow, no
+   *                      grade of any kind, no glass. The walk draws it alone, under the element,
+   *                      with an additive or reverse-subtract blend, so the fragment's alpha is
+   *                      exactly the coverage the element's own fill would have had. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
-          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'GlassBorderOnly' = 'Normal'): void => {
+          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'GlassBorderOnly' | 'LiftOnly' = 'Normal'): void => {
     if (this._count >= this._capacity) this._grow();
 
     const style = jiv.RenderStyle;
@@ -303,9 +312,11 @@ export class JivInstanceBuffer {
     // unpacks and runs applyGrading. NaN-guarded so it can never black a panel.
     data[offset + 31] = _packFgGrade(jiv.EffectiveBrightness, jiv.EffectiveSaturation, jiv.EffectiveContrast);
 
-    data[offset + 32] = style.BackdropBrightness;
+    // A lift that could not be drawn under the element rides in the grade it already runs (Core/Lift.ts).
+    const grade = FoldLift(style.BackdropBrightness, style.BackdropContrast, LiftGraded(jiv));
+    data[offset + 32] = grade.Brightness;
     data[offset + 33] = style.BackdropSaturation;
-    data[offset + 34] = style.BackdropContrast;
+    data[offset + 34] = grade.Contrast;
     const blurPx = Math.max(0.5, style.BackdropFrostBlur * d);
     data[offset + 35] = Math.max(0, Math.min(10, Math.log2(blurPx)));
 
@@ -374,6 +385,19 @@ export class JivInstanceBuffer {
       // Border-only flag. Carry a tiny magnitude when the feather is 0 so the
       // sign survives (−0 is not < 0 in GLSL); the rim AA stays effectively crisp.
       data[offset + 28] = -Math.max(borderEdgeAa, 1e-3);
+    } else if (borderMode === 'LiftOnly') {
+      const l = Math.abs(style.BackdropLift);
+      data[offset + 12] = l; data[offset + 13] = l; data[offset + 14] = l; data[offset + 15] = 1;
+      data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0;
+      data[offset + 20] = 0; data[offset + 21] = 0; data[offset + 22] = 0; data[offset + 23] = 0;
+      data[offset + 24] = 0; data[offset + 25] = 0; data[offset + 26] = 0; data[offset + 27] = 0;
+      data[offset + 31] = _FG_GRADE_IDENTITY;
+      data[offset + 32] = 1; data[offset + 33] = 1; data[offset + 34] = 1; data[offset + 35] = 0;
+      data[offset + 36] = 0; data[offset + 41] = 0; data[offset + 43] = 0;
+      data[offset + 44] = 0; data[offset + 46] = 0; data[offset + 47] = 0;
+      data[offset + 48] = 0; data[offset + 49] = 0; data[offset + 50] = 0;
+      data[offset + 52] = 0;
+      data[offset + 56] = 1; data[offset + 57] = 1; data[offset + 58] = 1; data[offset + 59] = 0;
     }
 
     this._count++;

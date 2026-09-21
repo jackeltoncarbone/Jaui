@@ -322,6 +322,8 @@ uniform vec4      u_BgGradTangent[MAX_BG_GRAD_STOPS];
 uniform float     u_BgGradPos[MAX_BG_GRAD_STOPS];
 
 out vec4 fragColor;
+// 1 only for a `BlendMode: Screen` draw, whose blend reads a PREMULTIPLIED source; 0 on every other.
+uniform float u_PremulOut;
 
 #if !defined(MATERIAL_FLAT)
 // Triangular-PDF dither — breaks 8-bit banding on smooth blurred backdrops.
@@ -2160,5 +2162,6 @@ void main() {
         result.rgb += gradDither / max(result.a, 0.25);
     }
 
+    if (u_PremulOut > 0.5) result.rgb *= result.a;
     fragColor = result;
 }

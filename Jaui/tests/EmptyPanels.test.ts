@@ -292,10 +292,10 @@ describe('emptypanels — the admission rule, said exactly', () => {
   });
 
   it('a blend mode that could read the destination is refused', () => {
-    // Inert today — `BlendMode` reaches no draw call — and refused anyway, because the day it is
-    // wired up a Difference at source alpha 0 is no longer provably a no-op.
-    expect(isEmpty(c, at({ BlendMode: 'Multiply' }))).toBe(false);
-    expect(isEmpty(c, at({ BlendMode: 'Difference' }))).toBe(false);
+    // Both admitted modes happen to leave the destination alone at source alpha 0, and they are
+    // refused anyway: the rule is written about SOURCE-OVER, and a future mode need not be so kind.
+    expect(isEmpty(c, at({ BlendMode: 'PlusLighter' }))).toBe(false);
+    expect(isEmpty(c, at({ BlendMode: 'Screen' }))).toBe(false);
     expect(isEmpty(c, at({ BlendMode: 'Normal' }))).toBe(true);
   });
 
