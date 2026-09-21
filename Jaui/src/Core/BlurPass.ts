@@ -442,6 +442,68 @@ export const GaussianCost = (
 export const GAUSS_TEMPS_MAX = 4;
 export const GAUSS_TEMP_BUDGET_BYTES = 8 * 1024 * 1024;
 
+/** What the Gaussian arm's temp pool holds, and the last build's `tempCover=` pair. */
+export interface GaussTempCensus {
+  Count: number;
+  Sizes: string;
+  Mb: number;
+  CoverWritten: number;
+  CoverReadable: number;
+  /** `?gauss-debug`'s magenta clears so far on this pass. */
+  DebugClears: number;
+}
+
+/** The horizontal pass's temp for ONE build: its size, where the region sits in it, and the two
+ *  numbers the gate line prints as `tempCover=<Written>/<Readable>`. */
+export interface GaussianTempPlan {
+  Ok: true;
+  W: number;
+  H: number;
+  /** Temp rows below the region's first row. Always the kernel's `Radius`, at a canvas edge too. */
+  PadBelow: number;
+  /** The scene row the temp's row 0 holds. NEGATIVE for a region within `Radius` of the bottom
+   *  edge: the H pass addresses rows the canvas does not have and the SAMPLER clamps them. */
+  Y0: number;
+  /** Rows past an output row the V pass can address: the furthest texel any live fetch's
+   *  bilinear footprint touches, read off the table rather than assumed from `Radius`. */
+  Reach: number;
+  /** Texels the H pass writes: the whole temp, because its viewport is the whole temp. */
+  Written: number;
+  /** Texels the V pass can address: the region's width by its height plus `Reach` each side. */
+  Readable: number;
+}
+
+/**
+ * The temp one Gaussian build draws into, or a NAMED refusal if the V pass could address a texel
+ * the H pass does not write.
+ *
+ * WHY THIS IS A PLAN AND NOT TWO LINES OF `_blurGaussian`. `_bindTarget` invalidates before every
+ * draw -- Metal's `LoadAction.DontCare` -- so a texel of the temp the H pass does not write holds
+ * whatever the tile memory held, which changes from shot to shot. The whole of the safety argument
+ * is therefore `Written == Readable`, and it is stated here as arithmetic the census prints and the
+ * tests pin, rather than left to follow from a viewport call.
+ *
+ * THE CANVAS EDGE IS CLAMPED IN THE READ, NOT IN THE WRITE. The temp is ALWAYS the region's height
+ * plus `Radius` rows each side, and the H pass addresses scene rows `YBottom - Radius ..` even when
+ * some of them lie off the canvas; `CLAMP_TO_EDGE` on the scene texture turns those into the edge
+ * row, which is the replication the chain's region-sized levels already take there. Clamping the
+ * WRITE instead (a shorter temp, `PadBelow < Radius`) left the V pass's outer taps addressing rows
+ * the temp does not have, and made every edge card a temp size of its own.
+ */
+export const PlanGaussianTemp = (
+  rect: { YBottom: number; W: number; H: number }, kernel: GaussianKernel,
+): GaussianTempPlan | GaussianRefusal => {
+  let reach = 0;
+  for (let i = 0; i < kernel.Fetches; i++) reach = Math.max(reach, Math.ceil(Math.abs(kernel.Offsets[i])));
+  const pad = kernel.Radius;
+  if (reach > pad) return { Ok: false, Why: `temp-reads-${reach}-rows-past-a-${pad}-row-pad` };
+  const h = rect.H + 2 * pad;
+  return {
+    Ok: true, W: rect.W, H: h, PadBelow: pad, Y0: rect.YBottom - pad, Reach: reach,
+    Written: rect.W * h, Readable: rect.W * (rect.H + 2 * reach),
+  };
+};
+
 // 9 levels: covers LOD 0..8 with dual-filter quality. Progressive blur
 // samples up to LOD ~6 for heavy BackdropFrostBlur settings; extra headroom
 // keeps the smooth mipmap chain populated deeper than we'll typically read.
@@ -980,6 +1042,20 @@ export class BlurPass {
   get LastGaussianSigma(): number { return this._lastGaussianSigma; }
   get LastGaussianFetches(): number { return this._lastGaussianFetches; }
   get LastGaussianRefusal(): string { return this._lastGaussianRefusal; }
+  /** `PlanGaussianTemp`'s two texel counts for the last Gaussian build -- kept across chain builds,
+   *  so a frame whose last build was a rim's chain still prints the fill's. Equal, or it refused. */
+  private _lastGaussianCover: { Written: number; Readable: number } = { Written: 0, Readable: 0 };
+  get LastGaussianCover(): { Written: number; Readable: number } { return this._lastGaussianCover; }
+
+  /** `?gauss-debug`, measurement only: CLEAR both Gaussian targets to magenta instead of leaving
+   *  them to `DontCare`, so a texel either pass fails to write shows in ONE shot instead of one
+   *  shot in four. A static because it is a URL arm with one reader and the renderer is not this
+   *  lane's to plumb. When both passes write every texel the clear is overwritten whole and the
+   *  picture is the `match` picture to the pixel; any magenta in the shot IS the unwritten texel. */
+  static GaussDebugMagenta = false;
+  private _gaussDebugClears = 0;
+  /** Magenta clears `?gauss-debug` issued on this pass: 2 per Gaussian build, or the arm is vacuous. */
+  get GaussDebugClears(): number { return this._gaussDebugClears; }
   /** Single FBO reused for the attach-mip-and-blit dance in
    *  GenerateOutputMipmap. Created lazily on first use. */
   private _mipBlitFbo: WebGLFramebuffer | null = null;
@@ -1449,8 +1525,13 @@ export class BlurPass {
       const plan = k !== 1 ? { Ok: false as const, Why: `pre-downsample-k${k}` }
         : pre !== null ? { Ok: false as const, Why: `presample-k${pre.K}` }
         : PlanGaussian(radius, gaussian, depth, tapOffset);
-      if (plan.Ok) return this._blurGaussian(input, width, height, rect, scaleX, scaleY, plan);
-      this._lastGaussianRefusal = plan.Why;
+      if (plan.Ok) {
+        const temp = PlanGaussianTemp(rect, plan.Kernel);
+        if (temp.Ok) return this._blurGaussian(input, width, height, rect, scaleX, scaleY, plan, temp);
+        this._lastGaussianRefusal = temp.Why;
+      } else {
+        this._lastGaussianRefusal = plan.Why;
+      }
     }
 
     // One bracket spans the pre-downsample AND the pyramid's down hops: they are one chain, and
@@ -1568,9 +1649,11 @@ export class BlurPass {
    * +-R leave the region and land on real scene texels for free. The vertical pass reads the
    * TEMP, so its taps at +-R leave the temp -- and a temp sized to the region would hand them
    * CLAMP_TO_EDGE's replicated border row instead of the scene. Padding the temp by R makes the
-   * vertical taps read filtered scene everywhere the canvas has scene to give, and the padding is
-   * clamped to the canvas so that at a screen edge the fallback is the same edge replication the
-   * chain's region-sized levels already take there.
+   * vertical taps read filtered scene everywhere the canvas has scene to give. At a screen edge the
+   * padding is NOT shortened: the H pass addresses rows off the canvas and the scene sampler's
+   * `CLAMP_TO_EDGE` replicates the edge row into them, the same replication the chain's
+   * region-sized levels take there -- and the temp keeps no row the V pass can read unwritten
+   * (`PlanGaussianTemp`).
    *
    * WHY THE MAPPING IS EXACT, which Rakos's linear sampling REQUIRES (Skia will not linear-sample
    * under anything but an identity or an integer translation, because a fractional one moves the
@@ -1592,25 +1675,26 @@ export class BlurPass {
    */
   private _blurGaussian = (
     input: WebGLTexture, width: number, height: number,
-    rect: RegionRect, scaleX: number, scaleY: number, plan: GaussianBuildPlan,
+    rect: RegionRect, scaleX: number, scaleY: number, plan: GaussianBuildPlan, tp: GaussianTempPlan,
   ): WebGLTexture => {
     const gl = this._gl;
     const prog = this._gaussianProgramOrThrow();
     const k = plan.Kernel;
 
-    // The tall rect, clamped to the canvas. Integers throughout: `rect.YBottom` and `rect.H` are
-    // on the phase grid and `k.Radius` is a `ceil`.
-    const y0 = Math.max(0, rect.YBottom - k.Radius);
-    const y1 = Math.min(height, rect.YBottom + rect.H + k.Radius);
-    const tempH = y1 - y0;
-    const padBelow = rect.YBottom - y0;
+    // The tall rect, NOT clamped to the canvas: `PlanGaussianTemp` says why. Integers throughout:
+    // `rect.YBottom` and `rect.H` are on the phase grid and `k.Radius` is a `ceil`.
+    const y0 = tp.Y0;
+    const tempH = tp.H;
+    const padBelow = tp.PadBelow;
 
     // ALLOCATE BOTH TARGETS BEFORE EITHER PASS. `_useChain` can build a whole chain and
     // `_useGaussTemp` a whole texture, and doing that between the two draws would put an
     // allocation inside the bracket that is measuring them.
     this._useChain(rect.W, rect.H);
     this._levels[0].Resize(rect.W, rect.H);
-    const temp = this._useGaussTemp(rect.W, tempH);
+    const temp = this._useGaussTemp(tp.W, tempH);
+    const debug = BlurPass.GaussDebugMagenta;
+    const clearWas = debug ? gl.getParameter(gl.COLOR_CLEAR_VALUE) as Float32Array : null;
 
     gl.useProgram(prog.Program);
     gl.uniform1i(this._gTexLoc, 0);
@@ -1626,6 +1710,7 @@ export class BlurPass {
 
     const timedH = this.Timers !== null && this.Timers.Begin('blur-down');
     this._bindTarget(temp, 'gauss-h');
+    if (debug) this._gaussDebugClear();
     gl.uniform4f(this._gSrcLoc, rect.X / width, y0 / height, rect.W / width, tempH / height);
     gl.uniform2f(this._gStepLoc, 1 / width, 0);
     gl.bindTexture(gl.TEXTURE_2D, input);
@@ -1634,11 +1719,13 @@ export class BlurPass {
 
     const timedV = this.Timers !== null && this.Timers.Begin('blur-up');
     this._bindTarget(this._levels[0], 'l0');
+    if (debug) this._gaussDebugClear();
     gl.uniform4f(this._gSrcLoc, 0, padBelow / tempH, 1, rect.H / tempH);
     gl.uniform2f(this._gStepLoc, 0, 1 / tempH);
     gl.bindTexture(gl.TEXTURE_2D, temp.Texture);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
 
+    if (clearWas !== null) gl.clearColor(clearWas[0], clearWas[1], clearWas[2], clearWas[3]);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._target('default');
     if (timedV) this.Timers!.End();
@@ -1650,8 +1737,17 @@ export class BlurPass {
     this._lastGaussian = true;
     this._lastGaussianSigma = plan.Sigma;
     this._lastGaussianFetches = k.Fetches;
+    this._lastGaussianCover = { Written: tp.Written, Readable: tp.Readable };
     this._lastRegion = this._region(rect, scaleX, scaleY);
     return this._levels[0].Texture;
+  };
+
+  /** `?gauss-debug`: fill the target just bound with magenta. The caller restores the clear colour. */
+  private _gaussDebugClear = (): void => {
+    const gl = this._gl;
+    gl.clearColor(1, 0, 1, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    this._gaussDebugClears++;
   };
 
   /** ONE ATLAS INSTEAD OF N PYRAMIDS: every member's level `i` into one target, one bind per
@@ -2317,7 +2413,7 @@ export class BlurPass {
   /** What the Gaussian arm's temp pool holds. Printed on the flag's gate line, because an arm
    *  that quietly grew a second megabyte of attachment per card is an arm whose timing cell is
    *  measuring storage as well as passes. */
-  get GaussTempCensus(): { Count: number; Sizes: string; Mb: number } {
+  get GaussTempCensus(): GaussTempCensus {
     let bytes = 0;
     const sizes: string[] = [];
     for (const [key, t] of this._gaussTemps) { bytes += t.Bytes; sizes.push(key); }
@@ -2325,6 +2421,9 @@ export class BlurPass {
       Count: this._gaussTemps.size,
       Sizes: sizes.sort().join('+'),
       Mb: Math.round(bytes / (1024 * 1024) * 10) / 10,
+      CoverWritten: this._lastGaussianCover.Written,
+      CoverReadable: this._lastGaussianCover.Readable,
+      DebugClears: this._gaussDebugClears,
     };
   }
 

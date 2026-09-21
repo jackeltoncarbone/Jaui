@@ -13,6 +13,7 @@ import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
 import {
   BlurPass, PyramidDepth, ChainBytes, BLUR_PROGRAMS_BOOT, GAUSS_PASSES, type GaussianMode,
+  type GaussTempCensus,
   type ChainLimits, type AtlasBuildMember, type BackdropRect,
 } from './BlurPass';
 import { PassTimers, type PassProfile } from './Pass.Timers';
@@ -779,9 +780,11 @@ export class WebGL2Renderer implements Renderer {
   get LastGaussianFetches(): number { return this._lastGaussianFetches; }
   get LastGaussianRefusal(): string { return this._lastGaussianRefusal; }
   /** The Gaussian arm's temp pool, straight off the pass that holds it. */
-  get GaussTempCensus(): { Count: number; Sizes: string; Mb: number } {
+  get GaussTempCensus(): GaussTempCensus {
     const pass = this._blur as BlurPass | undefined;
-    return pass === undefined ? { Count: 0, Sizes: '', Mb: 0 } : pass.GaussTempCensus;
+    return pass === undefined
+      ? { Count: 0, Sizes: '', Mb: 0, CoverWritten: 0, CoverReadable: 0, DebugClears: 0 }
+      : pass.GaussTempCensus;
   }
   /** `?glass-group`'s effect field, and it has to be read as a TRIPLE. `GroupBuilds` alone cannot
    *  distinguish a page that grouped twenty cards into one pyramid from a page that grouped two
