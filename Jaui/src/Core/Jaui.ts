@@ -27,8 +27,9 @@ import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, 
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
 // copy of the rule would be a count that can silently disagree with the pass it is counting.
 import {
-  BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, MAX_CHAINS, CHAIN_BUDGET_BYTES,
-  type AtlasBuildMember,
+  BaseDownsampleFactor, PresamplePlanFor, PyramidDepth, ResolveRegionRect, PlanBackdropUnion,
+  MAX_CHAINS, CHAIN_BUDGET_BYTES,
+  type AtlasBuildMember, type BackdropUnionPlan,
 } from './BlurPass';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
 import {
@@ -224,6 +225,27 @@ export interface GlassPresampleCensus {
   /** Empty unless a flag refused the lever outright, in which case it names which. */
   Refused: string;
 }
+
+/** `?glass-group`, per rendered frame. Read `Builds` and `Fallbacks` TOGETHER: an arm reading
+ *  `Groups 0, Members 0, Fallbacks 20` is the engine this lane inherited wearing the flag's name,
+ *  and a timing cell quoting it would pass by having done nothing. */
+export interface GlassGroupCensus {
+  Armed: boolean;
+  /** Groups the frame planned, and the pyramids they built. Equal unless a member was culled out
+   *  of the walk after the plan scan saw it, in which case the group never gets entered. */
+  Groups: number;
+  Builds: number;
+  /** Surfaces that took a group's pyramid. THE effect field. */
+  Members: number;
+  /** Glass fills no group covered, which built one at a time exactly as they do today. */
+  Fallbacks: number;
+  /** `EndsByKey.blur` beside them -- 1 on `glass-grid` against 20 off. */
+  Blur: number;
+  /** One `WxH@k/depth` per group, in walk order. */
+  Rects: string;
+  /** Empty unless a flag refused the lever outright, in which case it names which. */
+  Refused: string;
+}
 import { DirtyFlag } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
@@ -321,6 +343,20 @@ interface FillPyramid {
   Region: { x: number; y: number; w: number; h: number };
   /** The frame it was recorded in. See `_fillPyramids`. */
   Frame: number;
+}
+
+/** ONE GLASS GROUP: a run of glass siblings under one parent that share a blur class, and the
+ *  single pyramid they all sample.
+ *
+ *  `Members` is in WALK ORDER, so `Members[0]` is the surface whose arrival is the capture point.
+ *  The walk does not read it that way -- it builds on the FIRST member it actually reaches, which
+ *  is `Members[0]` unless a cull removed it -- because "the scene as of group entry" is a fact
+ *  about the walk and not about the plan. */
+interface GlassGroup {
+  Members: Jiv[];
+  /** The sigma every member shares, in device px. `PlanBackdropUnion`'s `radius`. */
+  Radius: number;
+  Plan: BackdropUnionPlan;
 }
 
 /** Does `outer` contain `inner`? Both are device-px screen rects with y down, as
@@ -757,6 +793,54 @@ export class Canvas implements DirtyTracker {
   /** Empty unless a flag refused the arm outright, in which case it names which -- so a control
    *  shot can be told from an arm that quietly disarmed. Published on the census. */
   private _glassPresampleRefused = '';
+  /** `?glass-group` -- THE CONTAINER-SCOPED SHARED BACKDROP. One pyramid per GROUP of glass
+   *  siblings, captured when the walk ENTERS the group, sampled by every member of it.
+   *
+   *  THE LAW, which is Jack's ruling of 2026-09-20 and Apple's rule before it (WWDC25: "glass can
+   *  not sample other glass ... a glass container allows these elements to share their sampling
+   *  region"; "always avoid glass on glass"):
+   *
+   *    A glass GROUP is a run of glass siblings under one parent. Its backdrop is the scene AS OF
+   *    THE WALK'S ENTRY to the group -- captured once, before any member paints -- and every
+   *    member samples it. Nothing painted inside the group (a member's glass, rim, shadow or
+   *    text, or a non-glass sibling between two members) is ever sampled by another member. A
+   *    group entered LATER in the walk captures the scene with earlier groups' glass in it.
+   *
+   *  That second sentence is why this is not `?wkr-shared-backdrop`, and why it needs no
+   *  dirty-rect machinery: a layer above still blurs everything below it, glass included, because
+   *  it captures later. `Perf/PyramidUnion.Finding.md` built the planner this calls and reverted
+   *  it under the law this repeals; `PlanBackdropUnion` carries the whole argument.
+   *
+   *  DEFAULT OFF in this lane. Jack has ruled the PICTURE -- the change is the one already shot as
+   *  "phased" on `glass-grid`: 34,830 px (0.85%), max 12, mean 2.1, a card no longer refracting
+   *  its earlier neighbour's glass in the gap band -- but the gate still has to see it on seven
+   *  shots before the default moves. */
+  private _glassGroup: boolean = false;
+  /** The last `jaui:glass-group` gate line, printed on a SHAPE change rather than per frame. */
+  private _glassGroupLastLine = '';
+  /** Empty unless a flag refused the arm outright, in which case it names which. */
+  private _glassGroupRefused = '';
+  /** Every planned group, indexed by EVERY member so the walk's lookup is one map hit at the fill
+   *  site rather than a scan. Rebuilt by `_glassGroupPrepass` each frame it is armed. */
+  private _glassGroups = new Map<Jiv, GlassGroup>();
+  /** The pyramid each member samples, filled when the walk first ENTERS the group. A member finds
+   *  it already here, which is what makes "the scene as of group entry" true by construction
+   *  rather than by a timestamp. */
+  private _glassGroupHandles = new Map<Jiv, GpuTextureHandle>();
+  /** Set for the duration of the plan scan: the traversal RECORDS the glass fills it would build
+   *  instead of building them, because a group is a property of a RUN and not of a member. Null
+   *  on every other path. */
+  private _glassGroupScan: { Node: Jiv; Parent: Jiv | null; Plan: GlassBlurPlan }[] | null = null;
+  /** The parent of the node `_blurFirstNode` is about to visit, set by `_blurFirstDescend` for
+   *  the scan alone. Null for the Root and for a teleported node replayed out of its own scope,
+   *  and a null parent never groups with anything -- a node whose container the walk has left is
+   *  not a sibling of anything in it. */
+  private _glassGroupParent: Jiv | null = null;
+  /** The frame's group census, for the gate line. `Fallbacks` is the one to read beside `Members`:
+   *  a plan that grouped nothing and fell back on everything is the unflagged engine. */
+  private _glassGroupStats = {
+    Groups: 0, Builds: 0, Members: 0, Fallbacks: 0, Solo: 0, MaxLod: 0, Unplanned: 0, Rects: '',
+  };
   /** `?emptypanels` -- A PANEL THAT PAINTS NOTHING IS NOT PUSHED. Default ON.
    *
    *  A fully transparent background with no painted border and no shadow shades its whole quad to
@@ -3164,7 +3248,23 @@ export class Canvas implements DirtyTracker {
           // the build is a lookup and the scene target was never unbound here — which is why the
           // `RebindSceneTarget` below stays inside the branch that actually left it.
           const preFill = this._blurFirst || this._phasedWalk ? this._blurFirstFill.get(node) : undefined;
-          if (preFill !== undefined) {
+          // `?glass-group`: THE GROUP'S BACKDROP, AND THE POINT IT IS CAPTURED AT.
+          //
+          // This line is the whole of the law in the walk. The FIRST member of a group to reach it
+          // builds one pyramid over the union of the group's regions, from the live scene, before
+          // any member has painted; every later member finds the handle already there and paints
+          // its body, rim and shadow in exactly the order it does today. So nothing painted inside
+          // the group is ever in the group's backdrop, and a group the walk enters LATER captures
+          // a scene that already holds the earlier group's glass -- which is the half of the old
+          // separation law the ruling kept, obtained for free from the walk's own ordering rather
+          // than from a check.
+          //
+          // It is asked BEFORE `preFill` rather than after, and the flag parse refuses
+          // `?blur-first` and `?blur-phased` by name, so the two can never both answer.
+          const groupFill = this._glassGroup ? this._glassGroupTake(node, region, w, h) : null;
+          if (groupFill !== null) {
+            lastBackdrop = groupFill;
+          } else if (preFill !== undefined) {
             lastBackdrop = preFill;
             this._blurFirstStats.Used++;
           } else {
@@ -3570,6 +3670,11 @@ export class Canvas implements DirtyTracker {
     // draws into the scene through raw GL that this ledger cannot see, so the honest place is
     // after it — and no scene in the perf harness has one.
     if (this._blurFirst && !this._diagNoUi) this._blurFirstPrepass(w, h);
+    // `?glass-group` (DEFAULT OFF, DIFFERENT PIXELS). Which glass surfaces are SIBLINGS in one
+    // container, and what one pyramid over each such run would be. It builds nothing here -- the
+    // capture is at the group's first member, inside the walk -- so this is arithmetic over a
+    // traversal and no GL at all. Inert and skipped entirely when the flag is off.
+    if (this._glassGroup && !this._diagNoUi) this._glassGroupPrepass(w, h);
     // `?occlusion` (DEFAULT ON, SAME PIXELS). Which opaque fills the walk below is about to emit
     // for nothing, decided here because a coverer is later in paint order than what it covers and
     // the walk cannot know it at the moment it would push P. Inert and ~free when the flag is off.
@@ -3733,6 +3838,41 @@ export class Canvas implements DirtyTracker {
         + ` pblur=${this._phasedStrays.Pblur}`
         + ` switches=${sw} pixels=DIFFERENT`;
       if (line !== this._atlasLastLine) { this._atlasLastLine = line; JTrace(line); }
+    }
+
+    // `?glass-group`'s gate, on the same terms as the three above: a SHAPE change, not a frame.
+    //
+    // ONE LINE PER GROUP, then the census, because the per-group line is the only place the shape
+    // of the grouping is visible: `members=20 rect=2456x1456 k=1 depth=2 fill=5587400` is a page
+    // whose twenty cards are one container, and twenty lines reading `members=1` would be the same
+    // page with a tree nobody expected. `fallbacks` beside `members` is the vacuous-success guard
+    // this ledger keeps needing: an arm reading `groups=0 members=0 fallbacks=20` is the engine
+    // this lane inherited wearing the flag's name, and a timing cell quoting it measured nothing.
+    // `blur` is the control invariant -- `EndsByKey.blur` must fall from 20 to `groups` on
+    // `glass-grid`, with `drawCalls` unmoved.
+    if (this._glassGroup && !this._diagNoUi) {
+      const st = this._glassGroupStats;
+      const gl2 = this._renderer instanceof WebGL2Renderer ? this._renderer : null;
+      if (gl2 !== null) gl2.NoteGroupFallback(st.Fallbacks);
+      const seen = new Set<GlassGroup>();
+      const lines: string[] = [];
+      for (const g of this._glassGroups.values()) {
+        if (seen.has(g)) continue;
+        seen.add(g);
+        lines.push(`jaui:glass-group members=${g.Members.length}`
+          + ` rect=${g.Plan.RectW}x${g.Plan.RectH} k=${g.Plan.K} depth=${g.Plan.Depth}`
+          + ` fill=${g.Plan.Fill} memberFill=${g.Plan.MemberFill}`);
+      }
+      lines.push(`jaui:glass-group groups=${st.Groups} builds=${st.Builds} members=${st.Members}`
+        + ` fallbacks=${st.Fallbacks} solo=${st.Solo} maxLod=${st.MaxLod} unplanned=${st.Unplanned}`
+        + ` rects=${st.Rects}`
+        + ` blur=${gl2 === null ? -1 : (gl2.SceneEndsByKey['blur'] ?? 0)}`
+        + ` switches=${gl2 === null ? -1 : gl2.SceneSwitches} pixels=DIFFERENT`);
+      const line = lines.join('\n');
+      if (line !== this._glassGroupLastLine) {
+        this._glassGroupLastLine = line;
+        for (const l of lines) JTrace(l);
+      }
     }
 
     // `?border-direct`'s gate, on the same terms as the three above: a SHAPE change, not a frame.
@@ -5095,7 +5235,13 @@ export class Canvas implements DirtyTracker {
     while (scope.Deferred.length > 0) {
       const items = scope.Deferred.sort((a, b) => a.N.TeleportSeq - b.N.TeleportSeq);
       scope.Deferred = [];
-      for (const d of items) this._blurFirstNode(d.N, d.M, scope.Stack, scope, d.MH, d.P, w, h);
+      for (const d of items) {
+        // A teleported node is painted out of its own container's slot in the order, so it is not
+        // a sibling of anything the walk is inside. `null` never matches a real parent, which is
+        // what keeps it out of every group rather than putting it in the wrong one.
+        if (this._glassGroupScan !== null) this._glassGroupParent = null;
+        this._blurFirstNode(d.N, d.M, scope.Stack, scope, d.MH, d.P, w, h);
+      }
     }
   };
 
@@ -5180,6 +5326,10 @@ export class Canvas implements DirtyTracker {
         scope.Deferred.push({ N: child, M: cM, MH: cMH, P: persp });
         continue;
       }
+      // `?glass-group`: WHOSE CHILD IS ABOUT TO BE VISITED. Re-set before every child rather
+      // than once before the loop, because the recursive descent inside the previous child
+      // overwrote it. Only the scan reads it, so an unflagged pre-pass does not carry the write.
+      if (this._glassGroupScan !== null) this._glassGroupParent = node;
       if (child.RenderStyle.Layer !== 0) {
         const childScope: TeleportScope = { Deferred: [], Stack: clip };
         this._blurFirstNode(child, cM, clip, childScope, cMH, persp, w, h);
@@ -5197,6 +5347,20 @@ export class Canvas implements DirtyTracker {
   private _blurFirstBuild = (
     into: Map<Jiv, GpuTextureHandle>, node: Jiv, plan: GlassBlurPlan, w: number, h: number,
   ): boolean => {
+    // `?glass-group`: RECORD it, and build nothing. A group is a property of a RUN of siblings, so
+    // it cannot be decided one member at a time -- and unlike the atlas, the build is not deferred
+    // to the end of a phase either: it happens in the REAL walk, at whichever member of the group
+    // the walk reaches first, because the law this flag implements is about WHEN the backdrop is
+    // captured. This branch is first in the method so an unflagged pre-pass does not carry it, and
+    // it hangs off `_blurFirstBuild` rather than off the traversal so the plan it records is the
+    // one `_glassFillBlurPlan` already resolved for this node -- one resolver, two call sites, and
+    // no way for the scan to disagree with the walk about which surfaces build or over what rect.
+    // `_glassGroupPrepass` pins `_prepassSites` to `'fill'`, so no rim reaches here.
+    const gscan = this._glassGroupScan;
+    if (gscan !== null) {
+      gscan.push({ Node: node, Parent: this._glassGroupParent, Plan: plan });
+      return true;
+    }
     const st = this._blurFirstStats;
     // One instance per node per site. A second build for the same key would overwrite the handle
     // and leave the first consumer reading someone else's map, so it is refused and counted.
@@ -5266,6 +5430,192 @@ export class Canvas implements DirtyTracker {
     const rect = ResolveRegionRect(plan.Region, w, h, k * (1 << depth));
     this._blurFirstKeys.add(`${rect.W}x${rect.H}`);
     return true;
+  };
+
+  /** `?glass-group`: PLAN THE FRAME'S GROUPS, before the walk and without building anything.
+   *
+   *  Two steps, and they are separate because they answer different questions. The SCAN rides
+   *  `_blurFirstNode` -- the same traversal, the same culls, the same `_glassFillBlurPlan` the
+   *  walk's fill site calls -- so there is one answer to "which surfaces build and over what
+   *  region" and not two. The PARTITION is a run-length pass over what it recorded.
+   *
+   *  It issues no GL. The pyramids are built in the REAL walk, each at its own group's first
+   *  member, which is the entire content of the law this flag implements: a backdrop is a time,
+   *  and the time is the walk's arrival at the container. A pre-pass that built them all here
+   *  would be `?blur-phased` with extra arithmetic -- every group captured at the same instant,
+   *  which is exactly the composition the ruling did NOT make.
+   */
+  private _glassGroupPrepass = (w: number, h: number): void => {
+    this._glassGroups.clear();
+    this._glassGroupHandles.clear();
+    const st = this._glassGroupStats;
+    st.Groups = 0; st.Builds = 0; st.Members = 0; st.Fallbacks = 0;
+    st.Solo = 0; st.MaxLod = 0; st.Unplanned = 0; st.Rects = '';
+    const scan: { Node: Jiv; Parent: Jiv | null; Plan: GlassBlurPlan }[] = [];
+    this._glassGroupScan = scan;
+    this._glassGroupParent = null;
+    // FILLS ONLY, pinned the way `_blurPhasedBuild` pins it. A glass RIM is not a group member:
+    // under `?border-source=fill` (the default) it reads its own fill's handle, which is now the
+    // group's, and under `=scene` it builds its own pyramid from the scene at its own BorderLayer
+    // slot -- which is AFTER its siblings have painted, so it is not a member of anything.
+    this._prepassSites = 'fill';
+    const scope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
+    this._blurFirstNode(this.Root, MAT_IDENTITY, EmptyClipStack, scope, null, null, w, h);
+    this._blurFirstReplay(scope, w, h);
+    this._prepassSites = 'both';
+    this._glassGroupScan = null;
+    this._glassGroupParent = null;
+    this._planGlassGroups(scan, w, h);
+  };
+
+  /** Cut the scanned fills into GROUPS and plan a union pyramid for each.
+   *
+   *  A run ends on any of three things, and each is the law rather than a heuristic:
+   *
+   *   - A DIFFERENT PARENT. The group IS the container, so a sibling of someone else starts one.
+   *     A glass surface nested inside an intervening sibling has a different parent and therefore
+   *     ends the run: it is a different container, it paints between two members, and Apple's own
+   *     rule is that glass in a different container is exactly the case that does NOT share a
+   *     sampling region. Ending the run keeps "a group entered later sees the earlier group's
+   *     glass" true in both directions.
+   *   - A DIFFERENT SIGMA. `k`, `depth` and the phase grid all come off the radius, so mixing two
+   *     radii in one pyramid is a resample and not a crop.
+   *   - THE PLANNER. `PlanBackdropUnion` refuses a class whose members disagree on `k`, a rect the
+   *     canvas edge clamped off the phase grid, a member the union does not contain, or a union
+   *     that costs more fill than its members do. Every refusal falls back to TODAY'S ENGINE,
+   *     which is the only degradation this lane is willing to have.
+   *
+   *  A MIP CONSUMER (`MaxLod > 0`) can never JOIN a group and does not END one either. A union's
+   *  identity only ever covers level 0: `GenerateOutputMipmap` halves from level 0's own origin,
+   *  so two regions that agree on the level-0 grid stop agreeing as soon as the chain goes deeper
+   *  than the phase they were snapped to. It is refused on its own terms, its neighbours' run
+   *  continues around it, and it builds its own pyramid in the walk from the scene as it stands
+   *  there. Today every `JwiftGlass` fill is exactly 0 here, which is what makes a group
+   *  thinkable at all; it is the same clause `AtlasAdmitsMember` and `PlanBorderDirect` open with.
+   *
+   *  A NON-GLASS sibling between two members does not split anything, and that is deliberate: the
+   *  scan never saw it, and by the law its paint is inside the group and therefore not sampled.
+   *
+   *  A run of ONE is not a group. Its union would be its own region, so it would pay a build to
+   *  save nothing -- `PlanBackdropUnion`'s first condition -- and it takes the path it takes
+   *  today, byte for byte.
+   *
+   *  -- THE ESCAPE HATCH, DESIGNED AND DELIBERATELY NOT BUILT --------------------------------
+   *
+   *  Apple's `GlassEffectContainer` is an AUTHORED container, not a structural one: two glass
+   *  elements in different parts of a view tree can be put in one container and share a sampling
+   *  region. The tree-shaped rule above is the right DEFAULT -- it needs no authoring, it is what
+   *  a designer already means by "these cards", and it cannot silently merge two things that only
+   *  look adjacent -- but it cannot express a toolbar whose chips are wrapped in per-chip layout
+   *  boxes, which is the shape that will ask for this first.
+   *
+   *  The hatch, when someone needs it, is ONE style property and no new machinery:
+   *
+   *      GlassGroup: <name>          // a string on the glass surface itself, inherited by nobody
+   *
+   *  and one line in the partition: the run key becomes `node.RenderStyle.GlassGroup || parent`
+   *  instead of `parent`. Everything downstream is unchanged, because everything downstream
+   *  already works on a run of members and a radius -- `PlanBackdropUnion` never asked who the
+   *  parent was.
+   *
+   *  Three things it must NOT do, and they are why it is a design note rather than a patch:
+   *  a named group may not span a LAYER boundary or a teleport (the walk paints those elsewhere,
+   *  so "the scene as of group entry" would name two different instants); it may not span a clip
+   *  stack, or the union's rect would cover texels no member may read; and it must still end the
+   *  run on a radius change, because the whole identity argument is one sigma per pyramid. None
+   *  of those is hard and all of them need a test each, which is a lane and not a line.
+   */
+  private _planGlassGroups = (
+    scan: readonly { Node: Jiv; Parent: Jiv | null; Plan: GlassBlurPlan }[], w: number, h: number,
+  ): void => {
+    const st = this._glassGroupStats;
+    const rects: string[] = [];
+    let run: { Node: Jiv; Parent: Jiv | null; Plan: GlassBlurPlan }[] = [];
+    const flush = (): void => {
+      if (run.length === 0) return;
+      const members = run;
+      run = [];
+      if (members.length < 2) { st.Solo += members.length; st.Fallbacks += members.length; return; }
+      const radius = members[0].Plan.Radius;
+      const plan = PlanBackdropUnion(members.map((m) => m.Plan.Region), w, h, radius);
+      if (plan === null) { st.Unplanned += members.length; st.Fallbacks += members.length; return; }
+      const group: GlassGroup = { Members: members.map((m) => m.Node), Radius: radius, Plan: plan };
+      for (const m of members) this._glassGroups.set(m.Node, group);
+      st.Groups++;
+      rects.push(`${plan.RectW}x${plan.RectH}@k${plan.K}/d${plan.Depth}x${members.length}`);
+    };
+    for (const c of scan) {
+      if (c.Plan.MaxLod > 0) { st.MaxLod++; st.Fallbacks++; continue; }
+      const head = run.length === 0 ? null : run[0];
+      if (head !== null
+          && (c.Parent === null || c.Parent !== head.Parent || c.Plan.Radius !== head.Plan.Radius)) {
+        flush();
+      }
+      if (c.Parent === null) { st.Solo++; st.Fallbacks++; continue; }
+      run.push(c);
+    }
+    flush();
+    st.Rects = rects.length === 0 ? 'none' : rects.join('+');
+  };
+
+  /** `?glass-group`: THE CAPTURE, and the handle every member of the group takes from it.
+   *
+   *  Null when this surface is in no group, which is every surface on an unflagged frame and
+   *  every surface the planner refused. Non-null means the group's pyramid is now built, and the
+   *  FIRST call for a group is the one that builds it -- from the live scene, at this point in
+   *  the walk, before any member has painted. That is the law, and it is the walk's own ordering
+   *  that enforces it rather than a recorded timestamp.
+   *
+   *  ONE HANDLE SERVES EVERY MEMBER, with no per-member crop, and that is not a shortcut. A
+   *  `BackdropRegion` is a map from SCREEN UV into the pyramid -- `screenUv * width/rect.W` minus
+   *  `rect.X/rect.W` -- so it is a function of the built RECT alone and says nothing about who is
+   *  sampling. `Jiv.Panel.frag`'s two mads land each member's own fragments on its own part of the
+   *  union, texel exact, because `PlanBackdropUnion` snapped the union to the same phase grid
+   *  every member's own rect was snapped to. The atlas needed a region per member only because
+   *  its members live in different SLOTS of one texture.
+   *
+   *  `region` is the member's LIVE region, re-derived by the walk from the same plan function the
+   *  scan called. It is CHECKED against the union the scan planned rather than assumed equal:
+   *  nothing runs between the scan and the walk, so they cannot differ today, but a member that
+   *  reached outside its own group's pyramid would sample a clamped edge texel and read as a
+   *  smear rather than as a crash. It falls back to its own build and says so on the gate.
+   */
+  private _glassGroupTake = (
+    node: Jiv, region: { x: number; y: number; w: number; h: number }, w: number, h: number,
+  ): GpuTextureHandle | null => {
+    const g = this._glassGroups.get(node);
+    if (g === undefined) return null;
+    const r = this._renderer;
+    if (!(r instanceof WebGL2Renderer) || !_regionContains(g.Plan.Region, region)) {
+      this._glassGroups.delete(node);
+      this._glassGroupStats.Fallbacks++;
+      return null;
+    }
+    const have = this._glassGroupHandles.get(node);
+    if (have !== undefined) {
+      this._glassGroupStats.Members++;
+      r.NoteGroupMember();
+      return have;
+    }
+    const t0 = performance.now();
+    const handle = r.ComputeBlurGroup(
+      r.SceneTexture, w, h, g.Radius, g.Plan.Region, g.Plan.K, g.Members.length,
+    );
+    const t1 = performance.now();
+    // Every member is a `MaxLod == 0` consumer -- `_planGlassGroups` refuses the rest -- so this
+    // is `GenerateOutputMipmap`'s first branch: make the texture complete at the base level and
+    // stop. Called anyway, once per group instead of once per member, because that branch is
+    // where the sampler state is set and a level 0 left mip-incomplete samples black.
+    r.GenerateBlurMipmap(0);
+    this._opMs.Blur += t1 - t0;
+    this._opMs.Mip += performance.now() - t1;
+    r.RebindSceneTarget();
+    for (const m of g.Members) this._glassGroupHandles.set(m, handle);
+    const st = this._glassGroupStats;
+    st.Builds++;
+    st.Members++;
+    r.NoteGroupMember();
+    return handle;
   };
 
   /** Walk the tree before the blur pass to find the largest FrostBlur (CSS px).
@@ -7339,6 +7689,94 @@ export class Canvas implements DirtyTracker {
       + ` default=${params.has('glass-presample') ? 'false' : 'true'}`
       + (this._glassPresample ? ' pixels=DIFFERENT' : '')
       + (this._glassPresampleRefused !== '' ? ` reason=${this._glassPresampleRefused}` : ''));
+
+    // `?glass-group=on|off` -- THE CONTAINER-SCOPED SHARED BACKDROP.
+    //
+    // DEFAULT OFF. It changes a picture and Jack has ruled the picture, not the gate: the change
+    // is the one already shot as "phased" on `glass-grid` (34,830 px, 0.85%, max 12, mean 2.1 --
+    // a card no longer refracting its earlier neighbour's glass in the 24 px gap band), and the
+    // default moves when seven shots match it. See `_glassGroup` for the law.
+    //
+    // Parsed LAST of the blur arms, after `?border-direct`, `?pyramid-atlas`, `?border-source`
+    // and `?glass-presample`, because it interacts with all of them at the same build site and is
+    // refused beside each BY NAME. The per-member clauses in `_planGlassGroups` would refuse most
+    // of these too, and they are tested -- they are what stops a future caller combining the two
+    // in code -- but a flag arm in which every member refuses is the vacuous shape this ledger
+    // keeps being bitten by: `groups=0 members=0 fallbacks=20` wearing the group's name, priced
+    // as though it had grouped something.
+    if (params.has('glass-group')) {
+      const raw = (params.get('glass-group') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off') {
+        throw new Error(`[Jaui] ?glass-group takes 'on' or 'off', got '${raw}'`);
+      }
+      this._glassGroup = raw !== 'off';
+    }
+    if (this._glassGroup) {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-build-no-pyramid-to-share'
+        : r.DiagBlurSrc !== null ? 'blur-src-swaps-the-sampled-texture-under-both-arms'
+        // THE FOUR THE BRIEF NAMES, each for its own reason and each stated rather than inherited.
+        //
+        // `?wkr-shared-backdrop` is the one worth saying out loud, because it is the lever this
+        // looks most like and is not. That arm builds ONE canvas-wide QUARTER-RESOLUTION sharp-root
+        // pyramid per frame, hands every surface in the tree the same texture whatever its
+        // container, and makes each of them climb a mip chain from a base LOD of 2 to find its own
+        // sigma. This arm builds a FULL-RESOLUTION level 0 at the MEMBERS' OWN sigma, over the
+        // union of ONE container's members, with no LOD constant anywhere -- every member still
+        // samples level 0 at lod 0 through `u_BackdropXf` exactly as it does today. Different
+        // resolution, different sigma, different scope, different sampling. The two cannot be
+        // armed together because the shared arm has already answered `lastBackdrop` for every
+        // surface before this site is reached.
+        : this._sharedBackdrop ? 'wkr-shared-backdrop-is-one-global-quarter-res-pyramid-at-a-lod-constant'
+        : this._pyramidAtlas ? 'pyramid-atlas-packs-a-chain-per-member-into-slots-of-one-texture'
+        : this._borderDirect ? 'border-direct-reproduces-a-per-rim-kernel-from-its-own-copy'
+        : this._glassPresample ? 'glass-presample-re-bases-a-build-onto-a-k-the-union-pin-contradicts'
+        // And the coherence refusals: anything that has already answered "where does this
+        // surface's pyramid come from" before the group site is reached, or that moves the
+        // capture point this flag's whole law is about.
+        : r.CardCompositeEnabled ? 'card-composite-builds-from-the-card-target-not-the-scene'
+        // `params.has`, not the fields: `?blur-phased` is parsed AFTER this block (it has to see
+        // every flag it interrogates) and `?blur-first` self-refuses without `?blur-src-*`, so a
+        // field read here would let either of them arm beside a group that thought it was alone.
+        : params.has('blur-first') ? 'blur-first-already-built-every-pyramid-ahead-of-the-walk'
+        : params.has('blur-phased') ? 'blur-phased-captures-every-build-at-one-instant-not-at-group-entry'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-at-a-build-whose-count-this-arm-moves'
+        : this._diagNoGlass || this._diagNoUi ? 'a-no-star-diagnostic-removes-the-surfaces-this-groups'
+        : null;
+      if (why !== null) {
+        this._glassGroup = false;
+        this._glassGroupRefused = why;
+        JTrace(`jaui:glass-group armed=off reason=${why}`);
+      }
+    }
+    // THE MARK, on both arms, from the line that decides -- never from the renderer's `Init`, for
+    // the reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is
+    // parsed, so a mark taken there would print `off` on every arm however the URL read.
+    JTrace(`jaui:glass-group armed=${this._glassGroup ? 'on' : 'off'}`
+      + ` default=${!params.has('glass-group')}`
+      + (this._glassGroup ? ' pixels=DIFFERENT' : ' pixels=SAME')
+      + (this._glassGroupRefused !== '' ? ` reason=${this._glassGroupRefused}` : ''));
+    {
+      const g = globalThis as unknown as { __jauiGlassGroup?: () => GlassGroupCensus };
+      g.__jauiGlassGroup = () => {
+        const r = this._renderer;
+        const on = r instanceof WebGL2Renderer;
+        const st = this._glassGroupStats;
+        return {
+          Armed: this._glassGroup,
+          Groups: st.Groups,
+          Builds: on ? r.GroupBuilds : 0,
+          Members: on ? r.GroupMembers : 0,
+          Fallbacks: on ? r.GroupFallbacks : 0,
+          Blur: on ? (r.SceneEndsByKey['blur'] ?? 0) : 0,
+          Rects: st.Rects,
+          Refused: this._glassGroupRefused,
+        };
+      };
+    }
 
     // `?atlas-instanced` -- how the atlas's hops are ISSUED, and nothing else. Parsed after the
     // atlas and its refusals so the mark can say whether there is an atlas to instance at all: it
