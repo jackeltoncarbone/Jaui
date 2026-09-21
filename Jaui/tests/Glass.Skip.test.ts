@@ -24,6 +24,7 @@
  * px of skirt on each vertical side and 32 on each horizontal one.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { Canvas } from '@jaui/Core/Jaui';
 import type { Renderer } from '@jaui/Core/Renderer';
 import { WebGL2Renderer } from '@jaui/Core/WebGL2.Renderer';
