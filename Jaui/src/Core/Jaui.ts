@@ -16,12 +16,12 @@ import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
-import { ClipStackBuffer, EmptyClipStack, type ClipShape, type ClipStack } from './Clip.Stack';
+import { ClipStackBuffer, EmptyClipStack, CLIP_FLOATS_PER_ENTRY, type ClipShape, type ClipStack } from './Clip.Stack';
 import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
 import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
-import { XformBuffer } from '../Transform/Xform.Buffer';
-import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop } from './Renderer';
+import { XformBuffer, XFORM_FLOATS_PER_ENTRY } from '../Transform/Xform.Buffer';
+import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop, type ProgressiveBlurParams } from './Renderer';
 // `?blur-first` names the pyramid pool's own chain key so the report can say how many chains
 // forty builds actually resolve to. These three are the exact functions `BlurPass.Blur` uses to
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
@@ -49,6 +49,10 @@ import {
   type PixelRect, type OcclusionFill, type OcclusionVerdict, type OcclusionNotes,
 } from './Occlusion';
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
+import {
+  PaintLedger, GuardedRect, UnionRect, BLUR_READ_GUARD_PX, BLUR_CACHE_BUDGET_BYTES, DAMAGE_MAX_PIECES,
+  RECORD_NODE, RECORD_RIM, RECORD_JANVAS, READER_FILL, READER_RIM, READER_PBLUR, type ReaderWhy,
+} from './Blur.Cache';
 import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited, type TickPaceMode } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
@@ -166,6 +170,44 @@ const OCCLUSION_MIN_AREA_FRACTION = 1 / 16;
 
 /** The one cover list every non-coverer shares, so a fill that cannot cover allocates nothing. */
 const EMPTY_COVER: readonly PixelRect[] = [];
+
+/** One rendered frame of `?blur-cache`, exactly: what `__jauiBlurCache()` publishes as `Frame`. */
+export interface BlurCacheFrame {
+  Surfaces: number;
+  Hits: number;
+  Misses: number;
+  /** Misses whose backdrop WAS clean -- first sight of a surface, or a slot evicted or refused. */
+  Cold: number;
+  Stored: number;
+  /** Glass-group members: they take the group's pyramid, which this cache does not key. */
+  Grouped: number;
+  Dirty: Record<'first' | 'gap' | 'key' | 'prefix' | 'full' | 'damage', number>;
+  /** -1 when the region gave up and called the whole canvas dirty. */
+  DirtyPieces: number;
+  DirtyPx: number;
+  Changed: number;
+  New: number;
+  Gone: number;
+  Fresh: Record<'janvas' | 'shadow' | 'group', number>;
+  Untracked: number;
+  Duplicate: number;
+  Seeded: boolean;
+  Resting: boolean;
+  Vacuous: boolean;
+}
+
+/** What `__jauiBlurCache()` publishes. `Session` is the verify arm's evidence: a long run reading
+ *  `TotalVerified > 0` with `TotalMismatches == 0`. */
+export interface BlurCacheCensus {
+  Armed: 'off' | 'on' | 'verify';
+  Refused: string;
+  Frame: BlurCacheFrame | null;
+  Session: { Frames: number; Resting: number; Vacuous: number };
+  Bytes: number;
+  Slots: number;
+  BudgetBytes: number;
+  Renderer: WebGL2Renderer['BlurCacheCensus'] | null;
+}
 
 /** What `__jauiOcclusion()` publishes. The census a reader outside the engine has no other way to
  *  ask for: what the pre-pass admitted, what it withheld, and -- the one that has to hold -- how
@@ -378,7 +420,7 @@ import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer, PANEL_PROGRAM_COUNT, GLASS_REG_PROGRAMS, GLASS_GATE_PROGRAMS } from './WebGL2.Renderer';
-import type { ShadowProbe } from './WebGL2.Renderer';
+import type { ShadowProbe, BlurCacheSlot } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
@@ -1209,6 +1251,40 @@ export class Canvas implements DirtyTracker {
    *  across the canvas it covered everything and forced a full-canvas rebuild per
    *  surface (slower than the old scissored per-surface blur). */
   private _sceneDirtyRects: number[] = [];
+  /** `?blur-cache=off|on|verify` -- A SURFACE WHOSE BACKDROP DID NOT CHANGE DOES NOT REBUILD ITS BLUR.
+   *
+   *  DEFAULT OFF, and it stays off until a long `verify` session reads `hits>0 mismatches=0`: the
+   *  cache is exactly as correct as the audit of what can change a pixel, and verify is the only
+   *  evidence the audit is complete. `on` skips the build on a clean backdrop and binds the copy it
+   *  kept; `verify` builds anyway, compares the two on every hit, and binds the fresh one, so its
+   *  pixels are the `off` arm's whatever it finds. All three arms are the same picture BY
+   *  CONSTRUCTION -- a non-zero pixel between them is a producer the audit missed, not a look.
+   *
+   *  `_sceneDirtyRects` above is NOT this lane's damage, though the name invites it: it is filled
+   *  only under `?wkr-shared-backdrop`, only with glass footprints, and only within one frame --
+   *  "drawn since the shared build", which on a page that repaints everything every frame is never
+   *  empty. A region built from it would read `hits=0` forever. See `Core/Blur.Cache.ts`. */
+  private _blurCache: 'off' | 'on' | 'verify' = 'off';
+  private _blurCacheRefused = '';
+  private readonly _bc = new PaintLedger<BlurCacheSlot>();
+  /** True for the length of one ledgered walk; every hook is one boolean when it is false. */
+  private _bcOn = false;
+  /** Bumped by every image upload the cache cannot attribute to one texture, and per texture by the
+   *  ones it can (a video frame re-uploaded in place under its key). */
+  private _bcImageEpoch = 0;
+  private readonly _bcTexEpochs = new WeakMap<object, number>();
+  private _bcUploadTex: object | null = null;
+  /** Bumped when the glyph atlas is flushed: a re-raster can land a different word under the SAME
+   *  UVs an unchanged instance carries, which no float would show. */
+  private _bcTextEpoch = 0;
+  private readonly _bcStats = {
+    Surfaces: 0, Hits: 0, Misses: 0, Cold: 0, Stored: 0, Grouped: 0,
+    Why: { first: 0, gap: 0, key: 0, prefix: 0, full: 0, damage: 0 } as Record<Exclude<ReaderWhy, 'clean'>, number>,
+  };
+  /** Session tallies for the census: frames the ledger ran, frames with nothing changed, and the
+   *  vacuous shape -- a frame with nothing changed, surfaces to read, and still no hit. */
+  private readonly _bcSession = { Frames: 0, Resting: 0, Vacuous: 0 };
+  private _bcLastLine = '';
   /** Frame counter for the one-shot per-surface dump (`?wkr-jaui-prof`). Logs
    *  each glass/pblur surface's rect + region fill once on a settled frame so
    *  we can see which surface dominates GPU fill. */
@@ -1259,6 +1335,11 @@ export class Canvas implements DirtyTracker {
     this._textCache = new TextCache(renderer);
     this._imageCache = new ImageCache(renderer);
     this._imageCache.OnLoad = () => {
+      // `?blur-cache`: every write into an image texture ends here, so this is where its pixels
+      // declare. A write the LoadBitmap hook attributed to one texture dirties only that texture's
+      // panels; any other dirties every image panel, which is always correct.
+      if (this._bcUploadTex !== null) this._bcTexEpochs.set(this._bcUploadTex, (this._bcTexEpochs.get(this._bcUploadTex) ?? 0) + 1);
+      else this._bcImageEpoch++;
       // Walk tree and set IntrinsicWidth/Height on nodes whose Background
       // is an Image kind referencing a now-loaded cache entry. This must
       // happen BEFORE layout so the solver sees the intrinsics on the
@@ -1319,6 +1400,9 @@ export class Canvas implements DirtyTracker {
       j.SetState('Loading', false);
       j.SetState('Failed', true);
     });
+    // The URL was parsed at the top of the constructor, so an unarmed canvas never wraps anything and
+    // its instance funnels are the ones it shipped with.
+    if (this._blurCache !== 'off') this._bcInstallHooks();
 
     this._animationManager.OnFrame(() => this.RequestFrame());
     // The animation half of the park's wake contract: anything that Kicks the manager -- a spring
@@ -1938,6 +2022,10 @@ export class Canvas implements DirtyTracker {
       // The layer-cache FBOs died with the context; drop them so the next
       // static frame recaptures into fresh FBOs.
       this._layerCache.clear();
+      // `?blur-cache`: the slots died with it too, and every record describes a scene that is gone.
+      this._bcTextEpoch++;
+      this._bc.Reset();
+      if (this._renderer instanceof WebGL2Renderer) this._renderer.BlurCacheClear();
       // Foreign 3D <janvas> renderers (e.g. the home hero field) lost their GPU
       // resources too — flag every one for re-Init so the next render re-runs
       // `Renderer.Init(gl, …)` against the restored context.
@@ -2599,6 +2687,9 @@ export class Canvas implements DirtyTracker {
     // glass/pblur that used to call SnapshotScreen).
     r.DisableBlend();
     r.BeginScenePass(0, 0, 0);
+    // `?blur-cache`: the paint ledger opens beside the scene it describes, before the first draw
+    // into it (the janvas pre-pass below).
+    this._bcBeginFrame(w, h);
 
     // Shared backdrop is rebuilt fresh each frame (no cross-frame caching — the
     // video-backdrop contract changes the scene every frame). Invalidate now;
@@ -2828,6 +2919,9 @@ export class Canvas implements DirtyTracker {
         borderEmitted = true;
         flushPanels();
         flushText();
+        // `?blur-cache`: the rim paints among the children, not beside the fill, so it is a record of
+        // its own. Opened after the flushes -- those drain the CHILDREN's instances, already recorded.
+        if (this._bcOn) this._bc.Open(node, RECORD_RIM);
         const ownClip = this._clipBuffer.Encode(stack, this._dpr);
         const ownXform = effH !== null ? this._xformBuffer.Add(effH, this._dpr) : -1;
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -2913,6 +3007,12 @@ export class Canvas implements DirtyTracker {
             lastBackdrop = fromFill.Handle;
             (r as WebGL2Renderer).NoteBorderFromFill();
             this._borderSourceStats.FromFill++;
+            // The fill's pyramid carries the fill's token; the raw snapshot above is read NOW, over
+            // the rim's own region, so the rim is a reader of its own as well.
+            if (this._bcOn) {
+              this._bcReadOnly(node, READER_RIM, `fill|${fromFill.BaseFrostLod}`, region);
+              this._bc.Sig.Number(this._bc.TokenOf(node, READER_FILL));
+            }
           } else if (preRim !== undefined) {
             lastBackdrop = preRim;
             this._blurFirstStats.Used++;
@@ -2933,6 +3033,7 @@ export class Canvas implements DirtyTracker {
                 .ComputeBorderDirect(region, w, h, plan.Radius, plan.MaxLod, node.RenderStyle.Refraction)
               : null;
             if (direct !== null) {
+              this._bcReadOnly(node, READER_RIM, `direct|${plan.Radius}|${plan.MaxLod}`, region);
               // No `GenerateBlurMipmap`: the admission rule requires `MaxLod == 0`, which is the
               // case where that call only ever ran `DisableMipmap` on a chain that no longer
               // exists. No `RebindSceneTarget` either -- the blit leaves the DRAW framebuffer at
@@ -2943,9 +3044,13 @@ export class Canvas implements DirtyTracker {
             } else {
               if (this._rimsInWalk) { this._blurFirstStats.Rim++; this._atlasWalkSolo++; }
               if (this._borderDirect) (r as WebGL2Renderer).NoteBorderPyramid();
-              lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,
-                this._mayPresample(plan), this._maySeparable(plan));
-              r.GenerateBlurMipmap(plan.MaxLod);
+              const presample = this._mayPresample(plan);
+              const separable = this._maySeparable(plan);
+              lastBackdrop = this._bcBuild(node, READER_RIM, region, plan.Radius, plan.MaxLod, presample, separable, w, h, () => {
+                const built = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
+                r.GenerateBlurMipmap(plan.MaxLod);
+                return built;
+              });
               r.RebindSceneTarget();
               // `?scene-restarts` / `?small-restarts`: the RIM build's insertion point, taken HERE
               // and not after the draw below. The build has just bound and drawn into the blur
@@ -2967,6 +3072,11 @@ export class Canvas implements DirtyTracker {
           r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
           const glassBgPaint = this._computeBgPaint(node);
+          if (this._bcOn) {
+            this._bcNoteBgPaint(glassBgPaint);
+            this._bc.Sig.Number(lastBaseFrostLod);
+            this._bc.Sig.Word(sceneSnap !== null ? 1 : 0);
+          }
           r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, true, sceneSnap, glassBgPaint);
           this._counts.Glass++;
           this._panelBuffer.Begin();
@@ -2982,6 +3092,7 @@ export class Canvas implements DirtyTracker {
           this._counts.Panels++;
           this._panelBuffer.Begin();
         }
+        if (this._bcOn) this._bc.Close();
       };
 
       for (const child of this._orderedChildren(node)) {
@@ -3118,6 +3229,10 @@ export class Canvas implements DirtyTracker {
         return;
       }
 
+      // `?blur-cache`: everything this node paints from here to its children is ONE record. Opened
+      // before the clip encode so the clip entries its instances index are this frame's.
+      if (this._bcOn) this._bc.Open(node, RECORD_NODE);
+
       // Encode the current clip stack into the per-frame buffer so this Jiv's
       // panel/text instances reference it by (offset, count).
       const clipMeta = this._clipBuffer.Encode(stack, this._dpr);
@@ -3242,13 +3357,21 @@ export class Canvas implements DirtyTracker {
         // LOD from mip 0 (truly clear, σ=0) up to u_MaxLod (heavy) — true
         // progression with no sharp/blurred crossfade, and one fewer pass than
         // the dual filter.
-        lastBackdrop = r.ComputeBlur(sceneSnap, w, h, 0, undefined, region);
-        lastBaseFrostLod = 0;
+        //
         // Cap mip build at this pblur's max sampled LOD — the shader does
         // textureLod(u_Pyramid, uv, ramp²·maxLod), so it never reads past
         // maxLod. Building deeper levels is pure fragment-fill waste on
         // a software rasterizer.
-        r.GenerateBlurMipmap(maxLod);
+        //
+        // `?blur-cache`: the pyramid is the whole mip chain of the region, so a clean region skips all
+        // of it. The snapshot above still runs -- the draw below reads it as `u_Scene` -- and it is the
+        // same scene state the reader was judged on.
+        lastBackdrop = this._bcBuild(node, READER_PBLUR, region, 0, maxLod, false, false, w, h, () => {
+          const built = r.ComputeBlur(sceneSnap, w, h, 0, undefined, region);
+          r.GenerateBlurMipmap(maxLod);
+          return built;
+        });
+        lastBaseFrostLod = 0;
         r.RebindSceneTarget();
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -3274,7 +3397,7 @@ export class Canvas implements DirtyTracker {
         // this is byte-identical to the previous AABB form.
         const _pbHalfW = _pbCx * node.Width * 0.5 * d;
         const _pbHalfH = _pbCy * node.Height * 0.5 * d;
-        if (!this._diagNoPblurDraw) r.DrawProgressiveBlur({
+        const pblur: ProgressiveBlurParams = {
           Rect: { X: _pbPivotX - _pbHalfW, Y: _pbPivotY - _pbHalfH, W: _pbHalfW * 2, H: _pbHalfH * 2 },
           Cos: matCos(eff), Sin: matSin(eff), PivotX: _pbPivotX, PivotY: _pbPivotY,
           Scene: sceneSnap, // reuse the snapshot we took for ComputeBlur
@@ -3293,7 +3416,9 @@ export class Canvas implements DirtyTracker {
           },
           ClipOffset: clipMeta.Offset,
           ClipCount: clipMeta.Count,
-        });
+        };
+        if (this._bcOn) this._bcNotePblur(pblur);
+        if (!this._diagNoPblurDraw) r.DrawProgressiveBlur(pblur);
         this._counts.PBlur++;
 
       } else if (((_isGlass(material) && node.RenderStyle.Refraction !== 0) || _hasBackdropFilter(node)) && material !== 'ProgressiveBlur' && !this._diagNoGlass) {
@@ -3473,23 +3598,33 @@ export class Canvas implements DirtyTracker {
           const groupFill = this._glassGroup ? this._glassGroupTake(node, region, w, h, dt) : null;
           if (groupFill !== null) {
             lastBackdrop = groupFill;
+            // `?blur-cache`: a group's pyramid is built over the union of its members at the first
+            // one, and this cache does not key it. Its members' pixels are therefore called changed
+            // every frame -- correct, and printed as `grouped=` so a page that groups is not read as
+            // a page the cache failed on.
+            if (this._bcOn) { this._bc.Fresh('group'); this._bcStats.Grouped++; }
           } else if (preFill !== undefined) {
             lastBackdrop = preFill;
             this._blurFirstStats.Used++;
           } else {
             if (this._blurFirst || this._phasedWalk) this._blurFirstStats.Missed++;
-            const _tBlur = performance.now();
-            lastBackdrop = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region,
-              this._mayPresample(plan), this._maySeparable(plan));
-            const _tMip = performance.now();
-            this._opMs.Blur += _tMip - _tBlur;
-            r.GenerateBlurMipmap(plan.MaxLod);
-            this._opMs.Mip += performance.now() - _tMip;
+            const presample = this._mayPresample(plan);
+            const separable = this._maySeparable(plan);
+            lastBackdrop = this._bcBuild(node, READER_FILL, region, plan.Radius, plan.MaxLod, presample, separable, w, h, () => {
+              const _tBlur = performance.now();
+              const built = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
+              const _tMip = performance.now();
+              this._opMs.Blur += _tMip - _tBlur;
+              r.GenerateBlurMipmap(plan.MaxLod);
+              this._opMs.Mip += performance.now() - _tMip;
+              // `?scene-restarts` / `?small-restarts`: this build's insertion point is taken BELOW,
+              // after the adaptive-shadow measure, and this flag is how it knows a build happened
+              // here. See the call site for why it is not taken on this line. A `?blur-cache` hit
+              // builds nothing and takes no point.
+              fillBuilt = true;
+              return built;
+            });
             r.RebindSceneTarget();
-            // `?scene-restarts` / `?small-restarts`: this build's insertion point is taken BELOW,
-            // after the adaptive-shadow measure, and this flag is how it knows a build happened
-            // here. See the call site for why it is not taken on this line.
-            fillBuilt = true;
           }
         }
 
@@ -3607,6 +3742,18 @@ export class Canvas implements DirtyTracker {
         // of v_Tint when u_BgMode != 0. Border, refraction, frost, rim
         // spec all keep working.
         const glassBgPaint = this._computeBgPaint(node);
+        // `?blur-cache`: the draw's inputs that are not instance floats. The adaptive shadow is the one
+        // the CPU cannot see: its state texel eases toward a GPU-side reading every rendered frame, and
+        // nothing reports whether it moved. So a surface that draws one is called changed every frame
+        // over its own quad -- a local refusal, narrower than disarming the cache.
+        if (this._bcOn) {
+          this._bcNoteBgPaint(glassBgPaint);
+          const sig = this._bc.Sig;
+          sig.Number(lastBaseFrostLod);
+          sig.Word(sceneSnap !== null ? 1 : 0);
+          sig.Word(_isGlass(material) ? 1 : 0);
+          if (shadowBackdrop !== undefined) { sig.Number(shadowBackdrop.Slot); this._bc.Fresh('shadow'); }
+        }
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
           r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop);
@@ -3673,6 +3820,7 @@ export class Canvas implements DirtyTracker {
         } else {
         const flatBgPaint = this._computeBgPaint(node);
         if (flatBgPaint !== undefined) {
+          this._bcNoteBgPaint(flatBgPaint);
           flushPanels();
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
@@ -3771,6 +3919,8 @@ export class Canvas implements DirtyTracker {
           );
         }
       }
+
+      if (this._bcOn) this._bc.Close();
 
       // Walk children in Layer order (ties break by tree order)
       descendChildren(node, eff, stack, scope, effH, childPersp);
@@ -3979,6 +4129,9 @@ export class Canvas implements DirtyTracker {
     // order than the trailing text, if any).
     flushPanels();
     flushText();
+    // Every draw that can land in a later surface's backdrop has been recorded: the card write-backs
+    // below are blits of what the walk already drew, and the janvas masks run after every reader.
+    this._bcEndFrame();
 
     // `?blur-first`'s gate, on the trace channel. Printed when the SHAPE changes rather than every
     // frame: a line per frame would drown the channel, and a line only on the first frame would
@@ -4480,6 +4633,293 @@ export class Canvas implements DirtyTracker {
     }
     return { Mode: 'RadialGradient', CenterX: bg.CenterX, CenterY: bg.CenterY, Radius: bg.Radius, Curve: curve };
   };
+
+  // ── `?blur-cache`: the paint records and the decision ─────────────────────────────────────────
+  //
+  // The mechanism is `Core/Blur.Cache.ts`'s; what lives here is WHERE the walk feeds it. Three kinds
+  // of call, and every one is a single boolean when the arm is off:
+  //
+  //   - a RECORD brackets what one node paints (its own fill, text and SVG; its rim overlay is a
+  //     second record), opened after the node's cull and closed before its children walk;
+  //   - the two instance FUNNELS (`_bcInstallHooks`) hash every push into the open record, so the
+  //     signature is the bytes the GPU is handed and no style property has to be named;
+  //   - each BUILD SITE asks `_bcBuild`, which is the only place a pyramid is skipped.
+
+  /** Wrap the two instance funnels and the image cache's in-place upload, once, at construction. A
+   *  push with no record open is a paint site the ledger does not know: it calls the whole frame
+   *  dirty from that point rather than slipping past, and the gate line prints `untracked=`. */
+  private _bcInstallHooks = (): void => {
+    const panel = this._panelBuffer;
+    const panelPush = panel.Push;
+    panel.Push = (jiv, dpr, m, clipOffset = 0, clipCount = 0, xformIndex = -1, borderMode) => {
+      panelPush(jiv, dpr, m, clipOffset, clipCount, xformIndex, borderMode);
+      if (this._bcOn) this._bcNotePanel(clipOffset, clipCount, xformIndex);
+    };
+    const text = this._textBuffer;
+    const textPush = text.Push;
+    text.Push = (cmd) => {
+      textPush(cmd);
+      if (this._bcOn) this._bcNoteText(cmd.ClipOffset, cmd.ClipCount, cmd.XformIndex ?? -1, cmd.Sin ?? 0);
+    };
+    // A video frame re-uploads under its own key, in place, every frame. Naming the texture here is
+    // what lets the card over it rebuild while the image panels beside it do not; the OnLoad hook
+    // reads it.
+    const images = this._imageCache;
+    const loadBitmap = images.LoadBitmap;
+    images.LoadBitmap = (key, bitmap) => {
+      this._bcUploadTex = images.Get(key)?.Texture ?? null;
+      try { loadBitmap(key, bitmap); } finally { this._bcUploadTex = null; }
+    };
+  };
+
+  /** The clip entries and the homography an instance indexes: the offsets are floats in the instance,
+   *  but what they point at is rewritten every frame and is what the fragment actually reads. */
+  private _bcNoteClipXform = (clipOffset: number, clipCount: number, xformIndex: number): void => {
+    const sig = this._bc.Sig;
+    if (clipCount > 0) {
+      sig.Floats(this._clipBuffer.Data, clipOffset * CLIP_FLOATS_PER_ENTRY, (clipOffset + clipCount) * CLIP_FLOATS_PER_ENTRY);
+    }
+    if (xformIndex >= 0) {
+      sig.Floats(this._xformBuffer.Data, xformIndex * XFORM_FLOATS_PER_ENTRY, (xformIndex + 1) * XFORM_FLOATS_PER_ENTRY);
+    }
+  };
+
+  /** A panel instance was pushed. Its quad (`a_Rect`, floats 0..3) is the device AABB it can
+   *  rasterize, shadow and border margins included; a projected instance carries its NATURAL box
+   *  there instead, and is bounded by the whole canvas. */
+  private _bcNotePanel = (clipOffset: number, clipCount: number, xformIndex: number): void => {
+    const bc = this._bc;
+    if (!bc.IsOpen) { bc.NoteUntracked(); return; }
+    const data = this._panelBuffer.Data;
+    const at = (this._panelBuffer.Count - 1) * JIV_FLOATS_PER_INSTANCE;
+    bc.Sig.Floats(data, at, at + JIV_FLOATS_PER_INSTANCE);
+    this._bcNoteClipXform(clipOffset, clipCount, xformIndex);
+    if (xformIndex >= 0) bc.ExtendAll();
+    else bc.Extend(data[at], data[at + 1], data[at] + data[at + 2], data[at + 1] + data[at + 3]);
+  };
+
+  /** A glyph instance was pushed. X/Y/W/H are its device quad; a glyph ROTATED about its pivot, or a
+   *  projected one, is bounded by the whole canvas rather than by arithmetic that has to agree with
+   *  the text vertex shader's sign convention. */
+  private _bcNoteText = (clipOffset: number, clipCount: number, xformIndex: number, sin: number): void => {
+    const bc = this._bc;
+    if (!bc.IsOpen) { bc.NoteUntracked(); return; }
+    const data = this._textBuffer.Data;
+    const at = (this._textBuffer.Count - 1) * TEXT_FLOATS_PER_INSTANCE;
+    bc.Sig.Floats(data, at, at + TEXT_FLOATS_PER_INSTANCE);
+    this._bcNoteClipXform(clipOffset, clipCount, xformIndex);
+    if (xformIndex >= 0 || sin !== 0) bc.ExtendAll();
+    else bc.Extend(data[at], data[at + 1], data[at] + data[at + 2], data[at + 1] + data[at + 3]);
+  };
+
+  /** A draw input that is not an instance float: the image or gradient a panel's fill samples. The
+   *  image is named by its texture and by the epochs its uploads bump -- a texture rewritten in place
+   *  keeps its identity, so the identity alone would miss a video frame. */
+  private _bcNoteBgPaint = (p: BgPaint | undefined): void => {
+    if (!this._bcOn) return;
+    const bc = this._bc;
+    const sig = bc.Sig;
+    if (p === undefined) { sig.Word(0); return; }
+    if (p.Mode === 'Image') {
+      sig.Word(1);
+      sig.Number(bc.Id(p.Texture));
+      sig.Number(this._bcTexEpochs.get(p.Texture) ?? 0);
+      sig.Number(this._bcImageEpoch);
+      sig.Number(p.UvScaleX); sig.Number(p.UvScaleY); sig.Number(p.UvOffsetX); sig.Number(p.UvOffsetY);
+      sig.Number(p.FadeAlpha);
+    } else if (p.Mode === 'LinearGradient') {
+      sig.Word(2); sig.Number(p.DirX); sig.Number(p.DirY); sig.Number(bc.Id(p.Curve));
+    } else if (p.Mode === 'RadialGradient') {
+      sig.Word(3); sig.Number(p.CenterX); sig.Number(p.CenterY); sig.Number(p.Radius); sig.Number(bc.Id(p.Curve));
+    } else {
+      sig.Word(4);
+    }
+  };
+
+  /** A progressive blur's draw: every number it hands its shader, and its quad. `Scene` and
+   *  `Pyramid` are not hashed -- the reader token `_bcBuild` mixed in already stands for both. */
+  private _bcNotePblur = (p: ProgressiveBlurParams): void => {
+    const bc = this._bc;
+    const sig = bc.Sig;
+    const rc = p.Rect;
+    sig.Number(rc.X); sig.Number(rc.Y); sig.Number(rc.W); sig.Number(rc.H);
+    sig.Number(p.Cos ?? 1); sig.Number(p.Sin ?? 0); sig.Number(p.PivotX ?? 0); sig.Number(p.PivotY ?? 0);
+    sig.Number(p.MaxLod); sig.Number(p.Direction); sig.Number(p.Feather); sig.Number(p.Easing);
+    sig.Number(p.Opacity);
+    sig.Number(p.Background.R); sig.Number(p.Background.G); sig.Number(p.Background.B); sig.Number(p.Background.A);
+    sig.Number(p.Grading.Brightness); sig.Number(p.Grading.Saturation); sig.Number(p.Grading.Contrast);
+    const stops = p.Stops ?? null;
+    sig.Number(stops === null ? -1 : stops.length);
+    if (stops !== null) for (const st of stops) { sig.Number(st.Position); sig.Number(st.Value); sig.Number(st.Easing); }
+    this._bcNoteClipXform(p.ClipOffset, p.ClipCount, -1);
+    if ((p.Sin ?? 0) !== 0) bc.ExtendAll();
+    else bc.Extend(rc.X, rc.Y, rc.X + rc.W, rc.Y + rc.H);
+  };
+
+  /** An SVG's immediate draws: the element's model matrix and opacity, and each fill's and stroke's
+   *  geometry (by identity -- a tessellation is replaced, never rewritten in place), colour and width.
+   *  Bounded by the whole canvas: a path can leave its viewBox, and a canvas-wide footprint costs
+   *  nothing on the frames the SVG does not change. */
+  private _bcNoteSvgDraw = (geometry: object, count: number, rgba: readonly number[], width: number): void => {
+    const bc = this._bc;
+    if (!bc.IsOpen) { bc.NoteUntracked(); return; }
+    const sig = bc.Sig;
+    sig.Number(bc.Id(geometry)); sig.Number(count); sig.Number(width);
+    for (const v of rgba) sig.Number(v);
+    bc.ExtendAll();
+  };
+
+  /**
+   * THE DECISION, at the one instant a surface would build its pyramid.
+   *
+   * The reader is evaluated first and its token goes into the open record whatever happens next, so
+   * a changed backdrop reaches the damage region for every surface after this one even on the arm
+   * that builds anyway. Then exactly one of:
+   *
+   *   HIT   -- clean, and the slot is still resident: no build. Under `verify` the build runs anyway,
+   *            the two level-0s are compared texel for texel, and the FRESH one is bound, so a
+   *            mismatch is counted and repaired rather than shown.
+   *   COLD  -- clean, nothing cached: build, then copy it into a slot for the next frame.
+   *   DIRTY -- build, and the slot (if any) goes invalid without being refilled: a backdrop that
+   *            changed this frame is the best predictor that it changes next frame too, and copying
+   *            a pyramid every frame of a scroll would make the null this lane cannot win a loss.
+   *
+   * `build` is the site's own `ComputeBlur` + `GenerateBlurMipmap`, unchanged; the copy rides the
+   * encoder end it already paid, and the site's `RebindSceneTarget` follows on every branch.
+   */
+  private _bcBuild = (
+    owner: Jiv, kind: number, region: { x: number; y: number; w: number; h: number },
+    radius: number, maxLod: number, presample: boolean, gaussian: boolean, w: number, h: number,
+    build: () => GpuTextureHandle,
+  ): GpuTextureHandle => {
+    if (!this._bcOn) return build();
+    const r = this._renderer as WebGL2Renderer;
+    const bc = this._bc;
+    const key = `build|${region.x},${region.y},${region.w},${region.h}|${radius}|${maxLod}`
+      + `|${presample ? 1 : 0}${gaussian ? 1 : 0}|${w}x${h}`;
+    const v = bc.Reader(owner, kind, key, GuardedRect(region.x, region.y, region.w, region.h, BLUR_READ_GUARD_PX));
+    bc.Sig.Number(v.Token);
+    const st = v.State;
+    const stats = this._bcStats;
+    stats.Surfaces++;
+    const slot = st.Slot !== null && st.Slot.Valid ? st.Slot : null;
+    if (v.Why === 'clean' && slot !== null && slot.Handle !== null) {
+      stats.Hits++;
+      r.NoteBlurCacheHit();
+      slot.LastUse = bc.Frame;
+      if (this._blurCache !== 'verify') return slot.Handle;
+      const fresh = build();
+      const texels = r.BlurCacheCompare(slot.Handle, fresh);
+      r.NoteBlurCacheVerify(texels !== 0);
+      if (texels !== 0) {
+        JTrace(`jaui:blur-cache mismatch kind=${kind === READER_FILL ? 'fill' : kind === READER_RIM ? 'rim' : 'pblur'}`
+          + ` node=${bc.Id(owner)} classes=${owner.Classes.length > 0 ? owner.Classes.join('.') : '-'}`
+          + ` region=${region.x},${region.y},${region.w}x${region.h} texels=${texels} frame=${bc.Frame}`
+          + ` read=${r.BlurCacheReadKind}`);
+        st.Slot = r.BlurCacheStore(fresh, slot, bc.Frame);
+      }
+      return fresh;
+    }
+    stats.Misses++;
+    r.NoteBlurCacheMiss();
+    if (v.Why === 'clean') stats.Cold++;
+    else stats.Why[v.Why]++;
+    if (slot !== null) slot.Valid = false;
+    const handle = build();
+    // Test next frame against what was READ, not what was asked: the build snapped the region out to
+    // its downsample grid, and the handle's map is the snapped rect.
+    const rr = handle.Region;
+    const full = GuardedRect(0, 0, w, h, BLUR_READ_GUARD_PX);
+    if (rr !== undefined && rr.ScaleX > 0 && rr.ScaleY > 0 && (rr.ScaleX !== 1 || rr.ScaleY !== 1 || rr.OffsetX !== 0 || rr.OffsetY !== 0)) {
+      const rw = w / rr.ScaleX, rh = h / rr.ScaleY;
+      const rx = -rr.OffsetX * rw, ry = h - (-rr.OffsetY * rh) - rh;
+      st.Rect = UnionRect(st.Rect, GuardedRect(rx, ry, rw, rh, BLUR_READ_GUARD_PX));
+    } else {
+      st.Rect = full;
+    }
+    if (v.Why === 'clean') {
+      st.Slot = r.BlurCacheStore(handle, st.Slot, bc.Frame);
+      if (st.Slot !== null) stats.Stored++;
+    }
+    return handle;
+  };
+
+  /** A reader that builds nothing of its own but still reads the scene at this instant (a rim taking
+   *  its fill's pyramid and a raw snapshot, a direct border copy): its token, into the open record. */
+  private _bcReadOnly = (owner: Jiv, kind: number, mode: string, region: { x: number; y: number; w: number; h: number }): void => {
+    if (!this._bcOn) return;
+    const key = `${mode}|${region.x},${region.y},${region.w},${region.h}`;
+    const v = this._bc.Reader(owner, kind, key, GuardedRect(region.x, region.y, region.w, region.h, BLUR_READ_GUARD_PX));
+    this._bc.Sig.Number(v.Token);
+    // A rim that built its own pyramid last frame and reads its fill's now holds a slot it will not
+    // bind again while it stays on this path.
+    if (v.State.Slot !== null) {
+      (this._renderer as WebGL2Renderer).BlurCacheRelease(v.State.Slot);
+      v.State.Slot = null;
+    }
+  };
+
+  /** Open the frame: the seed is everything every draw depends on that no instance carries. */
+  private _bcBeginFrame = (w: number, h: number): void => {
+    this._bcOn = this._blurCache !== 'off';
+    if (!this._bcOn) return;
+    const bc = this._bc;
+    const seed = bc.NewSeed();
+    seed.Number(w); seed.Number(h); seed.Number(this._dpr);
+    // `u_SpecularTilt`, a uniform of every panel draw.
+    seed.Number(this._specTiltX); seed.Number(this._specTiltY);
+    // The glyph atlas every text instance's UVs index, and its flush epoch.
+    const atlas = this._textCache.Atlas;
+    seed.Number(atlas ? bc.Id(atlas) : 0);
+    seed.Number(this._bcTextEpoch);
+    bc.BeginFrame(w, h);
+    const s = this._bcStats;
+    s.Surfaces = 0; s.Hits = 0; s.Misses = 0; s.Cold = 0; s.Stored = 0; s.Grouped = 0;
+    s.Why.first = 0; s.Why.gap = 0; s.Why.key = 0; s.Why.prefix = 0; s.Why.full = 0; s.Why.damage = 0;
+  };
+
+  /** Close the frame and print the gate line on a SHAPE change, like every gate in this file. */
+  private _bcEndFrame = (): void => {
+    if (!this._bcOn) return;
+    this._bcOn = false;
+    const r = this._renderer as WebGL2Renderer;
+    const bc = this._bc;
+    bc.EndFrame((slot) => r.BlurCacheRelease(slot));
+    const s = this._bcStats;
+    const st = bc.Stats;
+    const reg = bc.Region;
+    const ses = this._bcSession;
+    ses.Frames++;
+    // RESTING: nothing painted differently from the frame before. A resting frame with surfaces to
+    // read, none of them first-seen or cold, and still no hit, is a cache that is dead code wearing
+    // a flag -- named, never averaged away.
+    const resting = !reg.Full && reg.Count === 0;
+    if (resting) ses.Resting++;
+    const vacuous = resting && s.Surfaces > 0 && s.Hits === 0 && s.Cold === 0
+      && s.Why.first === 0 && s.Why.gap === 0;
+    if (vacuous) ses.Vacuous++;
+    const c = r.BlurCacheCensus;
+    const why = s.Why;
+    const line = `jaui:blur-cache arm=${this._blurCache} surfaces=${s.Surfaces} hits=${s.Hits} misses=${s.Misses}`
+      + ` cold=${s.Cold} dirty=first:${why.first},gap:${why.gap},key:${why.key},prefix:${why.prefix},full:${why.full},damage:${why.damage}`
+      + ` grouped=${s.Grouped} stored=${s.Stored} evictions=${c.Evictions} refused=${c.Refused}`
+      + ` bytes=${(r.BlurCacheBytes / (1024 * 1024)).toFixed(1)}MB slots=${r.BlurCacheSlots}`
+      + ` dirtyPieces=${reg.Full ? 'full' : reg.Count} dirtyPx=${(reg.Px / 1e6).toFixed(1)}M`
+      + ` changed=${st.Changed} new=${st.New} gone=${st.Gone}`
+      + ` fresh=janvas:${st.Fresh.janvas},shadow:${st.Fresh.shadow},group:${st.Fresh.group}`
+      + ` untracked=${st.Untracked} dup=${st.Duplicate} seeded=${st.Seeded ? 1 : 0}`
+      + ` resting=${resting ? 1 : 0} vacuous=${vacuous ? 1 : 0}`
+      + (this._blurCache === 'verify' ? ` verified=${c.Verified} mismatches=${c.Mismatches} read=${r.BlurCacheReadKind}` : '')
+      + ' pixels=SAME';
+    this._bcLastFrame = {
+      Surfaces: s.Surfaces, Hits: s.Hits, Misses: s.Misses, Cold: s.Cold, Stored: s.Stored, Grouped: s.Grouped,
+      Dirty: { ...why }, DirtyPieces: reg.Full ? -1 : reg.Count, DirtyPx: reg.Px,
+      Changed: st.Changed, New: st.New, Gone: st.Gone, Fresh: { ...st.Fresh },
+      Untracked: st.Untracked, Duplicate: st.Duplicate, Seeded: st.Seeded, Resting: resting, Vacuous: vacuous,
+    };
+    if (line !== this._bcLastLine) { this._bcLastLine = line; JTrace(line); }
+  };
+  private _bcLastFrame: BlurCacheFrame | null = null;
 
   /** Compute the offset descendants see when descending past a scroll container. */
   /** Returns the (Ox, Oy) for descendants. ScrollX/Y is in this node's
@@ -6035,11 +6475,13 @@ export class Canvas implements DirtyTracker {
     const model0: [number, number, number] = [m[0], m[2], m[4]];
     const model1: [number, number, number] = [m[1], m[3], m[5]];
     const nodeOp = node.EffectiveOpacity;
+    if (this._bcOn) this._bcNoteSvgDraw(svg, 0, [...model0, ...model1], 0);
     this._renderer.EnableBlend();
     for (const fill of svg.Fills) {
       const c = this._resolveSvgColor(fill.ColorRaw);
       const a = c.A * fill.Opacity * nodeOp;
       if (a <= 0.001 || fill.VertCount === 0) continue;
+      if (this._bcOn) this._bcNoteSvgDraw(fill.Verts, fill.VertCount, [c.R, c.G, c.B, a], 0);
       this._renderer.SvgFillDraw(fill.Verts, fill.VertCount, model0, model1, [c.R, c.G, c.B, a], w, h);
     }
     if (svg.Strokes.length > 0) {
@@ -6049,6 +6491,7 @@ export class Canvas implements DirtyTracker {
         const c = this._resolveSvgColor(st.ColorRaw);
         const a = c.A * st.Opacity * nodeOp;
         if (a <= 0.001 || st.SegmentCount === 0) continue;
+        if (this._bcOn) this._bcNoteSvgDraw(st.Data, st.SegmentCount, [c.R, c.G, c.B, a], st.HalfWidth * scale);
         this._renderer.SvgStrokeDraw(st.Data, st.SegmentCount, model0, model1, [c.R, c.G, c.B, a], st.HalfWidth * scale, w, h);
       }
     }
@@ -7305,6 +7748,9 @@ export class Canvas implements DirtyTracker {
   private _invalidateAllText = (): void => {
     BumpFontGeneration();
     this._textCache.Clear();
+    // `?blur-cache`: the atlas keeps its texture across a Clear, so a re-raster can land a new face
+    // under the very UVs an unchanged glyph instance carries. The frame seed moves instead.
+    this._bcTextEpoch++;
     let needsKick = false;
     for (const anim of this._textAnimators.values()) {
       if (anim.Resync()) needsKick = true;
@@ -7330,6 +7776,9 @@ export class Canvas implements DirtyTracker {
     // new font at the OLD advance widths.
     BumpFontGeneration();
     this._textCache.Clear();
+    // `?blur-cache`: the atlas keeps its texture across a Clear, so a re-raster can land a new face
+    // under the very UVs an unchanged glyph instance carries. The frame seed moves instead.
+    this._bcTextEpoch++;
     this.RequestFrame();
   };
 
@@ -8682,6 +9131,66 @@ export class Canvas implements DirtyTracker {
       const g = globalThis as unknown as { __jauiEmptyPanels?: () => EmptyPanelCensus };
       g.__jauiEmptyPanels = () => ({ Armed: this._emptyPanelCull, ...this._emptyPanelStats });
     }
+    // `?blur-cache=on|off|verify` -- A CLEAN BACKDROP DOES NOT REBUILD ITS BLUR. Default OFF.
+    //
+    // Parsed after every flag it interrogates, and each refusal names the thing it cannot stand
+    // beside. They are all one of two shapes: an arm that answers "where does this surface's pyramid
+    // come from" before the build site is reached (so there is no build to skip, or a stand-in with
+    // no backdrop to key), or an arm that moves WHICH draws land in the scene or the ORDER they land
+    // in outside the paint records the cache reasons from. `?glass-group` (default on) is NOT
+    // refused: its groups take their own pyramid and are counted `grouped=`, and its fallbacks --
+    // every surface on the phone's home page -- are ordinary builds the cache keys.
+    if (params.has('blur-cache')) {
+      const raw = (params.get('blur-cache') ?? '').trim();
+      if (raw !== '' && raw !== 'on' && raw !== 'off' && raw !== 'verify') {
+        throw new Error(`[Jaui] ?blur-cache takes 'on', 'off' or 'verify', got '${raw}'`);
+      }
+      this._blurCache = raw === 'off' ? 'off' : raw === 'verify' ? 'verify' : 'on';
+    }
+    if (this._blurCache !== 'off') {
+      const r = this._renderer;
+      const why =
+        !(r instanceof WebGL2Renderer) ? 'webgl2-only'
+        : this._diagNoBlur || r.DiagBlurDummy ? 'no-blur-and-blur-dummy-build-no-pyramid-to-keep'
+        : r.DiagBlurSrc !== null ? 'blur-src-builds-from-a-stand-in-not-the-backdrop'
+        : this._sharedBackdrop ? 'shared-backdrop-builds-one-canvas-pyramid-this-cache-does-not-key'
+        : this._layerCacheEnabled ? 'layer-cache-composites-subtrees-outside-the-paint-records'
+        : this._damageTest ? 'damage-test-culls-draws-with-a-hardcoded-rect'
+        : this._blurFirst ? 'blur-first-pre-builds-every-pyramid-ahead-of-the-walk'
+        : this._phasedWalk || this._blurPhased ? 'phased-walk-paints-the-tree-in-three-passes'
+        : r.CardCompositeEnabled ? 'card-composite-retargets-the-walk-into-card-targets'
+        : this._glassGaussian !== 'off' ? 'glass-gaussian-reads-the-scene-past-the-read-guard'
+        : params.has('scene-restarts') || params.has('small-restarts')
+          ? 'restart-probes-insert-at-builds-a-hit-does-not-make'
+        : null;
+      if (why !== null) {
+        this._blurCache = 'off';
+        this._blurCacheRefused = why;
+      }
+    }
+    // THE MARK, on every arm, from the line that decides -- never from the renderer's `Init`, for the
+    // reason lane restarts2 wrote down: in worker mode `Init` is awaited BEFORE the URL is parsed.
+    JTrace(`jaui:blur-cache armed=${this._blurCache} default=${!params.has('blur-cache')}`
+      + ` budget=${Math.round(BLUR_CACHE_BUDGET_BYTES / (1024 * 1024))}MB guard=${BLUR_READ_GUARD_PX}px`
+      + ` maxPieces=${DAMAGE_MAX_PIECES} pixels=SAME`
+      + (this._blurCacheRefused !== '' ? ` reason=${this._blurCacheRefused}` : ''));
+    {
+      const g = globalThis as unknown as { __jauiBlurCache?: () => BlurCacheCensus };
+      g.__jauiBlurCache = (): BlurCacheCensus => {
+        const r = this._renderer;
+        const gl2 = r instanceof WebGL2Renderer ? r : null;
+        return {
+          Armed: this._blurCache,
+          Refused: this._blurCacheRefused,
+          Frame: this._bcLastFrame,
+          Session: { ...this._bcSession },
+          Bytes: gl2 !== null ? gl2.BlurCacheBytes : 0,
+          Slots: gl2 !== null ? gl2.BlurCacheSlots : 0,
+          BudgetBytes: gl2 !== null ? gl2.BlurCacheBudgetBytes : BLUR_CACHE_BUDGET_BYTES,
+          Renderer: gl2 !== null ? gl2.BlurCacheCensus : null,
+        };
+      };
+    }
     {
       const g = globalThis as unknown as { __jauiGlassGaussian?: () => GlassGaussianCensus };
       g.__jauiGlassGaussian = () => {
@@ -8984,6 +9493,10 @@ export class Canvas implements DirtyTracker {
         const fbo = r.GetSceneFramebuffer();
         renderer.Render(gl, fbo, { X: px, Y: yFromBottom, Width: pw, Height: ph }, dt);
         node.ClearDirty();
+        // `?blur-cache`: a foreign renderer's pixels are opaque to the ledger, and `MarkDirty` is not
+        // a complete declaration of them (`Invalidate` wakes the loop without it, and `Render` gets a
+        // `dt` to animate by). So a janvas that rendered is ALWAYS changed over its viewport.
+        if (this._bcOn) this._bc.Declare(node, RECORD_JANVAS, 'janvas', px, py, px + pw, py + ph);
 
         // Defer the visual clip mask to the end of the frame. Wiping scene
         // FBO pixels here destroys data that in-tree consumers need: a
