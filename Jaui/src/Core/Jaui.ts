@@ -4450,6 +4450,10 @@ export class Canvas implements DirtyTracker {
         + ` classes=${c.Classes}`
         + ` blurDraws=${c.DrawsTotal}(${c.Draws})`
         + ` targets=${c.Targets} tempCover=${this._renderer.GaussTempCensus.CoverWritten}/${this._renderer.GaussTempCensus.CoverReadable}`
+        // `?blur-temp`'s effect field, on the line that prints while rendering rather than on the
+        // arm-time mark where a counter would read 0 for ever. `clears=0` under `=clear` means the
+        // arm never reached a bound target, so its pixel reading says nothing.
+        + ` temp=${this._blurTemp}${this._blurTemp === 'clear' ? ` clears=${c.TempClears}` : ''}`
         + ` planRefused=${c.Refused}`;
       if (line !== this._blurPlanLastLine) { this._blurPlanLastLine = line; JTrace(line); }
     }
@@ -8744,6 +8748,10 @@ export class Canvas implements DirtyTracker {
       + ` default=${!params.has('blur-chain')}`
       + ` sigma=${this._blurSigma} k=${this._blurKRule} fetches=${this._blurFetches ?? 'auto'}`
       + ` upload=${this._gaussUploadPrefix ? 'prefix' : 'full'}`
+      // The mark fires once at arm time, BEFORE any frame has rendered, so a counter here would read
+      // 0 for ever and be worse than absent. `clears=` is on the GATE LINE instead, which prints on a
+      // shape change while rendering. Said here because the Mac had to reach the worker-side census
+      // through playwright to verify this arm at all, and that gap was mine.
       + ` temp=${this._blurTemp}`
       + ` compile=${this._renderer instanceof WebGL2Renderer ? this._renderer.BlurPlanCensus.Compile : 'none'}`
       + (this._gaussDebug ? ' debug=magenta' : '')
