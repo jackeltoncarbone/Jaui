@@ -186,7 +186,11 @@ describe('borderdirect3 > the fragment census', () => {
   // BorderBlur)` per axis, and on a glass card the shadow is what wins it.
   const MARGIN = 34;
   const RADIUS = 44;
-  /** `JwiftGlass`: BorderWidth 0.45pt, BorderFade 0.7pt, BorderBlur 0.3pt, at dpr 2. */
+  /** A REPRESENTATIVE glass card at dpr 2, not a reading of the sheet. These were JwiftGlass's numbers
+   *  when this cell was measured (BorderWidth 0.45pt, BorderFade 0.7pt, BorderBlur 0.3pt); the sheet has
+   *  since taken the rim to @JwiftRimWidth 0.675pt. They are left as they were ON PURPOSE -- this test
+   *  asserts a RATIO of band to quad, and re-deriving the fixture every time the rim is retuned would
+   *  change the number the finding was recorded against without changing anything it claims. */
   const BORDER_W = 0.9;
   const FADE = 1.4;
   const AA = 0.6;
