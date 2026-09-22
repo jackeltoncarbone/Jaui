@@ -2051,9 +2051,15 @@ void main() {
                 float avCode = floor(v_Outline.x / 4096.0);
                 float borderAlphaVariance = avCode / 2047.0;
                 float borderFresnelStrength = (v_Outline.x - avCode * 4096.0) / 1024.0;
-                float fbCode = floor(v_Outline.y / 1024.0);
+                // THE ADDITIVE RIM's one bit, packed above the Fresnel grade (Jiv.InstanceBuffer's
+                // RIM_ADDITIVE_FLAG). 1 = `BorderFilter: Lift(n)` was authored and v_BorderColor.rgb
+                // arrived PREMULTIPLIED by the signed amount; 0 = every rim that ever shipped, and
+                // then `v_Outline.y - 0.0 * 2097152.0` is v_Outline.y exactly.
+                float rimAdditive = step(2097152.0, v_Outline.y);
+                float fresnelPacked = v_Outline.y - rimAdditive * 2097152.0;
+                float fbCode = floor(fresnelPacked / 1024.0);
                 float borderFresnelBrightness = fbCode / 256.0;
-                float borderFresnelSaturation = (v_Outline.y - fbCode * 1024.0) / 256.0;
+                float borderFresnelSaturation = (fresnelPacked - fbCode * 1024.0) / 256.0;
                 float alphaFloor = 1.0 - borderAlphaVariance;
                 float strokeBrightness = mix(alphaFloor, 1.0, pow(lightFacing, 2.0));
                 // ── What the Fresnel converges on ──
@@ -2097,7 +2103,39 @@ void main() {
                 // to author a cooler flare (below 1) or burn a hued one back toward white (above 1).
                 vec3 fresnelTarget = clamp(mix(vec3(1.0), huedTarget, rimCarry) * borderFresnelBrightness, 0.0, 1.0);
                 vec3 strokeTint = mix(v_BorderColor.rgb, fresnelTarget, pow(lightFacing, 3.0) * borderFresnelStrength);
-                vec3 borderRgb = mix(borderBackdrop, strokeTint, v_BorderColor.a * strokeBrightness);
+                // ── MIX, or ADD ──
+                // The rim's weight is ONE number in both modes -- BorderColor's alpha, tapered by the
+                // light-facing brightness. That taper is the varying thickness: a dimmer arc reads as
+                // a thinner edge, and it is the thing the additive rim had to keep.
+                //
+                // MIX (rimAdditive 0) is the rim as it has always been drawn: the gather pulled toward
+                // strokeTint, which is white when BorderFresnelStrength is 0. It raises luma AND scales
+                // chroma by (1 - weight) -- measured on the header avatar, a fill of chroma 123 wearing
+                // a ring of chroma 94 at the same hue.
+                //
+                // ADD (rimAdditive 1) is `out = in + k`, the one operation that raises luma while
+                // preserving hue and chroma EXACTLY. `k` is v_BorderColor.rgb, which the packer already
+                // multiplied by the lift's signed amount, scaled by the same weight. The mix's weight
+                // goes to 0 in this mode, so the gather passes through untouched and the offset is all
+                // that is added -- there is no second blend state and no second draw, because the rim
+                // ALREADY HOLDS what it rides: borderBackdrop is the gather of what lies under the
+                // stroke, and adding to it inside one source-over draw is the same picture an additive
+                // blend would have written.
+                //
+                // IT CLIPS AT 1.0, and clipping is the one thing that shifts hue: whichever channel
+                // reaches full first stops moving while the others keep going. Over a backdrop whose
+                // brightest channel is at or above (1 - k) the rim stops being hue-preserving and
+                // starts converging on white, which is the white mix again by another route. Lift(18)
+                // crosses that at a backdrop channel of 238, Lift(30) at 226 and Lift(50) at 206: the
+                // first clipping code is 256 - n. At the header avatar's Lift(120) the fully lit arc
+                // adds 60, so it crosses at 196, and that disc peaks at 168 on blue.
+                //
+                // At rimAdditive 0 this is the line that shipped, term for term: the mix takes
+                // `weight * (1.0 - 0.0)`, which is weight, and the added term is rgb * (weight * 0.0),
+                // which is the exact zero vector on every channel.
+                float rimWeight = v_BorderColor.a * strokeBrightness;
+                vec3 borderRgb = mix(borderBackdrop, strokeTint, rimWeight * (1.0 - rimAdditive))
+                               + v_BorderColor.rgb * (rimWeight * rimAdditive);
 
                 // Replace the panel result in the border zone (alpha-blended by mask).
                 // borderBase is the antialiased annulus. Normally the rim alpha

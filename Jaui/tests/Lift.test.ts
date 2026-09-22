@@ -61,29 +61,37 @@ describe('Lift() parses as a backdrop function, in 0-255 units', () => {
     expect(f.BlurRaw).toBe('8pt');
   });
 
-  it('is refused on the two RIM zones only, naming the tool that zone already has', () => {
-    // INVERTED TWICE. The foreground zone used to refuse `Lift` and name `BlendMode: PlusLighter`;
-    // the foreground zone IS that surface now. The TEXT zone joined it. The rule the original
-    // assertion protected -- "a zone that cannot do this names the tool that can" -- still holds for
-    // the two RIM zones, which is where it stays pinned; the literal moved because the message now
-    // lists three accepting zones instead of two.
+  it('is refused on the FRESNEL zone only, naming the tool that zone already has', () => {
+    // INVERTED THREE TIMES, and each inversion moved the LITERAL while the rule stood still. The
+    // foreground zone used to refuse `Lift` and name `BlendMode: PlusLighter`; the foreground zone IS
+    // that surface now. The TEXT zone joined it. On 2026-09-22 the BORDER zone joined it too, once the
+    // glass rim's composite learned to ADD what it already gathered instead of mixing toward white.
+    // The rule the original assertion protects -- "a zone that cannot do this names the tool that
+    // can" -- is unchanged and is now pinned on the ONE zone left, the Fresnel.
     expect(ParseFilter('Lift(18)', 'foreground').Lift).toBeCloseTo(18 / 255, 12);
     expect(ParseFilter('Lift(18)', 'text').Lift).toBeCloseTo(18 / 255, 12);
-    expect(() => ParseFilter('Lift(18)', 'border')).toThrow(/BACKDROP, its FOREGROUND or its INK/);
-    expect(() => ParseFilter('Lift(18)', 'fresnel')).toThrow(/BACKDROP, its FOREGROUND or its INK/);
+    expect(ParseFilter('Lift(18)', 'border').Lift).toBeCloseTo(18 / 255, 12);
+    expect(() => ParseFilter('Lift(18)', 'fresnel')).toThrow(/BorderFresnelFilter takes Brightness and Saturate only/);
     expect(() => ParseFilter('Lift(300)')).toThrow(/signed amount of 255/);
   });
 
-  it('names all three obstacles when the RIM refuses it, not the old hand-wave', () => {
+  it('names what could not carry it when the FRESNEL refuses it, not the old hand-wave', () => {
     // The rule: a refusal has to say what could not carry the value, or the next author re-files it
     // as a bug. The message that shipped said "a stroke has no backdrop of its own to add to", which
-    // was written when a lift only meant a shape draw and is not the real reason.
+    // was written when a lift only meant a shape draw and was not the real reason.
+    //
+    // THREE ASSERTIONS LEFT THIS TEST AND EVERY ONE IS ACCOUNTED FOR. `/same fragment as the fill/`
+    // (one draw, one blend state) and `/borders-only element/` (what works instead) both moved to
+    // `Jaui._refuseRimLift`, which is where the material is known and where a FLAT stroke is still
+    // refused for exactly that reason -- Rim.Lift.test.ts pins both. `/three scalars/` was retired
+    // with its claim: the glass rim's grade genuinely cannot carry a per-channel offset, which is why
+    // the lift does not ride the grade at all but replaces the mix at the composite line, one step
+    // later. What is pinned here is the Fresnel's own reason, which is not about a draw.
     let msg = '';
-    try { ParseFilter('Lift(18)', 'border'); } catch (e) { msg = (e as Error).message; }
-    expect(msg).toMatch(/same fragment as the fill/);      // one draw, one blend state
-    expect(msg).toMatch(/three scalars/);                  // the glass rim's grade cannot carry chroma
-    expect(msg).toMatch(/borders-only element/);           // and what DOES work today
-    expect(msg).toMatch(/TextFilter/);                     // names the new zone as an alternative
+    try { ParseFilter('Lift(18)', 'fresnel'); } catch (e) { msg = (e as Error).message; }
+    expect(msg).toMatch(/normalized to\s+max-channel 1/);  // WHY this zone specifically cannot take one
+    expect(msg).toMatch(/denormalizes it/);                // what the offset would do to it
+    expect(msg).toMatch(/BorderFilter/);                   // and the property that DOES own it
   });
 
   it('takes a bare var, because the resolver evaluates a grade argument before the parse', () => {

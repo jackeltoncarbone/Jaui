@@ -1250,7 +1250,7 @@ export class Canvas implements DirtyTracker {
    *                           one batch into two, so a scene read with and without one prices the
    *                           switches directly. */
   private _liftStats = {
-    Authored: 0, Inherited: 0, IgnoredSampling: 0, TextInk: 0,
+    Authored: 0, Inherited: 0, IgnoredSampling: 0, TextInk: 0, RimLift: 0,
     Under: 0, Graded: 0, Builds: 0,
     CascadeVisited: 0, CascadeCarried: 0,
     PanelBatches: 0, Refused: {} as Record<string, number>,
@@ -3276,6 +3276,10 @@ export class Canvas implements DirtyTracker {
 
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, ownClip.Offset, ownClip.Count, ownXform, 'GlassBorderOnly');
+          // THE ADDITIVE RIM's effect field, counted at the ONE push that can carry it (the packer
+          // premultiplies BorderColor and sets the flag in that same branch), so `rimLift` counts
+          // rims that DREW additive rather than styles that asked to.
+          if (node.RenderStyle.BorderLift !== 0) this._liftStats.RimLift++;
           r.EnableBlend();
           r.PanelBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -3507,6 +3511,11 @@ export class Canvas implements DirtyTracker {
       // children all come later in paint order -- which is the whole guarantee that the lift never
       // reaches the element's ink. `liftBuilds0` brackets the node's own paint: an under-drawn
       // element that still caused a pyramid build is this lane failing.
+      // THE ADDITIVE RIM's refusals, beside the foreground zone's and for the same reason: this is the
+      // draw-time point where the material, the BorderLayer and the resolved style are all in hand.
+      // Gated on the amount so a node that authored no rim lift pays one compare against a float that
+      // is already in cache -- the zone is not consulted at all, and `_liftZonesOf` never sees it.
+      if (phasedPaints && node.RenderStyle.BorderLift !== 0) this._refuseRimLift(node);
       const zones: LiftZones = phasedPaints
         ? this._liftZonesOf(node)
         : { Shape: null, Ink: null, TextInk: null, TextScale: 1 };
@@ -4388,6 +4397,7 @@ export class Canvas implements DirtyTracker {
     this._liftStats.Inherited = 0;
     this._liftStats.IgnoredSampling = 0;
     this._liftStats.TextInk = 0;
+    this._liftStats.RimLift = 0;
     this._liftStats.Under = 0;
     this._liftStats.Graded = 0;
     this._liftStats.Builds = 0;
@@ -5445,6 +5455,56 @@ export class Canvas implements DirtyTracker {
     return s.BorderWidth > 0 && s.BorderColor.A > 0.001;
   };
 
+  /** THE ADDITIVE RIM's refusals, asked only of a node that authored `BorderFilter: Lift()`.
+   *
+   *  A lift on the rim is `borderBackdrop + BorderColor.rgb * amount * weight`, computed inside the
+   *  glass border zone. Two things have to be true for that line to mean anything, and each failure
+   *  names the draw that could not carry it:
+   *
+   *    1. THE RIM MUST BE GLASS. A flat stroke has no `borderBackdrop` -- it is composited inside the
+   *       shared panel fragment from BorderColor alone, one `result` from fill, shadow and border
+   *       written once, so there is nothing to add TO and one draw has one blend state. This is the
+   *       obstacle `Filter.Parse._refuseLift` measured, and it is the half of it that still stands.
+   *    2. THE RIM MUST OWN ITS OWN DRAW, which for a glass rim means a non-zero `BorderLayer` over a
+   *       border that actually paints. Not for the blend -- the arithmetic needs none -- but for WHAT
+   *       THE GATHER IS. A fused rim samples the scene BEHIND the panel, which the panel's own fill
+   *       then covers, so `gather + k` would be "what is behind this card, lifted", not "what the rim
+   *       rides, lifted". Re-emitted at its BorderLayer the rim gathers the children it floats over,
+   *       which IS what it rides, and that is what makes the lift mean what it says.
+   *
+   *  The predicate for 2 is the ENGINE'S OWN, not a restatement of it: `BorderLayer !== 0 &&
+   *  _hasPaintedBorder(node)` is the exact expression that picks `'Suppress'` at the panel push and
+   *  the exact expression that lets `emitBorderOverlay` run. A guard that decided this with its own
+   *  copy of the rule would drift from the rule the moment either moved. */
+  private _refuseRimLift = (node: Jiv): void => {
+    const s = node.RenderStyle;
+    if (!_isGlass(s.Material)) {
+      throw new Error(
+        `[Jaui] BorderFilter: Lift(${Math.round(s.BorderLift * 255)}) makes the rim ADD what it rides ` +
+        `instead of mixing toward BorderColor, and this element's rim is a FLAT stroke (Material: ` +
+        `${s.Material}). A flat stroke never samples what is under it -- it is composited inside the ` +
+        'same fragment as the fill and the shadow, from BorderColor alone, so there is nothing for it ' +
+        'to add TO and one draw has one blend state. Give the element a glass material, or author the ' +
+        'lift on BackdropFilter (what is under the whole element lifts) or on Filter (the element\'s ' +
+        'own paint adds -- and on a borders-only element that paint IS the stroke).',
+      );
+    }
+    if (!(s.BorderLayer !== 0 && this._hasPaintedBorder(node))) {
+      throw new Error(
+        `[Jaui] BorderFilter: Lift(${Math.round(s.BorderLift * 255)}) makes the rim ADD what it rides, ` +
+        'and this glass rim does not own a draw whose gather IS what it rides: ' +
+        (this._hasPaintedBorder(node)
+          ? 'its BorderLayer is 0, so the stroke is fused into the panel and gathers the scene BEHIND ' +
+            'the card -- which the card\'s own fill then covers. Adding to that lifts what nobody can ' +
+            'see. Set BorderLayer (the house rim uses 10) so the rim re-emits above the content it ' +
+            'floats over and gathers THAT.'
+          : 'it paints no stroke at all (BorderWidth ' + s.BorderWidth + ', BorderColor alpha ' +
+            s.BorderColor.A + '), so there is no rim to lift. The lift rides BorderColor: its rgb is ' +
+            'what gets added and its ALPHA is the weight, so both have to be non-zero.'),
+      );
+    }
+  };
+
   /** `?emptypanels`: would this node's panel instance shade its whole quad to `result.a` EXACTLY 0?
    *
    *  Only ever asked of a node the walk has already routed to the NON-GLASS panel branch, so
@@ -5517,6 +5577,7 @@ export class Canvas implements DirtyTracker {
       Inherited: st.Inherited,
       IgnoredSampling: st.IgnoredSampling,
       TextInk: st.TextInk,
+      RimLift: st.RimLift,
       Under: st.Under,
       Graded: st.Graded,
       Builds: st.Builds,

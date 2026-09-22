@@ -146,6 +146,9 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BorderFilter',           s => s.BorderBrightness,             (s, v) => { s.BorderBrightness = v; }],
   ['BorderFilter',           s => s.BorderSaturation,             (s, v) => { s.BorderSaturation = v; }],
   ['BorderFilter',           s => s.BorderContrast,               (s, v) => { s.BorderContrast = v; }],
+  // The additive rim's amount springs with the rest of its bucket, so `:Hover { BorderFilter:
+  // Lift(90) }` eases in over the same 140ms as the Brightness beside it rather than snapping.
+  ['BorderFilter',           s => s.BorderLift,                   (s, v) => { s.BorderLift = v; }],
   // Fresnel-highlight grade — bucket `BorderFresnelFilter`. Springs as plain scalars;
   // the quantization into a_Outline.y happens per-frame at push, not here.
   ['BorderFresnelFilter',    s => s.BorderFresnelBrightness,      (s, v) => { s.BorderFresnelBrightness = v; }],

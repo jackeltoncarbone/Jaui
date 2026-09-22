@@ -34,9 +34,9 @@ import type { LiftValue } from '../Core/Lift';
 //          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur + borderFade packed)
 //   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, bulge)
-//   loc 14: a_Outline      (packed rim amounts, packed Fresnel grade, clipOffset, clipCount)
+//   loc 14: a_Outline      (packed rim amounts, packed Fresnel grade + additive-rim flag, clipOffset, clipCount)
 //          .x  = _packOutlineAmounts(borderAlphaVariance, borderFresnelStrength)
-//          .y  = _packFresnelGrade(fresnelBrightness, fresnelSaturation)
+//          .y  = _packFresnelGrade(fresnelBrightness, fresnelSaturation) [+ RIM_ADDITIVE_FLAG]
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
 //   loc 15: a_BorderFilter (brightnessMul, saturationMul, contrastMul, lodOffset)
@@ -98,6 +98,27 @@ const _qAmount = (v: number, ceiling: number, codes: number): number => {
  *  1_048_575. The panel frag reverses this. */
 const _packFresnelGrade = (brightness: number, saturation: number): number =>
   _q(brightness, 256, 1023) * 1024 + _q(saturation, 256, 1023);
+
+/** THE ADDITIVE RIM's one bit, and why it is only a bit.
+ *
+ *  `BorderFilter: Lift(n)` needs TWO things in the fragment: an AMOUNT and a switch from mix to add.
+ *  There is no lane for the amount -- WebGL2 guarantees 16 vertex attributes, locations 0..15 are all
+ *  spoken for, and the stride is 60 floats = exactly 15 vec4 of instance data. Nine spare bits do not
+ *  exist either: `_packOutlineAmounts` reaches 8_386_560 of a 24-bit mantissa (ONE bit spare) and
+ *  `_packInnerBlurFade` reaches 262_120 (six).
+ *
+ *  So the amount is not carried separately at all. A lift is a color TIMES an amount, which is one
+ *  vector, and this rim's color is already in the instance: `a_BorderColor.rgb`. The push premultiplies
+ *  it by the signed amount, exactly as `'LiftOnly'` below premultiplies the shape draw's fill
+ *  (`l * c.R`), and this flag is all that is left to say -- ADD this rgb at the rim's weight rather
+ *  than MIX toward it. `a_BorderColor.a` is untouched and stays the weight it always was, so a press
+ *  that raises the rim's alpha still brightens an additive rim.
+ *
+ *  It rides `a_Outline.y`, whose `_packFresnelGrade` payload maxes at 1_048_575 -- under 2^20, so this
+ *  2^21 flag cannot collide with it, and the sum maxes at 3_145_727, exact in a 24-bit mantissa with
+ *  room to spare. The `.x` lane's single spare bit was the alternative and is left alone: one bit of
+ *  headroom is not a place to put a flag that a future amount may want to grow into. */
+export const RIM_ADDITIVE_FLAG = 2097152;
 
 const _packFgGrade = (brightness: number, saturation: number, contrast: number): number => {
   const b = _q(brightness, 256, 1023);
@@ -390,6 +411,22 @@ export class JivInstanceBuffer {
       // Border-only flag. Carry a tiny magnitude when the feather is 0 so the
       // sign survives (−0 is not < 0 in GLSL); the rim AA stays effectively crisp.
       data[offset + 28] = -Math.max(borderEdgeAa, 1e-3);
+      // THE ADDITIVE RIM (`BorderFilter: Lift(n)`). Premultiplied into the rim's OWN color lane, for
+      // the reason on RIM_ADDITIVE_FLAG: a lift is a color times an amount, which is one vector, and
+      // there is no sixteenth attribute to carry the amount beside it. The alpha is left alone -- it
+      // is the rim's weight in both modes, so a press that raises it still brightens the stroke.
+      //
+      // This is the ONLY mode that premultiplies, and deliberately: it is the one push that is
+      // guaranteed to reach the glass border zone, where `borderBackdrop` -- the gather of what lies
+      // under the stroke -- is what the rgb gets added to. `Jaui._refuseRimLift` throws by name for
+      // every other rim, so a premultiplied color can never reach the flat stroke path and paint a
+      // dimmed line instead of an additive one.
+      if (style.BorderLift !== 0) {
+        data[offset + 16] = style.BorderColor.R * style.BorderLift;
+        data[offset + 17] = style.BorderColor.G * style.BorderLift;
+        data[offset + 18] = style.BorderColor.B * style.BorderLift;
+        data[offset + 53] += RIM_ADDITIVE_FLAG;
+      }
     } else if (borderMode === 'LiftOnly') {
       // THE ADDITIVE COLOR's fill: |amount| times the color, per channel, at alpha 1 (Core/Lift.ts).
       // The blend's `SRC_ALPHA` factor then multiplies it by the element's own coverage, so a

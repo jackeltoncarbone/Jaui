@@ -247,7 +247,12 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // LOD octave offset for BorderFilter); a missing Blur() = 0.
   const fg = ParseFilter(_resolveGradeArgs(ResolveTernary(s.Filter, ctx), ctx), 'foreground');
   const backdrop = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BackdropFilter, ctx), ctx));
-  const border = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BorderFilter, ctx), ctx));
+  // THE ZONE ARGUMENT IS LOAD-BEARING AND WAS MISSING. This call passed no zone, which is the
+  // `'backdrop'` DEFAULT, so every `BorderFilter` in the app was parsed, validated and cached as a
+  // backdrop filter: `_cacheBorder` was unreachable, the border zone's refusals never fired outside a
+  // unit test that called `ParseFilter(x, 'border')` by hand, and `BorderFilter: Lift(60)` was
+  // accepted and silently dropped. The guard was right; only its locator was wrong.
+  const border = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BorderFilter, ctx), ctx), 'border');
   // The rim's Fresnel highlight grades separately from the rim's gather: the gather is
   // the backdrop seen THROUGH the bevel, the highlight is what the lit face throws back.
   // Brightness + Saturate only; the 'fresnel' zone throws on Blur()/Contrast().
@@ -383,6 +388,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderBrightness: border.Brightness,
     BorderSaturation: border.Saturation,
     BorderContrast: border.Contrast,
+    BorderLift: border.Lift,
 
     BorderFresnelBrightness: fresnel.Brightness,
     BorderFresnelSaturation: fresnel.Saturation,

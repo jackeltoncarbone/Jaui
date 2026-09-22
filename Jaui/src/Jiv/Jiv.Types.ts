@@ -494,6 +494,14 @@ export interface JivRenderStyle {
   BorderBrightness: number;
   BorderSaturation: number;
   BorderContrast: number;
+  /** THE ADDITIVE RIM. `BorderFilter: Lift(n)`'s amount as a signed fraction of full scale (n / 255).
+   *  Identity 0, which is the mix the rim has always drawn. Non-zero makes the stroke ADD
+   *  `BorderColor.rgb * this` to the gather it already holds, at the SAME weight the mix used
+   *  (`BorderColor.a * strokeBrightness`), so the taper survives and the rim's hue and chroma become
+   *  exactly the gather's instead of being scaled by `(1 - weight)` toward BorderColor.
+   *
+   *  Only a GLASS rim that owns its own draw can carry it -- `Jaui._refuseRimLift` names the rest. */
+  BorderLift: number;
 
   /** Resolved `BorderFresnelFilter` grade over the rim's Fresnel highlight.
    *  Brightness is a final value multiplier (identity 1); Saturation is the
