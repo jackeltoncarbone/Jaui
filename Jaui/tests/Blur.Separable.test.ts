@@ -561,7 +561,7 @@ describe('blurfast > what a shot will see, by the sub-level rule (card 0 of glas
   // Both arms over card 0's region on the harness's own seeded bed, three channels, cropped to
   // the card box -- the gaussian lane's geometry, with this plan's SOLVED table in place of
   // `GaussianKernelFor(GAUSS_MATCH_SIGMA)`.
-  const DPR = 2, FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 + 0.25 * 3 + 8 * DPR;
+  const DPR = 2, FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 * (1 + 0.2 * 0.25) + 8 * DPR;
   const box = { x: 60 * DPR, y: 70 * DPR, w: 216 * DPR, h: 150 * DPR };
   const region: BackdropRect = {
     x: Math.floor(box.x - FILL_MARGIN), y: Math.floor(box.y - FILL_MARGIN),

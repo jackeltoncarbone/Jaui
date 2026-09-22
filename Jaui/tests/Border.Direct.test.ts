@@ -339,11 +339,16 @@ describe('border-direct > the wiring, read off the source', () => {
     expect(FRAG).toContain(
       'if (u_BorderGather > 0.5) bSample = sampleBackdropDirect(bUv, bLod, frostLod);');
     expect(FRAG).toContain('vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);');
-    // Four other `sampleBackdrop` call sites, all on the fill path, all unchanged and none of them
-    // behind the define -- they are dead on a border-only instance and live on every other.
+    // The other `sampleBackdrop` call sites, all on the fill path and none of them behind the
+    // define -- they are dead on a border-only instance and live on every other: the one-tap body,
+    // the three dispersion taps (aave's R/G/B at 1.2/1.1/1.0 of the offset) and the rim glow's. The
+    // rim-specular tap is gone with the highlight that took it (aave's needs no backdrop read).
     expect(FRAG).toContain('backdrop = sampleBackdrop(baseUv, lodBoost, frostLod);');
+    expect(FRAG).toContain('vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);');
+    expect(FRAG).toContain('vec3 sG = sampleBackdrop(uvG, lodBoost, frostLod);');
+    expect(FRAG).toContain('vec3 sB = sampleBackdrop(baseUv, lodBoost, frostLod);');
     expect(FRAG).toContain('vec3 rimSample = sampleBackdrop(rimUv, 0.0, frostLod);');
-    expect(FRAG).toContain('vec3 rimSpecBackdrop = sampleBackdrop(baseUv, max(0.0, lodBoost - 0.5), frostLod);');
+    expect(FRAG).not.toContain('rimSpecBackdrop');
     // The raw-scene branch is kept VERBATIM in the direct twin: a panel that authored no frost
     // reads `u_Scene` on both arms, off the same test.
     const direct = FRAG.slice(FRAG.indexOf('vec3 sampleBackdropDirect('));

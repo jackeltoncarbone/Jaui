@@ -75,16 +75,16 @@ describe('GLASS_BORDER_ONLY - the rim overlay program is a deletion plus its sta
 
   it('removes the body: taps, grade, absorption, shadow, fill composite, rim glow, ambient, catchlight', () => {
     for (const stmt of [
-      'float caSpreadPx = chromaticAberration * hump * 3.0;',
-      'vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);',
+      'float caSpreadPx = 0.2 * chromaticAberration * length(refractOffset);',
+      'vec3 sG = sampleBackdrop(uvG, lodBoost, frostLod);',
       'backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);',
       'vec3 absorb = pow(max(v_Tint.rgb, vec3(0.0001)), vec3(pathLength * v_Tint.a));',
       'float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);',
       'vec4 fillSrc = resolveBgFill(panelLocal);',
       'vec3 rimSample = sampleBackdrop(rimUv, 0.0, frostLod);',
       'float hemiAmbient = (edgeLightTop * hemiTop + edgeLightBottom * hemiBottom);',
-      'float specBase = pow(max(dot(N3, H3), 0.0), specSharpness);',
-      'vec3 rimSpecBackdrop = sampleBackdrop(baseUv, max(0.0, lodBoost - 0.5), frostLod);',
+      'float spec = 0.5 * min(glowTerm + edgeTerm, 1.0) * lightIntensity * glassiness * fillAlpha;',
+      'result.rgb = max(mix(result.rgb + spec, result.rgb * (1.0 - spec), darken), vec3(0.0));',
     ]) expect(gone, stmt).toContain(stmt);
   });
 
@@ -127,12 +127,12 @@ describe('GLASS_NO_GLOW / GLASS_NO_SPEC - each deletes exactly its own block and
     expect(text(p)).toContain('result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;');
   });
 
-  it('NO_SPEC: the catchlight and the rim-specular line, and nothing else', () => {
+  it('NO_SPEC: the highlight (the aave glow and edge band, adaptive), and nothing else', () => {
     const p = glassProgram('NO_SPEC');
     expect(linesNotIn(p, GLASS)).toEqual([]);
     const gone = deleted(p, GLASS);
     exactlyTheBlock(gone, 'if (!GlassSkips(GLASS_SKIP_SPECULAR)) {');
-    expect(text(gone)).toContain('float rimSpecAlpha = rimSpecBand * rimSpecDir * specIntensity * fillAlpha;');
+    expect(text(gone)).toContain('float spec = 0.5 * min(glowTerm + edgeTerm, 1.0) * lightIntensity * glassiness * fillAlpha;');
   });
 
   it('NO_LIGHT is the two deletions together, and the renderer cuts it with both defines', () => {
@@ -243,21 +243,24 @@ describe('GLASS_REG_REMAT and GLASS_NO_SKIP_GATES', () => {
 // statement. The FILL draw runs NO_LIGHT on glass-grid, the RIM draw BORDER_ONLY; today both ran GLASS.
 //
 //                     sdf  shadow  lod  taps  fill  glow  spec  zone   peak
+// Re-pinned 2026-09-22 for aave's lens (Jwift/Shared/Research/Aave.Glass.md): the rim-specular tap and
+// the Blinn-Phong catchlight are gone, the highlight is one adaptive composite, and the taps read the lens
+// field's offset. No stage holds more than before; the glow tap drops 34 -> 31 and the highlight 23 -> 18.
 const MAP: Record<string, Array<number | null>> = {
-  GLASS:             [13,   29,   29,   28,   27,   34,   23,    8],
-  NO_LIGHT:          [13,   23,   29,   25,   21, null, null,    8],
+  GLASS:             [13,   28,   26,   25,   26,   31,   18,    8],
+  NO_LIGHT:          [13,   23,   26,   25,   21, null, null,    8],
   BORDER_ONLY:       [10, null,   13, null, null, null, null,    8],
-  REG:               [11,   11,   22,   23,   15,   29,   23,    8],
-  REG_NO_LIGHT:      [11,   11,   22,   20,   11, null, null,    8],
+  REG:               [11,   11,   23,   22,   14,   28,   18,    8],
+  REG_NO_LIGHT:      [11,   11,   21,   20,   11, null, null,    8],
   REG_BORDER_ONLY:   [ 8, null,   10, null, null, null, null,    8],
-  REMAT:             [ 9,    9,   19,   20,   14,   28,   23,    8],
-  REMAT_NO_LIGHT:    [ 9,    9,   19,   17,   11, null, null,    8],
+  REMAT:             [ 9,    9,   20,   19,   13,   27,   18,    8],
+  REMAT_NO_LIGHT:    [ 9,    9,   18,   17,   11, null, null,    8],
   REMAT_BORDER_ONLY: [ 8, null,   10, null, null, null, null,    8],
-  NOGATES:           [13,   29,   29,   28,   27,   34,   23,    8],
+  NOGATES:           [13,   28,   26,   25,   26,   31,   18,    8],
 };
 const PEAK: Record<string, number> = {
-  GLASS: 34, NO_LIGHT: 29, BORDER_ONLY: 13, REG: 29, REG_NO_LIGHT: 22, REG_BORDER_ONLY: 10,
-  REMAT: 28, REMAT_NO_LIGHT: 19, REMAT_BORDER_ONLY: 10, NOGATES: 34,
+  GLASS: 31, NO_LIGHT: 26, BORDER_ONLY: 13, REG: 28, REG_NO_LIGHT: 21, REG_BORDER_ONLY: 10,
+  REMAT: 27, REMAT_NO_LIGHT: 18, REMAT_BORDER_ONLY: 10, NOGATES: 31,
 };
 
 describe('the register map, computed from the source', () => {
@@ -280,12 +283,14 @@ describe('the register map, computed from the source', () => {
   it('the named findings the table rests on', () => {
     const g = registerMap('GLASS');
     const r = registerMap('REG_NO_LIGHT');
-    // Today the rim glow's tap holds the whole body: the backdrop, the fill's texture coordinate,
-    // the border chain, the edge light it is about to write, and `p` / `pLocal` / `mode` for stages
-    // that come after it.
-    expect(g.glow!.Names).toEqual(expect.arrayContaining(['backdrop', 'baseUv', 'widthScale', 'edgeLightRgb', 'pLocal', 'mode']));
-    // Today the shadow's corner field (a second 6 pow) runs holding 29; under REG it holds 11.
-    expect(g.shadow!.Components).toBe(29);
+    // Today the rim glow's tap holds the whole body: the backdrop, the border chain, the edge light it
+    // is about to write, and `p` / `pLocal` / `mode` for stages that come after it. It no longer holds
+    // the fill's texture coordinate: `baseUv`'s last reader was the rim-specular tap, which went with
+    // the catchlight when the highlight became aave's.
+    expect(g.glow!.Names).toEqual(expect.arrayContaining(['backdrop', 'widthScale', 'edgeLightRgb', 'pLocal', 'mode']));
+    expect(g.glow!.Names).not.toContain('baseUv');
+    // Today the shadow's corner field (a second 6 pow) runs holding 28; under REG it holds 11.
+    expect(g.shadow!.Components).toBe(28);
     expect(r.shadow!.Names).toEqual(['borderFade', 'clipAlpha', 'dist', 'innerBlur', 'normal', 'p', 'pLocal', 'shadowAlpha']);
     // Under REG the backdrop dies at the fill composite and never meets the border chain.
     expect(r.fill!.Names).not.toContain('widthScale');

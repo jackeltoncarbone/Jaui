@@ -36,7 +36,7 @@ const CANVAS_W = 2560;
 const CANVAS_H = 1600;
 const DPR = 2;
 const RADIUS = 4 * DPR;
-const FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 + 0.25 * 3 + 8 * DPR;
+const FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 * (1 + 0.2 * 0.25) + 8 * DPR;
 const RIM_MARGIN = 4 * DPR + 8 * DPR;
 
 const CardBox = (i: number): BackdropRect => {

@@ -195,7 +195,6 @@ LiquidGlass {
   BackdropFilter: Blur(4pt) Brightness(1.25) Saturate(1.25) Contrast(0.75)
 
   Thickness: 2
-  Fillet: 0.25
   BezelWidth: 11
   BezelScale: 0.25
   Refraction: 20
@@ -203,7 +202,7 @@ LiquidGlass {
   LightAngle: 135
   LightIntensity: 1
   SpecularIntensity: 0
-  SpecularSharpness: 10
+  SpecularGlow: 0
   FresnelStrength: 0.55
   ChromaticAberration: 0.3
   EdgeLightTop: 0

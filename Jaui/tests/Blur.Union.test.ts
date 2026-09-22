@@ -18,9 +18,9 @@ const CANVAS_W = 2560;
 const CANVAS_H = 1600;
 const DPR = 2;
 
-/** JwiftGlass: BackdropFilter Blur(4pt), Thickness 2.5, Fillet 0, Refraction 8, CA 0.25.
+/** JwiftGlass: BackdropFilter Blur(4pt), Thickness 2.5, Curvature 0, Refraction 8, CA 0.25.
  *  Jaui.ts: margin = frostCssPx*d + (thicknessDev + bulge)*Refraction + CA*3 + 8*d. */
-const GLASS_MARGIN = 4 * DPR + (2.5 * DPR) * 8 + 0.25 * 3 + 8 * DPR;   // 64.75
+const GLASS_MARGIN = 4 * DPR + (2.5 * DPR) * 8 * (1 + 0.2 * 0.25) + 8 * DPR;   // 66
 /** JwiftGlass: ShadowBlur 16pt, ShadowOffsetY 2pt, so its fragments reach this far past the box. */
 const GLASS_PAINT_OUTSET_Y = (16 + 2) * DPR;                            // 36
 const GLASS_PAINT_OUTSET_X = 16 * DPR;                                  // 32
@@ -219,7 +219,7 @@ describe('the separation law', () => {
     w: b.w + GLASS_PAINT_OUTSET_X * 2, h: b.h + GLASS_PAINT_OUTSET_Y * 2,
   });
 
-  it('glass-grid FAILS it: a 20pt gap is inside the 64.75px sample margin', () => {
+  it('glass-grid FAILS it: a 20pt gap is inside the 66px sample margin', () => {
     const cards = GlassGridCards();
     expect(Intersects(cards[1].Region, PaintRect(cards[0].Box))).toBe(true);
     // And it is not one unlucky pair — every card after the first has a predecessor under it.
@@ -245,8 +245,8 @@ describe('the separation law', () => {
 
   it('names the gap the law asks for, so the number is a fact and not a feeling', () => {
     // gap > later surface's sample margin + earlier surface's paint outset.
-    expect(GLASS_MARGIN + GLASS_PAINT_OUTSET_X).toBeCloseTo(96.75, 5);
-    expect((GLASS_MARGIN + GLASS_PAINT_OUTSET_X) / DPR).toBeCloseTo(48.375, 5);
+    expect(GLASS_MARGIN + GLASS_PAINT_OUTSET_X).toBeCloseTo(98, 5);
+    expect((GLASS_MARGIN + GLASS_PAINT_OUTSET_X) / DPR).toBeCloseTo(49, 5);
   });
 });
 

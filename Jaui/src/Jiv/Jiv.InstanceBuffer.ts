@@ -32,8 +32,8 @@ import type { LiftValue } from '../Core/Lift';
 //   loc 11: a_Lighting     (lightAngle rad, bodyTint, lightIntensity, fresnelStrength)
 //          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
 //          signed glass body Tint: negative toward black, positive toward white.
-//   loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur + borderFade packed)
-//   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, bulge)
+//   loc 12: a_Specular     (specularIntensity, specularGlow, chromaticAberration, innerBlur + borderFade packed)
+//   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, curvature in device px)
 //   loc 14: a_Outline      (packed rim amounts, packed Fresnel grade + additive-rim flag, clipOffset, clipCount)
 //          .x  = _packOutlineAmounts(borderAlphaVariance, borderFresnelStrength)
 //          .y  = _packFresnelGrade(fresnelBrightness, fresnelSaturation) [+ RIM_ADDITIVE_FLAG]
@@ -357,14 +357,15 @@ export class JivInstanceBuffer {
     data[offset + 43] = style.FresnelStrength;
 
     data[offset + 44] = style.SpecularIntensity;
-    data[offset + 45] = style.SpecularSharpness;
+    data[offset + 45] = style.SpecularGlow;
     data[offset + 46] = style.ChromaticAberration;
     data[offset + 47] = _packInnerBlurFade(style.InnerBlur, style.BorderFade * avgScale * d);
 
     data[offset + 48] = style.EdgeLightTop;
     data[offset + 49] = style.EdgeLightBottom;
     data[offset + 50] = style.BorderVariance;
-    data[offset + 51] = style.Fillet;
+    // Curvature is a LENGTH (the lens cap's height), so it scales to device px like BezelWidth.
+    data[offset + 51] = style.Curvature * avgScale * d;
 
     data[offset + 52] = _packOutlineAmounts(style.BorderAlphaVariance, style.BorderFresnelStrength);
     data[offset + 53] = _packFresnelGrade(style.BorderFresnelBrightness, style.BorderFresnelSaturation);

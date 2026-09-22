@@ -52,7 +52,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // Physical material
   ['Frost',                  s => s.Frost,                        (s, v) => { s.Frost = v; }],
   ['Thickness',              s => s.Thickness,                    (s, v) => { s.Thickness = v; }],
-  ['Fillet',                 s => s.Fillet,                       (s, v) => { s.Fillet = v; }],
+  ['Curvature',              s => s.Curvature,                    (s, v) => { s.Curvature = v; }],
   ['Refraction',             s => s.Refraction,                   (s, v) => { s.Refraction = v; }],
   // Signed, so a theme flip springs dark tint → clear → light tint and never passes through grey.
   ['Tint',                   s => s.Tint,                         (s, v) => { s.Tint = v; }],
@@ -90,7 +90,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['LightAngle',             s => s.LightAngle,                   (s, v) => { s.LightAngle = v; }],
   ['LightIntensity',         s => s.LightIntensity,               (s, v) => { s.LightIntensity = v; }],
   ['SpecularIntensity',      s => s.SpecularIntensity,            (s, v) => { s.SpecularIntensity = v; }],
-  ['SpecularSharpness',      s => s.SpecularSharpness,            (s, v) => { s.SpecularSharpness = v; }],
+  ['SpecularGlow',           s => s.SpecularGlow,                 (s, v) => { s.SpecularGlow = v; }],
   ['FresnelStrength',        s => s.FresnelStrength,              (s, v) => { s.FresnelStrength = v; }],
   ['ChromaticAberration',    s => s.ChromaticAberration,          (s, v) => { s.ChromaticAberration = v; }],
   ['EdgeLightTop',           s => s.EdgeLightTop,                 (s, v) => { s.EdgeLightTop = v; }],

@@ -131,7 +131,7 @@ const buildGlassGrid = (c: Canvas, bedDx = 0, bedDy = 0): Map<Jiv, string> => {
       Layout: { Direction: 'Column', Justify: 'End', Align: 'Stretch', Gap: '4pt', Padding: jssValue(CARD, 'Padding') },
       Style: {
         Background: CLEAR,
-        Thickness: '2.5', Refraction: '8', BezelWidth: '12', BezelScale: '0.25', Fillet: '0',
+        Thickness: '2.5', Refraction: '8', BezelWidth: '12', BezelScale: '0.25', Curvature: '0',
         BackdropFilter: 'Blur(4pt) Saturate(1.6) Contrast(0.6)', Tint: '0.45',
         BorderWidth: '0.45pt', BorderBlur: '0.3pt', BorderFade: '0.7pt',
         BorderColor: 'rgba(255, 255, 255, 0.35)',

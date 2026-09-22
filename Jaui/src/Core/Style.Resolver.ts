@@ -324,7 +324,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     // reads this as the ramp's max blur.
     BackdropFrostBlur: fgBlur ? fgFrost : resolveBlur(backdrop.BlurRaw),
     Thickness: thickness,
-    Fillet: Resolve(s.Fillet, ctx, 'W'),
+    Curvature: Resolve(s.Curvature, ctx, 'W'),
     Refraction: Resolve(s.Refraction, ctx, 'W'),
     Tint: _resolveTint(s, ctx),
     AdaptiveFar: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.AdaptiveFar, ctx), ctx, 'W'))),
@@ -347,7 +347,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     LightIntensity: Resolve(s.LightIntensity, ctx, 'W'),
 
     SpecularIntensity: Resolve(s.SpecularIntensity, ctx, 'W'),
-    SpecularSharpness: Resolve(s.SpecularSharpness, ctx, 'W'),
+    SpecularGlow: Resolve(s.SpecularGlow, ctx, 'W'),
     FresnelStrength: Resolve(s.FresnelStrength, ctx, 'W'),
     ChromaticAberration: Resolve(s.ChromaticAberration, ctx, 'W'),
     EdgeLightTop: Resolve(s.EdgeLightTop, ctx, 'W'),

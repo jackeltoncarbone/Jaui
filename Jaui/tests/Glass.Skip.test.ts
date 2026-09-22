@@ -176,7 +176,7 @@ const buildGlassGrid = (c: Canvas): void => {
         Background: CLEAR,
         Thickness: String(glassNumber('Thickness')), Refraction: String(glassNumber('Refraction')),
         BezelWidth: String(glassNumber('BezelWidth')), BezelScale: String(glassNumber('BezelScale')),
-        Fillet: String(glassNumber('Fillet')),
+        Curvature: String(glassNumber('Curvature')),
         ChromaticAberration: String(glassNumber('ChromaticAberration')),
         BackdropFilter: 'Blur(4pt) Saturate(1.6) Contrast(0.6)', Tint: '0.45',
         BorderWidth: glassRaw('BorderWidth'), BorderBlur: glassRaw('BorderBlur'), BorderFade: glassRaw('BorderFade'),

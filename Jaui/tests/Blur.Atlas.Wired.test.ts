@@ -45,7 +45,7 @@ const DPR = 2;
 /** BackdropFilter Blur(4pt) at DPR 2. */
 const RADIUS = 4 * DPR;
 /** The FILL pipeline's margin: frost*d + (thickness*d + bulge)*Refraction + CA*3 + 8*d. */
-const FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 + 0.25 * 3 + 8 * DPR;
+const FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 * (1 + 0.2 * 0.25) + 8 * DPR;
 /** The BORDER-only pipeline's margin: frost*d + 8*d. */
 const RIM_MARGIN = 4 * DPR + 8 * DPR;
 

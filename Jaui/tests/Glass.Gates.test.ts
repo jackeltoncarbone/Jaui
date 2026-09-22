@@ -166,7 +166,7 @@ const BARRIER_KINDS: Record<GlassGateBarrier, GlassProgramKind[]> = {
   ambient: ['full', 'noLight'],
 };
 const BARRIER_OUTPUTS: Record<GlassGateBarrier, string[]> = {
-  bezel: ['bend', 'hump'], refract: ['refractOffset'], lod: [], grad: [], absorb: [], ambient: [],
+  bezel: ['outward', 'inRamp'], refract: ['refractOffset'], lod: [], grad: [], absorb: [], ambient: [],
 };
 
 describe('GLASS_GATE_<B> - a new TRUE gate around statements that are otherwise the shipped ones', () => {
@@ -248,8 +248,8 @@ describe('every ?glass-gates variant is whole: balanced, every read declared and
 //
 //                         skirt clip  sdf  bezel refract lod   ca  backdrop grade absorb shadow ambient rim spec border  grad
 const MAP: Record<GlassProgramKind, Record<string, number | null>> = {
-  full:       { skirt: 0, clip: 0, sdf: 29, '+bezel': 14, '+refract': 24, '+lod': 27, ca: 28, backdrop: 34, grade: 23, '+absorb': 22, shadow: 29, '+ambient': 27, rim: 31, specular: 17, border: 5, '+grad': 10 },
-  noLight:    { skirt: 0, clip: 0, sdf: 23, '+bezel': 14, '+refract': 24, '+lod': 27, ca: 27, backdrop: 26, grade: 20, '+absorb': 18, shadow: 23, '+ambient': 21, rim: null, specular: null, border: 5, '+grad': 10 },
+  full:       { skirt: 0, clip: 0, sdf: 28, '+bezel': 14, '+refract': 23, '+lod': 24, ca: 25, backdrop: 31, grade: 20, '+absorb': 19, shadow: 28, '+ambient': 26, rim: 28, specular: 17, border: 5, '+grad': 10 },
+  noLight:    { skirt: 0, clip: 0, sdf: 23, '+bezel': 14, '+refract': 23, '+lod': 24, ca: 25, backdrop: 26, grade: 20, '+absorb': 18, shadow: 23, '+ambient': 21, rim: null, specular: null, border: 5, '+grad': 10 },
   borderOnly: { skirt: 0, clip: 0, sdf: 7, '+bezel': 11, '+refract': 13, '+lod': 10, ca: null, backdrop: 8, grade: null, '+absorb': null, shadow: null, '+ambient': null, rim: null, specular: null, border: 5, '+grad': 7 },
 };
 
@@ -272,10 +272,13 @@ describe('the gate map, computed from the source', () => {
   it('the named findings the predictions rest on', () => {
     const fill = mapOf('noLight');
     const rim = mapOf('borderOnly');
-    // The shipped FILL's largest carried set among the ten is the chromatic gate, beside the taps;
-    // among the new gates it is `+lod`, which sits at the fill program's register peak.
+    // The shipped FILL's largest carried set among the ten is the backdrop tap, the chromatic gate
+    // one behind it: since aave's dispersion reads the offset it already has, the chromatic gate no
+    // longer carries a step along the normal (27 -> 25). Among the new gates it is `+lod`, which sits
+    // at the fill program's register peak.
     const ten = STAGES.filter((s) => fill[s] !== null).sort((a, b) => fill[b]! - fill[a]!);
-    expect(ten[0]).toBe('ca');
+    expect(ten[0]).toBe('backdrop');
+    expect(ten[1]).toBe('ca');
     const added = BARRIERS.map((b) => `+${b}`).sort((a, b) => fill[b]! - fill[a]!);
     expect(added[0]).toBe('+lod');
     // In the RIM program the refraction chain is the largest set any gate touches, old or new.

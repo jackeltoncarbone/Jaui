@@ -3144,7 +3144,7 @@ export class Canvas implements DirtyTracker {
           // draw at ~Jaui.ts:1466-1489 — self-contained at the overlay point.
           // ── What a BORDER-ONLY pass can actually reach ──
           // This margin used to be the glass FILL path's, copied whole: frost + the
-          // refraction footprint (|Thickness x Refraction|, plus the Fillet bulge) +
+          // refraction footprint (|Thickness x Refraction|) +
           // chromatic aberration. None of those three exist here. A border-only fragment
           // makes exactly ONE backdrop tap — the border zone's `bUv`, which offsets
           // INWARD along the normal and is scaled by `solidness`, so it never leaves the
@@ -3761,9 +3761,8 @@ export class Canvas implements DirtyTracker {
         // sampling (Jiv.Panel.frag), or a displaced sample lands past the
         // blurred region and reads unblurred/stale scene — the "no blur on the
         // outer refraction" rim. The shader displaces by, at worst:
-        //   edge refraction: Thickness·avgScale·d · Refraction   (hump ≤ 1)
-        //   surface bulge:   Fillet · minHalf · 0.25·0.7 · Refraction  (domeProfile ≤ 0.7)
-        //   chromatic aberr: ChromaticAberration · 3
+        //   refraction:      Thickness·avgScale·d · |Refraction|   (outward band + 0.4·√2 lens field ≤ 1)
+        //   chromatic aberr: 0.2 · ChromaticAberration of that      (red leads the offset by 20%)
         // plus the frost blur's own spatial spread. Compute the exact bound so
         // the blur is built everywhere the panel can sample — keeps the full
         // refraction look (no displacement clamp) while guaranteeing it reads
@@ -5974,9 +5973,11 @@ export class Canvas implements DirtyTracker {
    *  The margin covers the FULL reach of the glass shader's backdrop sampling (Jiv.Panel.frag), or
    *  a displaced sample lands past the blurred region and reads unblurred/stale scene — the "no
    *  blur on the outer refraction" rim. The shader displaces by, at worst:
-   *    edge refraction: Thickness·avgScale·d · Refraction   (hump ≤ 1)
-   *    surface bulge:   Fillet · minHalf · 0.25·0.7 · Refraction  (domeProfile ≤ 0.7)
-   *    chromatic aberr: ChromaticAberration · 3
+   *    refraction:      Thickness·avgScale·d · |Refraction|   (outward band + 0.4·√2 lens field ≤ 1)
+   *    chromatic aberr: 0.2 · ChromaticAberration of that      (red leads the offset by 20%)
+   *  The two bezel terms cannot both peak: past the outward band's peak it falls as `1 - inRamp`
+   *  while the lens field rises as `0.4·|field|·inRamp`, |field| ≤ √2, so the sum never passes 1.
+   *  Curvature only SHAPES the field, which is clamped to 1 per axis, so it adds no reach.
    *  plus the frost blur's own spatial spread. The region is canvas-clamped, so a heavy panel just
    *  falls back toward a full-canvas pyramid (correct, bounded) — and a full-canvas region resolves
    *  to the identity map, i.e. exactly the old behaviour. */
@@ -5988,11 +5989,9 @@ export class Canvas implements DirtyTracker {
     const frostCssPx = Math.max(1, rs.BackdropFrostBlur);
     const gsx = matScaleX(eff), gsy = matScaleY(eff);
     const avgScale = (gsx + gsy) * 0.5;
-    const minHalf = Math.min(node.Width * gsx, node.Height * gsy) * d * 0.5;
     const thicknessDev = rs.Thickness * avgScale * d;
-    const bulgeMax = rs.Fillet * minHalf * 0.25 * 0.7;
-    const refractMax = (thicknessDev + bulgeMax) * rs.Refraction;
-    const caMax = rs.ChromaticAberration * 3.0;
+    const refractMax = thicknessDev * Math.abs(rs.Refraction);
+    const caMax = 0.2 * Math.abs(rs.ChromaticAberration) * refractMax;
     const margin = frostCssPx * d + refractMax + caMax + 8 * d;
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
     // second reading of them: a bound computed off a different rule is a bound that can drift

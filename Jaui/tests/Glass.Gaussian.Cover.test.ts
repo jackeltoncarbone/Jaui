@@ -32,7 +32,7 @@ const CANVAS_W = 2560, CANVAS_H = 1600;
 /** glass-grid's geometry at a dpr, exactly as `Glass.Gaussian.test.ts` pins it at dpr 2. */
 const Grid = (dpr: number): { Fill: BackdropRect[]; Rim: BackdropRect[]; W: number; H: number; Radius: number } => {
   const w = Math.round(1280 * dpr), h = Math.round(800 * dpr);
-  const fillMargin = 4 * dpr + (2.5 * dpr) * 8 + 0.25 * 3 + 8 * dpr;
+  const fillMargin = 4 * dpr + (2.5 * dpr) * 8 * (1 + 0.2 * 0.25) + 8 * dpr;
   const rimMargin = 4 * dpr + 8 * dpr;
   const box = (i: number): BackdropRect => {
     const col = i % 5, row = (i / 5) | 0;

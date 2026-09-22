@@ -26,8 +26,9 @@ describe('Jiv Material (inferred)', () => {
     expect(j.RenderStyle.Material).toBe('LiquidGlass');
   });
 
-  it('ClearGlass preset has high specular, low blur, and infers LiquidGlass', () => {
-    expect(parseFloat(ClearGlass.SpecularIntensity as string)).toBeGreaterThan(0.7);
+  it('ClearGlass preset has the brighter highlight, low blur, and infers LiquidGlass', () => {
+    // aave's clear lens: a stronger glow toward the lit corners than the regular glass.
+    expect(parseFloat(ClearGlass.SpecularGlow as string)).toBeGreaterThan(parseFloat(LiquidGlass.SpecularGlow as string));
     expect(parseFloat(ClearGlass.BackdropFrostBlur as string)).toBeLessThanOrEqual(1);
     const j = new Jiv({ Style: { ...ClearGlass } });
     expect(j.RenderStyle.Material).toBe('LiquidGlass');
@@ -40,7 +41,7 @@ describe('Jiv Material (inferred)', () => {
     expect(j.Style.LightAngle).toBe('-45');
     expect(j.Style.LightIntensity).toBe('1');
     expect(j.Style.SpecularIntensity).toBe('0');
-    expect(j.Style.SpecularSharpness).toBe('100');
+    expect(j.Style.SpecularGlow).toBe('0');
     expect(j.Style.FresnelStrength).toBe('0');
     expect(j.Style.ChromaticAberration).toBe('0');
     expect(j.Style.EdgeLightTop).toBe('0');

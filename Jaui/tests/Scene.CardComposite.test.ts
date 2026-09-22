@@ -38,7 +38,6 @@ const GRID = jssClass(readPerfJss(), 'PerfGrid');
 
 const FROST_PT = jssBlurPt(GLASS, 'BackdropFilter');
 const THICKNESS = jssNumber(GLASS, 'Thickness');
-const FILLET = jssNumber(GLASS, 'Fillet');
 const REFRACTION = jssNumber(GLASS, 'Refraction');
 const CA = jssNumber(GLASS, 'ChromaticAberration');
 const SHADOW_BLUR_PT = jssNumber(GLASS, 'ShadowBlur');
@@ -54,10 +53,8 @@ const CANVAS_H = 1600;
 
 /** `Jaui.ts`'s glass FILL sample margin, mirrored. Unrotated, unscaled: `avgScale` is 1. */
 const fillMarginDev = (dpr: number): number => {
-  const thicknessDev = THICKNESS * 1 * dpr;
-  const minHalf = Math.min(CARD_W_PT, CARD_H_PT) * dpr * 0.5;
-  const bulgeMax = FILLET * minHalf * 0.25 * 0.7;
-  return FROST_PT * dpr + (thicknessDev + bulgeMax) * REFRACTION + CA * 3 + 8 * dpr;
+  const refractMax = THICKNESS * 1 * dpr * REFRACTION;
+  return FROST_PT * dpr + refractMax + 0.2 * CA * refractMax + 8 * dpr;
 };
 /** `Jaui.ts`'s `_subtreeMaxPaintMargin`, mirrored for a card: shadow blur plus the larger offset. */
 const paintMarginDev = (dpr: number): number => (SHADOW_BLUR_PT + SHADOW_OFFSET_Y_PT) * dpr;
@@ -280,8 +277,8 @@ describe('the grid law — a region-sized source is a CROP, not a resample', () 
 
   it('WITHOUT the guard the fill rect and the box share an edge exactly — zero slack', () => {
     // The negative control, and the reason the guard is not decoration. The paint margin (36) sits
-    // far inside the sample margin (64.75) and contributes nothing, and both edges land on
-    // floor((px - 64.75) / 4) * 4, the same number -- so the first DOWN hop's 1.15-texel tap reads
+    // far inside the sample margin (66) and contributes nothing, and both edges land on
+    // floor((px - 66) / 4) * 4, the same number -- so the first DOWN hop's 1.15-texel tap reads
     // past the only pixels the composite has.
     const margin = fillMarginDev(DPR);
     const unguarded = (px: number, pw: number): number =>
@@ -305,7 +302,7 @@ describe('the replay rule — a seeded target equals what the scene held', () =>
     // The paint rect is what a later surface replays; the region is what it needs filled. The gap
     // is 40 px, so paint stops 4 px short of the neighbour's box and the region lands 68 px in.
     expect(paint).toBe(36);
-    expect(margin).toBeCloseTo(64.75, 6);
+    expect(margin).toBeCloseTo(66, 6);
     const gap = GAP_PT * DPR;
     expect(gap).toBe(40);
     expect(paint).toBeLessThan(gap);              // no card's ink reaches its neighbour's BOX

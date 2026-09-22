@@ -35,9 +35,9 @@ const renderer = readRenderer();
 const CANVAS_W = 2560;
 const CANVAS_H = 1600;
 const DPR = 2;
-/** JwiftGlass: BackdropFilter Blur(4pt), Thickness 2.5, Fillet 0, Refraction 8, CA 0.25.
+/** JwiftGlass: BackdropFilter Blur(4pt), Thickness 2.5, Curvature 0, Refraction 8, CA 0.25.
  *  `_glassFillBlurPlan`: margin = frostCssPx*d + (thicknessDev + bulge)*Refraction + CA*3 + 8*d. */
-const FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 + 0.25 * 3 + 8 * DPR;   // 64.75
+const FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 * (1 + 0.2 * 0.25) + 8 * DPR;   // 66
 /** `_glassRimBlurPlan`: a border-only fragment makes ONE inward tap, so margin = frost*d + 8*d. */
 const RIM_MARGIN = 4 * DPR + 8 * DPR;                                  // 24
 const RADIUS = 4 * DPR;

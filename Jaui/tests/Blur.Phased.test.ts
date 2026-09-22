@@ -62,7 +62,7 @@ const CARD_H = jssNumber(CARD, 'Height');           // 150pt
 const FROST = jssBlurPt(GLASS, 'BackdropFilter');   // 4pt
 const THICKNESS = jssNumber(GLASS, 'Thickness');    // 2.5
 const REFRACTION = jssNumber(GLASS, 'Refraction');  // 8
-const FILLET = jssNumber(GLASS, 'Fillet');          // 0
+const CURVATURE = jssNumber(GLASS, 'Curvature');    // 0
 const CA = jssNumber(GLASS, 'ChromaticAberration'); // 0.25
 const BEZEL = jssNumber(GLASS, 'BezelWidth');       // 12
 const BORDER_LAYER = jssNumber(GLASS, 'BorderLayer');
@@ -75,10 +75,10 @@ const GAP = 20;
 const GRID_LEFT = 60;
 const GRID_TOP = 70;
 
-/** `_glassFillBlurPlan`: frost*d + (thickness*d + Fillet*minHalf*0.25*0.7)*Refraction + CA*3 + 8*d. */
-const MIN_HALF = Math.min(CARD_W, CARD_H) * DPR * 0.5;
+/** `_glassFillBlurPlan`: frost*d + thickness*d*Refraction, plus 0.2*CA of that, + 8*d. Curvature
+ *  only shapes the lens field (clamped to 1 per axis), so it adds no reach. */
 const FILL_MARGIN =
-  FROST * DPR + (THICKNESS * DPR + FILLET * MIN_HALF * 0.25 * 0.7) * REFRACTION + CA * 3 + 8 * DPR;
+  FROST * DPR + THICKNESS * DPR * REFRACTION * (1 + 0.2 * CA) + 8 * DPR;
 /** `_glassRimBlurPlan`: a border-only fragment makes ONE inward tap, so frost*d + 8*d. */
 const RIM_MARGIN = FROST * DPR + 8 * DPR;
 const RADIUS = FROST * DPR;
@@ -623,8 +623,8 @@ describe('the counters, derived on Scene.Ledger.ts itself', () => {
 describe('the pixel change, derived from the two sheets that own the geometry', () => {
   it('reads the geometry it depends on, so a retuned class moves the prediction', () => {
     expect([CARD_W, CARD_H, GAP]).toEqual([216, 150, 20]);
-    expect([FROST, THICKNESS, REFRACTION, FILLET, CA]).toEqual([4, 2.5, 8, 0, 0.25]);
-    expect(FILL_MARGIN).toBe(64.75);
+    expect([FROST, THICKNESS, REFRACTION, CURVATURE, CA]).toEqual([4, 2.5, 8, 0, 0.25]);
+    expect(FILL_MARGIN).toBe(66);
     expect(RIM_MARGIN).toBe(24);
     // The rim IS an overlay on this class, which is why phase 5 exists at all, and the shadow IS
     // adaptive, which is why the probe had to move.
@@ -632,9 +632,9 @@ describe('the pixel change, derived from the two sheets that own the geometry', 
     expect(SHADOW_ADAPTIVE).toBeGreaterThan(0);
   });
 
-  it('a FILL pyramid reaches 24.75 device px into a neighbour box; a RIM pyramid reaches none', () => {
+  it('a FILL pyramid reaches 26 device px into a neighbour box; a RIM pyramid reaches none', () => {
     const gutter = GAP * DPR;                          // 40 device px
-    expect(FILL_MARGIN - gutter).toBeCloseTo(24.75, 6);
+    expect(FILL_MARGIN - gutter).toBeCloseTo(26, 6);
     expect(RIM_MARGIN - gutter).toBeLessThan(0);
     // So on this grid the RIM pyramids read the same texels in both arms: rim N's region contains
     // card N's own fill and the bed, and nothing of any neighbour, in either arm. Every differing
@@ -674,11 +674,11 @@ describe('the pixel change, derived from the two sheets that own the geometry', 
 
   it('bounds the differing area: inside card boxes only, 24 px deep, at most 6.4% of the frame', () => {
     // A tap can only reach a neighbour where the bezel displaces outward. The budget is
-    // (thickness*d + bulge) * Refraction = 40 device px of displacement plus the pyramid's own
+    // thickness*d * Refraction = 40 device px of displacement plus the pyramid's own
     // +-3 sigma spread (sigma = RADIUS), against a 40 px gutter — so a neighbour's content reaches
     // at most (40 + 3*RADIUS - gutter) device px inside the card's own edge, and the bezel is no
     // wider than that either.
-    const disp = (THICKNESS * DPR + FILLET * MIN_HALF * 0.25 * 0.7) * REFRACTION;
+    const disp = THICKNESS * DPR * REFRACTION;
     expect(disp).toBe(40);
     const depth = Math.min(disp + 3 * RADIUS - GAP * DPR, BEZEL * DPR);
     expect(depth).toBe(24);

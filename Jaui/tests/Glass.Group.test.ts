@@ -88,10 +88,10 @@ const CANVAS_H = VIEW_H * DPR;
 const GAP_PT = 20;
 
 /** `_glassFillBlurPlan`'s margin for a JwiftGlass card, from the sheet's own numbers:
- *  `frost*d + (Thickness*d + Fillet*minHalf*0.175)*Refraction + CA*3 + 8*d`. Fillet is 0 on this
- *  class, so the bulge term vanishes and this is 8 + 40 + 0.75 + 16 = 64.75 device px. */
+ *  `frost*d + Thickness*d*Refraction + 0.2*CA of that + 8*d`: the chromatic reach rides the bend
+ *  (aave's dispersion), so this is 8 + 40 + 2 + 16 = 66 device px. */
 const GLASS_MARGIN = 4 * DPR + (glassNumber('Thickness') * DPR) * glassNumber('Refraction')
-  + glassNumber('ChromaticAberration') * 3 + 8 * DPR;
+  * (1 + 0.2 * glassNumber('ChromaticAberration')) + 8 * DPR;
 
 /** `_glassFillBlurPlan`'s region for a card box already in device px. */
 const RegionFor = (x: number, y: number, w: number, h: number): BackdropRect => ({
@@ -260,7 +260,7 @@ const buildGlassGrid = (c: Canvas): Map<Jiv, string> => {
       Style: {
         Background: CLEAR,
         Thickness: String(glassNumber('Thickness')), Refraction: String(glassNumber('Refraction')),
-        BezelWidth: '12', BezelScale: '0.25', Fillet: String(glassNumber('Fillet')),
+        BezelWidth: '12', BezelScale: '0.25', Curvature: String(glassNumber('Curvature')),
         ChromaticAberration: String(glassNumber('ChromaticAberration')),
         BackdropFilter: 'Blur(4pt) Saturate(1.6) Contrast(0.6)', Tint: '0.45',
         BorderWidth: '0.45pt', BorderBlur: '0.3pt', BorderFade: '0.7pt',
@@ -358,9 +358,9 @@ describe('the sheet the numbers come from', () => {
   it('reads JwiftGlass off its own rule, chromatic aberration included', () => {
     expect(glassNumber('Thickness')).toBe(2.5);
     expect(glassNumber('Refraction')).toBe(8);
-    expect(glassNumber('Fillet')).toBe(0);
+    expect(glassNumber('Curvature')).toBe(0);
     expect(glassNumber('ChromaticAberration')).toBe(0.25);
-    expect(GLASS_MARGIN).toBe(64.75);
+    expect(GLASS_MARGIN).toBe(66);
   });
 
   it('resolves a card to the 568x436 the blur path documents', () => {
@@ -467,7 +467,7 @@ describe('?glass-group - the capture is at group entry, and it is the whole ruli
   it('OFF: twenty builds, one per card, each made after the card before it drew', () => {
     // Today's engine. `renderNode` walks once and each card's pyramid is built from the scene as
     // of its OWN draw, so card N's backdrop contains card N-1's glass, rim and shadow wherever
-    // they reach into its 64.75 px sample margin - which at a 20pt (40 device px) gap they do.
+    // they reach into its 66 px sample margin - which at a 20pt (40 device px) gap they do.
     const draws = fillDraws(off);
     expect(draws.length).toBe(20);
     // Twenty rims beside them, each reading its own fill's pyramid rather than building a second

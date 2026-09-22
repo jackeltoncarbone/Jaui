@@ -219,15 +219,14 @@ describe('borderfromfill > containment, the clause the brief asked to be proved'
   it('the FILL region contains the RIM region for `PerfCard` at dpr 2, corner and edge', () => {
     // Both plans are `_glassFillBlurPlan` / `_glassRimBlurPlan`, transcribed here on the numbers
     // `PerfCard : JwiftGlass` resolves to at dpr 2: a 216x150pt card, frost 4pt, Thickness 2.5,
-    // Refraction 8, Fillet 0, ChromaticAberration 0.25, ShadowBlur 16pt, ShadowOffsetY 2pt.
+    // Refraction 8, Curvature 0, ChromaticAberration 0.25, ShadowBlur 16pt, ShadowOffsetY 2pt.
     const d = 2;
     const frost = 4;
     const pw = 216 * d;
     const ph = 150 * d;
     const thicknessDev = 2.5 * 1 * d;
-    const bulgeMax = 0 * Math.min(pw, ph) * 0.5 * 0.25 * 0.7;
-    const refractMax = (thicknessDev + bulgeMax) * 8;
-    const caMax = 0.25 * 3;
+    const refractMax = thicknessDev * 8;
+    const caMax = 0.2 * 0.25 * refractMax;
     const fillMargin = frost * d + refractMax + caMax + 8 * d;
     const rimMargin = frost * d + 8 * d;
     expect(fillMargin).toBeGreaterThan(rimMargin);

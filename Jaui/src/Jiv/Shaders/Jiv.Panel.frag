@@ -16,8 +16,8 @@ flat in vec4 v_StyleParams;    // borderEdgeAa, smoothness, opacity, brightness 
 flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
 flat in vec4 v_Refraction;     // thickness, bezelWidth, refractionStrength, bezelScale
 flat in vec4 v_Lighting;       // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
-flat in vec4 v_Specular;       // specIntensity, specSharpness, chromaticAberration, innerBlur
-flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance, bulge
+flat in vec4 v_Specular;       // specIntensity (edge highlight), specGlow, chromaticAberration, innerBlur
+flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, borderVariance, curvature (device px)
 flat in vec4 v_Outline;        // packed rim amounts, packed Fresnel grade, clipOffset, clipCount
                                // .x = alphaVariance*2047 * 4096 + fresnelStrength*1024
                                // .y = fresnelBrightness*256 * 1024 + fresnelSaturation*256
@@ -81,9 +81,9 @@ flat in vec4 v_BorderFilter;   // brightnessMul, saturationMul, contrastMul, lod
 //                       is excluded, so `edgeLightAlpha` / `edgeLightRgb` keep their 0.0 initialisers
 //                       where the block would have produced +0 and a finite colour. The composite
 //                       stays, and is `r*1 + (+0)` on both sides.
-//   GLASS_NO_SPEC       every instance has SpecularIntensity exactly +0: the catchlight and the
-//                       rim-specular line are excluded. `specAlpha` would have been +-0 and
-//                       `rimSpecAlpha > 0.0` false.
+//   GLASS_NO_SPEC       every instance has SpecularIntensity AND SpecularGlow exactly +0: the
+//                       highlight is excluded. `spec` would have been +-0, adding and scaling by
+//                       nothing.
 //   GLASS_REG           register-LIFETIME hygiene: the same statements in a different order, so
 //                       the drop shadow's corner field runs beside the main one, the fill
 //                       composite runs straight after the taps (the backdrop dies there), and the
@@ -231,8 +231,8 @@ bool GlassSkips(int bit) { return false; }
 // programs do not contain a token of it. The bit values are `Glass.Programs.GLASS_GATE_BARRIERS`.
 #if defined(MATERIAL_GLASS) && (defined(GLASS_GATE_BEZEL) || defined(GLASS_GATE_REFRACT) || defined(GLASS_GATE_LOD) || defined(GLASS_GATE_GRAD) || defined(GLASS_GATE_ABSORB) || defined(GLASS_GATE_AMBIENT))
 uniform int u_GlassGate;
-const int GLASS_BARRIER_BEZEL   = 1;     // the bezel hump: four smoothsteps into `bend` / `hump`
-const int GLASS_BARRIER_REFRACT = 2;     // the refraction offset: rotated normal, bulge, clamp
+const int GLASS_BARRIER_BEZEL   = 1;     // the bezel bands: smoothsteps into `outward` / `inRamp`
+const int GLASS_BARRIER_REFRACT = 2;     // the refraction offset: rotated normal, lens field, clamp
 const int GLASS_BARRIER_LOD     = 4;     // the rim blur LOD: rim boost, fwidth footprint, frost ramp
 const int GLASS_BARRIER_GRAD    = 8;     // ShapeGrad_inner, split from ShapeSDF_inner in CornerEval
 const int GLASS_BARRIER_ABSORB  = 16;    // the Beer-Lambert absorption: a vec3 pow
@@ -1157,6 +1157,47 @@ float clipStackDistance(vec2 pixel, int offset, int count) {
     return d;
 }
 
+// ── THE LENS FIELD (aave's, Jwift/Shared/Research/Aave.Glass.md) ─────────────────────────────────
+// Jack, of aave.com/design/building-glass-for-the-web: "for the glass. this is the key."
+//
+// Where a fragment of the glass reads its color from, as a function of the SHAPE alone. aave bakes
+// this into a PNG for feDisplacementMap; here it is the same math per fragment, off the SDF the shader
+// already has, so there is no map to rebuild when the shape changes and nothing to do when it moves.
+//
+// `LensBezel` is the erf falloff that confines the bend to a band `depth` wide inside the outline:
+// the SDF of the outline inset by `depth` (dist + depth, positive inside the band) through a Gaussian
+// CDF, with aave's erf(z) ~ tanh(sqrt(pi) z). About 1 across the band, 0.5 at its inner edge, about 0
+// in the interior, so the face of the glass stays flat -- which is also what Apple's does.
+float LensBezel(float dist, float depth) {
+    float d = max(depth, 0.5);
+    return 0.5 * (1.0 + tanh(1.7724538509 * (dist + d) / (d * 1.41421356)));
+}
+
+// The bend per axis, in [-1, 1], pointing AWAY from the center (the caller samples against it, so
+// the edge shows content from further in: magnification).
+//
+// Curvature 0 is a straight ramp, 0 at the center and 1 at the edge. Curvature > 0 is the height of a
+// spherical cap over each half-extent, and the bend is that cap's SLOPE, x / sqrt(R^2 - x^2): gentle in
+// the middle and steep toward the rim, which is what a thin convex lens does. aave normalizes it so the
+// mean slope over [0, h] is 0.5 by summing 200 samples; the integral has a closed form,
+// R - sqrt(R^2 - h^2), so this divides by that instead. The PNG clamps every channel, so the product
+// with the bezel is clamped to 1 here.
+vec2 LensField(vec2 p, vec2 halfSize, float dist, float depth, float curvature) {
+    vec2 h = max(halfSize, vec2(1.0));
+    vec2 a = abs(p);
+    vec2 f;
+    if (curvature > 0.0) {
+        float d = clamp(curvature, 0.01, max(min(h.x, h.y) - 1.0, 0.01));
+        vec2 R = (h * h + d * d) / (2.0 * d);
+        vec2 x = min(a, 0.999 * R);
+        vec2 meanSlope = (R - sqrt(max(R * R - h * h, vec2(0.0)))) / h;
+        f = x / sqrt(R * R - x * x) * (0.5 / max(meanSlope, vec2(1e-4)));
+    } else {
+        f = a / h;
+    }
+    return sign(p) * clamp(f * LensBezel(dist, depth), 0.0, 1.0);
+}
+
 void main() {
 #if !defined(MATERIAL_FLAT)
     if (GlassSkips(GLASS_SKIP_SKIRT) && GlassSkirtCut()) discard;
@@ -1244,7 +1285,7 @@ void main() {
     float fresnelStrength = v_Lighting.w;
 
     float specIntensity = v_Specular.x;
-    float specSharpness = max(v_Specular.y, 1.0);
+    float specGlow = v_Specular.y;
     float chromaticAberration = v_Specular.z;
     // v_Specular.w packs the border's inward fade (device px, quarter steps) above InnerBlur (thousandths).
     float _blurFadePacked = v_Specular.w;
@@ -1255,7 +1296,7 @@ void main() {
     float edgeLightTop = v_RimEdge.x;
     float edgeLightBottom = v_RimEdge.y;
     float borderVariance = v_RimEdge.z;
-    float bulge = v_RimEdge.w;
+    float curvature = v_RimEdge.w;
 
     vec2 p = pLocal - panelCenter;
 
@@ -1319,20 +1360,24 @@ void main() {
     // assigned by the same expressions. It could skip on an amount only where both readers vanish
     // (Thickness x Refraction 0 AND ChromaticAberration 0); glass-grid has neither, so it is a
     // pure barrier there.
+    //
+    // THE HYBRID (Jack, 2026-09-22): the OUTWARD half is still this Apple-measured band; the INWARD half
+    // is now aave's lens field (LensField above), which hands over as the outward band falls away
+    // (`inRamp`, from its peak at 0.4 s to s). The old inward band was a bump of fixed shape; the lens
+    // field follows the panel's own curvature and dies into the flat face through the erf instead.
 #if defined(MATERIAL_GLASS) && defined(GLASS_GATE_BEZEL)
-    float bend;
-    float hump;
+    float outward;
+    float inRamp;
     if (GlassGate(GLASS_BARRIER_BEZEL)) {
 #endif
     float outwardBand = smoothstep(0.0, s * 0.4, x) * (1.0 - smoothstep(s * 0.4, s, x));
-    float inwardBand = smoothstep(s, (s + 1.0) * 0.5, x) * (1.0 - smoothstep((s + 1.0) * 0.5, 1.0, x));
 #if defined(MATERIAL_GLASS) && defined(GLASS_GATE_BEZEL)
-    bend = 0.4 * inwardBand - outwardBand;
-    hump = max(inwardBand, outwardBand);
+    outward = outwardBand;
+    inRamp = smoothstep(s * 0.4, s, x);
     }
 #else
-    float bend = 0.4 * inwardBand - outwardBand;
-    float hump = max(inwardBand, outwardBand);
+    float outward = outwardBand;
+    float inRamp = smoothstep(s * 0.4, s, x);
 #endif
 
     // ── Fill alpha (shape mask) ──
@@ -1349,10 +1394,10 @@ void main() {
     // ── Backdrop sample with refraction + chromatic aberration + variable LOD ──
     //
     // Show Studio combines TWO displacement fields:
-    //   1) Edge refraction — rotated outward normal, scaled by `hump`, sampled INWARD
-    //      (negative of the rotated normal) so rim content is pulled from further in.
-    //   2) Surface bulge — radial direction from the panel CENTER outward, scaled by
-    //      a dome profile. This offsets the whole panel like a convex lens.
+    //   1) Apple's outward band — the rotated outward normal, scaled by `outward`, so the
+    //      outline shows what lies outside the panel.
+    //   2) aave's lens field — per axis, shaped by Curvature, pulling the interior toward the
+    //      edge across the rest of the bezel and gone by the flat face.
     //
     // The sum is applied as a UV offset when sampling the backdrop.
     vec3 backdrop = vec3(0.0);
@@ -1397,33 +1442,21 @@ void main() {
         vec2 refractOffset;
         if (GlassGate(GLASS_BARRIER_REFRACT)) {
 #endif
-        // Edge refraction: rotate the outward normal ~10° along the tangent,
-        // then negate to sample INWARD (Show Studio's `-refract * edgeIntensity`).
+        // Apple's outward band: the outline shows what lies OUTSIDE the panel, along the outward
+        // normal rotated ~10° along the tangent.
         vec2 tangent = vec2(-normal.y, normal.x);
         vec2 rotatedNormal = normal * 0.985 + tangent * 0.174; // cos(10°), sin(10°)
-        vec2 edgeDisp = -rotatedNormal * bend * thickness;
+        vec2 edgeDisp = rotatedNormal * outward * thickness;
 
-        // Surface bulge: radial direction from panel center, scaled by dome profile.
-        // Magnitude is proportional to the panel's MINOR axis (its thickness),
-        // not a constant — otherwise long pills (halfY << halfX) produce a
-        // displacement larger than the pill is tall, pulling samples off-screen
-        // where CLAMP_TO_EDGE returns the FBO's cleared border (dark halos at
-        // pill endcaps).
-        vec2 bulgeDisp = vec2(0.0);
-        if (bulge != 0.0) {
-            float minHalf = min(panelHalfSize.x, panelHalfSize.y);
-            float maxRadius = max(panelHalfSize.x, panelHalfSize.y);
-            float normDist = clamp(length(p) / max(maxRadius, 1.0), 0.0, 1.0);
-            float domeProfile = normDist * (1.0 - 0.3 * normDist);
-            vec2 radialDir = length(p) > 0.001 ? p / length(p) : vec2(0.0);
-            float bulgeMag = bulge * minHalf * 0.25;
-            bulgeDisp = radialDir * domeProfile * bulgeMag;
-        }
+        // aave's lens field: past the outward peak the glass pulls the interior toward the edge,
+        // 0.4 of the outward reach (the iPhone's measured ratio), shaped by Curvature and gone by the
+        // flat face. It replaces the radial `bulge`, which zoomed the whole panel about its center.
+        vec2 lensDisp = -LensField(p, panelHalfSize, dist, bezelWidth, curvature) * (0.4 * thickness * inRamp);
 
 #if defined(MATERIAL_GLASS) && defined(GLASS_GATE_REFRACT)
-        refractOffset = (edgeDisp + bulgeDisp) * refractionStrength;
+        refractOffset = (edgeDisp + lensDisp) * refractionStrength;
 #else
-        vec2 refractOffset = (edgeDisp + bulgeDisp) * refractionStrength;
+        vec2 refractOffset = (edgeDisp + lensDisp) * refractionStrength;
 #endif
 
         // Clamp the displacement so a strong Thickness×Refraction can't push the
@@ -1445,26 +1478,12 @@ void main() {
         // GLASS_REG computes the two chromatic ones inside the 3-tap branch below, their only
         // reader, instead of holding four floats across the LOD computation.
 #if !defined(GLASS_BORDER_ONLY)
-#if !defined(GLASS_REG)
-        // CA spread along normal, scaled by hump and ca
-        float caPx = chromaticAberration * hump * 3.0;
-        vec2 caStep = normal * caPx;
-#endif
-
         // FBO has top-of-scene at UV.y=1 (panel/text shaders flip Y in clip space).
         // Flip Y here so each fragment samples the pixel directly behind it.
         // `baseUv` was hoisted to the outer scope — assign instead of redeclare
         // so the border-zone refilter can reuse the same refracted UV.
         baseUv = (v_PixelPos + refractOffset) / u_Resolution;
-#if !defined(GLASS_REG)
-        vec2 uvR = (v_PixelPos + refractOffset + caStep) / u_Resolution;
-        vec2 uvB = (v_PixelPos + refractOffset - caStep) / u_Resolution;
-#endif
         baseUv.y = 1.0 - baseUv.y;
-#if !defined(GLASS_REG)
-        uvR.y = 1.0 - uvR.y;
-        uvB.y = 1.0 - uvB.y;
-#endif
 #endif
 
         // Backdrop is the Dual-Filter PRE-BLURRED FBO with mipmaps generated.
@@ -1514,16 +1533,16 @@ void main() {
 #if defined(MATERIAL_GLASS) && defined(GLASS_GATE_LOD)
         }
 #endif
-        // Chromatic aberration splits the R/B taps by ±caStep along the normal.
-        // caStep = normal * (ca * hump * 3) — and `hump` is ~0 across the entire
-        // flat interior (decays to <2e-4 by x=3·bezel). So for the vast interior
-        // of a panel/modal the three channel taps sample the SAME uv and the
-        // fringe is sub-pixel. Collapse to ONE backdrop read there: pixel-
-        // identical output, but 2 fewer mipmapped backdrop samples on millions
-        // of interior fragments (the dominant cost of a full-screen glass modal).
-        // The full 3-tap CA still runs in the thin rim band where it's visible.
+        // Chromatic aberration is aave's: DISPERSION, proportional to the bend. Three reads of the same
+        // offset, red at (1 + 0.2 ca) of it, green at (1 + 0.1 ca), blue at the offset itself, so the
+        // fringe is zero on the flat face and widest where the lens bends hardest. (It was a fixed
+        // `ca * hump * 3` px along the normal, the same width wherever the bezel was.) The refracted
+        // offset is ~0 across the flat interior, so there the three taps land within half a pixel of
+        // each other: collapse to ONE backdrop read, pixel-identical, 2 fewer mipmapped samples on
+        // every interior fragment (the dominant cost of a full-screen glass modal).
 #if !defined(GLASS_BORDER_ONLY)
-        float caSpreadPx = chromaticAberration * hump * 3.0; // = length(caStep)
+        // How far red leads blue: the spread the one-tap shortcut below tests against half a pixel.
+        float caSpreadPx = 0.2 * chromaticAberration * length(refractOffset);
         if (GlassSkips(GLASS_SKIP_CA)) caSpreadPx = 0.0;
         // A border-only pass throws `backdrop` away: it only reaches `fillRgb`, and the
         // borderOnly block below resets `result` to a transparent interior. So the one
@@ -1537,17 +1556,13 @@ void main() {
             if (caSpreadPx < 0.5) {
                 backdrop = sampleBackdrop(baseUv, lodBoost, frostLod);
             } else {
-#if defined(GLASS_REG)
-                float caPx = chromaticAberration * hump * 3.0;
-                vec2 caStep = normal * caPx;
-                vec2 uvR = (v_PixelPos + refractOffset + caStep) / u_Resolution;
-                vec2 uvB = (v_PixelPos + refractOffset - caStep) / u_Resolution;
+                vec2 uvR = (v_PixelPos + refractOffset * (1.0 + 0.2 * chromaticAberration)) / u_Resolution;
+                vec2 uvG = (v_PixelPos + refractOffset * (1.0 + 0.1 * chromaticAberration)) / u_Resolution;
                 uvR.y = 1.0 - uvR.y;
-                uvB.y = 1.0 - uvB.y;
-#endif
+                uvG.y = 1.0 - uvG.y;
                 vec3 sR = sampleBackdrop(uvR, lodBoost, frostLod);
-                vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);
-                vec3 sB = sampleBackdrop(uvB, lodBoost, frostLod);
+                vec3 sG = sampleBackdrop(uvG, lodBoost, frostLod);
+                vec3 sB = sampleBackdrop(baseUv, lodBoost, frostLod);
                 backdrop = vec3(sR.r, sG.g, sB.b);
             }
             if (GlassSkips(GLASS_SKIP_GRADE)) {} else
@@ -1902,82 +1917,35 @@ void main() {
         result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
         result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;
 
-        // GLASS_NO_SPEC: SpecularIntensity is +0 on every instance, so `specAlpha` is +-0 (every
-        // other factor is finite) and `rimSpecAlpha > 0.0` is false. GLASS_BORDER_ONLY: `fillAlpha`
-        // is 0, so the same two facts hold at any intensity. Excluded whole in both.
+        // GLASS_NO_SPEC: SpecularIntensity AND SpecularGlow are +0 on every instance, so `spec` is +-0
+        // (every other factor is finite) and the composite adds and scales by nothing. GLASS_BORDER_ONLY:
+        // `fillAlpha` is 0, so the same holds at any strength. Excluded whole in both.
 #if !defined(GLASS_NO_SPEC) && !defined(GLASS_BORDER_ONLY)
         if (!GlassSkips(GLASS_SKIP_SPECULAR)) {
 #if defined(GLASS_REG_REMAT)
             glassiness = smoothstep(0.0, 1.0, thickness);
 #endif
-            // ── Blinn-Phong specular catchlight on the bevel ──
-            // The bevel has a 3D normal: 2D outward normal (when on the bevel)
-            // tilted toward +Z (out of screen) at the flat center. We model this
-            // as `(normal * hump, 1 - hump*0.7)`: mostly +Z at the center where
-            // the surface is flat (hump=0), tilted outward at the rim (hump=1).
-            // View direction is +Z (orthographic). Light direction in 3D adds an
-            // elevation + the SpecularTilt offset — this reproduces Apple's
-            // gyro-driven catchlight (tilt device → specular slides across rim).
-            vec3 N3 = normalize(vec3(normal * hump, 1.0 - hump * 0.7));
+            // ── THE HIGHLIGHT (aave's; Jack, 2026-09-22: replace ours) ─────────────────────────────
+            // It replaced a Blinn-Phong catchlight on the bevel and a separate one-sided rim line that
+            // took its own backdrop tap. Two terms, both on the NORMALIZED POSITION across the panel,
+            // not the surface normal, and both TWO-SIDED: `abs` puts the light on opposite corners (top
+            // left and bottom right at the default 135), as the iPhone's key light and bounce do.
+            //   * glow: rises toward the two lit corners, confined to the bezel by the lens's own erf.
+            //   * edge: a band 0.3 of the bezel wide (aave's 3px on a 10px depth), full at the outline.
+            // The tilt still slides it, as the catchlight did.
             vec2 specLightDir = normalize(lightDir + u_SpecularTilt);
-            vec3 L3 = normalize(vec3(specLightDir, 0.6));
-            vec3 V3 = vec3(0.0, 0.0, 1.0);
-            vec3 H3 = normalize(L3 + V3);
-            float specBase = pow(max(dot(N3, H3), 0.0), specSharpness);
-            float specAlpha = specBase * specIntensity * hump * fillAlpha * lightIntensity;
-            vec3 specRgb = vec3(1.0);  // bright white catchlight
-            result.rgb = result.rgb * (1.0 - specAlpha) + specRgb * specAlpha;
-            result.a = result.a * (1.0 - specAlpha) + specAlpha;
-
-            // ── Rim specular highlight (Apple's chrome-edge catchlight) ─────
-            // A SECOND very thin bright line right at the silhouette, on the LIT
-            // side only — sharper directional falloff than the main border, and
-            // picks up vibrant color from the backdrop. Distinct from:
-            //   - Blinn-Phong catchlight (on the bevel SURFACE, not the silhouette)
-            //   - Main border stroke (uniform around the perimeter)
-            //   - Wide rim glow (soft inward fade, not pinned at the edge)
-            // This is the "variable vibrant rim line" that reads as chrome-like
-            // specular reflection off the glass rim, brightest where the rim's
-            // outward normal points toward the light.
-            //
-            // Width is PHYSICAL — proportional to perceived glass thickness. A
-            // thicker slab shows a wider rim edge-on. Floor at 0.75 px so the
-            // highlight never disappears on thin glass.
-            // Floor scales with glassiness so the highlight band collapses to 0
-            // as Thickness fades, preventing a hard pop at the variant flip.
-            float rimSpecW = max(thickness * 0.18, 0.75 * glassiness);
-            // Thin band between the outline (dist=0) and rimSpecW inside (dist=-rimSpecW).
-            // Previous subtraction formulation left the second term at 0 deep inside
-            // while the first stayed at 1, so the "thin line" was actually a 55%
-            // wash over the entire lit-side interior. Now: inside-outline mask
-            // multiplied by a reverse ramp that goes to 0 past rimSpecW inward.
-            float insideOutline = 1.0 - smoothstep(-aa, aa, dist);
-            float withinBand = smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
-            float rimSpecBand = insideOutline * withinBand;
-            // Directional alignment uses the TILTED light direction so the
-            // rim-spec line slides around the perimeter as pointer/gyro moves.
-            // The ambient, edge-light, and border directionality stay fixed to
-            // the stylesheet-set LightAngle (via `alignment` above).
-            vec2 specLightDirRim = normalize(lightDir + u_SpecularTilt);
-            float rimSpecKey = dot(normal, specLightDirRim);
-            float rimSpecAlign = max(rimSpecKey, -rimSpecKey * GROUND_BOUNCE);
-            float rimSpecDir = pow(max(rimSpecAlign, 0.0), 3.0);
-            float rimSpecAlpha = rimSpecBand * rimSpecDir * specIntensity * fillAlpha;
-            // rimSpecAlpha is 0 once dist <= -rimSpecW (the thin rim band) — i.e. the
-            // entire interior. Skip the vibrant-rim backdrop tap + composite there:
-            // a no-op composite anyway. Pixel-identical, saves the second per-pixel
-            // backdrop read across the whole interior.
-            if (rimSpecAlpha > 0.0) {
-                // Color: vibrant-boosted backdrop (sampled at the rim) mixed toward white.
-                // LOD offset slightly sharper than the panel so the rim highlight reads
-                // as "specular reflection of crisper nearby content."
-                vec3 rimSpecBackdrop = sampleBackdrop(baseUv, max(0.0, lodBoost - 0.5), frostLod);
-                float rimSpecLuma = dot(rimSpecBackdrop, LUMA);
-                vec3 rimSpecVibrant = clamp(mix(vec3(rimSpecLuma), rimSpecBackdrop, 1.8) * 1.4, 0.0, 1.0);
-                vec3 rimSpecRgb = mix(rimSpecVibrant, vec3(1.0), 0.45);
-                result.rgb = result.rgb * (1.0 - rimSpecAlpha) + rimSpecRgb * rimSpecAlpha;
-                result.a = result.a * (1.0 - rimSpecAlpha) + rimSpecAlpha;
-            }
+            vec2 np = clamp(p / max(panelHalfSize, vec2(1.0)), -1.0, 1.0);
+            float axis = abs(dot(np, specLightDir));
+            float glowTerm = specGlow * pow(clamp(axis * 0.70710678, 0.0, 1.0), 1.5) * LensBezel(dist, bezelWidth);
+            float edgeW = max(bezelWidth * 0.3, 1.0);
+            float edgeTerm = specIntensity * (dist < 0.0 ? max(0.0, 1.0 + dist / edgeW) : 0.0) * pow(axis, 1.5);
+            float spec = 0.5 * min(glowTerm + edgeTerm, 1.0) * lightIntensity * glassiness * fillAlpha;
+            // ADAPTIVE: it brightens what is dark and darkens what is bright (aave's luma 0.3 to 0.7), so
+            // it reads on any backdrop. An added white washes out over a bright photograph exactly where
+            // a highlight is needed; this is the same reason text inks with Lift.
+            float specLuma = dot(result.rgb, LUMA);
+            float darken = smoothstep(0.3, 0.7, specLuma);
+            result.rgb = max(mix(result.rgb + spec, result.rgb * (1.0 - spec), darken), vec3(0.0));
         }
 #endif
 

@@ -54,7 +54,7 @@ describe('JivInstanceBuffer (single unified renderer for every Jiv)', () => {
 
     // loc 12 a_Specular
     expect(d[44]).toBeCloseTo(LiquidGlass.SpecularIntensity!);
-    expect(d[45]).toBeCloseTo(LiquidGlass.SpecularSharpness!);
+    expect(d[45]).toBeCloseTo(LiquidGlass.SpecularGlow!);
     expect(d[46]).toBeCloseTo(LiquidGlass.ChromaticAberration!);
     expect(d[47]).toBeCloseTo(LiquidGlass.InnerBlur!);
 

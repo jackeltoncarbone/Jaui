@@ -221,9 +221,9 @@ export const FREE_ALIASES = new Set([
   'panelCenter', 'panelHalfSize', 'shadowOffset', 'shadowBlur', 'borderWidth', 'borderOnly',
   'borderEdgeAa', 'smoothness', 'opacity', 'materialType', 'brightness', 'saturation', 'contrast',
   'frostLod', 'thickness', 'bezelWidth', 'refractionStrength', 'bezelScale', 'bodyTint',
-  'lightIntensity', 'fresnelStrength', 'specIntensity', 'specSharpness', 'chromaticAberration',
-  '_blurFadePacked', 'edgeLightTop', 'edgeLightBottom', 'borderVariance', 'bulge', 'effectiveSmooth',
-  's', 'GROUND_BOUNCE', 'BORDER_MIN_DEVICE_PX', 'V3', 'specRgb',
+  'lightIntensity', 'fresnelStrength', 'specIntensity', 'specGlow', 'chromaticAberration',
+  '_blurFadePacked', 'edgeLightTop', 'edgeLightBottom', 'borderVariance', 'curvature', 'effectiveSmooth',
+  's', 'GROUND_BOUNCE', 'BORDER_MIN_DEVICE_PX',
   // Dead in every glass program: read only by the non-glass arms `materialType` folds away.
   'hasBackdropFilter',
 ]);
@@ -237,13 +237,13 @@ export const ANCHORS = {
   /** The refraction footprint: the one derivative. */
   lod: 'float refractFp = length(fwidth(refractOffset));',
   /** The body's taps. */
-  taps: 'vec3 sG = sampleBackdrop(baseUv, lodBoost, frostLod);',
+  taps: 'vec3 sG = sampleBackdrop(uvG, lodBoost, frostLod);',
   /** The fill source: the gradient loop and the OKLab conversion, compiled in whatever the mode. */
   fill: 'vec4 fillSrc = resolveBgFill(panelLocal);',
   /** The wide rim glow's tap. */
   glow: 'vec3 rimSample = sampleBackdrop(rimUv, 0.0, frostLod);',
-  /** The catchlight. */
-  spec: 'float specBase = pow(max(dot(N3, H3), 0.0), specSharpness);',
+  /** The highlight (aave's): the adaptive composite, where it holds the most. */
+  spec: 'float darken = smoothstep(0.3, 0.7, specLuma);',
   /** The border zone's tap. */
   zone: 'vec3 bSample = sampleBackdrop(bUv, bLod, frostLod);',
 } as const;

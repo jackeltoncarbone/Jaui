@@ -48,13 +48,15 @@ export const GLASS_PROGRAM_KINDS: readonly GlassProgramKind[] = ['full', 'border
 export const GLASS_OFF_BORDER_EDGE_AA = 28;
 export const GLASS_OFF_FRESNEL_STRENGTH = 43;
 export const GLASS_OFF_SPECULAR_INTENSITY = 44;
+/** `SpecularGlow`, the highlight's other term: the no-spec program needs it +0 as well. */
+export const GLASS_OFF_SPECULAR_GLOW = 45;
 
 export interface GlassBatchFacts {
   /** Every instance is a rim overlay: `borderEdgeAa < 0`, the fragment's own test in float32. */
   BorderOnly: boolean;
   /** Every instance has FresnelStrength exactly +0. */
   NoGlow: boolean;
-  /** Every instance has SpecularIntensity exactly +0. */
+  /** Every instance has SpecularIntensity AND SpecularGlow exactly +0. */
   NoSpec: boolean;
 }
 
@@ -74,7 +76,7 @@ export const GlassBatchPredicates = (d: Float32Array, count: number, floatsPerIn
     const b = i * floatsPerInstance;
     if (!(d[b + GLASS_OFF_BORDER_EDGE_AA] < 0)) borderOnly = false;
     if (!Object.is(d[b + GLASS_OFF_FRESNEL_STRENGTH], 0)) noGlow = false;
-    if (!Object.is(d[b + GLASS_OFF_SPECULAR_INTENSITY], 0)) noSpec = false;
+    if (!Object.is(d[b + GLASS_OFF_SPECULAR_INTENSITY], 0) || !Object.is(d[b + GLASS_OFF_SPECULAR_GLOW], 0)) noSpec = false;
   }
   return { BorderOnly: borderOnly, NoGlow: noGlow, NoSpec: noSpec };
 };

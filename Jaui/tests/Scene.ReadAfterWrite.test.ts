@@ -27,7 +27,6 @@ const GRID = jssClass(readPerfJss(), 'PerfGrid');
 
 const FROST_PT = jssBlurPt(GLASS, 'BackdropFilter');
 const THICKNESS = jssNumber(GLASS, 'Thickness');
-const FILLET = jssNumber(GLASS, 'Fillet');
 const REFRACTION = jssNumber(GLASS, 'Refraction');
 const CA = jssNumber(GLASS, 'ChromaticAberration');
 const SHADOW_BLUR_PT = jssNumber(GLASS, 'ShadowBlur');
@@ -43,10 +42,8 @@ const CARDS = 20;
 
 /** `Jaui.ts`'s glass FILL sample margin, mirrored. Unrotated, unscaled: `avgScale` is 1. */
 const fillMarginDev = (dpr: number): number => {
-  const thicknessDev = THICKNESS * 1 * dpr;
-  const minHalf = Math.min(CARD_W_PT, CARD_H_PT) * dpr * 0.5;
-  const bulgeMax = FILLET * minHalf * 0.25 * 0.7;
-  return FROST_PT * dpr + (thicknessDev + bulgeMax) * REFRACTION + CA * 3 + 8 * dpr;
+  const refractMax = THICKNESS * 1 * dpr * REFRACTION;
+  return FROST_PT * dpr + refractMax + 0.2 * CA * refractMax + 8 * dpr;
 };
 /** `Jaui.ts`'s BORDER-ONLY overlay margin, mirrored: a border-only fragment makes one inward tap,
  *  so its reach is the frost's own spread plus the pixel pad. */
@@ -245,8 +242,8 @@ describe('glass-grid — the number the counter should read', () => {
     expect(instanceFrostLod(FROST_PT, 1)).toBeGreaterThan(SCENE_TAP_FROST_LOD);
   });
 
-  it('the fill margin is 64.75 device px and the rim margin 24, at dpr 2', () => {
-    expect(fillMarginDev(DPR)).toBeCloseTo(64.75, 6);
+  it('the fill margin is 66 device px and the rim margin 24, at dpr 2', () => {
+    expect(fillMarginDev(DPR)).toBeCloseTo(66, 6);
     expect(rimMarginDev(DPR)).toBeCloseTo(24, 6);
   });
 
@@ -310,9 +307,9 @@ describe('what a per-batch dirty rect could serve on this grid', () => {
   const paintOutsetY = (SHADOW_BLUR_PT + SHADOW_OFFSET_Y_PT) * DPR;
 
   it('a neighbour card is inside the next card\'s sample margin, on both axes', () => {
-    // The margin reaches 64.75 px back across a 40 px gap, so it lands 24.75 px INSIDE the previous
+    // The margin reaches 66 px back across a 40 px gap, so it lands 26 px INSIDE the previous
     // card's own box - never mind its shadow, which crosses the gap on its own.
-    expect(fillMarginDev(DPR) - gapDev).toBeCloseTo(24.75, 6);
+    expect(fillMarginDev(DPR) - gapDev).toBeCloseTo(26, 6);
     expect(fillMarginDev(DPR) - gapDev).toBeGreaterThan(0);
     expect(paintOutsetX).toBeGreaterThan(0);
     expect(paintOutsetX + fillMarginDev(DPR)).toBeGreaterThan(gapDev);

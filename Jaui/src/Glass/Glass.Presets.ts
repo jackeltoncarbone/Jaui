@@ -32,11 +32,11 @@ export const LiquidGlass: Partial<JivStyle> = {
   // Backdrop grading — gentle, content stays readable
   BackdropFilter: 'Blur(3) Saturate(1.25) Contrast(0.75)',
 
-  // Refraction / bezel — match Apple's dossier. Bulge stays near-zero; the
-  // Apple glass surface reads as FLAT, not fishbowl-domed. Thickness controls
-  // perceived glass depth (and the rim-spec line width scales with it).
+  // Refraction / bezel — match Apple's dossier: the face reads FLAT, only the bezel bends.
+  // Curvature is aave's lens (Jwift/Shared/Research/Aave.Glass.md): the height of the cap whose
+  // slope shapes the bend across the bezel; the erf keeps it off the face, so it never fishbowls.
   Thickness: '2',
-  Fillet: '0.25',
+  Curvature: '40',
   BezelWidth: '7',
   BezelScale: '0.25',
   Refraction: '10',
@@ -45,10 +45,10 @@ export const LiquidGlass: Partial<JivStyle> = {
   LightAngle: '135',               // upper-left light (0=+x, 90=up)
   LightIntensity: '1',
 
-  // Specular: SpecularIntensity drives BOTH the Blinn-Phong bevel catchlight
-  // AND the thin rim-specular highlight. Sharpness is for the bevel catchlight.
-  SpecularIntensity: '0.55',
-  SpecularSharpness: '10',
+  // The highlight is aave's: SpecularIntensity is the edge band at the outline, SpecularGlow the
+  // wash toward the two lit corners. Their tuned playground values.
+  SpecularIntensity: '0.25',
+  SpecularGlow: '0.1',
   FresnelStrength: '0.55',
 
   // Chromatic aberration at rim — subtle
@@ -80,17 +80,18 @@ export const ClearGlass: Partial<JivStyle> = {
   BackdropFilter: 'Blur(1) Saturate(1.1)',
 
   Thickness: '1',
-  Fillet: '0.5',
+  Curvature: '40',
   BezelWidth: '1',
   BezelScale: '0.15',
   Refraction: '1',
 
   LightAngle: '135',
   LightIntensity: '1',
-  SpecularIntensity: '0.75',
-  SpecularSharpness: '150',
+  // aave's component preset: a brighter glow and more dispersion on the clear lens.
+  SpecularIntensity: '0.25',
+  SpecularGlow: '0.15',
   FresnelStrength: '0.85',
-  ChromaticAberration: '0.45',
+  ChromaticAberration: '0.3',
   EdgeLightTop: '0.22',
   EdgeLightBottom: '0.05',
   BorderVariance: '0.4',

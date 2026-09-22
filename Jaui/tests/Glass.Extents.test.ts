@@ -45,10 +45,11 @@ const glassNumber = (prop: string): number => {
 const FROST_PT = 4;
 const VIEW_W = 1280, VIEW_H = 800;
 
-/** `_glassFillBlurPlan`'s margin for a JwiftGlass surface at `dpr` (Fillet is 0 on the class). */
+/** `_glassFillBlurPlan`'s margin for a JwiftGlass surface at `dpr`: the chromatic reach is 0.2*CA of
+ *  the bend (aave's dispersion rides the offset). */
 const marginAt = (dpr: number): number =>
   FROST_PT * dpr + glassNumber('Thickness') * dpr * glassNumber('Refraction')
-  + glassNumber('ChromaticAberration') * 3 + 8 * dpr;
+  * (1 + 0.2 * glassNumber('ChromaticAberration')) + 8 * dpr;
 
 /** A box in CSS px -> `_glassFillBlurPlan`'s region in device px. */
 const regionAt = (dpr: number, [x, y, w, h]: readonly number[]): BackdropRect => {
@@ -341,7 +342,7 @@ const walkPhone = (): { Stats: Stats; Builds: number } => {
       Style: {
         Background: CLEAR,
         Thickness: String(glassNumber('Thickness')), Refraction: String(glassNumber('Refraction')),
-        BezelWidth: '12', BezelScale: '0.25', Fillet: String(glassNumber('Fillet')),
+        BezelWidth: '12', BezelScale: '0.25', Curvature: String(glassNumber('Curvature')),
         ChromaticAberration: String(glassNumber('ChromaticAberration')),
         BackdropFilter: 'Blur(4pt) Saturate(1.6) Contrast(0.6)', Tint: '0.45',
         BorderWidth: '0.45pt', BorderBlur: '0.3pt', BorderFade: '0.7pt',

@@ -259,7 +259,7 @@ describe('borderdirect3 > the fragment census', () => {
     expect(INSTANCE).toContain('loc  3: a_Radii        (tl, tr, br, bl)');
     // `a_Specular` is loc 12, so its `.w` is float 47, and the high half is the fade in quarter px.
     expect(INSTANCE).toContain(
-      'loc 12: a_Specular     (specularIntensity, specularSharpness, chromaticAberration, innerBlur + borderFade packed)');
+      'loc 12: a_Specular     (specularIntensity, specularGlow, chromaticAberration, innerBlur + borderFade packed)');
     expect(INSTANCE).toContain('Math.round(Math.min(63.75, Math.max(0, fadePx)) * 4) * 1024');
     expect(RENDERER).toContain('Math.floor(d[b + PANEL_OFF_SPECULAR_PACKED] / 1024) / 4;');
   });

@@ -497,10 +497,22 @@ export const PlanGaussianTemp = (
   };
 };
 
-// 9 levels: covers LOD 0..8 with dual-filter quality. Progressive blur
-// samples up to LOD ~6 for heavy BackdropFrostBlur settings; extra headroom
-// keeps the smooth mipmap chain populated deeper than we'll typically read.
-export const MAX_LEVELS = 9;
+// 10 levels: covers LOD 0..9 with dual-filter quality. THIS IS THE CEILING ON BLUR RADIUS, and it is
+// worth saying so here because nothing else does: each level doubles the canvas-space footprint of one
+// texel, so the deepest blur that physically exists is 2^(MAX_LEVELS - 1) points. At 9 levels that was
+// 256pt, and a `BackdropFilter: Blur(550pt)` silently clamped to it -- the shader asked for LOD 9.1 and
+// `stop` below had only built 8, so the authored number stopped meaning anything past 256.
+//
+// It clamps QUIETLY and only at the deep end, which is the worst way for it to fail: raising the value
+// still changes the middle of the ramp (sigma = 2 ^ (ramp^2 * maxLod) scales the whole curve), so it
+// looks like it is working while the heaviest part of the effect has stopped moving. Show Studio's hero
+// wants 400-550pt and was getting 256 of it. Jack, who spotted it from the picture alone: "is the blur
+// actually getting heavier?"
+//
+// The extra level is close to free. A pyramid is allocated to its caller's region, so level 9 of the
+// hero's 1600x880 region is about 3x2 pixels -- one more down pass and one more up pass over a handful
+// of texels, against a chain whose cost is dominated by levels 0 and 1.
+export const MAX_LEVELS = 10;
 
 /** Keep ≥ this much σ in base space for the σ-adaptive downsample (k ≤ σ/4 ≪ σ/2 → invisible). */
 const BASE_SIGMA = 4;

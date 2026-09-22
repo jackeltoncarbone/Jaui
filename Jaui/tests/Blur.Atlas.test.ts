@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   BaseDownsampleFactor, PyramidDepth, ResolveRegionRect, ChainBytes, PlanBackdropUnion,
-  type BackdropRect,
+  MAX_LEVELS, type BackdropRect,
 } from '../src/Core/BlurPass';
 import {
   PyramidPasses, PlanBackdropAtlas, AtlasRunIsLegal, PackAtlasSlots, RectsOverlap,
@@ -21,9 +21,9 @@ const CANVAS_W = 2560;
 const CANVAS_H = 1600;
 const DPR = 2;
 
-/** JwiftGlass: BackdropFilter Blur(4pt), Thickness 2.5, Fillet 0, Refraction 8, CA 0.25.
+/** JwiftGlass: BackdropFilter Blur(4pt), Thickness 2.5, Curvature 0, Refraction 8, CA 0.25.
  *  Jaui.ts `_glassFillBlurPlan`: margin = frostCssPx*d + (thicknessDev + bulge)*Refraction + CA*3 + 8*d. */
-const GLASS_MARGIN = 4 * DPR + (2.5 * DPR) * 8 + 0.25 * 3 + 8 * DPR;   // 64.75
+const GLASS_MARGIN = 4 * DPR + (2.5 * DPR) * 8 * (1 + 0.2 * 0.25) + 8 * DPR;   // 66
 /** `_glassRimBlurPlan`: a border-only fragment makes ONE inward tap, so frost + a pixel pad. */
 const RIM_MARGIN = 4 * DPR + 8 * DPR;                                   // 24
 /** JwiftGlass: ShadowBlur 16pt, ShadowOffsetY 2pt — how far its fragments reach past the box. */
@@ -87,8 +87,14 @@ describe('PyramidPasses — what a build actually costs in encoders', () => {
     // maxLod 2 -> stopLevel 3 -> three DOWN draws and three blits on top of the pyramid's four.
     const p = PyramidPasses(568, 436, 1, 2, 2);
     expect([p.MipDraws, p.Blits, p.Encoders]).toEqual([3, 3, 10]);
-    // No cap at all walks to MAX_LEVELS-1 or to 1x1, whichever comes first.
-    expect(PyramidPasses(568, 436, 1, 2).MipDraws).toBe(8);
+    // No cap at all walks to MAX_LEVELS-1 or to 1x1, whichever comes first. Asserted against the
+    // constant rather than against a copy of its value: this used to say 8, which was MAX_LEVELS-1 when
+    // MAX_LEVELS was 9, so raising the ceiling to buy a deeper blur turned a correct chain red. The rule
+    // is the one the comment already states; only the number was a snapshot.
+    expect(PyramidPasses(568, 436, 1, 2).MipDraws).toBe(MAX_LEVELS - 1);
+    // And it really is the LEVELS bound biting here, not the 1x1 one -- 568x436 still has room to halve
+    // at MAX_LEVELS-1, which is what makes this test about the cap at all.
+    expect(Math.min(568, 436) >> (MAX_LEVELS - 1)).toBe(0);
   });
 
   it('counts the sigma-adaptive pre-downsample as the passes it issues', () => {
@@ -104,9 +110,9 @@ describe('PyramidPasses — what a build actually costs in encoders', () => {
 });
 
 describe('the separation law, which is what decides this', () => {
-  it('glass-grid FAILS it: the fill margin reaches 24.75px into the neighbour\'s box', () => {
-    expect(GLASS_MARGIN).toBeCloseTo(64.75, 5);
-    expect(GLASS_MARGIN - 20 * DPR).toBeCloseTo(24.75, 5);   // margin minus the gutter
+  it('glass-grid FAILS it: the fill margin reaches 26px into the neighbour\'s box', () => {
+    expect(GLASS_MARGIN).toBeCloseTo(66, 5);
+    expect(GLASS_MARGIN - 20 * DPR).toBeCloseTo(26, 5);   // margin minus the gutter
     const m = Members(GlassGridBoxes());
     expect(RectsOverlap(m[0].Paint, m[1].Region)).toBe(true);
     expect(AtlasRunIsLegal(m, 0, 1)).toBe(false);
@@ -124,7 +130,7 @@ describe('the separation law, which is what decides this', () => {
 
   it('the row ABOVE counts too — the grid is connected in both axes, not just along a row', () => {
     const m = Members(GlassGridBoxes());
-    // The 20pt row gap is the same 20pt, so a card's region reaches 24.75px up into the card
+    // The 20pt row gap is the same 20pt, so a card's region reaches 26px up into the card
     // directly above it as well as sideways into its left neighbour.
     expect(RectsOverlap(m[0].Paint, m[5].Region)).toBe(true);    // card above card 5
     expect(RectsOverlap(m[1].Paint, m[5].Region)).toBe(true);    // and diagonally
@@ -148,8 +154,8 @@ describe('the separation law, which is what decides this', () => {
 
   it('names the gap the law asks for, so the number is a fact and not a feeling', () => {
     // gap > the later surface's sample margin + the earlier surface's paint outset.
-    expect(GLASS_MARGIN + PAINT_OUTSET_X).toBeCloseTo(96.75, 5);
-    expect((GLASS_MARGIN + PAINT_OUTSET_X) / DPR).toBeCloseTo(48.375, 5);
+    expect(GLASS_MARGIN + PAINT_OUTSET_X).toBeCloseTo(98, 5);
+    expect((GLASS_MARGIN + PAINT_OUTSET_X) / DPR).toBeCloseTo(49, 5);
   });
 
   it('opens at the same 52pt gap the union lane measured, on the same cards', () => {

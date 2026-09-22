@@ -254,7 +254,7 @@ export interface JivStyle {
   // Physical material — the Jiv is a slab with measurable properties
   Frost: string;
   Thickness: string;
-  Fillet: string;
+  Curvature: string;
   Refraction: string;
   /** The body's neutral pigment, 0..1: how far the graded backdrop is pulled toward the `TintTone`
    *  neutral. Applied after the BackdropFilter grade and before the Background fill, so it is the
@@ -281,7 +281,7 @@ export interface JivStyle {
 
   // Specular catchlight
   SpecularIntensity: string;
-  SpecularSharpness: string;
+  SpecularGlow: string;
 
   // Fresnel + chromatic
   FresnelStrength: string;
@@ -428,7 +428,7 @@ export interface JivRenderStyle {
   Frost: number;
   BackdropFrostBlur: number;
   Thickness: number;
-  Fillet: number;
+  Curvature: number;
   Refraction: number;
   /** Signed body tint: negative pulls toward black, positive toward white, magnitude = strength.
    *  Signed so a theme flip springs through clear glass rather than through grey. */
@@ -450,7 +450,7 @@ export interface JivRenderStyle {
   LightIntensity: number;
 
   SpecularIntensity: number;
-  SpecularSharpness: number;
+  SpecularGlow: number;
 
   FresnelStrength: number;
   ChromaticAberration: number;

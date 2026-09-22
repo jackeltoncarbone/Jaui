@@ -47,7 +47,7 @@ const PASS = readFileSync(join(__dirname, '../src/Core/BlurPass.ts'), 'utf8').re
 const CANVAS_W = 2560, CANVAS_H = 1600, DPR = 2;
 /** `BackdropFilter Blur(4pt)` at dpr 2 -- what `max(1, BackdropFrostBlur) * dpr` produces. */
 const RADIUS = 4 * DPR;
-const FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 + 0.25 * 3 + 8 * DPR;
+const FILL_MARGIN = 4 * DPR + (2.5 * DPR) * 8 * (1 + 0.2 * 0.25) + 8 * DPR;
 const RIM_MARGIN = 4 * DPR + 8 * DPR;
 
 const CardBox = (i: number): BackdropRect => {
