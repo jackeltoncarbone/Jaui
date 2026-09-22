@@ -81,10 +81,25 @@ export const jssValue = (body: string, name: string): string => {
   if (!m) throw new Error(`no ${name}`);
   return m[1].replace(/\/\/.*$/, '').trim();
 };
-
-/** A leading numeric value, unit suffix ignored (`16pt` -> 16, `0.28` -> 0.28). */
-export const jssNumber = (body: string, name: string): number => {
+/** A leading numeric value, unit suffix ignored (`16pt` -> 16, `0.28` -> 0.28).
+ *
+ *  IT FOLLOWS A TOKEN when given the sheet the body came from. A property may be authored as a `@Var`
+ *  rather than a literal -- on 2026-09-21 JwiftGlass's BorderWidth, BorderBlur and BorderFade became
+ *  @JwiftRimWidth / @JwiftRimBlur / @JwiftRimFade so a CMS card could stop carrying its own thicker rim --
+ *  and without the sheet this can only throw "is not numeric", which is a lookup failing rather than a
+ *  value being wrong. That was the SIXTH guard in one evening to break on how it located a number, so the
+ *  resolution belongs in the helper and not in each caller.
+ */
+export const jssNumber = (body: string, name: string, sheet?: string): number => {
   const raw = jssValue(body, name);
+  if (raw.startsWith('@') && sheet) {
+    const token = /^@[A-Za-z]\w*/.exec(raw)![0];
+    const decl = new RegExp('^' + token + ':\s*([^\n]+)', 'm').exec(sheet);
+    if (!decl) throw new Error(`${name} is ${token}, which the sheet does not declare`);
+    const n = /^-?[\d.]+/.exec(decl[1].trim());
+    if (!n) throw new Error(`${name} resolves to ${token} = ${decl[1].trim()}, which is not numeric`);
+    return parseFloat(n[0]);
+  }
   const m = /^-?[\d.]+/.exec(raw);
   if (!m) throw new Error(`${name} is not numeric: ${raw}`);
   return parseFloat(m[0]);
