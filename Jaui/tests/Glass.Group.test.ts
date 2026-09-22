@@ -55,13 +55,28 @@ const SCREEN_RADIUS_PT = (() => {
   return parseFloat(m[1]);
 })();
 /** A number authored in the `JwiftGlass` rule itself, taken from the FIRST occurrence after that
- *  rule opens so a later class overriding it cannot be read as the base's. */
+ *  rule opens so a later class overriding it cannot be read as the base's.
+ *
+ *  IT FOLLOWS A TOKEN. The value may be authored as a `@Var` rather than a literal, and until
+ *  2026-09-21 this matched only `[\d.]+` -- so when `Thickness` became `@JwiftGlassThickness` (one
+ *  number shared with JwiftSolidGlass, because a card is the same material as a button) the regex
+ *  skipped the line it was aimed at and ran on to the next NUMERIC `Thickness` in the file, which is
+ *  JwiftGlassThick's 3. It reported 3 where the sheet says 2.5 and took five geometry assertions with it.
+ *
+ *  That is the confusion the sentence above already promises to prevent, arriving by a route it did not
+ *  anticipate: not a later class overriding the base, but the base's own value moving into a token. So
+ *  follow the token. The rule this guards -- that the blur margin is computed from the numbers the SHEET
+ *  authors rather than from constants copied into the test -- is unchanged, and now survives tokenizing. */
 const glassNumber = (prop: string): number => {
   const from = GLASS.indexOf('JwiftGlass {');
   if (from < 0) throw new Error('no JwiftGlass rule in Jwift.Glass.jss');
-  const m = new RegExp(`\\n\\s*${prop}:\\s*([\\d.]+)`).exec(GLASS.slice(from));
-  if (!m) throw new Error(`no ${prop} in the JwiftGlass rule`);
-  return parseFloat(m[1]);
+  const hit = GLASS.slice(from).split('\n').find((line) => line.trim().startsWith(prop + ':'));
+  if (!hit) throw new Error(`no ${prop} in the JwiftGlass rule`);
+  const value = hit.trim().slice(prop.length + 1).trim();
+  if (!value.startsWith('@')) return parseFloat(value);
+  const declared = GLASS.split('\n').find((line) => line.startsWith(value + ':'));
+  if (!declared) throw new Error(`${prop} on JwiftGlass is ${value}, which declares no plain number`);
+  return parseFloat(declared.slice(value.length + 1));
 };
 
 /** The harness pins 1280 x 800 CSS px at deviceScaleFactor 2. */
