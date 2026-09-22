@@ -21,7 +21,8 @@ import type { JanvasRenderer, JanvasFactoryContext } from '../Janvas/Janvas.Rend
  *  it owns). `Ctx` is bridge-instance plumbing — most importantly
  *  `PostEvent`, which lets the renderer surface state changes back to its
  *  main-side counterpart. Returns the renderer instance Jaui will Init/Render. */
-export type JanvasRendererFactory = (config: unknown, ctx: JanvasFactoryContext) => JanvasRenderer;
+export type JanvasRendererFactory =
+  (config: unknown, ctx: JanvasFactoryContext) => JanvasRenderer | Promise<JanvasRenderer>;
 
 const _registry = new Map<string, JanvasRendererFactory>();
 

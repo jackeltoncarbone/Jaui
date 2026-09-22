@@ -59,6 +59,10 @@ export class Framebuffer {
   /** Of those, the FIRST allocations -- the ones that also pay `checkFramebufferStatus`, which the
    *  comment in `Resize` measured as a full GPU sync. */
   static FirstAllocations = 0;
+  /** Attachment shapes already proven renderable on this context, keyed by `_hasDepth` -- the one
+   *  thing that varies between the FBOs this class builds. See the note at the check itself. */
+  private static _validatedShapes = new Set<boolean>();
+
   /** Mip-level `texImage2D`s issued by `EnsureMipLevels`. */
   static MipAllocations = 0;
 
@@ -106,7 +110,20 @@ export class Framebuffer {
     // full GPU sync (~68ms on software ANGLE/WARP); when blur-level FBOs thrash
     // between surface sizes it fired ~8×/frame — the dominant per-frame stall
     // (measured 23.6s / 347 calls in a WARP orbit trace). Skip it on resize.
-    if (firstAlloc) {
+    // ONCE PER ATTACHMENT SHAPE, not once per framebuffer. What `checkFramebufferStatus` proves is
+    // that THIS COMBINATION OF ATTACHMENTS is renderable on this driver -- a COLOR_ATTACHMENT0 of
+    // RGBA8, plus a DEPTH24_STENCIL8 renderbuffer when `_hasDepth`. Two FBOs built by the lines
+    // above with the same `_hasDepth` are the same combination; the only thing that differs is
+    // their size, and a size the driver cannot honour fails at `texImage2D`, not here. So the first
+    // FBO of each shape answers the question for every later one.
+    //
+    // MEASURED 2026-09-22, and this is why it is worth a Set: the first frame makes TWENTY first
+    // allocations, and each one forced a full GPU sync. Skipping all twenty took the first render
+    // 124ms -> 82ms and first frame 273ms -> 240ms (n=5, firstAllocs=20 unchanged in both arms, so
+    // the allocations themselves were untouched). This keeps the guard -- a genuinely incomplete
+    // shape still throws, on its first FBO, before anything renders -- and pays the sync once.
+    if (firstAlloc && !Framebuffer._validatedShapes.has(this._hasDepth)) {
+      Framebuffer._validatedShapes.add(this._hasDepth);
       const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
       if (status !== gl.FRAMEBUFFER_COMPLETE) {
         throw new Error(`[Jaui] Framebuffer incomplete: 0x${status.toString(16)}`);

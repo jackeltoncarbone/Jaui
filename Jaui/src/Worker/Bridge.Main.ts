@@ -796,6 +796,8 @@ export class MainBridge {
     // — works for system fonts but not for webfonts.
     if (document.fonts) {
       const sentFaces = new Set<string>();
+      /** One in-flight download per URL. See the note at the fetch. */
+      const fontBinaries = new Map<string, Promise<ArrayBuffer>>();
       let sheetsWalked = 0;
       let binariesOk = 0;
       let binariesFailed = 0;
@@ -822,10 +824,26 @@ export class MainBridge {
         // a transferred ArrayBuffer. The worker constructs `new FontFace(family, buffer)`, which
         // behaves identically across Chromium and WebKit. Google Fonts sends
         // `access-control-allow-origin: *` on the gstatic binaries, which is what allows the fetch.
-        fetch(face.Url).then((r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.arrayBuffer();
-        }).then((buf) => {
+        // DEDUPE THE DOWNLOAD BY URL, not by descriptor. `sentFaces` above keys on
+        // family|weight|style|stretch|unicode-range, which is right for "have we registered this
+        // FACE" and wrong for "have we fetched these BYTES": Google Fonts serves ONE variable
+        // woff2 for every weight, so six @font-face rules point at one file and this fetched it
+        // six times. Measured 2026-09-22 on the home page: 42 font requests, 1,284 KB, of which
+        // 1,079 KB (84%) was the same seven files re-downloaded — one of them 84 KB, six times.
+        //
+        // The buffer is TRANSFERRED to the worker, which neutralises it, so each face gets its own
+        // `slice(0)` copy off the one shared download. That trades a few hundred KB of short-lived
+        // main-thread memory for five round trips per file — a trade that gets better the worse the
+        // network is, which is exactly the phone case.
+        let pending = fontBinaries.get(face.Url);
+        if (pending === undefined) {
+          pending = fetch(face.Url).then((r) => {
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            return r.arrayBuffer();
+          });
+          fontBinaries.set(face.Url, pending);
+        }
+        pending.then((shared) => shared.slice(0)).then((buf) => {
           binariesOk++;
           this.PostMessage({
             T: 'font-face',

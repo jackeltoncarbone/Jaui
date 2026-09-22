@@ -1072,6 +1072,16 @@ export class Canvas implements DirtyTracker {
    *  `BlurPass.TempLoad` carries the argument; the short version is that the M4's seam is one stale
    *  texel in a temp twenty builds share, and `discard` (the shipped `invalidateFramebuffer`) is
    *  what makes an uncovered texel undefined rather than merely old. */
+  /** `?frame-trace` — emit ONE compact line per rendered frame. `jaui:render:end` is deliberately a
+   *  FIRST-FRAME diagnostic (it is latched on `ff && _ffPresented`, beside `glyphs:first` and
+   *  `images:at-first-frame`), so before this flag existed there was no per-frame series at all:
+   *  steady-state work could only be read as a pass-class TOTAL, which sums overlapping timer
+   *  queries and is not a frame time. Unarmed this costs one boolean test per frame. */
+  private _frameTrace = false;
+  /** Frames emitted so far under `?frame-trace`, so a long run cannot fill the mark buffer. */
+  private _frameTraceCount = 0;
+  private _frameTraceCap = 600;
+
   private _blurTemp: 'discard' | 'clear' | 'keep' = 'discard';
   /** The last `jaui:blur-plan` gate line, printed on a SHAPE change rather than per frame. */
   private _blurPlanLastLine = '';
@@ -2448,7 +2458,11 @@ export class Canvas implements DirtyTracker {
     if (hud) tTextEnd = performance.now();
 
     // Reset per-frame counters; _render increments them as it walks.
-    if (hud) {
+    // `_frameTrace` joins `hud` here because without the reset these counters are CUMULATIVE, and a
+    // per-frame line reading `panels=4983` is not wrong-looking enough to be caught — it reads like
+    // a busy frame. Measured before the fix: 593 "frames" every one of which claimed to be over
+    // budget, with counts climbing monotonically.
+    if (hud || this._frameTrace) {
       this._counts.Panels = 0;
       this._counts.Glass = 0;
       this._counts.Text = 0;
@@ -2548,7 +2562,9 @@ export class Canvas implements DirtyTracker {
       // period the cadence is chosen from. Two `performance.now()` per RENDERED frame, paid only on
       // the arm that reads them.
       const wantsCost = this._tickPace.WantsRenderCost;
-      const tRender = ff || wantsCost ? performance.now() : 0;
+      // `_frameTrace` must be here too: otherwise tRender stays 0 and the mark prints
+      // `performance.now() - 0`, i.e. absolute page age, which looked like a 6,925 ms frame.
+      const tRender = ff || wantsCost || this._frameTrace ? performance.now() : 0;
       // THE SNAP, armed around this one call and nowhere else. `_resize` renders inline too and must
       // never take a whole reading off the ease -- a resize is motion, and the ease is the ease while
       // the page moves. The flag is a renderer field rather than an argument for the reason
@@ -2589,6 +2605,22 @@ export class Canvas implements DirtyTracker {
         this._counts.AtlasDraws = this._renderer.SceneAtlasDraws;
         this._counts.CardComposites = this._renderer.CardComposites;
         this._counts.CardFallbacks = this._renderer.CardFallbacks;
+      }
+      // PER-FRAME, under `?frame-trace`. Placed beside the first-frame mark because both want the
+      // same `tRender` and the same `_counts`, and deliberately NOT folded into it: that one is
+      // latched to the first frame and several tools parse it as such.
+      if (this._frameTrace && this._frameTraceCount < this._frameTraceCap) {
+        this._frameTraceCount++;
+        const c = this._counts;
+        // `cpuMs`, NAMED SO IT CANNOT BE MISREAD. This is the time to WALK THE TREE AND ISSUE the
+        // draws, not the time the GPU takes to execute them. On the home page it reads 1.1ms median
+        // against a 16.67ms budget while the page sustains only 41fps with 31% of ticks skipped —
+        // because the fence waits ~33ms for the GPU. A reader who sees "1.1ms" and concludes the
+        // frame is cheap will optimise the wrong side of the handoff.
+        JTrace(`jaui:frame n=${this._frameTraceCount} cpu=${JMs(performance.now() - tRender)}ms`
+          + ` panels=${c.Panels} glass=${c.Glass} text=${c.Text} images=${c.Image} pblur=${c.PBlur}`
+          + ` switches=${c.SceneSwitches} atlasDraws=${c.AtlasDraws}`
+          + ` rendered=${c.TicksRendered} skipped=${c.TicksSkipped}`);
       }
       if (ff && this._ffPresented) {
         // `_render` sets the latch at the present, beside the first-frame hook — `_resize` renders
@@ -9367,6 +9399,18 @@ export class Canvas implements DirtyTracker {
         throw new Error(`[Jaui] ?gauss-upload takes 'full' or 'prefix', got '${raw}'`);
       }
       this._gaussUploadPrefix = raw === 'prefix';
+    }
+    // `?frame-trace[=N]` — a per-frame line, default cap 600 frames (~15s at 40fps). The cap is
+    // the point: the trace report holds a bounded buffer and an uncapped per-frame mark would push
+    // the boot marks out of it, which is exactly the timeline a frame investigation still needs.
+    if (params.has('frame-trace')) {
+      const raw = (params.get('frame-trace') ?? '').trim();
+      const cap = raw === '' ? 600 : Number(raw);
+      if (!Number.isFinite(cap) || cap <= 0) {
+        throw new Error(`[Jaui] ?frame-trace takes a positive frame count, got '${raw}'`);
+      }
+      this._frameTrace = true;
+      this._frameTraceCap = cap;
     }
     if (params.has('blur-temp')) {
       const raw = (params.get('blur-temp') ?? '').trim();

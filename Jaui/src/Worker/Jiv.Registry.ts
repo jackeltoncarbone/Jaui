@@ -265,7 +265,7 @@ export class JivRegistry {
       console.warn(`[JivRegistry] janvas-attach: no factory registered for key '${key}'`);
       return;
     }
-    const renderer = factory(config, {
+    const produced = factory(config, {
       JivId: id,
       PostEvent: (channel, payload, transfer) => {
         this._post(
@@ -274,8 +274,30 @@ export class JivRegistry {
         );
       },
     });
-    janvas.Renderer = renderer;
-    this._janvasRenderers.set(id, renderer);
+    // A FACTORY MAY BE ASYNC, so a consumer can `import()` a heavy renderer instead of carrying it
+    // in the worker bundle. Show Studio's three 3D renderers pull three.js, which is 621KB riding
+    // on the HARD-BLOCKING render worker for every page load including ones with no 3D on them.
+    //
+    // The gap between attach and resolve is a state this method ALREADY has and already handles:
+    // when no factory is registered at all, `janvas.Renderer` stays null, the Jiv keeps its rect so
+    // layout does not collapse, and `RouteJanvasInput` is silent for an id with no renderer. An
+    // async factory just makes that window brief instead of permanent.
+    //
+    // A node unmounted while the import is in flight must NOT get a renderer afterwards, so the
+    // resolve re-checks that this id still holds THIS janvas before wiring it.
+    if (produced instanceof Promise) {
+      produced.then((renderer) => {
+        if (this._nodes.get(id) !== janvas) return;
+        janvas.Renderer = renderer;
+        this._janvasRenderers.set(id, renderer);
+        janvas.MarkLayoutDirty();
+      }).catch((err) => {
+        console.warn(`[JivRegistry] janvas-attach: factory for key '${key}' rejected:`, err);
+      });
+    } else {
+      janvas.Renderer = produced;
+      this._janvasRenderers.set(id, produced);
+    }
   };
 
   /** Forward an `M2W_JanvasInput` to the renderer registered for `id`.
