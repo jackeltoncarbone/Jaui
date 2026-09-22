@@ -287,7 +287,9 @@ export class JivRegistry {
     // resolve re-checks that this id still holds THIS janvas before wiring it.
     if (produced instanceof Promise) {
       produced.then((renderer) => {
-        if (this._nodes.get(id) !== janvas) return;
+        // Unmounted mid-import: nobody will ever render or dispose this one, so dispose it here --
+        // whatever its constructor allocated would otherwise outlive the node it was made for.
+        if (this._nodes.get(id) !== janvas) { renderer.Dispose?.(); return; }
         janvas.Renderer = renderer;
         this._janvasRenderers.set(id, renderer);
         janvas.MarkLayoutDirty();
