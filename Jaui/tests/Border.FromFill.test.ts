@@ -56,13 +56,35 @@ describe('borderfromfill > the flag, read off the source', () => {
     expect(JAUI).toContain("if (params.has('border-source')) {");
     expect(JAUI).toContain("if (raw !== '' && raw !== 'fill' && raw !== 'scene') {");
     expect(JAUI).toContain("[Jaui] ?border-source takes 'fill' or 'scene', got");
-    // `raw !== 'scene'` and not `raw === 'fill'`: the BARE flag arms it, as every flag in the block
-    // does, and `=scene` is the only spelling that turns it off.
-    expect(JAUI).toContain("this._borderSourceFill = raw !== 'scene';");
+    // `raw === 'fill'` and not `raw !== 'scene'`. It was the latter, which made the BARE flag arm the
+    // shortcut -- fine while `fill` was the default and the bare flag was a no-op, and wrong the moment
+    // the default became `scene`: `?border-source=` would have armed a PICTURE CHANGE while reading as
+    // though nothing had been asked for, which the block's own comment forbids in as many words.
+    expect(JAUI).toContain("this._borderSourceFill = raw === 'fill';");
   });
 
-  it('the default is `fill` (the 2026-09-20 ruling), declared on the field and not only in a comment', () => {
-    expect(JAUI).toContain('private _borderSourceFill: boolean = true;');
+  it('the default is `scene` (the 2026-09-21 ruling), declared on the field and not only in a comment', () => {
+    // THE RULING CHANGED, and this records the new one rather than being bypassed for it.
+    //
+    // 2026-09-20 ruled `fill`: the rim reads the pyramid its own fill already built, which costs no build
+    // at all and is worth ~0.98 ms over twenty cards on an M4.
+    //
+    // 2026-09-21 ruled `scene`, on the images, which is how this flag was always going to be settled
+    // ("Jack rules on it with images, not the lane"). On the avatar the shortcut is not a grade to retune
+    // but the WRONG TEXTURE: the fill's pyramid is the backdrop from BEFORE the fill drew, so the ring
+    // shows the wall behind the photo instead of the photo. Jack: "it's taking in the background behind
+    // the avatar when it really should be taking the avatar, since the Fresnel should be above the
+    // avatar's icon/picture" -- and then the general rule, "the border has a layer just like anything
+    // else. If it's over the contents/children, it uses that. That's how it works: layers. If it's
+    // partially in between, we're using part of each."
+    //
+    // `scene` is that rule exactly: the walk paints the rim at its layer slot, after every child whose
+    // Layer is strictly below BorderLayer, and the rim samples SnapshotScreen AT that point.
+    //
+    // The cost is a rim pyramid per glass node, and the phone is blur-bound already. If it regresses
+    // there, the lever is a CONDITIONAL admission in `_borderReadsFill` -- keep the shortcut only where
+    // nothing opaque sits under the rim -- not a return to a default that reads the wrong thing.
+    expect(JAUI).toContain('private _borderSourceFill: boolean = false;');
   });
 
   it('the mark prints on both arms, says which is armed, and flags the picture change', () => {

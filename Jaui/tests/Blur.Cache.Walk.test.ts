@@ -336,7 +336,11 @@ describe('?blur-cache=on -- the shapes it names rather than wins', () => {
   });
 
   it("a rim that binds its fill's pyramid rides the fill's hit: no rim build, the rim draws the cached copy", () => {
-    const s = scene('?blur-cache=on', { Rims: true });
+    // ARMED, because this cell's whole subject is the fill arm -- 'a rim that BINDS ITS FILL'S pyramid'.
+    // It stopped being the default on 2026-09-21 (Border.FromFill.test.ts records the ruling: on an
+    // avatar the shortcut samples the wall behind the photo rather than the photo), and under `scene` a
+    // rim builds its own pyramid, so there is no fill hit to ride and Hits reads 6 instead of 3.
+    const s = scene('?blur-cache=on&border-source=fill', { Rims: true });
     settle(s);
     const f = s.Frame();
     expect(f.Builds).toBe(0);

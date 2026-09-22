@@ -373,7 +373,15 @@ describe('the sheet the numbers come from', () => {
 // -- 1. WHAT GLASS-GRID'S TREE ACTUALLY PRODUCES -----------------------------------------------
 
 describe('?glass-group on glass-grid - the grouping the tree produces', () => {
-  const on = walk('?glass-group=on');
+  // PINNED TO `border-source=fill`, WHICH IS NO LONGER THE DEFAULT. This cell is about GROUPING, and
+  // its counts were written when the rim rode its fill's pyramid. The 2026-09-21 ruling made `scene`
+  // the default (Border.FromFill.test.ts records why: on an avatar the shortcut samples the wall behind
+  // the photo instead of the photo), and under `scene` every rim builds its own pyramid -- so the frame
+  // carries 40 builds where these assertions expect 20, and 21 where they expect 1.
+  //
+  // That is the ruling's price, not a grouping regression, and it is measured in its own file. Arming
+  // the arm this cell is about keeps one variable moving at a time.
+  const on = walk('?glass-group=on&border-source=fill');
 
   it('is ONE group of twenty, not four of five: the cards are children of PerfGrid', () => {
     // The brief guessed four bands of five, from `Perf/Occlusion2.Finding.md`'s four COVERING
@@ -453,8 +461,8 @@ describe('?glass-group on glass-grid - the grouping the tree produces', () => {
 // -- 2. THE LAW: NO MEMBER SAMPLES ANOTHER MEMBER'S PAINT --------------------------------------
 
 describe('?glass-group - the capture is at group entry, and it is the whole ruling', () => {
-  const off = walk('?glass-group=off');
-  const on = walk('?glass-group=on');
+  const off = walk('?glass-group=off&border-source=fill');
+  const on = walk('?glass-group=on&border-source=fill');
 
   it('OFF: twenty builds, one per card, each made after the card before it drew', () => {
     // Today's engine. `renderNode` walks once and each card's pyramid is built from the scene as
@@ -463,7 +471,7 @@ describe('?glass-group - the capture is at group entry, and it is the whole ruli
     const draws = fillDraws(off);
     expect(draws.length).toBe(20);
     // Twenty rims beside them, each reading its own fill's pyramid rather than building a second
-    // one: `?border-source=fill` is the default since Jaui `f1834cf`, so the frame's builds are
+    // one: `?border-source=fill` is ARMED BY THIS CELL (it stopped being the default on 2026-09-21),
     // the twenty fills and nothing else.
     expect(rimDraws(off).length).toBe(20);
     expect(builds(off).every((e) => e.Kind === 'blur')).toBe(true);

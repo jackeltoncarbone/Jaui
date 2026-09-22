@@ -960,7 +960,33 @@ export class Canvas implements DirtyTracker {
    *  face and the body's grade and Tint are applied ONCE where today they are applied twice (see
    *  the rim site in `descendChildren`, which measured that pair at 1.6-1.9x). Default `scene`: the
    *  engine this lane inherited, byte for byte and counter for counter. Jack rules on the images. */
-  private _borderSourceFill: boolean = true;
+  // DEFAULT `scene`, WHICH IS THE INHERITED ENGINE AND THE ONLY LAYER-CORRECT ANSWER.
+  //
+  // Jack, on the avatar: "it's taking in the background behind the avatar when it really should be
+  // taking the avatar, since the Fresnel should be above the avatar's icon/picture" — and then the rule
+  // in general: "the border has a layer just like anything else. If it's over the contents/children,
+  // it uses that. That's how it works: layers. If it's partially in between, we're using part of each."
+  //
+  // He is describing `scene`. The walk already paints the rim at its layer slot (`descendChildren`:
+  // AFTER every child whose Layer is strictly below BorderLayer, BEFORE the rest), and under `scene` the
+  // rim samples `SnapshotScreen(region)` AT that point — so it reads the fill and every child below its
+  // layer, which is exactly "use what is below me", and a rim that lands mid-stack gets part of each.
+  //
+  // Under `fill` it instead reuses the pyramid the node's FILL built, and that pyramid is the backdrop
+  // from BEFORE the fill drew. For a translucent glass toolbar the two look alike, which is why this
+  // shortcut survived. For anything with opaque content under its rim — an avatar's photo, an item
+  // cover — it is simply the wrong texture: the ring shows the wall behind the picture instead of the
+  // picture. That is not a grade to retune, it is the wrong sample.
+  //
+  // THE COST, stated rather than discovered later: `fill` costs no build at all, and `scene` costs the
+  // rim its own pyramid (or a snapshot below SCENE_TAP_FROST_LOD). The borderdirect3 cell priced that
+  // at 0.98 ms for twenty cards on an M4, and the phone is already blur-bound — ?no-blur measured 60 FPS
+  // against 16-18 control, so blur is 70-75% of the phone frame. If the phone regresses, the lever is a
+  // CONDITIONAL admission in `_borderReadsFill` (keep the shortcut only where nothing opaque sits under
+  // the rim), not a return to a default that reads the wrong thing everywhere.
+  //
+  // `?border-source=fill` still selects the shortcut, so the measurement is one flag away.
+  private _borderSourceFill: boolean = false;
   /** The last `jaui:border-source` gate line, printed on a SHAPE change like the three above it. */
   private _borderSourceLastLine = '';
   /** What each glass FILL left for its own rim this frame, and the frame it left it in.
@@ -9087,7 +9113,11 @@ export class Canvas implements DirtyTracker {
       if (raw !== '' && raw !== 'fill' && raw !== 'scene') {
         throw new Error(`[Jaui] ?border-source takes 'fill' or 'scene', got '${raw}'`);
       }
-      this._borderSourceFill = raw !== 'scene';
+      // AN EMPTY VALUE IS THE DEFAULT, not the opposite of it. This read `raw !== 'scene'`, so
+      // `?border-source=` armed `fill` — the exact failure the comment above forbids, a value that was
+      // ignored arming a change while reading as if it had not. Asking for `fill` is now the only way to
+      // get it, which is also what makes the default above the one that ships.
+      this._borderSourceFill = raw === 'fill';
     }
     // Everything it cannot run beside, named one at a time and refused on the trace rather than
     // silently disarmed. Each owns the rim's build site or the fill's handle from the other end:
