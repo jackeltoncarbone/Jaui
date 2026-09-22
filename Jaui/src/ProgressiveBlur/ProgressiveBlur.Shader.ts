@@ -393,12 +393,17 @@ void main() {
         rgb = mix(sharpRgb, smoothRgb, cubicBlend);
     }
 
-    // Backdrop grading — each factor ramps from 1 (identity, clear end) to
-    // its authored value (blurred end). Doing this per-pixel keeps the
-    // transition smooth and matches how the blur itself ramps.
-    float brightness = mix(1.0, u_Grading.x, ramp);
-    float saturation = mix(1.0, u_Grading.y, ramp);
-    float contrast   = mix(1.0, u_Grading.z, ramp);
+    // Backdrop grading — each factor ramps from 1 (identity, clear end) to its authored value (blurred
+    // end), ON THE BLUR'S OWN PROGRESS rather than on ramp. The comment here used to claim it "matches
+    // how the blur itself ramps" and it did not: lod is ramp*ramp*u_MaxLod, so ramp*ramp is the share of
+    // the blur actually delivered at this fragment. Grading against ramp ran the grade far ahead of the
+    // softening it belongs to — measured on the hero at Saturate(5), 59% saturated where the radius was
+    // 3.1pt of 120, so a sharp picture arrived already colored. The two curves agree at both ends and
+    // diverge in the middle, which is exactly where a progressive blur does its work; see the WGSL port.
+    float graded = ramp * ramp;
+    float brightness = mix(1.0, u_Grading.x, graded);
+    float saturation = mix(1.0, u_Grading.y, graded);
+    float contrast   = mix(1.0, u_Grading.z, graded);
     // Contrast, saturation, brightness: the panel shaders' grade order, so darkening lands toward black.
     rgb = (rgb - 0.5) * contrast + 0.5;
     float luma = dot(rgb, vec3(0.299, 0.587, 0.114));

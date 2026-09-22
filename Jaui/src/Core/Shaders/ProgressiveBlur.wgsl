@@ -157,10 +157,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let blend_t = smoothstep(0.0, 0.2, ramp);
   var rgb = mix(scene_rgb, blur_rgb, blend_t);
 
-  // Backdrop grading — ramps from identity (clear end) to authored value (blurred end).
-  let brightness = mix(1.0, uniforms.grading.x, ramp);
-  let saturation = mix(1.0, uniforms.grading.y, ramp);
-  let contrast = mix(1.0, uniforms.grading.z, ramp);
+  // Backdrop grading — ramps from identity (clear end) to authored value (blurred end), ON THE BLUR'S
+  // OWN PROGRESS. `lod` above is ramp*ramp*max_lod, so the share of the blur actually delivered at this
+  // fragment is ramp*ramp, NOT ramp — and grading against ramp ran the grade far ahead of the softening
+  // it is supposed to belong to. Measured on the hero at Saturate(5): at 280pt the saturation was 59%
+  // applied while the radius was 3.1pt of 120, so a SHARP picture arrived already colored. Jack: "you
+  // just increased saturation in a non blurred area. it should only happen in correlation with the blur."
+  // The two curves diverge most in the middle, which is exactly where a progressive blur is doing its
+  // work, and the error is invisible at both ends — which is why it survived this long.
+  let graded = ramp * ramp;
+  let brightness = mix(1.0, uniforms.grading.x, graded);
+  let saturation = mix(1.0, uniforms.grading.y, graded);
+  let contrast = mix(1.0, uniforms.grading.z, graded);
   // Contrast, saturation, brightness: the panel shaders' grade order, so darkening lands toward black.
   rgb = (rgb - 0.5) * contrast + 0.5;
   let luma = dot(rgb, vec3f(0.299, 0.587, 0.114));
