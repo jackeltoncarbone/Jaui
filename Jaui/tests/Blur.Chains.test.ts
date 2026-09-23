@@ -128,12 +128,14 @@ describe('the budget, on glass-grid', () => {
     expect(mib(3)).toBe(7.91);
   });
 
-  it('is capped by MAX_CHAINS, not by bytes: the largest N glass-grid admits is 3', () => {
-    // Two size classes x N chains, against the pool's two ceilings.
+  it('is capped by MAX_CHAINS, not by bytes: the largest N glass-grid admits is 8', () => {
+    // Two size classes x N chains, against the pool's two ceilings. (MAX_CHAINS was 6, which
+    // admitted 3; it rose to 16 because a real phone page draws seven sizes at rest — see
+    // Blur.Pool.Residency.test.ts. The claim this protects, that the count binds first, holds.)
     const fitsChains = (n: number): boolean => 2 * n <= MAX_CHAINS;
     const fitsBytes = (n: number): boolean => n * (FILL + RIM) <= CHAIN_BUDGET_BYTES;
-    expect([1, 2, 3].every(n => fitsChains(n) && fitsBytes(n))).toBe(true);
-    expect(fitsChains(4)).toBe(false);
+    expect([1, 2, 3, 4, 5, 6, 7, 8].every(n => fitsChains(n) && fitsBytes(n))).toBe(true);
+    expect(fitsChains(9)).toBe(false);
     // The 48 MB budget on its own would admit eighteen, so the cap is what binds.
     expect(fitsBytes(18)).toBe(true);
     expect(fitsBytes(19)).toBe(false);
@@ -310,11 +312,19 @@ describe('the rotation', () => {
 
 // ── Refusal ──
 
+/** Enough distinct level-0 sizes that N = 3 asks for more chains than MAX_CHAINS. */
+const OVER_CAP_MARGINS = [FILL_MARGIN, RIM_MARGIN, 40, 80, 120, 160];
+
 describe('an N the pool cannot hold', () => {
+  it('asks for more chains than the cap', () => {
+    const sizes = new Set(OVER_CAP_MARGINS.map(m => { const l = Level0(RegionFor(CardBox(0), m)); return `${l.W}x${l.H}`; }));
+    expect(sizes.size * 3).toBeGreaterThan(MAX_CHAINS);
+  });
+
   it('stops rotating and names itself on the trace rather than evicting', () => {
-    // Three size classes at N=3 wants nine chains against a cap of six.
+    // Six size classes at N=3 wants eighteen chains against a cap of sixteen.
     const r = Rig(3);
-    const sizes = [FILL_MARGIN, RIM_MARGIN, 40, 80, 120];
+    const sizes = OVER_CAP_MARGINS;
     for (const m of sizes) for (let k = 0; k < 3; k++) Build(r, RegionFor(CardBox(0), m));
     const census = r.Pass.ChainCensus;
     expect(census.Asked).toBe(3);
@@ -329,7 +339,7 @@ describe('an N the pool cannot hold', () => {
 
   it('says it once, however many builds follow', () => {
     const r = Rig(3);
-    for (const m of [FILL_MARGIN, RIM_MARGIN, 40, 80, 120]) {
+    for (const m of OVER_CAP_MARGINS) {
       for (let k = 0; k < 6; k++) Build(r, RegionFor(CardBox(0), m));
     }
     expect(_trace.filter(t => t.includes('refused=')).length).toBe(1);
@@ -337,7 +347,7 @@ describe('an N the pool cannot hold', () => {
 
   it('keeps drawing after it refuses — slot 0 is the shipped pool and always exists', () => {
     const r = Rig(3);
-    for (const m of [FILL_MARGIN, RIM_MARGIN, 40, 80, 120]) {
+    for (const m of OVER_CAP_MARGINS) {
       for (let k = 0; k < 3; k++) Build(r, RegionFor(CardBox(0), m));
     }
     expect(r.Pass.ChainCensus.Live).toBe(1);

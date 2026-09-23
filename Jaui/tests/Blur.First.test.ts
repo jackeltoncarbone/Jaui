@@ -265,7 +265,7 @@ describe('the pool cannot hold forty pyramids, and that is the finding', () => {
     expect([...keys].sort()).toEqual(['480x348', '568x436']);
   });
 
-  it('two chains sit far inside MAX_CHAINS 6 and the 48 MB budget, so nothing is evicted', () => {
+  it('two chains sit far inside MAX_CHAINS and the 48 MB budget, so nothing is evicted', () => {
     // `_evictChains` bills a chain at ceil(w*h*4*5/3) bytes. Nothing a later card needs is dropped
     // by a build the pre-pass made, so the split the brief allows for does not arise: 40 of 40 are
     // pre-built. The pixels are wrong for the OTHER reason — reuse, not eviction.

@@ -350,6 +350,36 @@ export class ScrollManager implements Animatable {
     return null;
   };
 
+  /** Every scroll container under a finger, innermost first: the ones a touch
+   *  COULD drive. Which one it does is not known until the finger has moved
+   *  far enough to have a direction; see `PickDragTarget`. */
+  ResolveScrollCandidates = (cssX: number, cssY: number): Jiv[] => {
+    const out: Jiv[] = [];
+    for (let cur: Jiv | null = this.HitTopmost(cssX, cssY); cur; cur = cur.Parent as Jiv | null) {
+      if (cur.Overflow === 'Scroll' && this._canScrollEither(cur)) out.push(cur);
+    }
+    return out;
+  };
+
+  /** The container a touch drag belongs to, once its direction is known: the
+   *  innermost candidate that scrolls on the drag's DOMINANT axis. This is the
+   *  browser's and iOS's rule for nested scrollers: a vertical swipe that
+   *  starts inside a horizontal carousel scrolls the page, and a horizontal
+   *  one scrolls the carousel. (The carousel owning the finger just because it
+   *  was under it first is the bug this replaces.) A candidate at its bound
+   *  still owns its axis and rubber-bands; chaining past a bound is wheel
+   *  behavior, not touch. Falls back to the innermost when nothing scrolls on
+   *  that axis, which is what the old rule always did. */
+  PickDragTarget = (candidates: readonly Jiv[], dx: number, dy: number): Jiv | null => {
+    if (candidates.length === 0) return null;
+    const horizontal = Math.abs(dx) > Math.abs(dy);
+    for (const c of candidates) {
+      const room = horizontal ? c.ContentWidth - c.Width : c.ContentHeight - c.Height;
+      if (room > 0.5) return c;
+    }
+    return candidates[0];
+  };
+
   /** Whether a container has anything to scroll on either axis right now.
    *  A scroll box whose content fits (a single-line input, an empty list) is
    *  not a scroll target — the gesture belongs to whatever CAN move. */

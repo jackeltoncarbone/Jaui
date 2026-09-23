@@ -8268,7 +8268,20 @@ export class Canvas implements DirtyTracker {
     // ─── Pointer drag (touch + trackpad + mouse) ───
     // Only consume drag for touch/pen; mouse drag stays available for selection
     // once we have selection. Track per pointer id so multi-touch doesn't collide.
-    interface DragCtx { target: Jiv; lastX: number; lastY: number; }
+    //
+    // NESTED SCROLLERS. A finger that lands on a horizontal carousel inside a
+    // vertical page does not yet say which one it means. Every scroller under
+    // it is caught (a fling stops the moment a finger touches it, as on iOS),
+    // and the drag goes to ONE of them only once the finger has travelled
+    // DRAG_SLOP_CSS_PX, chosen by its dominant axis (`PickDragTarget`). The
+    // travel before that is delivered on the first real move, so the content
+    // catches up to the finger instead of trailing it by the slop. A lone
+    // scroller has no choice to make and starts on the spot, as before.
+    const DRAG_SLOP_CSS_PX = 10;
+    interface DragCtx {
+      candidates: Jiv[]; target: Jiv | null;
+      startX: number; startY: number; lastX: number; lastY: number;
+    }
     const drags = new Map<number, DragCtx>();
 
     this._on('pointerdown', (e: PointerEvent) => {
@@ -8278,13 +8291,30 @@ export class Canvas implements DirtyTracker {
       const rect = this._pageRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
-      const target = this._scrollManager.ResolveScrollTarget(cssX, cssY);
-      if (!target) return;
+      const candidates = this._scrollManager.ResolveScrollCandidates(cssX, cssY);
+      if (candidates.length === 0) return;
 
       this._capturePointer(e.pointerId);
-      this._scrollManager.DragStart(target);
-      drags.set(e.pointerId, { target, lastX: e.clientX, lastY: e.clientY });
+      for (const c of candidates) this._scrollManager.DragStart(c);
+      drags.set(e.pointerId, {
+        candidates, target: candidates.length === 1 ? candidates[0] : null,
+        startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY,
+      });
     });
+
+    /** Hand an undecided drag to one scroller once it has a direction. The
+     *  others are let go with no momentum: they were only ever caught. */
+    const decide = (ctx: DragCtx, clientX: number, clientY: number): boolean => {
+      if (ctx.target !== null) return true;
+      const tx = clientX - ctx.startX;
+      const ty = clientY - ctx.startY;
+      if (tx * tx + ty * ty < DRAG_SLOP_CSS_PX * DRAG_SLOP_CSS_PX) return false;
+      ctx.target = this._scrollManager.PickDragTarget(ctx.candidates, -tx, -ty);
+      for (const c of ctx.candidates) if (c !== ctx.target) this._scrollManager.DragCancel(c);
+      ctx.lastX = ctx.startX;
+      ctx.lastY = ctx.startY;
+      return ctx.target !== null;
+    };
 
     this._on('pointermove', (e: PointerEvent) => {
       const ctx = drags.get(e.pointerId);
@@ -8310,11 +8340,12 @@ export class Canvas implements DirtyTracker {
       // per coalesced sample); the manager only ever takes differences, so the
       // two threads' differing time origins never enter the arithmetic.
       for (const sample of events) {
+        if (!decide(ctx, sample.clientX, sample.clientY)) continue;
         // Dragging pulls content the opposite direction of finger motion (finger
         // moves up → content scrolls down, same as native).
         const dx = -(sample.clientX - ctx.lastX);
         const dy = -(sample.clientY - ctx.lastY);
-        this._scrollManager.DragMove(ctx.target, dx, dy, sample.timeStamp);
+        this._scrollManager.DragMove(ctx.target!, dx, dy, sample.timeStamp);
         ctx.lastX = sample.clientX;
         ctx.lastY = sample.clientY;
       }
@@ -8329,23 +8360,28 @@ export class Canvas implements DirtyTracker {
     this._on('gestureclaim', (e: { pointerId: number }) => {
       const ctx = drags.get(e.pointerId);
       if (!ctx) return;
-      this._scrollManager.DragCancel(ctx.target);
+      for (const c of ctx.candidates) this._scrollManager.DragCancel(c);
       drags.delete(e.pointerId);
     });
 
     const finish = (e: PointerEvent): void => {
       const ctx = drags.get(e.pointerId);
       if (!ctx) return;
-      // The lift carries a position, and the finger really was travelling
-      // between the last pointermove and here — typically most of a frame. Feed
-      // it as the drag's final sample so that distance lands on the content AND
-      // so the release window's last interval is measured rather than read as
-      // the finger having stopped. Without it a flick is systematically slow by
-      // the fraction of the window that gap occupies.
-      const dx = -(e.clientX - ctx.lastX);
-      const dy = -(e.clientY - ctx.lastY);
-      if (dx !== 0 || dy !== 0) this._scrollManager.DragMove(ctx.target, dx, dy, e.timeStamp);
-      this._scrollManager.DragEnd(ctx.target, e.timeStamp);
+      if (decide(ctx, e.clientX, e.clientY)) {
+        // The lift carries a position, and the finger really was travelling
+        // between the last pointermove and here — typically most of a frame. Feed
+        // it as the drag's final sample so that distance lands on the content AND
+        // so the release window's last interval is measured rather than read as
+        // the finger having stopped. Without it a flick is systematically slow by
+        // the fraction of the window that gap occupies.
+        const dx = -(e.clientX - ctx.lastX);
+        const dy = -(e.clientY - ctx.lastY);
+        if (dx !== 0 || dy !== 0) this._scrollManager.DragMove(ctx.target!, dx, dy, e.timeStamp);
+        this._scrollManager.DragEnd(ctx.target!, e.timeStamp);
+      } else {
+        // A tap: the finger never moved far enough to scroll anything, and what it caught stays caught.
+        for (const c of ctx.candidates) this._scrollManager.DragCancel(c);
+      }
       this._animationManager.Kick();
       drags.delete(e.pointerId);
       if (this._hasCapture(e.pointerId)) {

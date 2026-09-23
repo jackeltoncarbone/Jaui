@@ -552,9 +552,15 @@ const K_MAX = 8;
  *  the most distinct sizes it will hold. See `_useChain` for why more than one is needed.
  *  At the sizes this app actually produces — a 216x150pt glass card at DPR 2 resolves to a
  *  568x436 level 0, about 1.65 MB of chain; a full-canvas 2560x1600 modal is 27.3 MB —
- *  48 MB holds a canvas-sized chain plus a dozen cards, or twenty-nine cards alone. */
+ *  48 MB holds a canvas-sized chain plus a dozen cards, or twenty-nine cards alone.
+ *
+ *  THE COUNT CEILING HAS TO CLEAR A REAL PAGE, NOT JUST glass-grid. Eviction is LRU, and a frame
+ *  that visits one size more than the pool holds, in the same order every frame, misses on EVERY
+ *  build. At 6 the iPhone home page (seven extents at rest) reallocated ~15 textures a frame and
+ *  sat near 10 fps (Blur.Pool.Residency.test.ts). The byte budget is the real guard on memory;
+ *  the count only has to be generous enough that it is never the one that binds. */
 export const CHAIN_BUDGET_BYTES = 48 * 1024 * 1024;
-export const MAX_CHAINS = 6;
+export const MAX_CHAINS = 16;
 
 /** Distinct level-0 sizes the σ-adaptive pre-downsample keeps a ping-pong pair for. Two is
  *  what `glass-grid` needs under `?glass-presample` (the fill pipeline and the rim pipeline);

@@ -302,7 +302,7 @@ describe('the pool has to hold twenty fill pyramids at once, and the shipped poo
     expect([...sizes].sort()).toEqual(['480x348', '568x436']);
   });
 
-  it('needs 52.7 MiB in 40 chains — over the shipped 48 MiB budget AND over MAX_CHAINS 6', () => {
+  it('needs 52.7 MiB in 40 chains — over the shipped 48 MiB budget AND over MAX_CHAINS', () => {
     const bytes = PHASED_CHAINS * (FILL + RIM);
     expect(bytes).toBe(55291740);
     expect(Math.round(bytes / (1024 * 1024) * 100) / 100).toBe(52.73);
