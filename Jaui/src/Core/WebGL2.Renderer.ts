@@ -109,7 +109,6 @@ interface _PanelLocs {
   shadowState:    WebGLUniformLocation | null;
   shadowBackdrop: WebGLUniformLocation | null;
   glassAdapt:     WebGLUniformLocation | null;
-  glassLift:      WebGLUniformLocation | null;
   glassFlip:      WebGLUniformLocation | null;
   // ── `?glass-skip`'s mask. Declared by the glass and non-glass programs, read only by the glass
   // one (`GlassSkips` is a constant false in the other, so it compiles out and this is null there).
@@ -141,7 +140,6 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   shadowState:    gl.getUniformLocation(p, 'u_ShadowState'),
   shadowBackdrop: gl.getUniformLocation(p, 'u_ShadowBackdrop'),
   glassAdapt:     gl.getUniformLocation(p, 'u_GlassAdapt'),
-  glassLift:      gl.getUniformLocation(p, 'u_GlassLift'),
   glassFlip:      gl.getUniformLocation(p, 'u_GlassFlip'),
   glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
   vibrancyCover:  gl.getUniformLocation(p, 'u_VibrancyCover'),
@@ -1623,7 +1621,6 @@ export class WebGL2Renderer implements Renderer {
     const adaptSlot = glassAdapt && this._shadowStateTex && glassAdapt.Slot >= 0 ? glassAdapt.Slot : -1;
     const flip = adaptSlot >= 0 ? glassAdapt!.Flip : null;
     gl.uniform2f(locs.glassAdapt, adaptSlot, adaptSlot >= 0 ? glassAdapt!.OpenFar : 0);
-    gl.uniform1f(locs.glassLift, adaptSlot >= 0 ? glassAdapt!.Lift : 0);
     gl.uniform4f(locs.glassFlip, flip?.Tint ?? 0, flip?.Contrast ?? 0, flip?.Saturate ?? 0, flip !== null ? 1 : 0);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
@@ -1659,7 +1656,6 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(locs.shadowState, 5);
     gl.uniform2f(locs.shadowBackdrop, -1, 0);
     gl.uniform2f(locs.glassAdapt, -1, 0);
-    gl.uniform1f(locs.glassLift, 0);
     gl.uniform4f(locs.glassFlip, 0, 0, 0, 0);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);

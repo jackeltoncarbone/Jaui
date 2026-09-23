@@ -41,10 +41,9 @@ float AdaptiveShadowAlpha(float authoredAlpha, float backdropFactor, float adapt
 
 // Adaptive glass (`?glass-adapt`). u_GlassAdapt = (slot, far): the surface's texel in the same state row
 // (G its mean backdrop luma, B its brightest local luma) and its AdaptiveFar. Slot -1 leaves the authored
-// grade untouched. u_GlassLift is AdaptiveLift (0 = the far end opens by the peak instead), and
-// u_GlassFlip the light plate (tint toward white, contrast, saturate) with w = 1 when AdaptiveFlip is armed.
+// grade untouched. u_GlassFlip is the light plate (tint toward white, contrast, saturate) with w = 1 when
+// AdaptiveFlip is armed.
 uniform vec2 u_GlassAdapt;
-uniform float u_GlassLift;
 uniform vec4 u_GlassFlip;
 
 #include "Glass.Flip.glsl"
@@ -76,16 +75,6 @@ vec4 GlassAdaptGrade(vec4 g, float peak, float openFar) {
     return GlassGradeOfEnds(ground, opened, g);
 }
 
-// AdaptiveLift, Apple's bar: the body sits `lift` above its backdrop's MEAN, keeping the authored ramp's
-// slope for what varies under it, never below the authored law and never past `ceiling` (the ink's floor).
-vec4 GlassLiftGrade(vec4 g, float mean, float lift, float ceiling) {
-    float scale = g.x * (1.0 + g.w);
-    float slope = scale * g.z;
-    float authored = scale * (1.0 - g.z) * 0.5 + slope * mean;
-    float level = max(min(mean + lift, ceiling), authored);
-    float lo = level - slope * mean;
-    return GlassGradeOfEnds(lo, lo + slope, g);
-}
 
 out vec2 v_PixelPos;
 flat out vec4 v_PanelGeom;
@@ -127,8 +116,7 @@ void main() {
     if (u_GlassAdapt.x >= 0.0 && a_Lighting.y < 0.0) {
         vec4 state = texelFetch(u_ShadowState, ivec2(int(u_GlassAdapt.x), 0), 0);
         vec4 grade = vec4(a_Grading.xyz, a_Lighting.y);
-        if (u_GlassLift > 0.0) grade = GlassLiftGrade(grade, state.g, u_GlassLift, u_GlassAdapt.y);
-        else if (u_GlassAdapt.y > 0.0) grade = GlassAdaptGrade(grade, state.b, u_GlassAdapt.y);
+        if (u_GlassAdapt.y > 0.0) grade = GlassAdaptGrade(grade, state.b, u_GlassAdapt.y);
         if (u_GlassFlip.w > 0.0) grade = mix(grade, vec4(1.0, u_GlassFlip.z, u_GlassFlip.y, u_GlassFlip.x), GlassFlipFactor(state.g));
         v_Grading.xyz = grade.xyz;
         v_Lighting.y = grade.w;

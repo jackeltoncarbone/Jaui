@@ -3785,7 +3785,6 @@ export class Canvas implements DirtyTracker {
         const glassAdapt = this._glassAdaptFor(node, shadowBackdrop);
         if (glassAdapt !== undefined && this._bcOn) {
           this._bc.Sig.Number(glassAdapt.OpenFar);
-          this._bc.Sig.Number(glassAdapt.Lift);
           this._bc.Sig.Word(glassAdapt.Flip !== null ? 1 : 0);
         }
         // THE FLIP: this surface's labels read the same texel as its plate, so its subtree's text is
@@ -5536,7 +5535,7 @@ export class Canvas implements DirtyTracker {
     const px = ab.minX * d, py = ab.minY * d;
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
     const adaptiveShadow = ((rs.ShadowAdaptive > 0 && rs.ShadowColor.A > 0.001)
-      || rs.AdaptiveFar > 0 || rs.AdaptiveLift > 0 || rs.AdaptiveFlip !== null)
+      || rs.AdaptiveFar > 0 || rs.AdaptiveFlip !== null)
       && !JivInstanceBuffer.DiagNoShadow;
     const instFrostLod = _instanceFrostLod(frost, d);
     const baseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
@@ -6467,11 +6466,11 @@ export class Canvas implements DirtyTracker {
   private _glassAdaptFor = (node: Jiv, shadow: ShadowBackdrop | undefined): GlassAdapt | undefined => {
     if (this._glassAdapt !== 'on') return undefined;
     const rs = node.RenderStyle;
-    if (!(rs.AdaptiveFar > 0) && !(rs.AdaptiveLift > 0) && rs.AdaptiveFlip === null) return undefined;
+    if (!(rs.AdaptiveFar > 0) && rs.AdaptiveFlip === null) return undefined;
     if (shadow === undefined || shadow.Slot < 0) { this._glassAdaptUnprobed++; return undefined; }
-    const adapt: GlassAdapt = { Slot: shadow.Slot, OpenFar: rs.AdaptiveFar, Lift: rs.AdaptiveLift, Flip: rs.AdaptiveFlip };
+    const adapt: GlassAdapt = { Slot: shadow.Slot, OpenFar: rs.AdaptiveFar, Flip: rs.AdaptiveFlip };
     this._glassAdaptDraws.push({
-      Slot: shadow.Slot, OpenFar: rs.AdaptiveFar, Lift: rs.AdaptiveLift, Flip: rs.AdaptiveFlip !== null,
+      Slot: shadow.Slot, OpenFar: rs.AdaptiveFar, Flip: rs.AdaptiveFlip !== null,
       Grade: { Brightness: rs.BackdropBrightness, Saturation: rs.BackdropSaturation, Contrast: rs.BackdropContrast, Tint: rs.Tint },
     });
     return adapt;

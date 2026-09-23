@@ -56,7 +56,6 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // Signed, so a theme flip springs dark tint → clear → light tint and never passes through grey.
   ['Tint',                   s => s.Tint,                         (s, v) => { s.Tint = v; }],
   ['AdaptiveFar',            s => s.AdaptiveFar,                  (s, v) => { s.AdaptiveFar = v; }],
-  ['AdaptiveLift',           s => s.AdaptiveLift,                 (s, v) => { s.AdaptiveLift = v; }],
 
   // Backdrop filter — every channel springs under the `BackdropFilter`
   // bucket, so `@Transition BackdropFilter { ... }` tunes them together.

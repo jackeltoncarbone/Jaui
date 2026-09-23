@@ -73,17 +73,6 @@ export const GlassGradeOfEnds = (lo: number, hi: number, g: GlassGrade): GlassGr
   return { Brightness: Math.max(keep, 1), Saturation: carry / range, Contrast: range / keep, Tint: -Math.max(1 - keep, 0) };
 };
 
-/** `AdaptiveLift`, Apple's bar: the body `lift` above the backdrop's mean, on the authored slope, never
- *  below the authored law and never past `ceiling`. `GlassLiftGrade` in `Jiv.Panel.vert`. */
-export const GlassLiftGrade = (g: GlassGrade, mean: number, lift: number, ceiling: number): GlassGrade => {
-  const scale = g.Brightness * (1 + g.Tint);
-  const slope = scale * g.Contrast;
-  const authored = scale * (1 - g.Contrast) * 0.5 + slope * mean;
-  const level = Math.max(Math.min(mean + lift, ceiling), authored);
-  const lo = level - slope * mean;
-  return GlassGradeOfEnds(lo, lo + slope, g);
-};
-
 /** The flip's weight at a backdrop mean: `GlassFlipFactor` in `Jiv/Shaders/Glass.Flip.glsl`. */
 export const GLASS_FLIP_LOW = 0.45;
 export const GLASS_FLIP_HIGH = 0.55;
@@ -106,8 +95,7 @@ export const GlassBodyLuma = (g: GlassGrade, y: number): number => {
 export interface GlassAdaptDraw {
   Slot: number;
   OpenFar: number;
-  /** `AdaptiveLift` (a fraction, 0 off) and whether `AdaptiveFlip` is armed. */
-  Lift: number;
+  /** Whether `AdaptiveFlip` is armed. */
   Flip: boolean;
   Grade: GlassGrade;
 }
@@ -194,7 +182,7 @@ export const GlassAdaptCensusOf = (
     const { Mean: mean, Peak: peak } = ReadStateTexel(row, d.Slot);
     if (d.Flip && GlassFlipFactor(mean) > 0.5) census.Flipped++;
     const ends = GlassAdaptFar(d.Grade, peak, d.OpenFar);
-    const g = d.Lift > 0 ? GlassLiftGrade(d.Grade, mean, d.Lift, d.OpenFar) : GlassAdaptGrade(d.Grade, peak, d.OpenFar);
+    const g = GlassAdaptGrade(d.Grade, peak, d.OpenFar);
     const lifted = g !== d.Grade;
     const opened = lifted ? ends.Opened : ends.Far;
     const capped = lifted && ends.Opened < d.OpenFar;

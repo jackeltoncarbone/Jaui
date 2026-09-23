@@ -309,7 +309,6 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     Refraction: Resolve(s.Refraction, ctx, 'W'),
     Tint: _resolveTint(s, ctx),
     AdaptiveFar: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.AdaptiveFar, ctx), ctx, 'W'))),
-    AdaptiveLift: Math.max(0, Math.min(255, Resolve(ResolveTernary(s.AdaptiveLift, ctx), ctx, 'W'))) / 255,
     AdaptiveFlip: _resolveAdaptiveFlip(ResolveTernary(s.AdaptiveFlip, ctx), ctx),
     BackdropBrightness: backdrop.Brightness,
     BackdropSaturation: backdrop.Saturation,

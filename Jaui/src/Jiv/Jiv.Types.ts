@@ -213,12 +213,8 @@ export interface JivStyle {
    *  what is behind it leaves the ink room, as Apple's does ("the amount of tint and the dynamic range
    *  shift"). Read per surface from the adaptive-shadow probe's backdrop luma; never past the far end
    *  the authored grade already reaches over white, so the ink is never less legible than the static
-   *  grade made it. Only a body tinted toward black opens. Default 0, the authored grade. With
-   *  `AdaptiveLift` it is instead the ceiling the lifted body may not pass. */
+   *  grade made it. Only a body tinted toward black opens. Default 0, the authored grade. */
   AdaptiveFar: string;
-  /** Apple's bar: the body rides this far (0-255) above the MEAN luma of what is behind it, keeping the
-   *  authored ramp's slope for what varies under it, capped at `AdaptiveFar`. Default 0, off. */
-  AdaptiveLift: string;
   /** THE FLIP: `<tint> <contrast> <saturate> <ink>`, the light plate this small glass turns to over
    *  light content (backdrop mean past 0.5) and the ink its labels turn to with it (Jiv/Shaders/
    *  Glass.Flip.glsl). A contrast of 0 is no flip, so a theme can switch it off. Default `None`. */
@@ -378,8 +374,6 @@ export interface JivRenderStyle {
   Tint: number;
   /** The resolved `AdaptiveFar`, 0 when the grade stays as authored. */
   AdaptiveFar: number;
-  /** The resolved `AdaptiveLift`, a fraction; 0 is off. */
-  AdaptiveLift: number;
   /** The resolved `AdaptiveFlip`, or null. */
   AdaptiveFlip: { Tint: number; Contrast: number; Saturate: number; Ink: { R: number; G: number; B: number } } | null;
   BackdropBrightness: number;
