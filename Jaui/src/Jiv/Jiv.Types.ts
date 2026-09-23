@@ -230,7 +230,9 @@ export interface JivStyle {
   // Physical material — the Jiv is a slab with measurable properties
   Frost: string;
   Thickness: string;
-  Curvature: string;
+  /** How far the glass bends what is behind it, as a multiple of Apple's: 1 is the analytic squircle
+   *  bend across the edge band (9% of the short side), 0 is a flat pane. Keep it at or under 1: that
+   *  is the most the band can bend without folding the backdrop. */
   Refraction: string;
   /** The body's neutral pigment, 0..1: how far the graded backdrop is pulled toward the `TintTone`
    *  neutral. Applied after the BackdropFilter grade and before the Background fill, so it is the
@@ -247,9 +249,6 @@ export interface JivStyle {
    *  grade made it. Only a body tinted toward black opens. Default 0, the authored grade. */
   AdaptiveFar: string;
 
-  // Refraction band geometry
-  BezelWidth: string;
-  BezelScale: string;
 
   // Lighting
   LightAngle: string;        // degrees
@@ -265,7 +264,6 @@ export interface JivStyle {
   EdgeLightTop: string;
   EdgeLightBottom: string;
 
-  InnerBlur: string;
 
   /** THE RIM: the light the edge catches, a hairline screened onto whatever is already drawn there
    *  (Jiv/Jiv.Rim.ts). `RimWidth` is its core, a length in `px`: a HAIRLINE, so it never scales with
@@ -400,7 +398,6 @@ export interface JivRenderStyle {
   Frost: number;
   BackdropFrostBlur: number;
   Thickness: number;
-  Curvature: number;
   Refraction: number;
   /** Signed body tint: negative pulls toward black, positive toward white, magnitude = strength.
    *  Signed so a theme flip springs through clear glass rather than through grey. */
@@ -415,8 +412,6 @@ export interface JivRenderStyle {
    *  draw time (`Core/Lift.ts`), because it depends on the cascaded foreground grade. */
   BackdropLift: number;
 
-  BezelWidth: number;
-  BezelScale: number;
 
   LightAngle: number;
   LightIntensity: number;
@@ -428,7 +423,6 @@ export interface JivRenderStyle {
   ChromaticAberration: number;
   EdgeLightTop: number;
   EdgeLightBottom: number;
-  InnerBlur: number;
 
   /** Resolved `RimWidth`, CSS px (the walk multiplies by the device pixel ratio). */
   RimWidth: number;

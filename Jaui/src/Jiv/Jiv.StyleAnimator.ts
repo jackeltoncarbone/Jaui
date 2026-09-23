@@ -52,7 +52,6 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // Physical material
   ['Frost',                  s => s.Frost,                        (s, v) => { s.Frost = v; }],
   ['Thickness',              s => s.Thickness,                    (s, v) => { s.Thickness = v; }],
-  ['Curvature',              s => s.Curvature,                    (s, v) => { s.Curvature = v; }],
   ['Refraction',             s => s.Refraction,                   (s, v) => { s.Refraction = v; }],
   // Signed, so a theme flip springs dark tint → clear → light tint and never passes through grey.
   ['Tint',                   s => s.Tint,                         (s, v) => { s.Tint = v; }],
@@ -82,10 +81,6 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // snap beside it: the ink's color is `Color`, which the text animator already springs.
   ['TextFilter',             s => s.TextLift,                     (s, v) => { s.TextLift = v; }],
 
-  // Refraction band geometry
-  ['BezelWidth',             s => s.BezelWidth,                   (s, v) => { s.BezelWidth = v; }],
-  ['BezelScale',             s => s.BezelScale,                   (s, v) => { s.BezelScale = v; }],
-
   // Lighting
   ['LightAngle',             s => s.LightAngle,                   (s, v) => { s.LightAngle = v; }],
   ['LightIntensity',         s => s.LightIntensity,               (s, v) => { s.LightIntensity = v; }],
@@ -97,7 +92,6 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['EdgeLightBottom',        s => s.EdgeLightBottom,              (s, v) => { s.EdgeLightBottom = v; }],
   ['RimWidth',               s => s.RimWidth,                     (s, v) => { s.RimWidth = v; }],
   ['RimStrength',            s => s.RimStrength,                  (s, v) => { s.RimStrength = v; }],
-  ['InnerBlur',              s => s.InnerBlur,                    (s, v) => { s.InnerBlur = v; }],
 
   // Transform — per-channel (legacy compound; superseded by Visual*).
   ['Transform',              s => s.Transform.TranslateX,         (s, v) => { s.Transform.TranslateX = v; }],

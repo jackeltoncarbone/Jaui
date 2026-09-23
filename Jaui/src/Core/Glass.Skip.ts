@@ -64,8 +64,8 @@ export const ParseGlassSkip = (raw: string): number | null => {
  * Per glass fragment, what it pays, summed over every glass draw in a frame.
  *
  * Counted by walking EVERY pixel centre of the instance's quad through a CPU port of the shader's
- * own gates -- the corner field's distance and normal, the bezel hump, the rim band, the
- * rim-specular band -- so the numbers are the shader's branches evaluated, not an
+ * own gates -- the corner field's distance and normal, the refraction band, the rim glow's band,
+ * the specular band -- so the numbers are the shader's branches evaluated, not an
  * area formula. Float64 where the GPU runs float32, so a pixel sitting on a gate's edge can land on
  * the other side; that moves a count by the perimeter's worth of pixels at most.
  */
@@ -110,7 +110,7 @@ export const AddGlassFragCensus = (into: GlassFragCensus, c: GlassFragCensus): v
 /** Offsets into one packed panel instance (`Jiv.InstanceBuffer.Push`). */
 const O = {
   RectX: 0, RectY: 1, RectW: 2, RectH: 3, Cos: 4, Sin: 5, HalfW: 6, HalfH: 7, Radii: 8,
-  EdgeAa: 28, Smooth: 29, Thickness: 36, Bezel: 37, BezelScale: 39,
+  EdgeAa: 28, Smooth: 29, Thickness: 36, Refraction: 38,
   LightAngle: 40, SpecIntensity: 44, Ca: 46, ClipCount: 55,
 } as const;
 
@@ -118,7 +118,7 @@ const O = {
  *  as its fractional part). Exported so a test can assert it against the reads in the source. */
 export const GLASS_CENSUS_KEY_OFFSETS: readonly number[] = [
   O.RectW, O.RectH, O.Cos, O.Sin, O.HalfW, O.HalfH, O.Radii, O.Radii + 1, O.Radii + 2, O.Radii + 3,
-  O.EdgeAa, O.Smooth, O.Thickness, O.Bezel, O.BezelScale, O.LightAngle, O.SpecIntensity,
+  O.EdgeAa, O.Smooth, O.Thickness, O.Refraction, O.LightAngle, O.SpecIntensity,
   O.Ca, O.ClipCount,
 ];
 const smoothstep = (e0: number, e1: number, x: number): number => {
@@ -201,14 +201,14 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
   const radii = [d[b + O.Radii], d[b + O.Radii + 1], d[b + O.Radii + 2], d[b + O.Radii + 3]];
   const edgeAa = d[b + O.EdgeAa];
   const aa = Math.max(Math.abs(edgeAa), 1e-4);
-  const bezel = Math.max(d[b + O.Bezel], 0.5);
-  const s = Math.max(d[b + O.BezelScale], 0.05);
+  const band = Math.max(0.09 * 2 * Math.min(hx, hy), 0.5);
+  const refraction = d[b + O.Refraction];
   const ca = d[b + O.Ca];
   const thickness = d[b + O.Thickness];
   const specI = d[b + O.SpecIntensity];
   const clipCount = d[b + O.ClipCount];
   const lx = Math.cos(d[b + O.LightAngle]), ly = -Math.sin(d[b + O.LightAngle]);
-  const rimBand = Math.max(bezel * 0.75, 6);
+  const rimBand = Math.max(band * 0.75, 6);
   const glassiness = smoothstep(0, 1, thickness);
   const rimSpecW = Math.max(thickness * 0.18, 0.75 * glassiness);
   const pad = 2 + Math.abs(edgeAa);
@@ -244,24 +244,21 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
     }
     const dist = e[0], nx = e[1], ny = e[2];
     const fillPos = dist < 0.5;
-    const edgeDist = Math.max(-dist, 0);
-    const x = edgeDist / bezel;
-    const outward = smoothstep(0, s * 0.4, x) * (1 - smoothstep(s * 0.4, s, x));
-    const inward = smoothstep(s, (s + 1) * 0.5, x) * (1 - smoothstep((s + 1) * 0.5, 1, x));
-    const hump = Math.max(inward, outward);
+    const edge = 1 - Math.min(1, Math.max(-dist, 0) / band);
+    const offset = (band / 3) * edge * edge * edge * refraction * glassiness;
     const noTaps = skip('backdrop');
     let taps = 0;
-    const three = ca * hump * 3 >= 0.5;
+    const three = 0.2 * ca * offset >= 0.5;
     if (three) c.Ca3++;
     taps += noTaps ? 0 : (three && !skip('ca') ? 3 : 1);
     const inBand = fillPos && dist > -rimBand;
     if (inBand) c.Band++;
     if (inBand && !skip('rim') && !noTaps) taps++;
     if (specI > 0 && fillPos && !skip('specular') && !noTaps) {
-      const band = (1 - smoothstep(-aa, aa, dist)) * smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
+      const specBand = (1 - smoothstep(-aa, aa, dist)) * smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
       const k = nx * lx + ny * ly;
       const align = Math.max(k, -k * 0.95);
-      if (band > 0 && align > 0) taps++;
+      if (specBand > 0 && align > 0) taps++;
     }
     if (fillPos) c.Face++; else c.Skirt++;
     return taps;

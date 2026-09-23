@@ -98,12 +98,6 @@ const SEPARABLE_MIP_MAX_LOD = 1;
  *  snap frame). A pack-buffer copy of 256 bytes behind a fence; see `_glassAdaptEndFrame`. */
 const GLASS_ADAPT_CENSUS_FRAMES = 30;
 
-/** Headroom for the shader's fwidth-driven refraction-footprint LOD, which rises where a strong bend
- *  FOLDS the backdrop and the caustic has to dissolve into blur (Jiv.Panel.frag, `refractLod`). It has
- *  no closed form, so this is the bound the glass path has always assumed — it used to be the literal
- *  5 passed to GenerateBlurMipmap. It only counts when `frostReq` is non-zero. */
-const REFRACT_FOLD_LOD = 5;
-
 /** The frost LOD an INSTANCE carries. Mirror of Jiv.InstanceBuffer (`data[offset + 35]`). */
 const _instanceFrostLod = (frostBlurPt: number, dpr: number): number =>
   Math.max(0, Math.min(10, Math.log2(Math.max(0.5, frostBlurPt * dpr))));
@@ -129,33 +123,10 @@ const SCENE_TAP_FROST_LOD = 0.05;
 const PHASED_CHAINS = 20;
 
 /** The deepest mip LOD a panel can read out of the pyramid built for it — the number that decides how
- *  much of a mip chain is worth building.
- *
- *  Mirror of Jiv.Panel.frag. `sampleBackdrop` reads `max(0, frostLod - u_BaseFrostLod) + extraLod`; the
- *  glass branch's extraLod is
- *      lodBoost = ((rimBoost * 1.5 + innerBlur) * glassiness + refractLod) * frostReq
- *      frostReq = clamp((frostLod - u_BaseFrostLod) * 4, 0, 1)
- *  with rimBoost <= 1 at the silhouette.
- *
- *  The per-surface glass path builds the pyramid AT the panel's own frost sigma, so frostLod equals
- *  u_BaseFrostLod, frostReq is exactly 0, and the whole boost collapses: the panel reads LOD 0 and
- *  nothing above it. That case returned 0 here is what lets the mip chain be skipped outright instead
- *  of built, blitted and never opened. */
-const _backdropMaxLod = (
-  frostLod: number,
-  baseFrostLod: number,
-  thicknessDev: number,
-  innerBlur: number,
-): number => {
-  const frostReq = Math.max(0, Math.min(1, (frostLod - baseFrostLod) * 4));
-  let lodBoost = 0;
-  if (frostReq > 0) {
-    const t = Math.max(0, Math.min(1, thicknessDev));
-    const glassiness = t * t * (3 - 2 * t);   // smoothstep(0, 1, thickness)
-    lodBoost = ((1.5 + innerBlur) * glassiness + REFRACT_FOLD_LOD) * frostReq;
-  }
-  return Math.max(0, frostLod - baseFrostLod) + lodBoost;
-};
+ *  much of a mip chain is worth building. Mirror of Jiv.Panel.frag's `sampleBackdrop`, which reads
+ *  `max(0, frostLod - u_BaseFrostLod)` and nothing else. The per-surface glass path builds the pyramid
+ *  AT the panel's own frost sigma, so this is 0 there and the mip chain is skipped outright. */
+const _backdropMaxLod = (frostLod: number, baseFrostLod: number): number => Math.max(0, frostLod - baseFrostLod);
 
 /** A CHROMATIC lift on an element that must take the graded fold. The one lift refusal that is an
  *  author error rather than a choice of implementation, and the reason is a hard engine limit rather
@@ -514,10 +485,8 @@ interface GlassBlurPlan {
    *  Two reaches, and the bound is their max rather than their sum, because they are reached from
    *  different fragments. The DRAW QUAD is the node's box expanded by
    *  `max(ShadowBlur + |ShadowOffset|, BorderWidth + BorderBlur)` (`Jiv.InstanceBuffer`), and
-   *  `sampleBackdrop` runs on every fragment of it including the shadow skirt -- where the
-   *  refraction hump has decayed to under 2e-4 and the displacement is nil. The REFRACTION and
-   *  chromatic-aberration displacement is reached from fragments at the shape's own edge, which
-   *  is inside the box.
+   *  `sampleBackdrop` runs on every fragment of it including the shadow skirt. The REFRACTION and
+   *  chromatic-aberration displacement points INWARD along the normal, so it never leaves the box.
    *
    *  Not clamped to the canvas here: the admission test does that, because a fragment outside the
    *  canvas is never rasterized and a reach that leaves it is therefore not a reach at all. */
@@ -1211,16 +1180,8 @@ export class Canvas implements DirtyTracker {
   //
   // Two things have changed since that was written, and both widen the gap:
   //
-  // 1. The shared path pins u_BaseFrostLod to a CONSTANT 2, and the shader's
-  //    frost gate added by the same commit that turned this off reads
-  //    frostReq = clamp((frostLod - u_BaseFrostLod) * 4, 0, 1). The per-surface
-  //    path builds at the panel's own sigma, so frostLod == u_BaseFrostLod and
-  //    frostReq is identically 0 — no rim boost, no caustic-hiding refraction
-  //    LOD, on any surface. Under shared, a 4pt-frost panel at DPR 2 gets
-  //    frostReq 1 and a rim lodBoost around 1.7 on top. Same shader, a rim
-  //    roughly 3x blurrier. The shared path has NEVER run against a shader that
-  //    contains frostReq. hasBackdropFilter's `frostLod > u_BaseFrostLod` test
-  //    inverts the same way: a flat backdrop-filter panel under 2pt of frost at
+  // 1. The shared path pins u_BaseFrostLod to a CONSTANT 2. hasBackdropFilter's
+  //    `frostLod > u_BaseFrostLod` test then inverts: a flat backdrop-filter panel under 2pt of frost at
   //    DPR 2 would lose its backdrop sample entirely (latent today — nothing
   //    authors under 4pt).
   // 2. The fill win is mostly the quarter-res cheat, not the sharing. At the
@@ -3478,20 +3439,18 @@ export class Canvas implements DirtyTracker {
         this._counts.PBlur++;
 
       } else if (((_isGlass(material) && node.RenderStyle.Refraction !== 0) || _hasBackdropFilter(node)) && material !== 'ProgressiveBlur' && !this._diagNoGlass) {
-        // ── Glass FILL vs glass BORDER are decoupled ──
+        // ── The glass FILL ──
         // A glass slab (Thickness > 0 → Material LiquidGlass) only takes the glass FILL
         // pipeline (refraction + backdrop sampling) when it actually has a glass-fill
         // effect to show: a non-zero Refraction, or a backdrop frost/grade. A slab with
         // Refraction 0 and no backdrop has nothing to refract or frost, so its FILL renders
-        // as a plain (solid) panel here — while its beveled, fresnel-lit glass BORDER still
-        // renders via the BorderLayer overlay (gated on _isGlass(Material), see ~Jaui.ts:1075).
-        // That's what lets ANY jiv carry a glass OUTLINE without its fill becoming glass.
+        // as a plain (solid) panel here. The rim is its own draw either way.
         // Flush pending batches: same reason as pblur — backdrop-filter
         // panels (glass or flat) read the scene (indirectly via the blur
         // pyramid), so the scene must be current. Flat panels with
         // non-default BackdropBrightness/Saturation/Contrast/FrostBlur go
         // through this same path — the shader branches on materialType
-        // to skip refraction/CA/bezel for them, but they still need the
+        // to skip refraction/CA for them, but they still need the
         // pyramid bound to sample.
         flushPanels();
         flushText();
@@ -3499,8 +3458,8 @@ export class Canvas implements DirtyTracker {
         // scene — so there's no feedback loop and we can feed ComputeBlur
         // the scene FBO's texture directly, zero blits.
         //
-        // Build the pyramid OVER just the panel's sample region (panel rect plus a generous
-        // margin for refraction + rim + bezel), and AT that size: level 0 comes back
+        // Build the pyramid OVER just the panel's sample region (panel rect plus the frost's own
+        // spread), and AT that size: level 0 comes back
         // region-sized and the handle carries the map from screen UV into it.
         //
         // Two costs come off together. Fragment fill drops from full-canvas to panel-sized
@@ -3521,19 +3480,8 @@ export class Canvas implements DirtyTracker {
         // backdrops read as a low-res texture upscaled. The dual filter still
         // downsamples internally for speed then upsamples back to full res,
         // and the pyramid is only as large as the panel's region, so cost stays bounded.
-        //
-        // Margin must cover the FULL reach of the glass shader's backdrop
-        // sampling (Jiv.Panel.frag), or a displaced sample lands past the
-        // blurred region and reads unblurred/stale scene — the "no blur on the
-        // outer refraction" rim. The shader displaces by, at worst:
-        //   refraction:      Thickness·avgScale·d · |Refraction|   (outward band + 0.4·√2 lens field ≤ 1)
-        //   chromatic aberr: 0.2 · ChromaticAberration of that      (red leads the offset by 20%)
-        // plus the frost blur's own spatial spread. Compute the exact bound so
-        // the blur is built everywhere the panel can sample — keeps the full
-        // refraction look (no displacement clamp) while guaranteeing it reads
-        // blurred pixels. The region is still canvas-clamped below, so a heavy
-        // panel just falls back toward a full-canvas pyramid (correct, bounded) — and a
-        // full-canvas region resolves to the identity map, i.e. exactly the old behaviour.
+        // The margin is `_glassFillBlurPlan`'s: the refraction bends inward, so only the frost's
+        // spread reaches past the box.
         const plan = this._glassFillBlurPlan(node, eff, effH, w, h);
         const frostCssPx = plan.FrostCssPx;
         const margin = plan.Margin;
@@ -3597,12 +3545,11 @@ export class Canvas implements DirtyTracker {
           }
           if (needRebuild) {
             // One sharp-root pyramid into a DEDICATED pass (pblur/border can't
-            // clobber it). Depth covers the heaviest frost expressed as a LOD
-            // plus the shader's refraction-footprint boost (~5); `_maxFrostBlur`
-            // is the largest BackdropFrostBlur in the tree, scanned pre-walk,
-            // and BuildSharedBackdrop self-clamps to the pyramid's level count.
+            // clobber it). Depth covers the heaviest frost expressed as a LOD;
+            // `_maxFrostBlur` is the largest BackdropFrostBlur in the tree, scanned
+            // pre-walk, and BuildSharedBackdrop self-clamps to the pyramid's level count.
             const _tShared = performance.now();
-            this._sharedPyramid = r.BuildSharedBackdrop(w, h, Math.log2(Math.max(1, this._maxFrostBlur * d)) + 5);
+            this._sharedPyramid = r.BuildSharedBackdrop(w, h, Math.log2(Math.max(1, this._maxFrostBlur * d)));
             this._opMs.Blur += performance.now() - _tShared;  // shared build folds snap+blur+mip into one number
             this._counts.SharedBuilds++;
             this._sharedPyramidValid = true;
@@ -5596,8 +5543,7 @@ export class Canvas implements DirtyTracker {
    *  A glass slab (Thickness > 0 → Material LiquidGlass) only takes it when it actually has a
    *  glass-fill effect to show: a non-zero Refraction, or a backdrop frost/grade. A slab with
    *  Refraction 0 and no backdrop has nothing to refract or frost, so its FILL renders as a plain
-   *  panel — while its beveled, fresnel-lit glass BORDER still renders via the BorderLayer
-   *  overlay. That is what lets ANY jiv carry a glass OUTLINE without its fill becoming glass. */
+   *  panel. The rim is its own draw either way. */
   private _glassFillTakesPyramid = (node: Jiv): boolean => {
     const material = node.RenderStyle.Material;
     return ((_isGlass(material) && node.RenderStyle.Refraction !== 0) || _hasBackdropFilter(node))
@@ -5607,17 +5553,10 @@ export class Canvas implements DirtyTracker {
   /** The glass FILL pyramid's plan: the region it is built over, the sigma it is built at, and how
    *  deep a chain the surface can read.
    *
-   *  The margin covers the FULL reach of the glass shader's backdrop sampling (Jiv.Panel.frag), or
-   *  a displaced sample lands past the blurred region and reads unblurred/stale scene — the "no
-   *  blur on the outer refraction" rim. The shader displaces by, at worst:
-   *    refraction:      Thickness·avgScale·d · |Refraction|   (outward band + 0.4·√2 lens field ≤ 1)
-   *    chromatic aberr: 0.2 · ChromaticAberration of that      (red leads the offset by 20%)
-   *  The two bezel terms cannot both peak: past the outward band's peak it falls as `1 - inRamp`
-   *  while the lens field rises as `0.4·|field|·inRamp`, |field| ≤ √2, so the sum never passes 1.
-   *  Curvature only SHAPES the field, which is clamped to 1 per axis, so it adds no reach.
-   *  plus the frost blur's own spatial spread. The region is canvas-clamped, so a heavy panel just
-   *  falls back toward a full-canvas pyramid (correct, bounded) — and a full-canvas region resolves
-   *  to the identity map, i.e. exactly the old behaviour. */
+   *  The margin is the frost blur's own spatial spread and a pad. The refraction bends every sample
+   *  INWARD along the normal (Jiv.Panel.frag, the refraction band), chromatic spread included, so no
+   *  tap ever leaves the panel's own box. The region is canvas-clamped, so a heavy panel just falls
+   *  back toward a full-canvas pyramid, which resolves to the identity map. */
   private _glassFillBlurPlan = (
     node: Jiv, eff: Mat2x3, effH: Mat3x3 | null, w: number, h: number,
   ): GlassBlurPlan => {
@@ -5626,10 +5565,7 @@ export class Canvas implements DirtyTracker {
     const frostCssPx = Math.max(1, rs.BackdropFrostBlur);
     const gsx = matScaleX(eff), gsy = matScaleY(eff);
     const avgScale = (gsx + gsy) * 0.5;
-    const thicknessDev = rs.Thickness * avgScale * d;
-    const refractMax = thicknessDev * Math.abs(rs.Refraction);
-    const caMax = 0.2 * Math.abs(rs.ChromaticAberration) * refractMax;
-    const margin = frostCssPx * d + refractMax + caMax + 8 * d;
+    const margin = frostCssPx * d + 8 * d;
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
     // second reading of them: a bound computed off a different rule is a bound that can drift
     // away from the quad it is supposed to contain. `DiagNoShadow` zeroes the shadow there, so it
@@ -5638,7 +5574,7 @@ export class Canvas implements DirtyTracker {
     const shadowReach = noShadow ? 0 : (rs.ShadowBlur * avgScale * d
       + Math.max(Math.abs(rs.ShadowOffsetX), Math.abs(rs.ShadowOffsetY)) * avgScale * d);
     const borderReach = (rs.BorderWidth + rs.BorderBlur) * avgScale * d;
-    const tapReach = Math.max(shadowReach, borderReach, refractMax + caMax);
+    const tapReach = Math.max(shadowReach, borderReach);
     const ab = this._nodeAabb(node, eff, effH);
     const px = ab.minX * d, py = ab.minY * d;
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
@@ -5654,16 +5590,11 @@ export class Canvas implements DirtyTracker {
         h: Math.min(h, Math.ceil(ph + margin * 2)),
       },
       Radius: frostCssPx * d,
-      // How deep a chain this panel can actually read. It used to be a flat 5 — headroom for the
-      // refraction-footprint LOD — but that boost is gated by `frostReq`, which is identically 0
-      // whenever the pyramid is built at the panel's own frost sigma, which is what `Radius` above
-      // does. So a frosted glass panel samples LOD 0 and nothing else, and the six DOWN passes, six
-      // mip blits and the driver's own full-chain generateMipmap were building, at CANVAS size, a
-      // pyramid no fragment ever opened. `_backdropMaxLod` is the shader's own formula; when a class
-      // does ask for a deeper read (a non-zero frostReq) the chain comes back on its own. The adaptive shadow reads the pyramid at its own detail LOD,
-      // so it floors the depth.
+      // How deep a chain this panel can actually read: `_backdropMaxLod`, the shader's own formula,
+      // which is 0 at the panel's own frost sigma. The adaptive shadow reads the pyramid at its own
+      // detail LOD, so it floors the depth.
       MaxLod: Math.max(
-        _backdropMaxLod(instFrostLod, baseFrostLod, thicknessDev, rs.InnerBlur),
+        _backdropMaxLod(instFrostLod, baseFrostLod),
         adaptiveShadow ? Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - baseFrostLod : 0,
       ),
       BaseFrostLod: baseFrostLod,
@@ -5903,9 +5834,8 @@ export class Canvas implements DirtyTracker {
     const rs = node.RenderStyle;
     const material = rs.Material;
     // Conservative on purpose, and wider than the glass FILL predicate: a glass slab with no
-    // refraction takes the plain panel branch but its RIM still snapshots the scene, and the rim
-    // paints after this node's children rather than here. Marking the read at the node's own
-    // (earlier) order can only refuse a coverer that would have been legal.
+    // refraction takes the plain panel branch, but it is still glass. Marking the read at the node's
+    // own order can only refuse a coverer that would have been legal.
     if (material === 'ProgressiveBlur' || _isGlass(material) || _hasBackdropFilter(node)) {
       scan.Reads.push(order);
       return;
