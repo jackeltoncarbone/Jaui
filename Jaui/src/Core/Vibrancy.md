@@ -1,6 +1,8 @@
 # Vibrancy
 
-Vibrancy is how content reads through a surface that already dims or blocks what is behind it. Jaui has one model for it, implemented in `Vibrancy.ts`. Jwift states Apple's levels as tokens in `Jwift.Glass.jss`.
+Vibrancy is how content reads through a surface that already dims or blocks what is behind it. It
+belongs to content ON a material (glass, a bar, a sheet, a progressive-blur foot). Text set directly on
+imagery or video takes an opaque ink, as Apple's hero copy does. Jaui has one model for it, implemented in `Vibrancy.ts`. Jwift states Apple's levels as tokens in `Jwift.Glass.jss`.
 
 ## Apple's model
 
