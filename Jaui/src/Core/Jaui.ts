@@ -14,7 +14,7 @@ import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
-import { JivInstanceBuffer, JivPanelShapeOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
+import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { RIM_SHOULDER_FRACTION, type RimDrawParams } from '../Jiv/Jiv.Rim';
 import {
   CascadeLift, FoldLift, InkBlendOf, Lift, LiftAmount, LiftGateLine, LiftGraded, LiftInkAmount,
@@ -98,9 +98,9 @@ const SEPARABLE_MIP_MAX_LOD = 1;
  *  snap frame). A pack-buffer copy of 256 bytes behind a fence; see `_glassAdaptEndFrame`. */
 const GLASS_ADAPT_CENSUS_FRAMES = 30;
 
-/** The frost LOD an INSTANCE carries. Mirror of Jiv.InstanceBuffer (`data[offset + 35]`). */
-const _instanceFrostLod = (frostBlurPt: number, dpr: number): number =>
-  Math.max(0, Math.min(10, Math.log2(Math.max(0.5, frostBlurPt * dpr))));
+/** The frost LOD an INSTANCE carries, from `JivFrostCssPx`. Mirror of Jiv.InstanceBuffer (`data[offset + 35]`). */
+const _instanceFrostLod = (frostCssPx: number, dpr: number): number =>
+  Math.max(0, Math.min(10, Math.log2(Math.max(0.5, frostCssPx * dpr))));
 
 /** Below this instance frost LOD a panel may still take `sampleBackdrop`'s raw-scene branch, so it
  *  needs a snapshot bound. The shader's own threshold is 0.01; this sits WELL above it because the
@@ -492,7 +492,7 @@ interface GlassBlurPlan {
   TapReach: number;
   /** Whether the adaptive-shadow probe will run for this surface (it deepens `MaxLod`). */
   AdaptiveShadow: boolean;
-  /** `BackdropFrostBlur` floored at 1pt — what the margin and the radius are built from. */
+  /** `JivFrostCssPx` floored at 1pt — what the margin and the radius are built from. */
   FrostCssPx: number;
 }
 
@@ -5573,7 +5573,8 @@ export class Canvas implements DirtyTracker {
   ): GlassBlurPlan => {
     const d = this._dpr;
     const rs = node.RenderStyle;
-    const frostCssPx = Math.max(1, rs.BackdropFrostBlur);
+    const frost = JivFrostCssPx(node);
+    const frostCssPx = Math.max(1, frost);
     const gsx = matScaleX(eff), gsy = matScaleY(eff);
     const avgScale = (gsx + gsy) * 0.5;
     const margin = frostCssPx * d + 8 * d;
@@ -5586,7 +5587,7 @@ export class Canvas implements DirtyTracker {
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
     const adaptiveShadow = rs.ShadowAdaptive > 0 && rs.ShadowColor.A > 0.001
       && !JivInstanceBuffer.DiagNoShadow;
-    const instFrostLod = _instanceFrostLod(rs.BackdropFrostBlur, d);
+    const instFrostLod = _instanceFrostLod(frost, d);
     const baseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
     return {
       Region: {

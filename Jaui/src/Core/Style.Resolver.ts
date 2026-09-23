@@ -10,6 +10,10 @@ import type { LiftDeclaration } from './Lift';
 import type { Color } from './Types';
 import { ResolveTransform } from '../Transform/Transform.Parse';
 
+/** The most frost `BackdropFilter: Blur(Auto)` draws, in CSS px. The field resolves to it, so every
+ *  reader that sizes for the largest frost is right; the panel's own is `JivFrostCssPx`. */
+export const AUTO_FROST_MAX = 8;
+
 /**
  * StyleResolver — turns an authored JivStyle (all strings) into a fully
  * numeric JivRenderStyle, given a ResolveContext.
@@ -252,7 +256,9 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // as its siblings, so `TextFilter: Lift(30 * @Dark - 20 * @Light)` flips with the theme in one
   // line exactly as a wash does.
   const ink = ParseFilter(_resolveGradeArgs(ResolveTernary(s.TextFilter, ctx), ctx), 'text');
-  const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
+  const frostAuto = backdrop.BlurRaw !== null && backdrop.BlurRaw.trim().toLowerCase() === 'auto';
+  const resolveBlur = (raw: string | null): number =>
+    (frostAuto ? AUTO_FROST_MAX : raw !== null ? Resolve(raw, ctx, 'W') : 0);
   // A gradient-driven blur spectrum implies the ProgressiveBlur material and the
   // ramp axis on its own, so the author doesn't also need ProgressiveBlurDirection.
   const blurSpec = s.ProgressiveBlur ? ParseProgressiveBlur(s.ProgressiveBlur) : null;
@@ -313,6 +319,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     // radius drives it when present, else the backdrop frost. The pblur shader
     // reads this as the ramp's max blur.
     BackdropFrostBlur: fgBlur ? fgFrost : resolveBlur(backdrop.BlurRaw),
+    BackdropFrostAuto: !fgBlur && frostAuto,
     Thickness: thickness,
     Refraction: Resolve(s.Refraction, ctx, 'W'),
     Tint: _resolveTint(s, ctx),

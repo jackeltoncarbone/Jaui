@@ -3,6 +3,7 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 import { FoldLift, LiftGraded } from '../Core/Lift';
 import type { LiftValue } from '../Core/Lift';
 import type { JivShape } from './Jiv.Rim';
+import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -29,7 +30,7 @@ import type { JivShape } from './Jiv.Rim';
 //          .w was materialType (now a compile-time shader-variant const);
 //          repurposed to the foreground Brightness multiplier.
 //   loc  9: a_Grading      (brightness, saturation, contrast, frostLod)
-//   loc 10: a_Refraction   (thickness, free, refractionStrength, free)
+//   loc 10: a_Refraction   (thickness, refraction band, free, refraction amount)
 //   loc 11: a_Lighting     (lightAngle rad, bodyTint, lightIntensity, fresnelStrength)
 //          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
 //          signed glass body Tint: negative toward black, positive toward white.
@@ -110,6 +111,26 @@ export const JivPanelShapeOf = (jiv: Jiv, dpr: number, m: Mat2x3, out: JivPanelS
   out.Cos = matCos(m);
   out.Sin = matSin(m);
   return out;
+};
+
+/** The glass refraction band, as a share of the short half side, clamped to [MIN, MAX] CSS px. */
+const REFRACTION_BAND_SHARE = 0.8;
+const REFRACTION_BAND_MIN = 8;
+const REFRACTION_BAND_MAX = 28;
+/** How far the circle map reaches at the outline, as a multiple of the band; never past the short half side. */
+const REFRACTION_AMOUNT_SHARE = 1.3;
+
+/** `Blur(Auto)`'s frost: a share of the short half side, clamped to [MIN, AUTO_FROST_MAX] CSS px, so a
+ *  small control stays clear and a sheet frosts. */
+const AUTO_FROST_SHARE = 0.06;
+const AUTO_FROST_MIN = 1.5;
+
+/** The backdrop frost a panel draws with, in CSS px: its authored `Blur()`, or the size rule under `Blur(Auto)`. */
+export const JivFrostCssPx = (jiv: Jiv): number => {
+  const style = jiv.RenderStyle;
+  if (!style.BackdropFrostAuto) return style.BackdropFrostBlur;
+  const minHalf = Math.min(jiv.Width, jiv.Height) * 0.5;
+  return Math.max(AUTO_FROST_MIN, Math.min(AUTO_FROST_MAX, AUTO_FROST_SHARE * minHalf));
 };
 
 /**
@@ -283,13 +304,16 @@ export class JivInstanceBuffer {
     data[offset + 32] = grade.Brightness;
     data[offset + 33] = style.BackdropSaturation;
     data[offset + 34] = grade.Contrast;
-    const blurPx = Math.max(0.5, style.BackdropFrostBlur * d);
+    const blurPx = Math.max(0.5, JivFrostCssPx(jiv) * d);
     data[offset + 35] = Math.max(0, Math.min(10, Math.log2(blurPx)));
 
+    // The refraction band and the circle map's reach at the outline, in device px (Jiv.Panel.frag).
+    const minHalf = Math.min(halfW, halfH);
+    const band = Math.max(REFRACTION_BAND_MIN * d, Math.min(REFRACTION_BAND_MAX * d, REFRACTION_BAND_SHARE * minHalf));
     data[offset + 36] = style.Thickness * avgScale * d;
-    data[offset + 37] = 0;
-    data[offset + 38] = style.Refraction;
-    data[offset + 39] = 0;
+    data[offset + 37] = band;
+    data[offset + 38] = 0;
+    data[offset + 39] = Math.min(REFRACTION_AMOUNT_SHARE * band, minHalf) * style.Refraction;
 
     data[offset + 40] = style.LightAngle * (Math.PI / 180);
     data[offset + 41] = style.Tint;

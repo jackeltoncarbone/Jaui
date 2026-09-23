@@ -14,7 +14,7 @@ flat in vec4 v_ShadowParams;   // shadowOffX, shadowOffY, shadowBlur, borderWidt
 flat in vec4 v_StyleParams;    // borderEdgeAa, smoothness, opacity, brightness (fg)
                                // borderEdgeAa: half-width of border/silhouette feather (physical px)
 flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
-flat in vec4 v_Refraction;     // thickness, free, refractionStrength, free
+flat in vec4 v_Refraction;     // thickness, refraction band, free, refraction amount (device px)
 flat in vec4 v_Lighting;       // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
 flat in vec4 v_Specular;       // specIntensity (edge highlight), specGlow, chromaticAberration, borderFade
 flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, free, free
@@ -897,16 +897,17 @@ float cornerQueries(vec2 pixel, int offset, int count, bool wantShadow, vec2 sha
 
 
 // ── THE REFRACTION BAND ─────────────────────────────────────────────────────────────────────────────
-// Apple's glass bends light only in a band along its edge, about 9% of the short side, and the face
-// inside it is flat. The surface is kube.io's convex squircle, and its displacement is analytic:
-// inward along the normal by REFRACT_DEPTH * band * (1 - x)^3, x from 0 at the outline to 1 at the
-// band's inner edge. The sample then moves at 1 - 3 * REFRACT_DEPTH * (1 - x)^2 of the screen's pace,
-// which never goes negative at 1/3: the edge stretches what lies just inside it and never folds.
-const float REFRACT_BAND = 0.09;
-const float REFRACT_DEPTH = 1.0 / 3.0;
-// The edge also reads milky: toward the outline the body loses its saturation and lifts a little.
-const float MILK_DEPTH = 0.25;
-const float MILK_LIFT = 0.12;
+// Ported from Kyant0's AndroidLiquidGlass (Apache-2.0): the circle map.
+// Within the band (v_Refraction.y) the sample moves inward along the normal by amount * (1 - sqrt(1 - k^2)),
+// k from 1 at the outline to 0 at the band's inner edge. Steep at the outline, so the edge folds and
+// mirrors a thin arc of what lies inside it. Band and amount are Jiv.InstanceBuffer's, in device px.
+// The normal is a rounded rectangle's with the corner softened to 1.5 bands, so the map has no seam
+// where a small corner's normal would turn.
+vec2 RefractionNormal(vec2 p, vec2 halfSize, float radius) {
+    vec2 q = abs(p) - halfSize + radius;
+    vec2 g = (q.x > 0.0 && q.y > 0.0) ? normalize(q) : (q.x > q.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+    return g * vec2(p.x < 0.0 ? -1.0 : 1.0, p.y < 0.0 ? -1.0 : 1.0);
+}
 
 // The band's own soft edge, for the highlight: about 1 across the band, 0.5 at its inner edge, about
 // 0 on the face. aave's erf(z) ~ tanh(sqrt(pi) z) over the outline inset by `depth`.
@@ -984,9 +985,9 @@ void main() {
     float frostLod = v_Grading.w;
 
     float thickness = v_Refraction.x;
-    float refractionStrength = v_Refraction.z;
     // The refraction band, which also sets the reach of every other edge effect on the glass.
-    float band = max(REFRACT_BAND * 2.0 * min(panelHalfSize.x, panelHalfSize.y), 0.5);
+    float band = max(v_Refraction.y, 0.5);
+    float refractionAmount = v_Refraction.w;
 
     vec2 lightDir = vec2(cos(v_Lighting.x), -sin(v_Lighting.x));
     float bodyTint = v_Lighting.y;
@@ -1088,13 +1089,17 @@ void main() {
 
 #if !defined(MATERIAL_FLAT)
     if (materialType == 1.0) {
-        // Where across the band this fragment sits, and the bend it takes there: inward along the
-        // normal, rotated into screen space with the panel.
-        float edge = 1.0 - clamp(edgeDist / band, 0.0, 1.0);
-        float edge3 = edge * edge * edge;
-        vec2 screenNormal = v_Is3D > 0.5 ? normal
-            : vec2(v_Rot.x * normal.x - v_Rot.y * normal.y, v_Rot.y * normal.x + v_Rot.x * normal.y);
-        vec2 refractOffset = -screenNormal * (REFRACT_DEPTH * band * edge3 * refractionStrength * glassiness);
+        // The circle map, rotated into screen space with the panel.
+        vec2 refractOffset = vec2(0.0);
+        if (edgeDist < band && refractionAmount > 0.0) {
+            float k = 1.0 - edgeDist / band;
+            float minHalf = min(panelHalfSize.x, panelHalfSize.y);
+            float maxRadius = max(max(v_Radii.x, v_Radii.y), max(v_Radii.z, v_Radii.w));
+            vec2 n = RefractionNormal(p, panelHalfSize, min(max(maxRadius, band * 1.5), minHalf));
+            vec2 screenNormal = v_Is3D > 0.5 ? n
+                : vec2(v_Rot.x * n.x - v_Rot.y * n.y, v_Rot.y * n.x + v_Rot.x * n.y);
+            refractOffset = -screenNormal * (refractionAmount * (1.0 - sqrt(max(1.0 - k * k, 0.0))) * glassiness);
+        }
 
         // FBO has top-of-scene at UV.y=1 (panel/text shaders flip Y in clip space).
         baseUv = (v_PixelPos + refractOffset) / u_Resolution;
@@ -1119,13 +1124,7 @@ void main() {
             backdrop = vec3(sR.r, sG.g, sB.b);
         }
         if (GlassSkips(GLASS_SKIP_GRADE)) {} else
-        if (GlassSkips(GLASS_SKIP_GRADE)) {} else
         backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);
-        // The milk: toward the outline the body desaturates and lifts, over the same cube the bend
-        // takes, so it lives in the band and is gone on the face.
-        float milk = MILK_DEPTH * edge3 * glassiness;
-        backdrop = mix(backdrop, vec3(dot(backdrop, LUMA)), milk);
-        backdrop += (1.0 - backdrop) * (milk * MILK_LIFT);
     } else if (hasBackdropFilter) {
         // Flat panel backdrop sampling — no refraction, no CA.
         vec3 s = sampleBackdrop(baseUv, frostLod);

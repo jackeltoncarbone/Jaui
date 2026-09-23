@@ -230,9 +230,9 @@ export interface JivStyle {
   // Physical material — the Jiv is a slab with measurable properties
   Frost: string;
   Thickness: string;
-  /** How far the glass bends what is behind it, as a multiple of Apple's: 1 is the analytic squircle
-   *  bend across the edge band (9% of the short side), 0 is a flat pane. Keep it at or under 1: that
-   *  is the most the band can bend without folding the backdrop. */
+  /** How far the glass bends what is behind it, as a multiple of Apple's: 1 is the full circle map
+   *  across the edge band (Jiv.Panel.frag), which folds a thin mirrored arc at the outline; 0 is a
+   *  flat pane. */
   Refraction: string;
   /** The body's neutral pigment, 0..1: how far the graded backdrop is pulled toward the `TintTone`
    *  neutral. Applied after the BackdropFilter grade and before the Background fill, so it is the
@@ -398,6 +398,8 @@ export interface JivRenderStyle {
 
   Frost: number;
   BackdropFrostBlur: number;
+  /** `BackdropFilter: Blur(Auto)`: the frost follows the panel's size (`JivFrostCssPx`). */
+  BackdropFrostAuto: boolean;
   Thickness: number;
   Refraction: number;
   /** Signed body tint: negative pulls toward black, positive toward white, magnitude = strength.
