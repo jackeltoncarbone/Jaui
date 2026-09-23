@@ -28,7 +28,7 @@ import { BrowserPlatform } from '@jaui/Core/Platform';
 import { Jiv } from '@jaui/Jiv/Jiv';
 import {
   CoveredPixels, CoveredRegion, IntersectPixelRect, PixelRectEmpty, PixelRectArea,
-  SubtractPixelRects, DEFAULT_OCCLUSION_LIMITS, type PixelRect,
+  SubtractPixelRects, CornerReach, DEFAULT_OCCLUSION_LIMITS, type PixelRect,
 } from '@jaui/Core/Occlusion';
 import { readJaui, readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber } from './Scene.ReadAfterWrite.Source';
 
@@ -161,7 +161,10 @@ const buildGlassGrid = (c: Canvas, bedDx = 0, bedDy = 0): Map<Jiv, string> => {
   return named;
 };
 
-interface Admitted { Name: string; Shape: PixelRect; Region: readonly PixelRect[]; Covers: boolean; Carvable: boolean; ClipRadius: number }
+interface Admitted {
+  Name: string; Shape: PixelRect; Region: readonly PixelRect[]; Covers: boolean; Carvable: boolean;
+  ClipRadius: number; ClipSmoothing: number;
+}
 
 interface Walked {
   Census: ReturnType<typeof occlusionCensus>;
@@ -183,7 +186,9 @@ const walk = (search: string, build: (c: Canvas) => Map<Jiv, string> = buildGlas
   const named = build(c);
   const admitted: Admitted[] = [];
   type Scan = { Fills: { Cover: readonly PixelRect[]; Covers: boolean; Carvable: boolean }[] };
-  type Clip = { X: number; Y: number; W: number; H: number; RTL: number; RTR: number; RBR: number; RBL: number };
+  type Clip = {
+    X: number; Y: number; W: number; H: number; RTL: number; RTR: number; RBR: number; RBL: number; Smoothness: number;
+  };
   const priv = c as unknown as {
     _occlusionRecord: (s: Scan, n: Jiv, eff: number[], stack: readonly Clip[], effH: unknown) => void;
     _occlusionShapeRect: (n: Jiv, eff: number[]) => PixelRect;
@@ -195,11 +200,15 @@ const walk = (search: string, build: (c: Canvas) => Map<Jiv, string> = buildGlas
     real(scan, node, eff, stack, effH);
     if (scan.Fills.length === before) return;
     const f = scan.Fills[before];
-    let clipRadius = 0;
-    for (const s of stack) clipRadius = Math.max(clipRadius, s.RTL, s.RTR, s.RBR, s.RBL);
+    let clipRadius = 0, clipSmoothing = 0;
+    for (const s of stack) {
+      const r = Math.max(s.RTL, s.RTR, s.RBR, s.RBL);
+      if (r > clipRadius) { clipRadius = r; clipSmoothing = s.Smoothness; }
+    }
     admitted.push({
       Name: named.get(node) ?? '?', Shape: priv._occlusionShapeRect(node, eff),
-      Region: f.Cover, Covers: f.Covers, Carvable: f.Carvable, ClipRadius: clipRadius * DPR,
+      Region: f.Cover, Covers: f.Covers, Carvable: f.Carvable,
+      ClipRadius: clipRadius * DPR, ClipSmoothing: clipSmoothing,
     });
   };
   c.RenderHeadless(1000);
@@ -259,14 +268,17 @@ describe('occlusion on glass-grid — the census the probe reads', () => {
     expect(seams.filter((s) => Number.isInteger(s))).toEqual([900]);
   });
 
-  it('EVERY node in this app sits inside a 183-device-px rounded clip — the term the first lane missed', () => {
+  it('EVERY node in this app sits inside a 104-device-px continuous-cornered clip — the term the first lane missed', () => {
     // `App.jss`: `Screen { BorderRadius: @JwiftScreenRadius, Overflow: Hidden }`, and every page in
-    // the app is inside it. 52pt of authored radius draws as 183 device px at dpr 2 (the continuous
-    // corner runs past the authored value), and that clip is in the stack of all five coverers.
+    // the app is inside it. 52pt is the corner's arc radius, 104 device px at dpr 2; its easing runs
+    // (1 + 0.6) r = 166.4 px along each edge, and that clip is in the stack of all five coverers.
     expect(jssValue(SCREEN, 'BorderRadius')).toBe('@JwiftScreenRadius');
     expect(jssValue(SCREEN, 'Overflow')).toBe('Hidden');
     expect(SCREEN_RADIUS_PT).toBe(52);
-    for (const a of w.Admitted) expect(Math.round(a.ClipRadius)).toBe(183);
+    for (const a of w.Admitted) {
+      expect(a.ClipRadius).toBe(104);
+      expect(CornerReach(a.ClipRadius, a.ClipSmoothing)).toBeCloseTo(166.4, 9);
+    }
   });
 });
 
@@ -274,14 +286,14 @@ describe('occlusion on glass-grid — the census the probe reads', () => {
 
 /** The five coverers' shape rects and the screen clip, taken from the walk above rather than
  *  restated — so the two models below are compared on the engine's own geometry. */
-const geometry = (): { Page: PixelRect; Bands: PixelRect[]; Clip: PixelRect; ClipR: number } => {
+const geometry = (): { Page: PixelRect; Bands: PixelRect[]; Clip: PixelRect; ClipReach: number } => {
   const w = walk('');
   const byName = new Map(w.Admitted.map((a) => [a.Name, a.Shape]));
   return {
     Page: byName.get('PerfPage')!,
     Bands: [1, 2, 3, 4].map((i) => byName.get(`PerfBand[${i}]`)!),
     Clip: { X0: 0, Y0: 0, X1: CANVAS_W, Y1: CANVAS_H },
-    ClipR: w.Admitted[0].ClipRadius,
+    ClipReach: CornerReach(w.Admitted[0].ClipRadius, w.Admitted[0].ClipSmoothing),
   };
 };
 
@@ -289,16 +301,16 @@ describe('occlusion on glass-grid — WHY the carve emitted zero pieces', () => 
   const g = geometry();
   const page = IntersectPixelRect(g.Page, CANVAS);
 
-  /** THE FIRST FOLD'S MODEL: one rect per coverer, inset by the clip's RADIUS on all four sides. */
+  /** THE FIRST FOLD'S MODEL: one rect per coverer, inset by the clip's corner reach on all four sides. */
   const insetModel = (): PixelRect[] => g.Bands.map((b) =>
     IntersectPixelRect(
       IntersectPixelRect(CoveredPixels(b.X0, b.Y0, b.X1, b.Y1, 0), CANVAS),
-      CoveredPixels(g.Clip.X0, g.Clip.Y0, g.Clip.X1, g.Clip.Y1, g.ClipR),
+      CoveredPixels(g.Clip.X0, g.Clip.Y0, g.Clip.X1, g.Clip.Y1, g.ClipReach),
     )).filter((r) => !PixelRectEmpty(r));
 
   /** THIS LANE'S: the face minus four corner BLOCKS, as a union of up to three rects. */
   const regionModel = (): PixelRect[] => {
-    const clip = CoveredRegion(g.Clip.X0, g.Clip.Y0, g.Clip.X1, g.Clip.Y1, g.ClipR);
+    const clip = CoveredRegion(g.Clip.X0, g.Clip.Y0, g.Clip.X1, g.Clip.Y1, g.ClipReach);
     const out: PixelRect[] = [];
     for (const b of g.Bands) {
       for (const part of CoveredRegion(b.X0, b.Y0, b.X1, b.Y1, 0)) {
@@ -311,10 +323,11 @@ describe('occlusion on glass-grid — WHY the carve emitted zero pieces', () => 
     return out;
   };
 
-  it('the inset model throws away a 183 px FRAME of the canvas on every coverer', () => {
+  it('the inset model throws away a 166 px FRAME of the canvas on every coverer', () => {
+    // The first pixel column whose centre (166.5) is past the 166.4 px reach.
     for (const c of insetModel()) {
-      expect(c.X0).toBe(183);
-      expect(c.X1).toBe(CANVAS_W - 183);
+      expect(c.X0).toBe(166);
+      expect(c.X1).toBe(CANVAS_W - 166);
     }
   });
 
@@ -335,7 +348,7 @@ describe('occlusion on glass-grid — WHY the carve emitted zero pieces', () => 
     let left = 0;
     for (const r of residual!) left += PixelRectArea(r);
     expect(left / PixelRectArea(page)).toBeLessThan(DEFAULT_OCCLUSION_LIMITS.MaxResidualFraction);
-    expect(PixelRectArea(page) - left).toBe(3_877_208);
+    expect(PixelRectArea(page) - left).toBe(3_899_784);
   });
 });
 
@@ -344,11 +357,13 @@ describe('occlusion on glass-grid — WHY the carve emitted zero pieces', () => 
 describe('occlusion on glass-grid — the carve fires', () => {
   const w = walk('');
 
-  it('carves the page fill into eight pieces and withholds 3,877,208 device px', () => {
+  it('carves the page fill into eight pieces and withholds 3,899,784 device px', () => {
     expect({
       Skipped: w.Census.Skipped, Carved: w.Census.Carved,
       Pieces: w.Census.Pieces, Px: w.Census.Px, Vacuous: w.Census.Vacuous,
-    }).toEqual({ Skipped: 0, Carved: 1, Pieces: 8, Px: 3_877_208, Vacuous: 0 });
+    }).toEqual({ Skipped: 0, Carved: 1, Pieces: 8, Px: 3_899_784, Vacuous: 0 });
+    // 22,576 px more than the old 183 px corner blocks withheld: the four blocks shrink from
+    // 183 x 149 (twice) and 183 x 183 (twice) to 166 x 132 and 166 x 166.
     expect(w.Plan.get('PerfPage')?.Kind).toBe('Carve');
   });
 
@@ -358,13 +373,13 @@ describe('occlusion on glass-grid — the carve fires', () => {
     expect(pieces).toEqual([
       // band 0 is under the area floor, so its 34 rows are drawn rather than covered
       { X0: 0, Y0: 0, X1: 2560, Y1: 34 },
-      { X0: 0, Y0: 34, X1: 183, Y1: 183 },        // top-left screen corner
-      { X0: 2377, Y0: 34, X1: 2560, Y1: 183 },    // top-right
+      { X0: 0, Y0: 34, X1: 166, Y1: 166 },        // top-left screen corner
+      { X0: 2394, Y0: 34, X1: 2560, Y1: 166 },    // top-right
       { X0: 0, Y0: 466, X1: 2560, Y1: 467 },      // seam at device y 466.67
       { X0: 0, Y0: 899, X1: 2560, Y1: 901 },      // the "whole" seam at 900, to float dust
       { X0: 0, Y0: 1333, X1: 2560, Y1: 1334 },    // seam at 1333.33
-      { X0: 0, Y0: 1417, X1: 183, Y1: 1600 },     // bottom-left screen corner
-      { X0: 2377, Y0: 1417, X1: 2560, Y1: 1600 }, // bottom-right
+      { X0: 0, Y0: 1434, X1: 166, Y1: 1600 },     // bottom-left screen corner
+      { X0: 2394, Y0: 1434, X1: 2560, Y1: 1600 }, // bottom-right
     ]);
   });
 

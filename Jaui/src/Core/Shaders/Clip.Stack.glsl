@@ -1,5 +1,5 @@
 // The clip stack as a signed distance, for the programs that draw inside a panel's clip without being
-// a panel: text. Spliced in where a program writes
+// a panel: text and the progressive blur. Spliced in where a program writes
 // `#pragma ClipStack` (WebGL2.Renderer `_withClipStack`), after it declares `uniform sampler2D u_ClipTex`.
 
 #include "../../Jiv/Shaders/Corner.Continuous.glsl"

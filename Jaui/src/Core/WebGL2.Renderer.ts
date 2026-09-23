@@ -4952,7 +4952,7 @@ export class WebGL2Renderer implements Renderer {
   };
 
   private _compileProgBlurShader = (batch: ShaderBatch): void => {
-    this._progBlurShader = batch.Add(PROGRESSIVE_BLUR_VERT, PROGRESSIVE_BLUR_FRAG);
+    this._progBlurShader = batch.Add(PROGRESSIVE_BLUR_VERT, _withClipStack(PROGRESSIVE_BLUR_FRAG));
   };
 
   private _wireProgBlurShader = (gl: WebGL2RenderingContext): void => {

@@ -327,7 +327,7 @@ describe('Occlusion — the region, and the cap that keeps it bounded', () => {
   });
 });
 
-describe('Occlusion — the continuous corner's reach', () => {
+describe("Occlusion — the continuous corner's reach", () => {
   it('is (1 + s) r: the easing starts that far out along each edge', () => {
     expect(CornerReach(10, 0.6)).toBeCloseTo(16, 9);
     expect(CornerReach(10, 0)).toBe(10);

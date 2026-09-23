@@ -110,8 +110,9 @@ export const CoveredPixels = (
  * CORNER blocks, and `CoveredPixels`'s all-sides inset pays for all four of them on every edge.
  * At a small radius that is the "conservative by up to 0.7r a side" the first lane named and
  * priced. At the App's own screen clip — `Screen { BorderRadius: @JwiftScreenRadius }`, which is
- * 183 DEVICE px of drawn radius at dpr 2 — it discards a 183 px frame of a 2560 x 1600 canvas:
- * 1.72 Mpx of cover that is genuinely alpha 1, on EVERY coverer in the app, because that clip is
+ * 183 DEVICE px of drawn radius at dpr 2 under the corner of the time (the continuous corner's
+ * reach is 166.4 px now) — it discards that frame of a 2560 x 1600 canvas:
+ * over 1.5 Mpx of cover that is genuinely alpha 1, on EVERY coverer in the app, because that clip is
  * in every node's stack. That is what made the carve emit zero pieces on both machines.
  *
  * ── WHY THE TWO WING ROWS ARE ALPHA 1, WHICH THE FLAT BRANCH DOES NOT SAY ─────────────────────

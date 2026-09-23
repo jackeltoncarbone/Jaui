@@ -18,7 +18,12 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const src = (...p: string[]): string =>
   readFileSync(join(HERE, '..', 'src', ...p), 'utf8').replace(/\r\n/g, '\n');
 
-export const readPanelFrag = (): string => src('Jiv', 'Shaders', 'Jiv.Panel.frag');
+/** A shader's text with its `#include` lines spliced in, as `scripts/build-shaders.mjs` does at build. */
+const INCLUDE = /^[ \t]*#include[ \t]+"([^"]+)"[ \t]*$/gm;
+const withIncludes = (path: string): string =>
+  readFileSync(path, 'utf8').replace(/\r\n/g, '\n').replace(INCLUDE, (_, rel: string) => withIncludes(join(dirname(path), rel)));
+
+export const readPanelFrag = (): string => withIncludes(join(HERE, '..', 'src', 'Jiv', 'Shaders', 'Jiv.Panel.frag'));
 export const readRenderer = (): string => src('Core', 'WebGL2.Renderer.ts');
 export const readJaui = (): string => src('Core', 'Jaui.ts');
 export const readInstanceBuffer = (): string => src('Jiv', 'Jiv.InstanceBuffer.ts');
