@@ -79,6 +79,10 @@ const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 /** The finest blur (pt) an adaptive shadow compares the sharp backdrop against, so clear glass still sees
  *  its text as detail. */
 const SHADOW_DETAIL_MIN_PT = 4;
+/** `?blur-mips=separable`: the deepest LOD a mip consumer may read and still take the separable plan.
+ *  One LOD, because past it a re-based (`k > 1`) level 0 moves the picture rather than the rounding --
+ *  see `_maySeparable`. */
+const SEPARABLE_MIP_MAX_LOD = 1;
 /** `?glass-adapt`'s census reads the probe state row back once per this many rendered frames (and on every
  *  snap frame). A pack-buffer copy of 256 bytes behind a fence; see `_glassAdaptEndFrame`. */
 const GLASS_ADAPT_CENSUS_FRAMES = 30;
@@ -1052,6 +1056,10 @@ export class Canvas implements DirtyTracker {
    *  width. `?blur-chain=on` is the control: the dual-filter chain byte for byte. */
   private _blurSeparable = true;
   private _blurSeparableRefused = '';
+  /** `?blur-mips=separable|chain`: may a SHALLOW mip consumer (`0 < MaxLod <= SEPARABLE_MIP_MAX_LOD`)
+   *  take the separable plan? DEFAULT separable; `=chain` is the dual-filter chain for those surfaces,
+   *  byte for byte. See `_maySeparable`. */
+  private _blurSeparableMips = true;
   /** `?blur-level`: a glass rim that reads ONE constant LOD gets that level built and nothing else
    *  (`BlurPass.PlanReadLevel`). DEFAULT ON; `=off` is the chain plus its mip stack, byte for byte. */
   private _blurLevel = true;
@@ -6910,9 +6918,23 @@ export class Canvas implements DirtyTracker {
    *  resolves to level 0 whatever LOD it works out -- which is every glass surface in this app.
    *
    *  Everything else -- the sigma, the kernel's size, the `match` arm's calibration, the k --
-   *  is `PlanGaussian`'s, asked inside the pass so there is one answer and not two. */
+   *  is `PlanGaussian`'s, asked inside the pass so there is one answer and not two.
+   *
+   *  SHALLOW MIP CONSUMERS TAKE THE SEPARABLE PLAN TOO (`?blur-mips`). The "stale level" reason above
+   *  is the Gaussian arm's and not the separable plan's: `_blurSeparable` writes `_levels[0]` of the
+   *  chain `_useChain` selected for its base, and `GenerateOutputMipmap` then builds mips 1..N by
+   *  halving FROM that level -- the same stack the chain would have built on its own level 0. What
+   *  does change is the scale of one LOD step when the plan re-bases (`k > 1`): level 0 is at `1/k`
+   *  of device resolution, so each further level adds a hop `k` times wider than the chain's. On a
+   *  pyramid built at the panel's own frost that hop is small beside the frost itself -- the hero
+   *  pill reads LOD 0.5 over sigma 12.7 device px, a rim band a few percent wider -- and the cap of
+   *  one LOD keeps it that way. This is the phone's hero: the pill's `BorderFilter: Blur(0.5pt)`
+   *  made it a mip consumer, and its fill and rim each paid the 8-pass chain every scrolled frame. */
   private _maySeparable = (plan: GlassBlurPlan): boolean =>
-    (this._glassGaussian !== 'off' || this._blurSeparable) && plan.MaxLod === 0;
+    plan.MaxLod === 0
+      ? this._glassGaussian !== 'off' || this._blurSeparable
+      : this._blurSeparable && this._glassGaussian === 'off' && this._blurSeparableMips
+        && plan.MaxLod <= SEPARABLE_MIP_MAX_LOD;
 
   /** `?blur-level`: the ONE LOD this RIM reads, or null. Booked on the census under both arms, so the
    *  control drag names the same surfaces the armed one builds for.
@@ -9535,6 +9557,13 @@ export class Canvas implements DirtyTracker {
       }
       this._blurSeparable = raw === 'off';
     }
+    if (params.has('blur-mips')) {
+      const raw = (params.get('blur-mips') ?? '').trim();
+      if (raw !== 'separable' && raw !== 'chain') {
+        throw new Error(`[Jaui] ?blur-mips takes 'separable' or 'chain', got '${raw}'`);
+      }
+      this._blurSeparableMips = raw === 'separable';
+    }
     if (params.has('blur-sigma')) {
       const raw = (params.get('blur-sigma') ?? '').trim();
       if (raw !== 'delivered' && raw !== 'authored') {
@@ -9677,6 +9706,7 @@ export class Canvas implements DirtyTracker {
     // Metal defect's third candidate asked for. `none` in main-thread mode, where `Init` has not run.
     JTrace(`jaui:blur-plan armed=${this._blurSeparable ? 'separable' : 'chain'}`
       + ` default=${!params.has('blur-chain')}`
+      + ` mips=${this._blurSeparable && this._blurSeparableMips ? 'separable' : 'chain'}`
       + ` sigma=${this._blurSigma} k=${this._blurKRule} fetches=${this._blurFetches ?? 'auto'}`
       + ` upload=${this._gaussUploadPrefix ? 'prefix' : 'full'}`
       // The mark fires once at arm time, BEFORE any frame has rendered, so a counter here would read
