@@ -30,8 +30,8 @@
  *      else in the flat program consumes any of them.
  *   2. The borderless program is a strict DELETION from MATERIAL_FLAT plus exactly one
  *      substituted line, the `CornerDist` call.
- *   3. The routing is exact on BOTH terms: `borderWidth === 0` and `pillW === 0`, computed off the
- *      packed instance floats with `CornerParams`' own expressions in float32.
+ *   3. The routing is exact: `borderWidth === 0`, off the packed instance floats. The corner needs no
+ *      term: `CornerDist` and `CornerEval` return the same `ContinuousCorner` distance.
  *
  * It does NOT prove that a driver emits the same instructions for the lines both programs share.
  * `glassshot 0` on every glass scene is the shipping gate, as it was for `flatprogram`.
@@ -231,8 +231,7 @@ describe('the borderless program is a deletion from the flat program, plus one l
 
 describe('what the borderless program removes', () => {
   const src = text(borderless);
-  const gone = ['ShapeGrad_inner', 'SS_PillEval', 'SS_PillGrad', 'CornerEval', 'ShapeEval',
-                'ShapeGrad(', 'normal', 'keyAlign', 'alignment', 'widthAlign', 'widthScale',
+  const gone = ['CornerEval', 'normal', 'keyAlign', 'alignment', 'widthAlign', 'widthScale',
                 'localBorderWidth', 'variedBorderWidth', 'drawnBorderWidth', 'borderCoverage',
                 'borderBase', 'borderAlpha', 'GROUND_BOUNCE', 'BORDER_MIN_DEVICE_PX'];
 
@@ -244,42 +243,25 @@ describe('what the borderless program removes', () => {
     // Non-vacuity: these assertions would pass on a source that had never had any of it.
     for (const name of gone) expect(text(flat), `${name} was never in MATERIAL_FLAT`).toContain(name);
   });
-
-  it('drops two of the shape path`s pow() calls and keeps the rest of the shader`s', () => {
-    // `ShapeGrad_inner` is "two pow() calls, a length and a normalize" by the file's own comment.
-    // `ShapeSDF_inner` (six) and `linearToSrgb` (one, called three times per OKLab stop) stay.
-    const powCount = (s: string): number => (s.match(/pow\(/g) ?? []).length;
-    expect(powCount(text(flat)) - powCount(src)).toBe(2);
-    expect(src).toContain('float un = pow(uvE.x, n);');
-    expect(src).toContain('return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;');
-  });
 });
 
 describe('what the borderless program keeps, byte for byte', () => {
   const src = text(borderless);
 
-  it('keeps the distance path — CornerParams, CornerDist, ShapeSDF_inner, SS_PillSDF', () => {
-    expect(src).toContain('void CornerParams(vec2 p, vec2 halfSize, vec4 radii, float smoothness,');
+  it('keeps the distance path — CornerDist over the continuous corner', () => {
     expect(src).toContain('float CornerDist(vec2 p, vec2 halfSize, vec4 radii, float smoothness) {');
-    expect(src).toContain('float ShapeSDF_inner(vec2 p, vec2 halfSize, vec2 rAxis, float n) {');
-    expect(src).toContain('float SS_PillSDF(vec2 p, vec2 halfSize) {');
+    expect(src).toContain('float ContinuousCorner(vec2 p, vec2 halfSize, vec4 radii, float smoothing, out vec2 outward) {');
     expect(src).toContain('float fillAlpha = 1.0 - smoothstep(-0.5, 0.5, dist);');
   });
 
-  it('CornerDist and CornerEval return the SAME expression on the leg the routing admits', () => {
-    // pillW <= 0: CornerDist returns `dSuper`, CornerEval assigns `distOut = dSuper` — and both
-    // compute `dSuper` as `ShapeSDF_inner(p, halfSize, vec2(rCorner), n)` off the same
-    // `CornerParams` call. Identical by inspection, which is what the pillW routing term buys.
+  it('CornerDist and CornerEval return the SAME distance, from the same call', () => {
     const f = text(flat);
     const cornerDist = /float CornerDist\([\s\S]*?\n\}/.exec(f)![0];
     const cornerEval = /void CornerEval\([\s\S]*?\n\}/.exec(f)![0];
-    for (const fn of [cornerDist, cornerEval]) {
-      expect(fn).toContain('CornerParams(p, halfSize, radii, smoothness, pillW, n, rCorner);');
-      expect(fn).toContain('ShapeSDF_inner(p, halfSize, vec2(rCorner), n)');
-      expect(fn).toContain('pillW <= 0.0');
-    }
-    // And the substituted call passes exactly what ShapeEval passed, minus the two out params.
-    expect(text(flat)).toContain('ShapeEval(p, panelHalfSize, v_Radii, effectiveSmooth, mode, dist, normal);');
+    expect(cornerDist).toContain('return ContinuousCorner(p, halfSize, radii, smoothness, unused);');
+    expect(cornerEval).toContain('distOut = ContinuousCorner(p, halfSize, radii, smoothness, gradOut);');
+    // And the substituted call passes exactly what CornerEval passed, minus the normal.
+    expect(text(flat)).toContain('CornerEval(p, panelHalfSize, v_Radii, effectiveSmooth, dist, normal);');
     expect(src).toContain('dist = CornerDist(p, panelHalfSize, v_Radii, effectiveSmooth);');
   });
 
@@ -393,114 +375,10 @@ describe('routing: which batches take the borderless program', () => {
     expect(PACKER).toMatch(/if \(borderMode === 'Suppress'\) \{\s*\n\s*data\[offset \+ 27\] = 0;/);
   });
 
-  it('tests pillW for EXACT zero, with CornerParams` own expressions and constants', () => {
-    const fn = /_batchTakesBorderlessProgram = \(\): boolean => \{([\s\S]*?)\n  \};/.exec(RENDERER)!;
-    const body = fn[1];
-    // The shader's constants, term for term.
-    const frag = text(none);
-    expect(frag).toContain('const float CORNER_SAT_FRAC    = 0.12;');
-    expect(frag).toContain('const float CORNER_ASPECT_LO   = 1.02;');
-    expect(frag).toContain('float satBand = max(minHalf * CORNER_SAT_FRAC, 1.0);');
-    expect(frag).toContain('float sat   = smoothstep(minHalf - satBand, minHalf - 1.0, authoredR);');
-    expect(frag).toContain('float elong = smoothstep(CORNER_ASPECT_LO, CORNER_ASPECT_HI, aspect);');
-    expect(frag).toContain('pillW = sat * elong;');
-    expect(frag).toContain('float authoredR  = floor(smoothness * 0.5) / 16.0;');
-    expect(frag).toContain('float aspect  = maxHalf / max(minHalf, 0.0001);');
-    expect(RENDERER).toContain('const CORNER_SAT_FRAC = Math.fround(0.12);');
-    expect(RENDERER).toContain('const CORNER_ASPECT_LO = Math.fround(1.02);');
-    expect(RENDERER).toContain('const CORNER_MIN_HALF = Math.fround(0.0001);');
-    expect(body).toContain('const satBand = Math.max(fr(minHalf * CORNER_SAT_FRAC), 1);');
-    expect(body).toContain('const satE0 = fr(minHalf - satBand);');
-    expect(body).toContain('const satE1 = fr(minHalf - 1);');
-    expect(body).toContain('const authoredR = Math.floor(d[b + PANEL_OFF_SMOOTH_PACKED] * 0.5) / 16;');
-    expect(body).toContain('const aspect = fr(maxHalf / Math.max(minHalf, CORNER_MIN_HALF));');
-    expect(body).toContain('if (authoredR <= satE0) continue;');
-    expect(body).toContain('if (aspect <= CORNER_ASPECT_LO) continue;');
-    // A degenerate smoothstep band is REFUSED, never reasoned about.
-    expect(body).toContain('if (!(satE0 < satE1)) return false;');
-  });
-
-  it('reads pillW`s three inputs at the offsets the packer writes them to', () => {
-    expect(RENDERER).toContain('const PANEL_OFF_HALF_W = 6;');
-    expect(RENDERER).toContain('const PANEL_OFF_HALF_H = 7;');
-    expect(RENDERER).toContain('const PANEL_OFF_SMOOTH_PACKED = 29;');
-    expect(PACKER).toMatch(/data\[offset \+ 6\] = halfW;/);
-    expect(PACKER).toMatch(/data\[offset \+ 7\] = halfH;/);
-    expect(PACKER).toContain('data[offset + 29] = Math.max(0, Math.min(1, style.BorderRadiusSmoothness))');
-    expect(PACKER).toContain('+ 2 * Math.round(authoredMin * 16);');
-    // And the fragment reads the same lane back out of a_PanelGeom.zw / a_StyleParams.y.
-    expect(text(none)).toContain('vec2 panelHalfSize = v_PanelGeom.zw;');
-    expect(text(none)).toContain('float smoothness = v_StyleParams.y;');
-  });
-
   it('ONE instance disqualifies the whole batch', () => {
     const body = /_batchTakesBorderlessProgram = \(\): boolean => \{([\s\S]*?)\n  \};/.exec(RENDERER)![1];
-    expect((body.match(/return false;/g) ?? []).length).toBe(3);
+    expect((body.match(/return false;/g) ?? []).length).toBe(1);
     expect(body).toContain('return true;');
-  });
-
-  it('the classifier`s own arithmetic, run against a transcription of CornerParams', () => {
-    // Everything above pins TEXT. This runs the two sides on the same numbers: a port of the
-    // shader's `pillW`, and a port of the renderer's predicate, over the shapes this app draws.
-    const fr = Math.fround;
-    const smoothstep = (e0: number, e1: number, x: number): number => {
-      const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
-      return t * t * (3 - 2 * t);
-    };
-    const shaderPillW = (halfW: number, halfH: number, packed: number): number => {
-      const minHalf = Math.min(halfW, halfH);
-      const maxHalf = Math.max(halfW, halfH);
-      const aspect = maxHalf / Math.max(minHalf, 0.0001);
-      const authoredR = Math.floor(packed * 0.5) / 16;
-      const satBand = Math.max(minHalf * 0.12, 1);
-      const sat = smoothstep(minHalf - satBand, minHalf - 1, authoredR);
-      const elong = smoothstep(1.02, 1.1, aspect);
-      return sat * elong;
-    };
-    const rendererAdmits = (halfW: number, halfH: number, packed: number): boolean => {
-      const minHalf = Math.min(halfW, halfH);
-      const maxHalf = Math.max(halfW, halfH);
-      const satBand = Math.max(fr(minHalf * fr(0.12)), 1);
-      const satE0 = fr(minHalf - satBand);
-      const satE1 = fr(minHalf - 1);
-      if (!(satE0 < satE1)) return false;
-      const authoredR = Math.floor(packed * 0.5) / 16;
-      if (authoredR <= satE0) return true;
-      const aspect = fr(maxHalf / Math.max(minHalf, fr(0.0001)));
-      return aspect <= fr(1.02);
-    };
-    const pack = (radiusPx: number, smooth = 0.6): number => smooth + 2 * Math.round(radiusPx * 16);
-
-    // Every shape the classifier admits really is on the superellipse leg.
-    let admitted = 0;
-    let refusedButFlat = 0;
-    for (const halfW of [8, 27, 54, 108, 216, 400, 900, 1470]) {
-      for (const halfH of [4, 8, 15, 27, 75, 150, 216, 478]) {
-        for (const r of [0, 1, 4, 16, 28, 56, 150, 478]) {
-          const packed = pack(r);
-          const admits = rendererAdmits(halfW, halfH, packed);
-          const pillW = shaderPillW(halfW, halfH, packed);
-          if (admits) { expect(pillW, `${halfW}x${halfH} r=${r}`).toBe(0); admitted++; }
-          else if (pillW === 0) refusedButFlat++;
-        }
-      }
-    }
-    expect(admitted).toBeGreaterThan(100);
-    // Non-vacuity in the other direction: the predicate is conservative, not universally true.
-    expect(admitted + refusedButFlat).toBeLessThan(8 * 8 * 8);
-
-    // The two shapes the bed is made of, named. `PerfPage` is the page's black fill at dpr 2 on
-    // the measuring machine's 1470x956 desktop; `PerfBand` is one of the six gradient bands
-    // (1800 x 1300/6 pt). Both radius 0, both borderless — both take the program.
-    expect(rendererAdmits(1470, 956, pack(0))).toBe(true);
-    expect(shaderPillW(1470, 956, pack(0))).toBe(0);
-    expect(rendererAdmits(1800, 216.66, pack(0))).toBe(true);
-    expect(shaderPillW(1800, 216.66, pack(0))).toBe(0);
-    // A capsule is refused — that is the pill leg, which this lane does NOT admit.
-    expect(rendererAdmits(78, 29, pack(29))).toBe(false);
-    expect(shaderPillW(78, 29, pack(29))).toBeGreaterThan(0);
-    // And a tiny panel whose smoothstep band is degenerate is refused rather than guessed at.
-    expect(rendererAdmits(6, 6, pack(3))).toBe(false);
   });
 
   it('binds the fourth program without touching the scene ledger', () => {

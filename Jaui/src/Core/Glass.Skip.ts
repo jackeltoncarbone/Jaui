@@ -10,6 +10,7 @@
  * Pure arithmetic, no GL, for the reason `Scene.Ledger` is its own module: it can be unit-tested
  * without the renderer's shader imports.
  */
+import { ContinuousCorner } from '../Jiv/Corner.Continuous';
 
 /** The shader's bits, by name. `Jiv.Panel.frag` declares the same nine `GLASS_SKIP_*` constants and
  *  `tests/Glass.Skip.test.ts` reads that file and holds the two tables to each other. */
@@ -81,7 +82,7 @@ export interface GlassFragCensus {
   /** `dist >= 0.5`: outside the face -- the shadow skirt. */
   Skirt: number;
   /** Skirt fragments the `skirt` arm discards (outside the face's padded BOX). The rest of the
-   *  skirt is the corner pockets between the superellipse and the box, which still run. */
+   *  skirt is the corner pockets between the rounded corner and the box, which still run. */
   Cut: number;
   /** Fragments taking the 3-tap chromatic fill path. */
   Ca3: number;
@@ -91,16 +92,13 @@ export interface GlassFragCensus {
   TapsFull: number;
   /** Clip-stack texel fetches (three per clip per fragment, paid before the clip's discard). */
   ClipFetches: number;
-  /** Instances on the corner field's pill or blend leg, counted with the superellipse leg's
-   *  distance (the polyline pill is not ported). 0 on `glass-grid`. */
-  PillApprox: number;
   /** 3D (projective) instances: their quad is a projected natural box and is not walked. */
   Projective: number;
 }
 
 export const EmptyGlassFragCensus = (): GlassFragCensus => ({
   Instances: 0, Frags: 0, Face: 0, Band: 0, Skirt: 0, Cut: 0, Ca3: 0,
-  Taps: 0, TapsFull: 0, ClipFetches: 0, PillApprox: 0, Projective: 0,
+  Taps: 0, TapsFull: 0, ClipFetches: 0, Projective: 0,
 });
 
 export const AddGlassFragCensus = (into: GlassFragCensus, c: GlassFragCensus): void => {
@@ -124,36 +122,6 @@ export const GLASS_CENSUS_KEY_OFFSETS: readonly number[] = [
 const smoothstep = (e0: number, e1: number, x: number): number => {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
-};
-
-/** `ShapeSDF_inner` and `ShapeGrad_inner`, the superellipse leg of the corner field. */
-const superellipse = (px: number, py: number, hx: number, hy: number, r: number, n: number,
-                      out: Float64Array): void => {
-  const rr = Math.max(r, 1e-3);
-  const qx = Math.abs(px) - hx + rr;
-  const qy = Math.abs(py) - hy + rr;
-  const ux = Math.max(Math.max(qx, 0) / rr, 1e-5);
-  const uy = Math.max(Math.max(qy, 0) / rr, 1e-5);
-  const nm1 = n - 1;
-  const gx = Math.sign(px) * Math.pow(ux, nm1) / rr;
-  const gy = Math.sign(py) * Math.pow(uy, nm1) / rr;
-  const gLen = Math.hypot(gx, gy);
-  if (gLen < 1e-4) {
-    const dx = hx - Math.abs(px);
-    const dy = hy - Math.abs(py);
-    out[1] = dx < dy ? Math.sign(px) : 0;
-    out[2] = dx < dy ? 0 : Math.sign(py);
-  } else {
-    out[1] = gx / gLen;
-    out[2] = gy / gLen;
-  }
-  if (qx <= 0 && qy <= 0) {
-    out[0] = -Math.min(hx - Math.abs(px), hy - Math.abs(py));
-    return;
-  }
-  const L = Math.pow(Math.pow(ux, n) + Math.pow(uy, n), 1 / n);
-  const gradLen = Math.pow(L, 1 - n) * Math.hypot(Math.pow(ux, nm1) / rr, Math.pow(uy, nm1) / rr);
-  out[0] = (L - 1) / Math.max(gradLen, 1e-5);
 };
 
 /** `GlassRectEval`: the `sdf` arm's sharp rectangle. */
@@ -213,17 +181,7 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
   const rimSpecW = Math.max(thickness * 0.18, 0.75 * glassiness);
   const pad = 2 + Math.abs(edgeAa);
 
-  // `CornerParams`, whose regime is a function of the instance alone (only rCorner is per pixel).
   const smooth = d[b + O.Smooth];
-  const minHalf = Math.min(hx, hy), maxHalf = Math.max(hx, hy);
-  const aspect = maxHalf / Math.max(minHalf, 1e-4);
-  const authoredR = Math.floor(smooth * 0.5) / 16;
-  const smoothAmt = smooth - 2 * Math.floor(smooth * 0.5);
-  const satBand = Math.max(minHalf * 0.12, 1);
-  const sat = smoothstep(minHalf - satBand, minHalf - 1, authoredR);
-  const elong = smoothstep(1.02, 1.10, aspect);
-  const n = (2 + 6 * Math.min(1, Math.max(0, smoothAmt))) * (1 - sat * (1 - elong)) + 2 * sat * (1 - elong);
-  if (sat * elong > 0) c.PillApprox = 1;
   c.Instances = 1;
 
   const skip = (stage: GlassSkipStage): boolean => (mask & GLASS_SKIP_STAGES[stage]) !== 0;
@@ -238,10 +196,7 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
       return -1;
     }
     if (skip('sdf')) sharpRect(px, py, hx, hy, e);
-    else {
-      const r = Math.min(px >= 0 ? (py <= 0 ? radii[1] : radii[2]) : (py <= 0 ? radii[0] : radii[3]), minHalf);
-      superellipse(px, py, hx, hy, r, n, e);
-    }
+    else ContinuousCorner(px, py, hx, hy, radii, smooth, e);
     const dist = e[0], nx = e[1], ny = e[2];
     const fillPos = dist < 0.5;
     const edge = 1 - Math.min(1, Math.max(-dist, 0) / band);

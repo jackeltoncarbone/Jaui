@@ -16,24 +16,13 @@
  * fragment whose colour is written with alpha exactly 1 destroys whatever the destination held,
  * and an earlier fill under it contributed nothing to the final image. That is the whole lever.
  *
- * `dist` is not a rect distance — it is a superellipse field — so the inset that guarantees
- * `dist <= -0.5` is derived rather than assumed. `ShapeSDF_inner` has a FLAT branch:
- *
- *     q = |p| - halfSize + rAxis;  if (q.x <= 0 && q.y <= 0)
- *         return -min(halfSize.x - |p.x|, halfSize.y - |p.y|);
- *
- * with `rAxis = rCorner = min(PickRectRadius(p, radii), minHalf)`. Inset a point by `s` from every
- * side with `s >= maxRadius` and both components of `q` are <= 0, so the flat branch runs and
- * `dist = -(distance to the nearest edge) <= -s`. Take `s = max(maxRadius, 0.5)` and the alpha is
- * exactly 1 — with NO dependence on the superellipse exponent, the smoothness, or the corner
- * blend. That is why the inset is `max(radius, 0.5)` and not something fitted.
- *
- * The one leg that escapes it is the PILL (`pillW > 0` mixes in `SS_PillSDF`, a capsule whose
- * interior is much smaller than the box). `CornerParams` reaches it only when the AUTHORED radius
- * exceeds `minHalf - max(0.12 * minHalf, 1)` — i.e. 88% of the short half-axis — so a coverer
- * whose radius is over HALF the short half-axis is refused outright by `PILL_GUARD_FRACTION` and
- * the pill leg is unreachable rather than approximated. Clip shapes cannot reach it at all: they
- * carry a bare smoothness, so `authoredR` decodes to 0 and `sat` is 0 for every clip.
+ * `dist` is not a rect distance — it is the continuous corner's field (Jiv/Shaders/Corner.Continuous.glsl)
+ * — so the inset that guarantees `dist <= -0.5` is derived rather than assumed. Its corner reaches
+ * `CornerReach(r, s) = (1 + s) r` along each edge, and past that on both axes it returns the FLAT
+ * branch, `-min(inward from the side, inward from the top)`. Inset a point by `max(reach, 0.5)` from
+ * every side and the flat branch runs, so `dist = -(distance to the nearest edge) <= -0.5` and the
+ * alpha is exactly 1, whatever the smoothing or the aspect. A shape shorter than twice its reach — a
+ * capsule, a disc — has no such point on some axis, and claims no cover.
  *
  * ── WHY THE ARITHMETIC IS IN PIXEL INDICES ─────────────────────────────────────────────────────
  *
@@ -73,9 +62,11 @@ export interface PixelRect {
  *  tolerance. */
 export const OCCLUSION_AA_INSET = 0.5;
 
-/** A coverer whose largest drawn radius exceeds this share of its SHORT half-axis is refused, so
- *  `CornerParams`'s pill leg (which needs an authored radius past 88% of it) is unreachable. */
-export const PILL_GUARD_FRACTION = 0.5;
+/** How far a continuous corner of radius `radius` and smoothing `smoothing` reaches along each edge from
+ *  the corner (Jiv/Shaders/Corner.Continuous.glsl): its easing starts (1 + s) r out. Past it on both
+ *  axes the shape's distance is the nearer straight edge's. */
+export const CornerReach = (radius: number, smoothing: number): number =>
+  (1 + Math.max(0, Math.min(1, smoothing))) * radius;
 
 export const PixelRectArea = (r: PixelRect): number =>
   Math.max(0, r.X1 - r.X0) * Math.max(0, r.Y1 - r.Y0);
@@ -125,23 +116,14 @@ export const CoveredPixels = (
  *
  * ── WHY THE TWO WING ROWS ARE ALPHA 1, WHICH THE FLAT BRANCH DOES NOT SAY ─────────────────────
  *
- * `ShapeSDF_inner`'s flat branch only runs on the CENTRE block (`|p| <= halfSize - rAxis` on both
- * axes), so the mid row is the one `CoveredPixels`'s own derivation already covers. The top and
- * bottom rows take the superellipse branch, and it degenerates there. With `|p.x| <= halfW - r`
- * the x leg is clamped to the shader's own `1e-5` floor, so with `uvy = q.y / r`:
- *
- *     L        = (1e-5^n + uvy^n)^(1/n)                  -> uvy
- *     gradLen  = L^(1-n) * sqrt(gx^2 + gy^2)             -> uvy^(1-n) * uvy^(n-1)/r  =  1/r
- *     dist     = (L - 1) / gradLen                       -> (uvy - 1) * r  =  |p.y| - halfH
- *
- * — the distance to the nearest HORIZONTAL edge, with the radius and the exponent both cancelling.
- * So a pixel centre at least 0.5 inside the top or bottom edge and clear of both corner blocks
- * has `dist <= -0.5` and alpha exactly 1, for every exponent the corner field can pick. The
- * residual `1e-5` terms only push `L` UP, and `Occlusion.Wired.test.ts` sweeps the claim against
- * the CPU port of `ShapeSDF_inner` at exponents 2/3/4/5/8 rather than resting on the limit.
+ * The continuous corner's flat branch runs wherever a point is past the corner's reach on BOTH axes;
+ * the top and bottom wing rows are past it on x but not on y. There the nearest feature is the
+ * straight top or bottom edge (the corner's features all lie within `reach` of the side on x), so
+ * `dist = |p.y| - halfH`: a pixel centre at least 0.5 inside that edge and clear of both corner blocks
+ * has alpha exactly 1. `Occlusion.Wired.test.ts` sweeps the claim against the corner field.
  *
  * `radius` is the LARGEST of the four drawn radii, so cutting that block from all four corners is
- * conservative whichever corner carries which radius — `PickRectRadius` selects per quadrant and
+ * conservative whichever corner carries which radius — the field selects per quadrant and
  * the derivation above does not depend on which it picked.
  *
  * The three rects are disjoint and their union is exactly `CoveredPixels(..., 0.5)` minus the four
@@ -153,10 +135,8 @@ export const CoveredRegion = (
 ): PixelRect[] => {
   const face = CoveredPixels(x0, y0, x1, y1, OCCLUSION_AA_INSET);
   const core = CoveredPixels(x0, y0, x1, y1, radius);
-  // A rect shorter than twice its radius has corner blocks that would OVERLAP, and then the three
-  // rows are not a partition of anything. The pill guard already refuses `radius > 0.5 * minHalf`,
-  // so this cannot fire on an admitted coverer; it is here because the arithmetic below is only
-  // sound when it holds.
+  // A rect shorter than twice its corner reach (a capsule, a disc) has corner blocks that would
+  // OVERLAP, and then the three rows are not a partition of anything: it claims no cover.
   if (PixelRectEmpty(core) || PixelRectEmpty(face)) return [];
   const out: PixelRect[] = [{ X0: face.X0, Y0: core.Y0, X1: face.X1, Y1: core.Y1 }];
   if (core.Y0 > face.Y0) out.push({ X0: core.X0, Y0: face.Y0, X1: core.X1, Y1: core.Y0 });

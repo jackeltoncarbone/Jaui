@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { JivInstanceBuffer, JIV_FLOATS_PER_INSTANCE } from '../src/Jiv/Jiv.InstanceBuffer';
 import { Jiv } from '../src/Jiv/Jiv';
 import {
-  CarvePieceTransform, CoveredPixels, CoveredRegion, RasterPixels, PixelRectEmpty, PixelRectArea,
+  CarvePieceTransform, CoveredPixels, CoveredRegion, RasterPixels, PixelRectEmpty, PixelRectArea, CornerReach,
 } from '../src/Core/Occlusion';
+import { ContinuousCorner } from '../src/Jiv/Corner.Continuous';
 import { MAT_IDENTITY, type Mat2x3 } from '../src/Transform/Mat2x3';
 
 /**
@@ -12,8 +13,8 @@ import { MAT_IDENTITY, type Mat2x3 } from '../src/Transform/Mat2x3';
  * `Occlusion.test.ts` is the rectangle arithmetic. This file is the three claims that arithmetic
  * rests on and that a rectangle cannot make for itself:
  *
- *   1. the inset `max(radius, 0.5)` really does land on `alpha == 1` in the shape field — shown
- *      against a CPU port of `ShapeSDF_inner` that is the same expressions in the same order;
+ *   1. the inset `max(CornerReach(radius, s), 0.5)` really does land on `alpha == 1` in the shape
+ *      field — shown against the CPU transcription of the continuous corner;
  *   2. a carved piece comes out of the REAL `JivInstanceBuffer.Push` differing from the fill it
  *      replaces in its GEOMETRY lanes and in a named set of `avgScale`-scaled lanes that are exact
  *      no-ops at `BorderWidth == 0` on a non-glass fill — and in nothing else;
@@ -30,21 +31,12 @@ beforeEach(() => {
   } as unknown as Document;
 });
 
-// ── A CPU port of the panel shader's shape field. Transcribed from `Jiv.Panel.frag`
-// `ShapeSDF_inner`: same expressions, same order, same epsilons.
-const ShapeSdfInner = (px: number, py: number, halfW: number, halfH: number, r: number, n: number): number => {
-  const rAxis = Math.max(r, 1e-3);
-  const qx = Math.abs(px) - halfW + rAxis;
-  const qy = Math.abs(py) - halfH + rAxis;
-  if (qx <= 0 && qy <= 0) return -Math.min(halfW - Math.abs(px), halfH - Math.abs(py));
-  const uvx = Math.max(Math.max(qx, 0) / rAxis, 1e-5);
-  const uvy = Math.max(Math.max(qy, 0) / rAxis, 1e-5);
-  const L = Math.pow(Math.pow(uvx, n) + Math.pow(uvy, n), 1 / n);
-  const gx = Math.pow(uvx, n - 1) / rAxis;
-  const gy = Math.pow(uvy, n - 1) / rAxis;
-  const gradLen = Math.pow(L, 1 - n) * Math.sqrt(gx * gx + gy * gy);
-  return (L - 1) / Math.max(gradLen, 1e-5);
-};
+// The panel shader's shape field, at one radius on all four corners and smoothing `s`.
+const Field = (px: number, py: number, halfW: number, halfH: number, r: number, s: number): number =>
+  ContinuousCorner(px, py, halfW, halfH, [r, r, r, r], s);
+
+/** The smoothings the sweeps run: a plain arc, iOS, and the most the model eases. */
+const SMOOTHINGS = [0, 0.3, 0.6, 0.8, 1];
 
 /** `1 - smoothstep(-0.5, 0.5, dist)` — the panel shader's `fillAlpha`, verbatim. */
 const FillAlpha = (dist: number): number => {
@@ -60,48 +52,47 @@ const FillAlpha32 = (dist: number): number => {
 };
 
 describe("Occlusion — the inset is the shader's, not a tolerance", () => {
-  const Sweep = (x0: number, y0: number, w: number, h: number, radius: number, n: number): void => {
-    const cover = CoveredPixels(x0, y0, x0 + w, y0 + h, radius);
+  const Sweep = (x0: number, y0: number, w: number, h: number, radius: number, s: number): void => {
+    const cover = CoveredPixels(x0, y0, x0 + w, y0 + h, CornerReach(radius, s));
     expect(PixelRectEmpty(cover)).toBe(false);
     const cx = x0 + w / 2, cy = y0 + h / 2;
     for (let j = cover.Y0; j < cover.Y1; j++) {
       for (let i = cover.X0; i < cover.X1; i++) {
-        expect(FillAlpha(ShapeSdfInner(i + 0.5 - cx, j + 0.5 - cy, w / 2, h / 2, radius, n))).toBe(1);
+        expect(FillAlpha(Field(i + 0.5 - cx, j + 0.5 - cy, w / 2, h / 2, radius, s))).toBe(1);
       }
     }
   };
 
   it('every claimed pixel of a square panel is alpha EXACTLY 1', () => {
-    Sweep(0, 0, 120, 80, 0, 4);
+    Sweep(0, 0, 120, 80, 0, 0.6);
   });
 
-  it('...of a rounded panel, across every superellipse exponent the corner field can pick', () => {
-    for (const n of [2, 3, 4, 5, 8]) Sweep(0, 0, 200, 140, 12, n);
+  it('...of a rounded panel, at every smoothing the corner can take', () => {
+    for (const s of SMOOTHINGS) Sweep(0, 0, 200, 140, 12, s);
   });
 
   it('...at a fractional origin, which is where a seam actually lands', () => {
-    Sweep(-400 + 433 + 1 / 3, 0.25, 360, 433 + 1 / 3, 0, 4);
+    Sweep(-400 + 433 + 1 / 3, 0.25, 360, 433 + 1 / 3, 0, 0.6);
   });
 
-  it('...of a panel whose radius is right at the pill guard', () => {
-    Sweep(0, 0, 100, 100, 25, 4);
+  it('...of a panel whose radius is a quarter of its side', () => {
+    Sweep(0, 0, 100, 100, 25, 0.6);
   });
 
   it('the row just outside a square panel is NOT alpha 1 — the claim is not vacuous', () => {
     const cover = CoveredPixels(0, 0, 120, 80, 0);
-    expect(FillAlpha(ShapeSdfInner(0.5 - 60, cover.Y1 + 0.5 - 40, 60, 40, 0, 4))).toBeLessThan(1);
+    expect(FillAlpha(Field(0.5 - 60, cover.Y1 + 0.5 - 40, 60, 40, 0, 0.6))).toBeLessThan(1);
   });
 });
 
 /**
  * THE WINGS — the claim lane occlusion2 rests on, against the same CPU port.
  *
- * `CoveredPixels` insets a rounded rect by its RADIUS on every side, which is the flat branch's
+ * `CoveredPixels` insets a rounded rect by its corner REACH on every side, which is the flat branch's
  * own guarantee and nothing more. `CoveredRegion` also claims the two WING rows — the full-width
  * strip along the top edge and along the bottom, clear of the four corner blocks — where the flat
- * branch does NOT run and the superellipse branch degenerates to the distance to the nearest
- * horizontal edge (the derivation is in `Core/Occlusion.ts`). Every pixel of every claimed rect is
- * swept here, at every exponent the corner field can pick, rather than resting on that limit.
+ * branch does NOT run and the nearest feature is the straight edge (the derivation is in
+ * `Core/Occlusion.ts`). Every pixel of every claimed rect is swept here, at every smoothing.
  *
  * This is not a small correction. `Screen { BorderRadius: @JwiftScreenRadius }` draws a 183 device
  * px corner at dpr 2, and that clip is in EVERY node's stack in the app: the all-sides inset threw
@@ -109,19 +100,18 @@ describe("Occlusion — the inset is the shader's, not a tolerance", () => {
  * zero pieces on both machines.
  */
 describe('Occlusion — the wing rows a rounded rect really does write at alpha 1', () => {
-  /** Every pixel centre the region claims, at the field's own value. `fieldRadius` is what
-   *  `PickRectRadius` would hand the SDF in that quadrant, which need not be the max the region
-   *  was built from. */
+  /** Every pixel centre the region claims, at the field's own value. `fieldRadius` is what the field
+   *  picks in that quadrant, which need not be the max the region was built from. */
   const SweepRegion = (
-    x0: number, y0: number, w: number, h: number, radius: number, n: number, fieldRadius = radius,
+    x0: number, y0: number, w: number, h: number, radius: number, s: number, fieldRadius = radius,
   ): number => {
-    const region = CoveredRegion(x0, y0, x0 + w, y0 + h, radius);
+    const region = CoveredRegion(x0, y0, x0 + w, y0 + h, CornerReach(radius, s));
     const cx = x0 + w / 2, cy = y0 + h / 2;
     let claimed = 0;
     for (const rect of region) {
       for (let j = rect.Y0; j < rect.Y1; j++) {
         for (let i = rect.X0; i < rect.X1; i++) {
-          expect(FillAlpha(ShapeSdfInner(i + 0.5 - cx, j + 0.5 - cy, w / 2, h / 2, fieldRadius, n))).toBe(1);
+          expect(FillAlpha(Field(i + 0.5 - cx, j + 0.5 - cy, w / 2, h / 2, fieldRadius, s))).toBe(1);
           claimed++;
         }
       }
@@ -129,23 +119,23 @@ describe('Occlusion — the wing rows a rounded rect really does write at alpha 
     return claimed;
   };
 
-  it('every claimed pixel is alpha EXACTLY 1, at every superellipse exponent', () => {
-    for (const n of [2, 3, 4, 5, 8]) expect(SweepRegion(0, 0, 200, 140, 24, n)).toBeGreaterThan(0);
+  it('every claimed pixel is alpha EXACTLY 1, at every smoothing', () => {
+    for (const s of SMOOTHINGS) expect(SweepRegion(0, 0, 200, 140, 24, s)).toBeGreaterThan(0);
   });
 
   it('...at a fractional origin, which is where a seam actually lands', () => {
-    SweepRegion(-400 + 433 + 1 / 3, 0.25, 360, 220, 31, 4);
+    SweepRegion(-400 + 433 + 1 / 3, 0.25, 360, 220, 31, 0.6);
   });
 
-  it('...and at a radius right at the pill guard, where the wings are widest', () => {
-    SweepRegion(0, 0, 160, 160, 40, 4);
+  it('...and at a radius a quarter of the side', () => {
+    SweepRegion(0, 0, 160, 160, 40, 0.6);
   });
 
   it('...with the field on a SMALLER radius than the region was built from', () => {
     // `radius` is the MAX of the four drawn radii and the corner blocks are cut at that size, so a
     // quadrant whose own radius is smaller is strictly further inside. Both legs swept.
-    SweepRegion(0, 0, 200, 140, 24, 4, 6);
-    SweepRegion(0, 0, 200, 140, 24, 4, 0);
+    SweepRegion(0, 0, 200, 140, 24, 0.6, 6);
+    SweepRegion(0, 0, 200, 140, 24, 0.6, 0);
   });
 
   it('the wings are the whole point: the region claims far more than the inset rect does', () => {
@@ -174,11 +164,11 @@ describe('Occlusion — the wing rows a rounded rect really does write at alpha 
 
   it('a corner block is NOT claimed, and is NOT alpha 1 — the claim is not vacuous', () => {
     const w = 200, h = 140, radius = 24;
-    const region = CoveredRegion(0, 0, w, h, radius);
+    const region = CoveredRegion(0, 0, w, h, CornerReach(radius, 0.6));
     // The pixel just inside the top-left corner of the face, which the corner block excludes.
     const px = 0, py = 0;
     expect(region.some((r) => px >= r.X0 && px < r.X1 && py >= r.Y0 && py < r.Y1)).toBe(false);
-    expect(FillAlpha(ShapeSdfInner(px + 0.5 - w / 2, py + 0.5 - h / 2, w / 2, h / 2, radius, 4))).toBeLessThan(1);
+    expect(FillAlpha(Field(px + 0.5 - w / 2, py + 0.5 - h / 2, w / 2, h / 2, radius, 0.6))).toBeLessThan(1);
   });
 
   it('a square rect gets the IDENTICAL set it always got — one rect, no wings', () => {
@@ -264,7 +254,7 @@ describe('Occlusion — a carved piece is the same panel at a smaller rect', () 
       const cx = (s.X0 + s.X1) / 2, cy = (s.Y0 + s.Y1) / 2;
       for (let j = piece.Y0; j < piece.Y1; j++) {
         for (const i of [piece.X0, piece.X0 + 1, 1279, 2558, piece.X1 - 1]) {
-          const dist = ShapeSdfInner(i + 0.5 - cx, j + 0.5 - cy, d[6], d[7], 0, 4);
+          const dist = Field(i + 0.5 - cx, j + 0.5 - cy, d[6], d[7], 0, 0.6);
           expect(FillAlpha32(dist)).toBe(1);
         }
       }

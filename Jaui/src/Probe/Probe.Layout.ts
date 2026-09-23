@@ -128,7 +128,7 @@ export const ProbeLayout = (canvas: Canvas, ids: ReadonlyMap<Element, number>): 
       Layer: rs?.Layer ?? 0,
       ZIndex: node.ChildLayout.ZIndex,
       Radius: _round(Math.max(...radii)),
-      RadiusAuthored: _round(Math.min(...(rs?.BorderRadiusRaw ?? [0, 0, 0, 0]))),
+      RadiusAuthored: _round(Math.min(...(rs?.BorderRadius ?? [0, 0, 0, 0]))),
       HasPaint: hasPaint,
       Background: background?.Kind ?? null,
       Opacity: _round(opacity),

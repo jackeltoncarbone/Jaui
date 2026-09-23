@@ -214,7 +214,7 @@ describe('the SIXTH panel program leaves the boot batch by the same mechanism', 
     expect(wirePanel).toContain('if (this._panelShaderBorderDirect !== null && !this._panelBorderDirectWired) {');
     const wireDirect = arrowBody(RENDERER, '_wirePanelBorderDirect');
     expect(wireDirect).toContain('this._panelBorderDirectWired = true;');
-    expect(wireDirect).toContain('_preparePanelProgram(this._gl, shader.Program)');
+    expect(wireDirect).toContain('_extractPanelLocs(this._gl, shader.Program)');
   });
 
   it('the flag and the renderer field agree on OFF, so the worker path cannot compile it by default', () => {

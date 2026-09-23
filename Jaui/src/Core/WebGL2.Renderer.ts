@@ -28,7 +28,7 @@ import { PACE_FENCE_RING, type PaceFenceSample } from './Tick.Pace';
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
-import { SS_PILL_CURVE, SS_PILL_SEGMENTS } from '../Jiv/Pill.Curve';
+import cornerSrc from '../Jiv/Shaders/Corner.Continuous.glsl.gen';
 import shadowBackdropFragSrc from '../Jiv/Shaders/Jiv.ShadowBackdrop.frag.gen';
 import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
 import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
@@ -154,23 +154,6 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
 });
 
 const _BG_UV_IDENTITY = [1, 1, 0, 0];
-
-/** A linked panel program's CONSTANT uniforms, uploaded once, then its locations.
- *
- *  The pill endcap curve is a uniform rather than a shader constant because of what D3D11 makes of a
- *  constant array (Jiv/Pill.Curve.ts has the measurement). Uniform values live on the program, so one
- *  upload at link covers every draw for the program's life, and a context restore rebuilds programs
- *  through this same call. Every panel variant comes through here -- the boot seven and the flagged
- *  ones -- which is what makes it the one place: a program that skipped it would draw a pill with a
- *  zero-length loop and an all-zero curve. */
-const _preparePanelProgram = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelLocs => {
-  const previous = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
-  gl.useProgram(p);
-  gl.uniform2fv(gl.getUniformLocation(p, 'u_PillCurve[0]'), SS_PILL_CURVE);
-  gl.uniform1i(gl.getUniformLocation(p, 'u_PillSegments'), SS_PILL_SEGMENTS);
-  gl.useProgram(previous);
-  return _extractPanelLocs(gl, p);
-};
 
 /** The rim's white term as a share of its gain. Fitted jointly to Apple's rim peaks over the body just
  *  inside them: the speaker button over teal, the Control Center Wi-Fi pill over blue, the Safari more
@@ -318,29 +301,13 @@ const PANEL_OFF_BODY_TINT = 41;
 const PANEL_BACKDROP_FILTER_EPSILON = 0.001;
 
 // ── The borderless program's own four offsets ───────────────────────────────
-// `NO_SHAPE_GRADIENT` removes the SDF gradient and the border chain it feeds. That is sound on
-// two conditions, both PER INSTANCE and both decided here off the same packed floats the
-// fragment's varyings are fed from:
-//
-//   1. `borderWidth == 0.0` EXACTLY. Not an epsilon: the removed chain's output is the exact
-//      float 0 only at zero, and at any other width it paints. `Jiv.InstanceBuffer.Push` writes
-//      `style.BorderWidth * avgScale * d` here, and its 'Suppress' arm writes a literal 0.
-//   2. `pillW == 0.0` EXACTLY — the corner field's superellipse leg. There `CornerDist` and
-//      `CornerEval` both return `ShapeSDF_inner(p, halfSize, vec2(rCorner), n)` from the same
-//      `CornerParams`, so the substitution is bit-identical by inspection. `pillW` is a function
-//      of the instance's half-size and packed smoothness ALONE (see `CornerParams` — `rCorner` is
-//      the only per-fragment term and it does not reach `pillW`), which is what makes a per-batch
-//      answer exact rather than conservative.
-const PANEL_OFF_HALF_W = 6;
-const PANEL_OFF_HALF_H = 7;
+// `NO_SHAPE_GRADIENT` removes the SDF gradient and the border chain it feeds. That is sound on one
+// condition, PER INSTANCE and decided here off the packed float the fragment reads: `borderWidth
+// == 0.0` EXACTLY. Not an epsilon: the removed chain's output is the exact float 0 only at zero, and
+// at any other width it paints. `Jiv.InstanceBuffer.Push` writes `style.BorderWidth * avgScale * d`
+// here, and its 'Suppress' arm writes a literal 0. The corner needs no condition: `CornerDist` and
+// `CornerEval` return the same `ContinuousCorner` distance.
 const PANEL_OFF_BORDER_WIDTH = 27;
-const PANEL_OFF_SMOOTH_PACKED = 29;
-// `Jiv.Panel.frag`'s `CornerParams`, constant for constant. Rounded to float32 because the
-// fragment evaluates them in `highp float` off the same float32 instance data.
-const CORNER_SAT_FRAC = Math.fround(0.12);
-const CORNER_ASPECT_LO = Math.fround(1.02);
-/** `CornerParams`' own `max(minHalf, 0.0001)` divide guard, as the float32 the shader sees. */
-const CORNER_MIN_HALF = Math.fround(0.0001);
 const PANEL_BYTES_PER_INSTANCE = PANEL_FLOATS_PER_INSTANCE * 4;
 const PANEL_ATTR_COUNT = 14; // locations 1..14 — clip_meta is packed into a_Outline.zw
 const BYTES_PER_VEC4 = 16;
@@ -381,27 +348,16 @@ const CLIP_MASK_FRAG = `#version 300 es
 precision highp float;
 uniform vec4 u_ClipRect;      // clip shape — parent's rect, device px
 uniform float u_Radius;       // device px (uniform across corners)
-uniform float u_Smoothness;   // 0 = circle corners, 1 = sharp squircle
+uniform float u_Smoothness;   // the continuous corner's smoothing
 uniform vec2 u_Resolution;    // canvas size in device px
 out vec4 fragColor;
+${cornerSrc}
 void main() {
     vec2 p = vec2(gl_FragCoord.x, u_Resolution.y - gl_FragCoord.y);
-    vec2 center = u_ClipRect.xy + 0.5 * u_ClipRect.zw;
-    vec2 halfSize = 0.5 * u_ClipRect.zw;
-    float r = min(u_Radius, min(halfSize.x, halfSize.y));
-    vec2 qAbs = abs(p - center);
-    vec2 cornerP = qAbs - (halfSize - vec2(r));
-    float sd;
-    // Superellipse-corner SDF — mirrors clipShapeDistance in Jiv.Panel.frag
-    // so the visual mask matches the in-shader clip stack (Apple-style
-    // squircle when smoothness > 0, pure circle at smoothness 0).
-    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) {
-        sd = max(qAbs.x - halfSize.x, qAbs.y - halfSize.y);
-    } else {
-        float n = 2.0 + 3.0 * clamp(u_Smoothness, 0.0, 1.0);
-        float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
-        sd = r * (pow(max(L, 0.0), 1.0 / n) - 1.0);
-    }
+    // The same continuous corner the in-shader clip stack draws, so the mask matches it.
+    vec2 unused;
+    float sd = ContinuousCorner(p - (u_ClipRect.xy + 0.5 * u_ClipRect.zw), 0.5 * u_ClipRect.zw,
+                                vec4(u_Radius), u_Smoothness, unused);
     if (sd <= 0.0) discard;
     fragColor = vec4(0.0, 0.0, 0.0, 0.0);
 }
@@ -1739,46 +1695,21 @@ export class WebGL2Renderer implements Renderer {
   /**
    * Can every instance in the pending batch be shaded by the BORDERLESS program?
    *
-   * Two questions per instance, both exact, both off the same packed floats the fragment reads.
-   *
-   * 1. **Is the border exactly absent?** `borderWidth === 0` covers both signed zeros, which is
-   *    right: `borderWidth * widthScale` is ±0 for either, `max(±0, 0.0)` is 0, and
-   *    `borderCoverage` is 0 / 1 = 0 in both cases. Not an epsilon — a 0.001 px border still
-   *    paints, at the hairline floor, at 0.001 coverage, and the removed chain is what paints it.
-   *
-   * 2. **Is the corner on the superellipse leg?** `pillW = sat * elong` in `CornerParams`, and
-   *    neither factor depends on the fragment, so one answer serves the whole instance. It is
-   *    exactly 0 when either factor is exactly 0, and `smoothstep` returns exactly 0 below its
-   *    low edge. A DEGENERATE band (`minHalf - satBand === minHalf - 1`, i.e. a panel under
-   *    ~8.33 device px on its short half-axis) makes the fragment's `smoothstep` divide by zero,
-   *    and this refuses rather than reasoning about what that produced — those batches keep
-   *    MATERIAL_FLAT.
+   * One question per instance, exact, off the same packed float the fragment reads: is the border
+   * exactly absent? `borderWidth === 0` covers both signed zeros, which is right: `borderWidth *
+   * widthScale` is ±0 for either, `max(±0, 0.0)` is 0, and `borderCoverage` is 0 / 1 = 0 in both
+   * cases. Not an epsilon — a 0.001 px border still paints, at the hairline floor, at 0.001
+   * coverage, and the removed chain is what paints it. The corner needs no question: the program's
+   * `CornerDist` and the full program's `CornerEval` return the same `ContinuousCorner` distance.
    *
    * One instance answering no sends the whole batch back to MATERIAL_FLAT. Only reached on
    * batches `_batchTakesFlatProgram` has already admitted.
    */
   private _batchTakesBorderlessProgram = (): boolean => {
     const d = this._panelInstanceData;
-    const fr = Math.fround;
     for (let i = 0; i < this._panelInstanceCount; i++) {
       const b = i * PANEL_FLOATS_PER_INSTANCE;
       if (d[b + PANEL_OFF_BORDER_WIDTH] !== 0) return false;
-      // `CornerParams`, term for term, in float32.
-      const halfW = d[b + PANEL_OFF_HALF_W];
-      const halfH = d[b + PANEL_OFF_HALF_H];
-      const minHalf = Math.min(halfW, halfH);
-      const maxHalf = Math.max(halfW, halfH);
-      const satBand = Math.max(fr(minHalf * CORNER_SAT_FRAC), 1);
-      const satE0 = fr(minHalf - satBand);
-      const satE1 = fr(minHalf - 1);
-      if (!(satE0 < satE1)) return false;
-      // `authoredR = floor(smoothness * 0.5) / 16.0` — the authored corner radius rides above the
-      // 0..1 smoothness in the same float, in sixteenths of a device pixel.
-      const authoredR = Math.floor(d[b + PANEL_OFF_SMOOTH_PACKED] * 0.5) / 16;
-      if (authoredR <= satE0) continue;                       // sat === 0
-      const aspect = fr(maxHalf / Math.max(minHalf, CORNER_MIN_HALF));
-      if (aspect <= CORNER_ASPECT_LO) continue;               // elong === 0, and sat is finite
-      return false;
     }
     return true;
   };
@@ -4804,17 +4735,17 @@ export class WebGL2Renderer implements Renderer {
   };
 
   private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
-    this._panelLocsGlass = _preparePanelProgram(gl, this._panelShaderGlass.Program);
-    this._panelLocsNone  = _preparePanelProgram(gl, this._panelShaderNone.Program);
+    this._panelLocsGlass = _extractPanelLocs(gl, this._panelShaderGlass.Program);
+    this._panelLocsNone  = _extractPanelLocs(gl, this._panelShaderNone.Program);
     // Most of these come back null on the flat program — the uniforms are not in it. That is the
     // point, and it needs no special case: `gl.uniform*` with a null location is specified to be
     // silently ignored, so `PanelDrawBatch` sets the same uniforms for every variant and only the
     // ones the bound program actually declares land.
-    this._panelLocsFlat  = _preparePanelProgram(gl, this._panelShaderFlat.Program);
-    this._panelLocsBorderless = _preparePanelProgram(gl, this._panelShaderBorderless.Program);
-    this._panelLocsTwoStop = _preparePanelProgram(gl, this._panelShaderTwoStop.Program);
-    this._panelLocsGlassNoLight = _preparePanelProgram(gl, this._panelShaderGlassNoLight.Program);
-    this._panelLocsRim = _preparePanelProgram(gl, this._panelShaderRim.Program);
+    this._panelLocsFlat  = _extractPanelLocs(gl, this._panelShaderFlat.Program);
+    this._panelLocsBorderless = _extractPanelLocs(gl, this._panelShaderBorderless.Program);
+    this._panelLocsTwoStop = _extractPanelLocs(gl, this._panelShaderTwoStop.Program);
+    this._panelLocsGlassNoLight = _extractPanelLocs(gl, this._panelShaderGlassNoLight.Program);
+    this._panelLocsRim = _extractPanelLocs(gl, this._panelShaderRim.Program);
     this._rimPassLoc = gl.getUniformLocation(this._panelShaderRim.Program, 'u_RimPass');
 
     const buf = gl.createBuffer();

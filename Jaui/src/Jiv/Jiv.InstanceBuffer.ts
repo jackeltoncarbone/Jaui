@@ -65,7 +65,7 @@ const _packFgGrade = (brightness: number, saturation: number, contrast: number):
 const _FG_GRADE_IDENTITY = _packFgGrade(1, 1, 1);
 
 /** A panel's shape in device px: half extents, per-corner drawn radii (tl, tr, br, bl) and the
- *  smoothness lane (smoothness fraction plus the authored radius in sixteenths of a device px above it). */
+ *  smoothness lane (the continuous corner's smoothing). */
 export interface JivShape {
   HalfWidth: number;
   HalfHeight: number;
@@ -96,12 +96,6 @@ export const JivPanelShapeOf = (jiv: Jiv, dpr: number, m: Mat2x3, out: JivPanelS
   const halfHeight = cy * jiv.Height * dpr * 0.5;
   const centerLX = jiv.X + jiv.Width * 0.5;
   const centerLY = jiv.Y + jiv.Height * 0.5;
-  // The drawn radius carries the smoothness compensation, which on a shallow box lands close to half
-  // the short axis. Whether a corner is a CAPSULE is the author's intent, so the shader is also handed
-  // the authored radius and decides saturation from it. Everything past half the box saturates alike.
-  const raw = style.BorderRadiusRaw;
-  const authoredMin = Math.min(Math.max(Math.min(raw[0], raw[1], raw[2], raw[3]), 0) * avgScale * dpr,
-    Math.min(halfWidth, halfHeight) + 1);
   const r = style.BorderRadius;
   out.HalfWidth = halfWidth;
   out.HalfHeight = halfHeight;
@@ -109,10 +103,7 @@ export const JivPanelShapeOf = (jiv: Jiv, dpr: number, m: Mat2x3, out: JivPanelS
   out.Radii[1] = r[1] * avgScale * dpr;
   out.Radii[2] = r[2] * avgScale * dpr;
   out.Radii[3] = r[3] * avgScale * dpr;
-  // Smoothness rides with the authored radius in one float: the 0..1 fraction is the smoothness and the
-  // whole part above it is the authored radius in sixteenths of a device pixel. A clip shape passes a
-  // bare smoothness and decodes an authored radius of 0.
-  out.Smoothness = Math.max(0, Math.min(1, style.BorderRadiusSmoothness)) + 2 * Math.round(authoredMin * 16);
+  out.Smoothness = Math.max(0, Math.min(1, style.BorderRadiusSmoothness));
   out.CenterX = matApplyX(m, centerLX, centerLY) * dpr;
   out.CenterY = matApplyY(m, centerLX, centerLY) * dpr;
   out.Cos = matCos(m);
@@ -323,8 +314,8 @@ export class JivInstanceBuffer {
 
     // The refraction band and the circle map's reach at the outline, in device px (Jiv.Panel.frag).
     const minHalf = Math.min(halfW, halfH);
-    const raw = style.BorderRadiusRaw;
-    const cornerRadius = Math.min(Math.max(raw[0], raw[1], raw[2], raw[3], 0) * avgScale * d, minHalf);
+    const rr = style.BorderRadius;
+    const cornerRadius = Math.min(Math.max(rr[0], rr[1], rr[2], rr[3], 0) * avgScale * d, minHalf);
     const roundness = minHalf > 0 ? cornerRadius / minHalf : 0;
     const band = Math.min(minHalf, Math.max(REFRACTION_BAND_MIN * d,
       Math.min(REFRACTION_BAND_MAX * d, REFRACTION_BAND_SHARE * cornerRadius * roundness)));

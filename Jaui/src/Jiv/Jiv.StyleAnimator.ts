@@ -177,7 +177,6 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.ProgressiveBlurEasing = target.ProgressiveBlurEasing;
   render.ProgressiveBlurStops = target.ProgressiveBlurStops;
   render.CornerShape = target.CornerShape;
-  render.BorderRadiusRaw = target.BorderRadiusRaw;
   render.BackdropFrostAuto = target.BackdropFrostAuto;
   // The lift declaration and both zone COLORS snap. An additive color's amount is what moves (it
   // springs in the two buckets above); its hue is not a spring, and `LiftDeclaration` is a tagged

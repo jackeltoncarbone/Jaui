@@ -226,23 +226,9 @@ const _inferMaterial = (thickness: number, direction: ProgressiveBlurDirection |
 export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle => {
   const rawRadius = ResolveLengthTuple4(s.BorderRadius, ctx, ['W', 'W', 'W', 'W']);
   const smoothness = Resolve(s.BorderRadiusSmoothness, ctx, 'W');
-  // Superellipse compensation, solved rather than fitted, so an authored radius reads as the CIRCLE of
-  // that radius at every smoothness. The shader draws the corner as a superellipse of exponent
-  // n = SmoothnessToExponent(s) = 2 + 6s, which hugs the square corner tighter than a circle of the same
-  // radius. Both curves are symmetric about the corner diagonal, so they agree exactly when they reach
-  // equally far along it: a circle of radius r comes within r(sqrt2 - 1) of the corner point, a
-  // superellipse of radius R within sqrt2 * R * (1 - 2^(-1/n)). Equating the two and solving for R/r:
-  //
-  //     cornerScale(n) = (1 - 2^(-1/2)) / (1 - 2^(-1/n))
-  //
-  // which is exactly 1 at n = 2 (no compensation for a true circle) and grows with smoothness. The old
-  // 1 + 2.6s was a straight-line fit through the same curve, 0.7% to 2.0% wide across the range, and it
-  // never landed concentric. Saturated pills are untouched: the half-box clamp and the fullyRounded
-  // circle collapse still apply downstream, and saturation is keyed to the AUTHORED radius (see
-  // Jiv.InstanceBuffer) so this flare can never promote a rounded rectangle into a capsule.
-  const cornerExponent = 2 + 6 * Math.max(0, Math.min(1, smoothness));
-  const cornerScale = (1 - Math.SQRT1_2) / (1 - Math.pow(2, -1 / cornerExponent));
-  const borderRadius = rawRadius.map(r => r * cornerScale) as typeof rawRadius;
+  // The authored radius is the continuous corner's own radius (Jiv/Shaders/Corner.Continuous.glsl),
+  // as it is Apple's: no compensation, and a child's radius is its parent's less the inset.
+  const borderRadius = rawRadius;
   const thickness = Resolve(s.Thickness, ctx, 'W');
 
   // Filters — each authored as a CSS-shaped function list, normalized into
@@ -302,7 +288,6 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 
     BorderRadius: borderRadius,
-    BorderRadiusRaw: rawRadius,
     CornerShape: _parseCornerShape(ResolveTernary(s.CornerShape, ctx)),
     BorderRadiusSmoothness: smoothness,
 

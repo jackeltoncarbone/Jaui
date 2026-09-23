@@ -47,7 +47,7 @@ import { GLASS_PROGRAMS_PREEMPT, ParseGlassPrograms, type GlassProgramsArm } fro
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
 import {
   PlanOcclusion, CoveredPixels, CoveredRegion, IntersectRegions, RasterPixels, IntersectPixelRect,
-  PixelRectEmpty, PixelRectArea, CarvePieceTransform, PILL_GUARD_FRACTION,
+  PixelRectEmpty, PixelRectArea, CarvePieceTransform, CornerReach,
   DEFAULT_OCCLUSION_LIMITS, NewOcclusionNotes, OcclusionNotesLine,
   type PixelRect, type OcclusionFill, type OcclusionVerdict, type OcclusionNotes,
 } from './Occlusion';
@@ -4376,7 +4376,7 @@ export class Canvas implements DirtyTracker {
         + ` frags=${c.Frags} face=${c.Face} band=${c.Band}`
         + ` skirt=${c.Skirt} cut=${c.Cut} ca3=${c.Ca3}`
         + ` taps=${c.Taps} full=${c.TapsFull} clipFetches=${c.ClipFetches}`
-        + ` pill=${c.PillApprox} projective=${c.Projective}`
+        + ` projective=${c.Projective}`
         + ` pixels=${mask === 0 ? 'SAME' : 'DIFFERENT'}`;
       if (line !== this._glassSkipLastLine) { this._glassSkipLastLine = line; JTrace(line); }
     }
@@ -5394,19 +5394,13 @@ export class Canvas implements DirtyTracker {
     const h = cy * node.Height;
     const avgScale = (cx + cy) * 0.5;
     const maxR = Math.min(w, h) / 2;
-    // The clip draws the panel's corner verbatim — the compensated radius, clamped to half the box. It
-    // needs no saturation rule of its own: fullyRounded below flattens smoothness to 0 for genuinely
-    // round shapes, and the superellipse at n = 2 is then an exact circle or stadium.
+    // The clip draws the panel's corner verbatim: the same continuous corner, its radius clamped to half
+    // the box, so a capsule clips as the capsule it draws.
     const corner = (i: number): number => Math.min(radii[i] * avgScale, maxR);
     const rtl = corner(0);
     const rtr = corner(1);
     const rbr = corner(2);
     const rbl = corner(3);
-    // A circle or pill clips at smoothness 0 (n = 2), else the default squircle bulges into the diagonals.
-    // Keyed to the AUTHORED radius as the panel shader's saturation is: the compensated one passes half a
-    // small box long before the author asked for a circle, and turned a 48pt rounded tile's art into a disc.
-    const raw = node.RenderStyle.BorderRadiusRaw;
-    const fullyRounded = Math.min(raw[0], raw[1], raw[2], raw[3]) * avgScale >= maxR;
     // The clip rect is the node's box in canvas space; under rotation its
     // top-left would be ambiguous, so store the CENTER (always well-defined)
     // and let the clip SDF rebuild corners from center ± half-extents in the
@@ -5424,7 +5418,7 @@ export class Canvas implements DirtyTracker {
       RTR: rtr,
       RBR: rbr,
       RBL: rbl,
-      Smoothness: fullyRounded ? 0 : node.RenderStyle.BorderRadiusSmoothness,
+      Smoothness: node.RenderStyle.BorderRadiusSmoothness,
       Cos: matCos(m),
       Sin: matSin(m),
       CenterX: matApplyX(m, cxLocal, cyLocal),
@@ -5912,17 +5906,11 @@ export class Canvas implements DirtyTracker {
     const avgScale = (matScaleX(eff) + matScaleY(eff)) * 0.5;
     let radius = 0;
     for (let i = 0; i < 4; i++) radius = Math.max(radius, rs.BorderRadius[i] * avgScale * d);
-    let rawMin = rs.BorderRadiusRaw[0];
-    for (let i = 1; i < 4; i++) rawMin = Math.min(rawMin, rs.BorderRadiusRaw[i]);
-    const halfMin = Math.min(r.X1 - r.X0, r.Y1 - r.Y0) * 0.5;
-    const authored = Math.min(Math.max(rawMin, 0) * avgScale * d, halfMin + 1);
-    // Past the guard the corner field can reach its PILL leg, whose interior is a capsule and not
-    // the rect this inset assumes. `Core/Occlusion.ts` derives the 0.88 the leg really needs; the
-    // guard sits at half, so the leg is unreachable rather than approximated.
-    const squareEnough = Math.max(radius, authored) <= PILL_GUARD_FRACTION * halfMin;
+    // How far the corner reaches along each edge: the continuous corner's easing runs (1 + s) r.
+    const reach = CornerReach(radius, rs.BorderRadiusSmoothness);
 
     let cover: readonly PixelRect[] = EMPTY_COVER;
-    let covers = opaque && squareEnough;
+    let covers = opaque;
     if (covers) {
       // TWO CHAINS, and the second is the fallback for the first. `region` is the honest set — a
       // rounded rect's face minus its four CORNER blocks (`CoveredRegion`), which is what the App's
@@ -5932,16 +5920,14 @@ export class Canvas implements DirtyTracker {
       // `MAX_COVER_RECTS` (3^depth on a deep stack of rounded clips) the coverer falls back to it
       // rather than being refused, and one clip per node's stack is one extra rect intersect.
       let region: PixelRect[] | null =
-        IntersectRegions(CoveredRegion(r.X0, r.Y0, r.X1, r.Y1, radius), scan.CanvasRegion);
-      let plain = IntersectPixelRect(CoveredPixels(r.X0, r.Y0, r.X1, r.Y1, radius), scan.Canvas);
-      // A clip only ever SHRINKS what a coverer writes at alpha 1, and a clip whose own shape this
-      // arithmetic cannot bound (rotated, or round enough to be a capsule) makes the coverer
-      // unusable rather than merely smaller.
+        IntersectRegions(CoveredRegion(r.X0, r.Y0, r.X1, r.Y1, reach), scan.CanvasRegion);
+      let plain = IntersectPixelRect(CoveredPixels(r.X0, r.Y0, r.X1, r.Y1, reach), scan.Canvas);
+      // A clip only ever SHRINKS what a coverer writes at alpha 1, and a rotated clip, whose shape this
+      // arithmetic cannot bound, makes the coverer unusable rather than merely smaller.
       for (const c of stack) {
         if ((c.Cos ?? 1) !== 1 || (c.Sin ?? 0) !== 0) { covers = false; break; }
         const cw = c.W * d, ch = c.H * d;
-        const cr = Math.max(c.RTL, c.RTR, c.RBR, c.RBL) * d;
-        if (cr > PILL_GUARD_FRACTION * Math.min(cw, ch) * 0.5) { covers = false; break; }
+        const cr = CornerReach(Math.max(c.RTL, c.RTR, c.RBR, c.RBL) * d, c.Smoothness);
         const cx0 = c.X * d, cy0 = c.Y * d;
         if (region !== null) region = IntersectRegions(region, CoveredRegion(cx0, cy0, cx0 + cw, cy0 + ch, cr));
         plain = IntersectPixelRect(plain, CoveredPixels(cx0, cy0, cx0 + cw, cy0 + ch, cr));
@@ -5967,7 +5953,7 @@ export class Canvas implements DirtyTracker {
     // difference the transform makes cannot reach a pixel. At a non-zero border width it could.
     // An opaque IMAGE carves too: each piece is drawn alone with its UV window re-cut to the piece
     // (`_emitCarvedImage`), so the pixels are the ones the whole quad would have put there.
-    const carvable = (flat || bg.Kind === 'Image') && skippable && radius === 0 && authored === 0
+    const carvable = (flat || bg.Kind === 'Image') && skippable && radius === 0
       && rs.BorderWidth === 0 && rs.Thickness === 0;
     if (!covers && !skippable) return;
     scan.Fills.push({ Order: order, Raster: raster, Cover: cover, Covers: covers, Skippable: skippable, Carvable: carvable });

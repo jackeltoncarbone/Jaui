@@ -12,7 +12,7 @@ export const DefaultJivStyle: JivStyle = {
   PointScale: '1pt',
   BorderRadius: '0',
   CornerShape: 'Round',
-  BorderRadiusSmoothness: '0.3',
+  BorderRadiusSmoothness: '0.6',
   Background: 'rgba(0, 0, 0, 0)',
   // THE ADDITIVE COLOR, inherited (Core/Lift.ts). `Inherit` is the initial value -- take the
   // ancestor's, which for a node with no additive ancestor is nothing at all. `None` is the reset.

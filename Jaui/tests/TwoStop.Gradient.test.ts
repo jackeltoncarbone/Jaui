@@ -335,7 +335,7 @@ describe('routing: which draws take the two-stop program', () => {
     expect(RENDERER).toContain(': isTwoStop ? this._panelLocsTwoStop');
     // And its locations are extracted like every other variant's.
     expect(RENDERER).toContain(
-      'this._panelLocsTwoStop = _preparePanelProgram(gl, this._panelShaderTwoStop.Program);');
+      'this._panelLocsTwoStop = _extractPanelLocs(gl, this._panelShaderTwoStop.Program);');
   });
 
   it('asks the question of the DRAW, not of the instances: the stop count is a batch uniform', () => {

@@ -142,8 +142,8 @@ export interface JivStyle {
   BorderRadius: string;
   /** Space-separated tokens; same 1/2/4 shorthand as BorderRadius. */
   CornerShape: string;
-  /** Corner curvature smoothness — superellipse exponent interpolating
-   *  between round (0) and squircle (1). */
+  /** The continuous corner's smoothing, 0..1 (Jiv/Shaders/Corner.Continuous.glsl): how far the corner
+   *  eases into its edges, (1 + s) x the radius. 0 is a plain circular arc; 0.6, the default, is iOS. */
   BorderRadiusSmoothness: string;
   // Fill
   Background: string;
@@ -373,8 +373,6 @@ export interface JivRenderStyle {
   PointScale: number;
 
   BorderRadius: [number, number, number, number];          // tl, tr, br, bl
-  /** The radii as authored, before the smoothness compensation: what decides whether a corner saturates. */
-  BorderRadiusRaw: [number, number, number, number];
   CornerShape: [CornerShape, CornerShape, CornerShape, CornerShape];
   BorderRadiusSmoothness: number;
 

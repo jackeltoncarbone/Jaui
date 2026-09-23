@@ -3,7 +3,7 @@ import {
   CoveredPixels, CoveredRegion, IntersectRegions, MAX_COVER_RECTS,
   RasterPixels, IntersectPixelRect, PixelRectArea, PixelRectEmpty,
   SubtractPixelRects, MergePixelRects, PlanOcclusion, CarvePieceTransform,
-  DEFAULT_OCCLUSION_LIMITS, OCCLUSION_AA_INSET, PILL_GUARD_FRACTION,
+  DEFAULT_OCCLUSION_LIMITS, OCCLUSION_AA_INSET, CornerReach,
   type PixelRect, type OcclusionFill,
 } from '../src/Core/Occlusion';
 
@@ -43,7 +43,7 @@ describe('Occlusion — the alpha-1 interior', () => {
   });
 
   it('gives up the corner band of a rounded rect, so the flat branch of the SDF is what it reads', () => {
-    // radius 8 -> inset 8 a side: the returned box is where ShapeSDF_inner's `q <= 0` holds.
+    // reach 8 -> inset 8 a side: the returned box is where the corner field's flat branch holds.
     expect(CoveredPixels(0, 0, 100, 100, 8)).toEqual({ X0: 8, Y0: 8, X1: 92, Y1: 92 });
   });
 
@@ -327,13 +327,15 @@ describe('Occlusion — the region, and the cap that keeps it bounded', () => {
   });
 });
 
-describe('Occlusion — the pill guard', () => {
-  it('sits at half the short half-axis, well under the 0.88 the pill leg needs', () => {
-    // `CornerParams`: sat = smoothstep(minHalf - max(0.12*minHalf, 1), minHalf - 1, authoredR), so
-    // the pill leg is unreachable below 0.88 * minHalf. The guard is 0.5.
-    expect(PILL_GUARD_FRACTION).toBe(0.5);
-    const minHalf = 100;
-    const satLowerEdge = minHalf - Math.max(minHalf * 0.12, 1);
-    expect(PILL_GUARD_FRACTION * minHalf).toBeLessThan(satLowerEdge);
+describe('Occlusion — the continuous corner's reach', () => {
+  it('is (1 + s) r: the easing starts that far out along each edge', () => {
+    expect(CornerReach(10, 0.6)).toBeCloseTo(16, 9);
+    expect(CornerReach(10, 0)).toBe(10);
+    expect(CornerReach(10, 2)).toBe(20);
+  });
+
+  it('claims nothing of a capsule, whose corner reach spans its short side', () => {
+    // A 300 x 60 pill at radius 30: the reach (48) passes the 30 px half height, so no row is clear.
+    expect(CoveredRegion(0, 0, 300, 60, CornerReach(30, 0.6))).toEqual([]);
   });
 });

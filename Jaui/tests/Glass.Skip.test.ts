@@ -611,7 +611,6 @@ describe('the census on glass-grid\'s own instances - what each stage removes', 
     for (const c of [fill0, rim0]) {
       expect(c.Frags).toBe(496 * 372);
       expect(c.Face + c.Skirt).toBe(c.Frags);
-      expect(c.PillApprox).toBe(0);
       expect(c.Projective).toBe(0);
     }
     // A 432x300 face with 28pt (56 px) superellipse corners: the face is 432x300 less the four

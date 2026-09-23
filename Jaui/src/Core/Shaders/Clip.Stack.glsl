@@ -1,29 +1,14 @@
 // The clip stack as a signed distance, for the programs that draw inside a panel's clip without being
-// a panel: text and the rim. Spliced in where a program writes
+// a panel: text. Spliced in where a program writes
 // `#pragma ClipStack` (WebGL2.Renderer `_withClipStack`), after it declares `uniform sampler2D u_ClipTex`.
 
-float pickClipRadius(vec2 p, vec4 radii) {
-    if (p.x >= 0.0) {
-        return p.y <= 0.0 ? radii.y : radii.z;
-    }
-    return p.y <= 0.0 ? radii.x : radii.w;
-}
+#include "../../Jiv/Shaders/Corner.Continuous.glsl"
 
 // Negative inside, positive outside, device px, so the edge takes the same half-pixel feather the
-// panel's silhouette does.
+// panel's silhouette does: the same continuous corner the panel draws its clip with.
 float clipShapeDistance(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
-    vec2 center = rect.xy + rect.zw * 0.5;
-    vec2 halfSize = rect.zw * 0.5;
-    vec2 qSigned = pixel - center;
-    vec2 qAbs = abs(qSigned);
-    float r = pickClipRadius(qSigned, radii);
-    vec2 cornerP = qAbs - (halfSize - vec2(r));
-    if (r <= 0.0 || cornerP.x <= 0.0 || cornerP.y <= 0.0) {
-        return max(qAbs.x - halfSize.x, qAbs.y - halfSize.y);
-    }
-    float n = 2.0 + 6.0 * clamp(smoothness, 0.0, 1.0);
-    float L = pow(cornerP.x / r, n) + pow(cornerP.y / r, n);
-    return r * (pow(max(L, 0.0), 1.0 / n) - 1.0);
+    vec2 unused;
+    return ContinuousCorner(pixel - (rect.xy + rect.zw * 0.5), rect.zw * 0.5, radii, smoothness, unused);
 }
 
 const int MAX_CLIP_DEPTH = 16;

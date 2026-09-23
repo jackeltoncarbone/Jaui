@@ -38,9 +38,18 @@ const escape = (s) => s
   .replace(/`/g, '\\`')
   .replace(/\$\{/g, '\\${');
 
+// `#include "Relative/Path.glsl"` on a line of its own splices that file in, resolved against the including
+// file and recursively, so one GLSL chunk can serve several programs with no runtime splice.
+const INCLUDE = /^[ 	]*#include[ 	]+"([^"]+)"[ 	]*$/gm;
+const resolve = (path, seen = new Set()) => {
+  if (seen.has(path)) throw new Error(`[shaders] include cycle at ${path}`);
+  const next = new Set(seen).add(path);
+  return readFileSync(path, 'utf8').replace(INCLUDE, (_, rel) => resolve(join(dirname(path), rel), next));
+};
+
 let count = 0;
 for (const path of walk(SRC)) {
-  const content = readFileSync(path, 'utf8');
+  const content = resolve(path);
   const ts = `// AUTO-GENERATED — do not edit. Regenerate via \`npm run build:shaders\`.\nexport default \`${escape(content)}\`;\n`;
   writeFileSync(`${path}.gen.ts`, ts);
   count++;

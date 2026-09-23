@@ -1,7 +1,7 @@
 /**
  * Reads the border's hairline handling straight out of the SHADER SOURCES.
  *
- * Same discipline as Pill.Curve.Source: the numbers and the expressions come from the real
+ * The numbers and the expressions come from the real
  * `.frag`, never from a copy kept here, so changing the shader without changing
  * the test fails the test instead of quietly invalidating it.
  */
