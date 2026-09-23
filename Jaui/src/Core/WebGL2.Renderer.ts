@@ -39,6 +39,7 @@ import {
 
 import panelVertSrc from '../Jiv/Shaders/Jiv.Panel.vert.gen';
 import panelFragSrc from '../Jiv/Shaders/Jiv.Panel.frag.gen';
+import { SS_PILL_CURVE, SS_PILL_SEGMENTS } from '../Jiv/Pill.Curve';
 import shadowBackdropFragSrc from '../Jiv/Shaders/Jiv.ShadowBackdrop.frag.gen';
 import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
 import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
@@ -184,6 +185,23 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
 });
 
 const _BG_UV_IDENTITY = [1, 1, 0, 0];
+
+/** A linked panel program's CONSTANT uniforms, uploaded once, then its locations.
+ *
+ *  The pill endcap curve is a uniform rather than a shader constant because of what D3D11 makes of a
+ *  constant array (Jiv/Pill.Curve.ts has the measurement). Uniform values live on the program, so one
+ *  upload at link covers every draw for the program's life, and a context restore rebuilds programs
+ *  through this same call. Every panel variant comes through here -- the boot seven and the flagged
+ *  ones -- which is what makes it the one place: a program that skipped it would draw a pill with a
+ *  zero-length loop and an all-zero curve. */
+const _preparePanelProgram = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelLocs => {
+  const previous = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
+  gl.useProgram(p);
+  gl.uniform2fv(gl.getUniformLocation(p, 'u_PillCurve[0]'), SS_PILL_CURVE);
+  gl.uniform1i(gl.getUniformLocation(p, 'u_PillSegments'), SS_PILL_SEGMENTS);
+  gl.useProgram(previous);
+  return _extractPanelLocs(gl, p);
+};
 
 // ─── Opaque handle wrapping ─────────────────────────────────────────────────
 
@@ -5265,17 +5283,17 @@ export class WebGL2Renderer implements Renderer {
   };
 
   private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
-    this._panelLocsGlass = _extractPanelLocs(gl, this._panelShaderGlass.Program);
-    this._panelLocsNone  = _extractPanelLocs(gl, this._panelShaderNone.Program);
+    this._panelLocsGlass = _preparePanelProgram(gl, this._panelShaderGlass.Program);
+    this._panelLocsNone  = _preparePanelProgram(gl, this._panelShaderNone.Program);
     // Most of these come back null on the flat program — the uniforms are not in it. That is the
     // point, and it needs no special case: `gl.uniform*` with a null location is specified to be
     // silently ignored, so `PanelDrawBatch` sets the same uniforms for every variant and only the
     // ones the bound program actually declares land.
-    this._panelLocsFlat  = _extractPanelLocs(gl, this._panelShaderFlat.Program);
-    this._panelLocsBorderless = _extractPanelLocs(gl, this._panelShaderBorderless.Program);
-    this._panelLocsTwoStop = _extractPanelLocs(gl, this._panelShaderTwoStop.Program);
-    this._panelLocsGlassBorderOnly = _extractPanelLocs(gl, this._panelShaderGlassBorderOnly.Program);
-    this._panelLocsGlassNoLight = _extractPanelLocs(gl, this._panelShaderGlassNoLight.Program);
+    this._panelLocsFlat  = _preparePanelProgram(gl, this._panelShaderFlat.Program);
+    this._panelLocsBorderless = _preparePanelProgram(gl, this._panelShaderBorderless.Program);
+    this._panelLocsTwoStop = _preparePanelProgram(gl, this._panelShaderTwoStop.Program);
+    this._panelLocsGlassBorderOnly = _preparePanelProgram(gl, this._panelShaderGlassBorderOnly.Program);
+    this._panelLocsGlassNoLight = _preparePanelProgram(gl, this._panelShaderGlassNoLight.Program);
     // `?glass-reg`'s family, when it joined THIS batch (main-thread order) and is not wired yet.
     if (this._glassRegShaders !== null && this._glassRegPrograms === null) this._wireGlassReg();
     if (this._glassGateShaders !== null && this._glassGatePrograms === null) this._wireGlassGates();
@@ -5302,7 +5320,7 @@ export class WebGL2Renderer implements Renderer {
       throw new Error('[Jaui] _wirePanelBorderDirect ran before the BORDER_DIRECT program existed');
     }
     this._panelBorderDirectWired = true;
-    this._panelLocsBorderDirect = _extractPanelLocs(this._gl, shader.Program);
+    this._panelLocsBorderDirect = _preparePanelProgram(this._gl, shader.Program);
   };
 
   /**
@@ -5336,7 +5354,7 @@ export class WebGL2Renderer implements Renderer {
     if (shaders === null) throw new Error('[Jaui] _wireGlassReg ran before the ?glass-reg programs existed');
     const out = {} as Record<GlassProgramKind, _PanelProgram>;
     for (const kind of GLASS_PROGRAM_KINDS) {
-      out[kind] = { Shader: shaders[kind], Locs: _extractPanelLocs(this._gl, shaders[kind].Program) };
+      out[kind] = { Shader: shaders[kind], Locs: _preparePanelProgram(this._gl, shaders[kind].Program) };
     }
     this._glassRegPrograms = out;
   };
@@ -5386,7 +5404,7 @@ export class WebGL2Renderer implements Renderer {
     if (shaders === null) throw new Error('[Jaui] _wireGlassGates ran before the ?glass-gates programs existed');
     const out = {} as Record<GlassProgramKind, _PanelProgram>;
     for (const kind of GLASS_PROGRAM_KINDS) {
-      out[kind] = { Shader: shaders[kind], Locs: _extractPanelLocs(this._gl, shaders[kind].Program) };
+      out[kind] = { Shader: shaders[kind], Locs: _preparePanelProgram(this._gl, shaders[kind].Program) };
     }
     this._glassGatePrograms = out;
   };

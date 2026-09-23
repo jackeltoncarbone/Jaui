@@ -325,8 +325,8 @@ describe('the renderer and Jaui: what is compiled when, and what is printed', ()
     expect(PANEL_PROGRAM_COUNT).toBe(7);
     expect(GLASS_VARIANT_PROGRAMS).toBe(2);
     const wire = arrowBody(R, '_wirePanelShader');
-    expect(wire).toContain('this._panelLocsGlassBorderOnly = _extractPanelLocs(gl, this._panelShaderGlassBorderOnly.Program);');
-    expect(wire).toContain('this._panelLocsGlassNoLight = _extractPanelLocs(gl, this._panelShaderGlassNoLight.Program);');
+    expect(wire).toContain('this._panelLocsGlassBorderOnly = _preparePanelProgram(gl, this._panelShaderGlassBorderOnly.Program);');
+    expect(wire).toContain('this._panelLocsGlassNoLight = _preparePanelProgram(gl, this._panelShaderGlassNoLight.Program);');
   });
 
   it('?glass-reg compiles on the ARM, off the surviving value, and a restore drops it', () => {

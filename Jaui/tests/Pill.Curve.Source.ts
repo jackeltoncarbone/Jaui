@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 export const GLSL_PATH = join(SRC, 'Jiv', 'Shaders', 'Jiv.Panel.frag');
 export const WGSL_PATH = join(SRC, 'Core', 'Shaders', 'Panel.wgsl');
+export const CURVE_PATH = join(SRC, 'Jiv', 'Pill.Curve.ts');
 
 export interface PillCurve {
   maxExtent: number;
@@ -27,12 +28,19 @@ const numbers = (body: string): Array<[number, number]> => {
   return out;
 };
 
+/** The curve the GLSL panel shader draws: its POINTS arrive as the `u_PillCurve` uniform from
+ *  Jiv/Pill.Curve.ts (see that file for why it is not a shader constant), and its max extent is still
+ *  the shader's own `SS_PILL_MAXEXTENT`. Both are read from the real files. */
 export const readGlslCurve = (): PillCurve => {
   const src = readFileSync(GLSL_PATH, 'utf8');
   const ext = /const\s+float\s+SS_PILL_MAXEXTENT\s*=\s*([\d.]+)\s*;/.exec(src);
-  const arr = /const\s+vec2\s+SS_PILL_CURVE\[\d+\]\s*=\s*vec2\[\]\(([\s\S]*?)\);/.exec(src);
-  if (!ext || !arr) throw new Error('could not parse the pill curve out of Jiv.Panel.frag');
-  return { maxExtent: Number(ext[1]), points: numbers(arr[1]) };
+  const curveSrc = readFileSync(CURVE_PATH, 'utf8');
+  const arr = /SS_PILL_CURVE\s*=\s*new Float32Array\(\[([\s\S]*?)\]\);/.exec(curveSrc);
+  if (!ext || !arr) throw new Error('could not parse the pill curve out of Jiv.Panel.frag / Pill.Curve.ts');
+  const flat = [...arr[1].matchAll(/-?[\d.]+/g)].map((m) => Number(m[0]));
+  const points: Array<[number, number]> = [];
+  for (let i = 0; i + 1 < flat.length; i += 2) points.push([flat[i], flat[i + 1]]);
+  return { maxExtent: Number(ext[1]), points };
 };
 
 export const readWgslCurve = (): PillCurve => {
