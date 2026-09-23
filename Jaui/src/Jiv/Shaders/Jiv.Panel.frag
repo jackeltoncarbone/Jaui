@@ -442,6 +442,18 @@ uniform int u_PillSegments;
 
 const float SS_PILL_MAXEXTENT = 1.5400; // SS pill max horizontal extent / halfY
 
+// A SHORT PILL IS A STADIUM. The measured cap reaches 1.54 half-heights in from the tip, so a pill less
+// than 1.54 times as long as it is tall has no room for it: laid in anyway, the cap ran past the centre
+// and the shape came out a flat-topped squircle blob (a 64 x 52 tab bar selection pill). Apple's short
+// capsules are round-ended, so below the lead-in the pill eases into the true stadium of the same box,
+// all stadium by aspect SS_PILL_STADIUM, all measured cap by the lead-in; and the cap's lead-in never
+// reaches past the half-length.
+const float SS_PILL_STADIUM = 1.15;
+
+float SS_PillStadiumWeight(float halfX, float halfY) {
+    return smoothstep(SS_PILL_STADIUM, SS_PILL_MAXEXTENT, halfX / max(halfY, 1e-4));
+}
+
 // Polyline-based SDF + gradient for the SS pill. Pixel-accurate match to SS's
 // GeneratePillPath (within ~0.05 px on a 60-tall pill at 33 sample points).
 //
@@ -459,13 +471,19 @@ void SS_PillEval(vec2 p, vec2 halfSize, out float distOut, out vec2 gradOut) {
     vec2 hs = horiz ? halfSize : halfSize.yx;
     float halfY = hs.y;
     float halfX = hs.x;
-    float maxExtent = SS_PILL_MAXEXTENT * halfY;
+    float maxExtent = min(SS_PILL_MAXEXTENT * halfY, halfX);
     float flatStart = halfX - maxExtent;
+    float capWeight = SS_PillStadiumWeight(halfX, halfY);
+    // The stadium of the same box: its round end's centre and the offset from it.
+    vec2 stadium = vec2(max(q.x - (halfX - halfY), 0.0), q.y);
+    float stadiumLength = length(stadium);
+    float stadiumDist = stadiumLength - halfY;
+    vec2 stadiumGrad = stadiumLength > 0.0001 ? stadium / stadiumLength : vec2(0.0, 1.0);
 
     if (q.x <= flatStart) {
         // Flat zone — top/bottom edge is the only boundary in this column
-        distOut = q.y - halfY;
-        vec2 g = vec2(0.0, sign(p.y));
+        distOut = mix(stadiumDist, q.y - halfY, capWeight);
+        vec2 g = normalize(mix(stadiumGrad, vec2(0.0, 1.0), capWeight)) * vec2(sign(p.x), sign(p.y));
         gradOut = horiz ? g : g.yx;
         return;
     }
@@ -506,14 +524,15 @@ void SS_PillEval(vec2 p, vec2 halfSize, out float distOut, out vec2 gradOut) {
 
     float udist = sqrt(minDSq);
     bool inside = qL.y <= halfY && u_b > 0.0 && qL.x <= u_b;
-    distOut = inside ? -udist : udist;
+    distOut = mix(stadiumDist, inside ? -udist : udist, capWeight);
 
     // Outward normal: from closest point on polyline to query, sign-flipped
-    // if inside. Restored to original quadrant via sign(p).
+    // if inside, eased toward the stadium's as the SDF is. Restored to original quadrant via sign(p).
     vec2 dg = qL - bestClosest;
     float L = length(dg);
     vec2 g = L > 0.0001 ? dg / L : vec2(1.0, 0.0);
     if (inside) g = -g;
+    g = normalize(mix(stadiumGrad, g, capWeight));
     g.x *= sign(p.x);
     g.y *= sign(p.y);
     gradOut = horiz ? g : g.yx;
@@ -528,10 +547,12 @@ float SS_PillSDF(vec2 p, vec2 halfSize) {
     vec2 hs = horiz ? halfSize : halfSize.yx;
     float halfY = hs.y;
     float halfX = hs.x;
-    float maxExtent = SS_PILL_MAXEXTENT * halfY;
+    float maxExtent = min(SS_PILL_MAXEXTENT * halfY, halfX);
     float flatStart = halfX - maxExtent;
+    float capWeight = SS_PillStadiumWeight(halfX, halfY);
+    float stadiumDist = length(vec2(max(q.x - (halfX - halfY), 0.0), q.y)) - halfY;
 
-    if (q.x <= flatStart) return q.y - halfY;
+    if (q.x <= flatStart) return mix(stadiumDist, q.y - halfY, capWeight);
 
     vec2 qL = vec2(q.x - flatStart, q.y);
 
@@ -557,7 +578,7 @@ float SS_PillSDF(vec2 p, vec2 halfSize) {
     }
     float udist = sqrt(minDSq);
     bool inside = qL.y <= halfY && u_b > 0.0 && qL.x <= u_b;
-    return inside ? -udist : udist;
+    return mix(stadiumDist, inside ? -udist : udist, capWeight);
 }
 
 // Gradient-only wrapper over SS_PillEval. Kept for API compatibility with
