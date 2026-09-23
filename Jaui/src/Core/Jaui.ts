@@ -495,6 +495,29 @@ interface GlassBlurPlan {
   FrostCssPx: number;
 }
 
+/** A scroll edge's pyramid, handed to the glass in its subtree: the handle, the region it covers, the
+ *  deepest level built, and the strip's own blur ramp, so a surface in it can read the level the strip
+ *  blurs to where the surface sits. `Start` and `Length` are the ramp's origin and length on its axis in
+ *  device px, `Vertical` says which axis, `Easing` is the ramp's exponent. */
+interface EdgeBackdrop {
+  Handle: GpuTextureHandle;
+  Region: { x: number; y: number; w: number; h: number };
+  MaxLod: number;
+  Vertical: boolean;
+  Start: number;
+  Length: number;
+  Easing: number;
+}
+
+/** The level a scroll edge blurs to at device coordinate `at` on its axis: the progressive blur's own
+ *  ramp, pow(smoothstep(t), Easing), squared, times its deepest level (ProgressiveBlur.Shader). */
+const _edgeLodAt = (e: EdgeBackdrop, at: number): number => {
+  const length = Math.abs(e.Length) < 1 ? (e.Length < 0 ? -1 : 1) : e.Length;
+  const t = Math.max(0, Math.min(1, (at - e.Start) / length));
+  const ramp = Math.pow(t * t * (3 - 2 * t), e.Easing);
+  return ramp * ramp * e.MaxLod;
+};
+
 /** ONE GLASS GROUP: a run of glass siblings under one parent that share a blur class, and the
  *  single pyramid they all sample.
  *
@@ -2878,7 +2901,7 @@ export class Canvas implements DirtyTracker {
     // floating in the strip samples that pyramid at its own frost instead of building one from the dimmed
     // scene. So the bar reads brighter than the dimmed surround it sits on, as Apple's does, and costs no
     // build of its own. Scoped to the strip's subtree; null everywhere else.
-    let edgeBackdrop: { Handle: GpuTextureHandle; Region: { x: number; y: number; w: number; h: number }; MaxLod: number } | null = null;
+    let edgeBackdrop: EdgeBackdrop | null = null;
     // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
     // contract means the scene is different every frame; caching snapshots
     // across surfaces was already unsafe. Each glass/pblur now builds its
@@ -3399,7 +3422,20 @@ export class Canvas implements DirtyTracker {
           return built;
         });
         lastBaseFrostLod = 0;
-        if (lastBackdrop !== null) edgeHere = { Handle: lastBackdrop, Region: region, MaxLod: maxLod };
+        // Handed to the subtree's glass only for a plain ramp along the element's own unrotated axis.
+        if (lastBackdrop !== null && node.RenderStyle.ProgressiveBlurStops === null && !_rotated) {
+          const vertical = dir === 'ToTop' || dir === 'ToBottom';
+          const lo = vertical ? py : px;
+          const span = feather > 0 ? feather : (vertical ? ph : pw);
+          const toEnd = dir === 'ToBottom' || dir === 'ToRight';
+          edgeHere = {
+            Handle: lastBackdrop, Region: region, MaxLod: maxLod, Vertical: vertical,
+            // t runs from the clear end: the top for ToBottom, the bottom for ToTop.
+            Start: toEnd ? lo : lo + (vertical ? ph : pw),
+            Length: toEnd ? span : -span,
+            Easing: Math.max(0.001, node.RenderStyle.ProgressiveBlurEasing),
+          };
+        }
         r.RebindSceneTarget();
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -3532,6 +3568,8 @@ export class Canvas implements DirtyTracker {
         // DID author frost never reaches that fallback at all, so it takes no
         // snapshot — see the else branch.
         let sceneSnap: GpuTextureHandle | null;
+        // The deepest level the backdrop this surface reads was built to; unbounded for its own.
+        let backdropLodCap = Infinity;
         // `?scene-restarts` / `?small-restarts`: whether THIS surface built a fill pyramid on this
         // line rather than taking a pre-built one. The insertion point below needs to know, and
         // the build sits inside a branch whose locals do not survive it.
@@ -3596,14 +3634,12 @@ export class Canvas implements DirtyTracker {
           // `RebindSceneTarget` below stays inside the branch that actually left it.
           const preFill = this._blurFirst || this._phasedWalk ? this._blurFirstFill.get(node) : undefined;
           // Inside a scroll edge: the strip's own pyramid, when this surface's sample region lies within
-          // it and every level it reads was built. The strip's level n is a Gaussian of dpr * 2^n device
-          // px from a raw level 0, so this surface's frost lands at log2(frost) above it, and its base is
-          // log2(dpr). A frost-0 surface reads the raw scene snapshot, which the strip has since dimmed,
-          // so it builds its own.
-          const edgeLevels = Math.log2(Math.max(frostCssPx, _rsAdaptiveShadow ? SHADOW_DETAIL_MIN_PT : 0, 1));
+          // it. The strip's level n is a Gaussian about 2^n device px wide over a raw level 0, and the
+          // surface reads it at the heavier of its own frost and the strip's blur where the surface's
+          // centre sits: blurred as the strip blurs the content there, but not dimmed. A frost-0 surface
+          // reads the raw scene snapshot, which the strip has since dimmed, so it builds its own.
           const edgeFill = edgeBackdrop !== null && plan.InstFrostLod >= SCENE_TAP_FROST_LOD
-            && _regionContains(edgeBackdrop.Region, region) && edgeLevels <= edgeBackdrop.MaxLod
-            ? edgeBackdrop : null;
+            && _regionContains(edgeBackdrop.Region, region) ? edgeBackdrop : null;
           // `?glass-group`: THE GROUP'S BACKDROP, AND THE POINT IT IS CAPTURED AT.
           //
           // This line is the whole of the law in the walk. The FIRST member of a group to reach it
@@ -3627,7 +3663,12 @@ export class Canvas implements DirtyTracker {
             if (this._bcOn) { this._bc.Fresh('group'); this._bcStats.Grouped++; }
           } else if (edgeFill !== null) {
             lastBackdrop = edgeFill.Handle;
-            lastBaseFrostLod = Math.log2(d);
+            const centre = edgeFill.Vertical ? py + ph * 0.5 : px + pw * 0.5;
+            const level = Math.min(edgeFill.MaxLod,
+              Math.max(Math.log2(Math.max(1, frostCssPx * d)), _edgeLodAt(edgeFill, centre)));
+            // The shader reads `frostLod - u_BaseFrostLod`, so the base is what lands it on `level`.
+            lastBaseFrostLod = plan.InstFrostLod - level;
+            backdropLodCap = edgeFill.MaxLod;
             // `?blur-cache`: the strip's pyramid is keyed to the strip, not to this surface, so this
             // surface's pixels are called changed every frame, as a glass group's members are.
             if (this._bcOn) this._bc.Fresh('edge');
@@ -3682,7 +3723,7 @@ export class Canvas implements DirtyTracker {
           shadowBackdrop = preShadow;
           this._adaptiveShadowsDrawn = true;
         } else if (_rsAdaptiveShadow && lastBackdrop) {
-          const detailLod = Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod;
+          const detailLod = Math.min(backdropLodCap, Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod);
           // The reading is provably last frame's only when the blur cache just called this surface's
           // fill clean AND the probe reads the same rect at the same level; otherwise it is unknown.
           const last = this._probeLast.get(node);
