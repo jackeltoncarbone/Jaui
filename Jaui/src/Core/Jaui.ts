@@ -79,6 +79,11 @@ const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 /** The finest blur (pt) an adaptive shadow compares the sharp backdrop against, so clear glass still sees
  *  its text as detail. */
 const SHADOW_DETAIL_MIN_PT = 4;
+/** `?ablate`: the arms it knows, the rendered frames each holds for, and the render-to-render gap
+ *  past which the page was idle rather than slow. */
+const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui'];
+const ABLATE_FRAMES = 12;
+const ABLATE_IDLE_MS = 250;
 /** `?blur-mips=separable`: the deepest LOD a mip consumer may read and still take the separable plan.
  *  One LOD, because past it a re-based (`k > 1`) level 0 moves the picture rather than the rounding --
  *  see `_maySeparable`. */
@@ -708,6 +713,14 @@ export class Canvas implements DirtyTracker {
   private _diagNoPblurDraw: boolean = false;
   private _diagNoReality: boolean = false; // [diag ?no-reality] skip the janvas/field pre-pass → UI-only cost
   private _diagNoUi: boolean = false;       // [diag ?no-ui] skip the Jaui UI tree walk → field-only cost
+  /** `?ablate` (with `?trace`): the phone's own ablation, in ONE session. Every `Frames` rendered
+   *  frames it switches to the next arm, and it books each render-to-render interval to the arm that
+   *  rendered it, so a hero scroll on the device prices every arm against the same content, the same
+   *  thermals and the same finger. Null when unarmed. */
+  private _ablate: {
+    Arms: string[]; I: number; Count: number; Last: number; Skip: boolean; Cycle: number;
+    Samples: Map<string, number[]>;
+  } | null = null;
   private _diagNoBlur: boolean = false;     // [diag ?no-blur] no-op the backdrop blur build → blur fill cost
   private _diagNoPanels: boolean = false;   // [diag ?no-panels] skip non-glass panel fill (SDF+shadow+border) → panel share
   private _diagNoShadow: boolean = false;   // [diag ?no-shadow] zero panel drop-shadow → shadow overdraw share
@@ -2101,6 +2114,53 @@ export class Canvas implements DirtyTracker {
     Occ: new Map<string, number>(),
   };
 
+  /** Set the diagnostics for ONE `?ablate` arm and clear the rest. Every field it touches is read per
+   *  frame, which is what lets the arm change between two renders of one session. */
+  private _ablateApply = (arm: string): void => {
+    this._diagNoBlur = arm === 'no-blur';
+    this._diagNoPblur = arm === 'no-pblur';
+    this._diagNoPanels = arm === 'no-panels';
+    this._diagNoGlassDraw = arm === 'no-glass-draw';
+    this._diagNoShadow = arm === 'no-shadow';
+    JivInstanceBuffer.DiagNoShadow = arm === 'no-shadow';
+    this._occlusion = arm !== 'no-occlusion';
+    this._diagNoUi = arm === 'no-ui';
+  };
+
+  /** Book this render's interval to the arm that drew it, and move on every `ABLATE_FRAMES`. The
+   *  first interval after a switch is dropped (its start belongs to the other arm), and so is any
+   *  gap long enough to be idle rather than frame time. A full cycle prints every arm's median. */
+  private _ablateTick = (now: number): void => {
+    const a = this._ablate!;
+    const arm = a.Arms[a.I];
+    const dt = now - a.Last;
+    a.Last = now;
+    if (!a.Skip && dt > 0 && dt < ABLATE_IDLE_MS) {
+      let list = a.Samples.get(arm);
+      if (list === undefined) { list = []; a.Samples.set(arm, list); }
+      list.push(dt);
+    }
+    a.Skip = false;
+    if (++a.Count < ABLATE_FRAMES) return;
+    a.Count = 0;
+    a.Skip = true;
+    a.I = (a.I + 1) % a.Arms.length;
+    this._ablateApply(a.Arms[a.I]);
+    if (a.I !== 0) return;
+    a.Cycle++;
+    const q = (xs: number[], f: number): number => xs[Math.min(xs.length - 1, Math.floor(f * xs.length))];
+    const base = a.Samples.get('control');
+    const baseMed = base !== undefined && base.length > 0 ? q([...base].sort((x, y) => x - y), 0.5) : NaN;
+    for (const name of a.Arms) {
+      const xs = [...(a.Samples.get(name) ?? [])].sort((x, y) => x - y);
+      if (xs.length === 0) { JTrace(`jaui:ablate cycle=${a.Cycle} arm=${name} n=0`); continue; }
+      const med = q(xs, 0.5);
+      JTrace(`jaui:ablate cycle=${a.Cycle} arm=${name} n=${xs.length} med=${med.toFixed(1)}`
+        + ` p25=${q(xs, 0.25).toFixed(1)} p75=${q(xs, 0.75).toFixed(1)}`
+        + (name === 'control' || !(baseMed > 0) ? '' : ` vsControl=${(med - baseMed).toFixed(1)}`));
+    }
+  };
+
   private _flushAwake = (now: number, rendered: boolean, layoutDirty: boolean): void => {
     const a = this._awake;
     if (a.Since === 0) a.Since = now;
@@ -2554,6 +2614,7 @@ export class Canvas implements DirtyTracker {
     this._needsRender = false;
     if (JauiTracing()) this._flushAwake(performance.now(), renderActive, layoutDirty);
     if (renderActive) {
+      if (this._ablate !== null) this._ablateTick(performance.now());
       this._renderHold = 3; // render this frame + a 2-frame settle tail
       if (this._adaptiveShadowsDrawn) {
         // Five taus armed, three unarmed: the number does NOT decide the parked pixels (the snap
@@ -10208,6 +10269,7 @@ export class Canvas implements DirtyTracker {
         : this._glassGaussian !== 'off' ? 'glass-gaussian-reads-the-scene-past-the-read-guard'
         : params.has('scene-restarts') || params.has('small-restarts')
           ? 'restart-probes-insert-at-builds-a-hit-does-not-make'
+        : params.has('ablate') ? 'ablate-switches-arms-mid-run-and-a-kept-pyramid-would-cross-arms'
         : null;
       if (why !== null) {
         this._blurCache = 'off';
@@ -10220,6 +10282,19 @@ export class Canvas implements DirtyTracker {
       + ` budget=${Math.round(BLUR_CACHE_BUDGET_BYTES / (1024 * 1024))}MB guard=${BLUR_READ_GUARD_PX}px`
       + ` maxPieces=${DAMAGE_MAX_PIECES} pixels=SAME`
       + (this._blurCacheRefused !== '' ? ` reason=${this._blurCacheRefused}` : ''));
+    // `?ablate[=a,b,...]` -- THE PHONE PRICES ITS OWN ARMS. See `_ablate`. Needs `?trace` to report.
+    if (params.has('ablate')) {
+      const raw = (params.get('ablate') ?? '').trim();
+      const known = ABLATE_ARMS;
+      const arms = raw === '' ? [...known] : raw.split(',').map((a) => a.trim());
+      for (const a of arms) {
+        if (!known.includes(a)) throw new Error(`[Jaui] ?ablate arm '${a}' is not one of ${known.join(',')}`);
+      }
+      if (!arms.includes('control')) arms.unshift('control');
+      this._ablate = { Arms: arms, I: 0, Count: 0, Last: 0, Skip: true, Cycle: 0, Samples: new Map() };
+      this._ablateApply('control');
+      JTrace(`jaui:ablate armed arms=${arms.join(',')} frames=${ABLATE_FRAMES} cache=off`);
+    }
     {
       const g = globalThis as unknown as { __jauiBlurCache?: () => BlurCacheCensus };
       g.__jauiBlurCache = (): BlurCacheCensus => {
