@@ -20,14 +20,6 @@ export const DefaultJivStyle: JivStyle = {
   // Filters — identity by default (no grade, no frost). See Jiv.Types.
   Filter: 'None',
   BackdropFilter: 'None',
-  BorderFilter: 'None',
-  // The Fresnel highlight's own grade. NOT 'None': the highlight has always been
-  // over-saturated about white by 1.6 (a hard-coded RIM_CHROMA_GAIN in the panel
-  // shader until it became authorable), so 1.6 is what "unchanged" means here and
-  // an identity 1 would silently flatten every glass rim in the app. Zero-cost
-  // regardless — BorderFresnelStrength is 0, so nothing reads this until a class
-  // asks for a Fresnel.
-  BorderFresnelFilter: 'Brightness(1) Saturate(1.6)',
   // The INK zone. 'None' means the ink covers, which is what ink does -- so the default costs one
   // identity parse per style and reaches no draw.
   TextFilter: 'None',
@@ -49,10 +41,9 @@ export const DefaultJivStyle: JivStyle = {
   ChromaticAberration: '0',
   EdgeLightTop: '0',
   EdgeLightBottom: '0',
-  BorderVariance: '0',
-  BorderAlphaVariance: '0',
-  BorderFresnelStrength: '0',
   InnerBlur: '0',
+  RimWidth: '0',
+  RimStrength: '0',
   Transform: '',                         // empty = identity
   // Visual* — render-time, per-element. `VisualScale: '1'` is identity;
   // `VisualTranslate: '0'` is no offset; `VisualOrigin: '0.5'` is center.

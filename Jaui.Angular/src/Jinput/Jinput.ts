@@ -12,6 +12,7 @@ import {
   LayoutSegments, CharPosition, IndexAtPoint, RangeRects, WordRangeAt,
   type LayoutMetrics, type LayoutSegmentInput, type LaidOutSegment,
 } from './Jinput.Layout';
+import type { JivHandle } from 'jaui';
 import JinputJss from './Jinput.jss';
 
 /**
@@ -276,6 +277,8 @@ function _withAlpha(color: string, alpha: number): string {
       data-form-type="other"
       rows="1"
       [readOnly]="ReadOnly()"
+      [attr.tabindex]="ReadOnly() ? -1 : null"
+      [attr.aria-label]="Label() || Placeholder() || null"
       (input)="onInput($event)"
       (compositionstart)="onCompositionStart()"
       (compositionend)="onCompositionEnd()"
@@ -324,6 +327,12 @@ export class Jinput implements OnDestroy {
   readonly PeerCarets = input<readonly JinputPeerCaret[]>([]);
   readonly Placeholder = input('');
   readonly ReadOnly = input(false);
+  /** The accessible name of the field. Falls back to the placeholder. */
+  readonly Label = input<string | null>(null);
+  /** The node whose rect counts as inside the input for a touch summon and for tap-outside dismissal.
+   *  A host that draws a field around the text passes that field, so a tap anywhere on it edits. It must
+   *  watch its rect. Unset, the text's own wrap is the target. */
+  readonly HitSurface = input<JivHandle | null>(null);
   /** Allow newline characters in the model. When false (default), Enter
    *  emits Submitted instead of inserting a newline, and pasted text has
    *  newlines stripped. Set true on long-form / multi-paragraph editors. */
@@ -977,6 +986,27 @@ export class Jinput implements OnDestroy {
     if (document.activeElement === input) input.blur();
   };
 
+  /** Replace the whole value with the caret at its end. A bound Text change never reaches the hidden
+   *  textarea while it is focused, so the next keystroke would bring the old value back; this does. */
+  SetText = (value: string): void => {
+    const input = this._hiddenInput()?.nativeElement;
+    if (input) {
+      input.value = value;
+      input.setSelectionRange(value.length, value.length);
+    }
+    this.Text.set(value);
+    if (this._focused()) this.syncSelection();
+  };
+
+  private _insideSurface = (e: PointerEvent, wrap: JivHandle, canvasEl: HTMLElement): boolean => {
+    const surface = this.HitSurface() ?? wrap;
+    const cRect = canvasEl.getBoundingClientRect();
+    const localX = e.clientX - cRect.left;
+    const localY = e.clientY - cRect.top;
+    return localX >= surface.X && localX < surface.X + surface.Width
+        && localY >= surface.Y && localY < surface.Y + surface.Height;
+  };
+
   /** Tap-outside dismissal (SS-199). Fires for every real pointerdown on the
    *  page; when we're focused and the tap lands outside this input's text
    *  wrap, blur so the keyboard leaves. Taps inside the wrap are ignored so
@@ -986,11 +1016,7 @@ export class Jinput implements OnDestroy {
     const wrap = this._wrap();
     const canvasEl = this._jaui?.Canvas?.Element;
     if (!wrap || !canvasEl) return;
-    const cRect = canvasEl.getBoundingClientRect();
-    const localX = e.clientX - cRect.left;
-    const localY = e.clientY - cRect.top;
-    const inWrap = localX >= wrap.Node.X && localX < wrap.Node.X + wrap.Node.Width
-                && localY >= wrap.Node.Y && localY < wrap.Node.Y + wrap.Node.Height;
+    const inWrap = this._insideSurface(e, wrap.Node, canvasEl);
     if (!inWrap) this.Blur();
   };
 
@@ -1019,11 +1045,7 @@ export class Jinput implements OnDestroy {
     const canvasEl = this._jaui?.Canvas?.Element;
     const input = this._hiddenInput()?.nativeElement;
     if (!wrap || !canvasEl || !input) return;
-    const cRect = canvasEl.getBoundingClientRect();
-    const localX = e.clientX - cRect.left;
-    const localY = e.clientY - cRect.top;
-    const inWrap = localX >= wrap.Node.X && localX < wrap.Node.X + wrap.Node.Width
-                && localY >= wrap.Node.Y && localY < wrap.Node.Y + wrap.Node.Height;
+    const inWrap = this._insideSurface(e, wrap.Node, canvasEl);
     if (!inWrap) return;
     // Arm the summon for this gesture; the actual focus waits for a tap-up.
     this._summonPending = true;

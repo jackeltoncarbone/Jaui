@@ -160,10 +160,10 @@ export class DamageRegion {
 
 // ── Records ───────────────────────────────────────────────────────────────────────────────────────
 
-/** What a record paints. A node's own paint and its BorderLayer rim overlay are separate records,
- *  because the rim paints among the node's children and not beside its fill. */
+/** What a record paints. A node's own paint and its EDGE (a border re-emitted at its BorderLayer, and its
+ *  rim) are separate records, because the edge paints among the node's children and not beside its fill. */
 export const RECORD_NODE = 1;
-export const RECORD_RIM = 2;
+export const RECORD_EDGE = 2;
 export const RECORD_JANVAS = 3;
 
 /** Why a record is dirty with no float to show for it: its pixels come from state the CPU cannot see.
@@ -177,9 +177,8 @@ interface PaintRecord {
   Painted: boolean;
 }
 
-/** Readers: the three sites that build a blur from the scene. */
+/** Readers: the sites that build a blur from the scene. */
 export const READER_FILL = 1;
-export const READER_RIM = 2;
 export const READER_PBLUR = 3;
 
 export interface ReaderState<Slot> {

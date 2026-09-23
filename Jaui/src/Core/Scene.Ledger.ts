@@ -84,44 +84,6 @@ export class SceneReadLedger {
   AtlasMembers = 0;
   AtlasSolo = 0;
   AtlasBytes = 0;
-  /** THE BORDER CENSUS, per frame. `?border-direct` replaces a glass rim's four-pass backdrop
-   *  pyramid with one blit and a gather in the border's own shader, and the only way to tell an
-   *  armed frame from an unarmed one is which branch each rim took.
-   *
-   *  Read them TOGETHER, and `BordersPyramid` first. `BordersDirect = 0, BordersPyramid = 20` under
-   *  the flag is the unflagged engine wearing the flag's name - every rim refused by the admission
-   *  rule, every encoder still there, and a timing comparison that would pass by having done
-   *  nothing. On `glass-grid` at dpr 2 it must read `20 / 0`, with `EndsByKey['border-copy']` at 20
-   *  and `EndsByKey.blur` down to the fills' atlas beside it. */
-  BordersDirect = 0;
-  BordersPyramid = 0;
-  /** THE BORDER-SOURCE CENSUS, per frame. `?border-source=fill` lets a glass rim sample the
-   *  pyramid its own FILL already built and sampled, instead of building a second one over the
-   *  same region out of the scene the fill has since drawn into.
-   *
-   *  Read `BordersRimBuilt` FIRST, for the reason the atlas census prints `solo` and the direct
-   *  census prints `pyramid`: `BordersFromFill = 0, BordersRimBuilt = 20` under the flag is the
-   *  unflagged engine wearing the flag's name - every rim refused by the admission rule, every
-   *  build and every encoder still in the frame, and a timing comparison that would pass by having
-   *  done nothing. On `glass-grid` at dpr 2 it must read `20 / 0`, with `EndsByKey.blur` at 20
-   *  against the unflagged 40 beside it.
-   *
-   *  Both stay 0 on the `scene` arm (the default), which is what makes that arm the engine this
-   *  lane inherited in its COUNTERS as well as in its pixels. */
-  BordersFromFill = 0;
-  BordersRimBuilt = 0;
-  /** THE FRAGMENT COUNTS, estimated from the rim instances the direct program actually drew.
-   *
-   *  The M4's cell made eighty render passes and eighty draws leave the frame and the frame got
-   *  2.59 ms SLOWER, and the first hypothesis for that was that the 64-tap gather runs on the whole
-   *  rim QUAD rather than on the band. It does not (`Jiv.Panel.frag` calls it inside
-   *  `if (borderBase > 0.001)`), but the two numbers are what makes that statement checkable from
-   *  a run instead of from a reading of the source: `BorderFragments` is where the gather runs and
-   *  `BorderQuadFragments` is where the PROGRAM runs, and the ratio between them is the thing any
-   *  argument about occupancy has to start from. Both are estimates off the packed instance -- see
-   *  `Border.Direct.EstimateBorderFragments`, which is where the arithmetic lives and is tested. */
-  BorderFragments = 0;
-  BorderQuadFragments = 0;
   /** DRAWS the atlas builds issued this frame, and the reason it is a column of its own: the
    *  harness's `drawCalls` counts SCENE draws and does not see a pyramid pass at all. It read
    *  153 / 153 / 154 across `?pyramid-atlas` off / fills / all -- three arms that differ by 160
@@ -152,9 +114,7 @@ export class SceneReadLedger {
    *  Booked off `BlurPass.LastGaussian` after the call rather than off the flag, for the reason
    *  `PresampledBuilds` is: an arm in which every build hit a refusal reads 0 here instead of
    *  reading like a win. 0 unflagged by construction -- the plan is not consulted unless the arm
-   *  asked for it. On `glass-grid` at dpr 2 it is 20 under the shipped `?border-source=fill` (the
-   *  twenty FILL builds; each rim reads its own fill's level 0 and builds nothing) and 40 under
-   *  `?border-source=scene`, where every rim builds again. */
+   *  asked for it. On `glass-grid` at dpr 2 it is 20, the twenty FILL builds. */
   GaussianBuilds = 0;
   /** RENDER PASSES those builds issued: `GAUSS_PASSES` each, so 40 where the twenty chains they
    *  replaced would have issued 80.
@@ -189,20 +149,6 @@ export class SceneReadLedger {
    *  NOT the `targets=` pool census. That counts the separable plan's hop and temp as two sizes, so a
    *  single k = 2 build reads `2:` there -- the dpr-3 union's `1840x1106+1858x1106` is ONE extent. */
   SurfaceExtents: SurfaceExtent[] = [];
-  /** `?blur-level`, per rendered frame: builds that took the LEVEL PLAN (`BlurPass.PlanReadLevel`,
-   *  a consumer that reads one constant LOD) in the plan's currency -- passes, destination px,
-   *  bilinear fetches, texels blitted into the output's mip slots -- and beside it what the chain
-   *  plus `GenerateOutputMipmap` cost for the SAME builds (`ReadLevelChain*`). Not booked on the
-   *  `SurfaceChain*` side, which counts the chain's own passes and never saw its mip chain. */
-  ReadLevelBuilds = 0;
-  ReadLevelPasses = 0;
-  ReadLevelFill = 0;
-  ReadLevelReads = 0;
-  ReadLevelBlit = 0;
-  ReadLevelChainPasses = 0;
-  ReadLevelChainFill = 0;
-  ReadLevelChainReads = 0;
-  ReadLevelChainBlit = 0;
   /** `?glass-group`: the container-scoped shared backdrop, per rendered frame.
    *
    *  `GroupBuilds` is pyramids built for a GROUP of glass siblings; `GroupMembers` is how many
@@ -213,9 +159,7 @@ export class SceneReadLedger {
    *
    *  On `glass-grid` at dpr 2 they must read 1 / 20 / 0: `Perf.GlassGrid.ts` puts all twenty cards
    *  under ONE `PerfGrid` parent, so the page is one group of twenty and not four bands of five.
-   *  `EndsByKey.blur` falls from 20 to 1 beside them -- twenty fills become one group build, and
-   *  `?border-source=fill` (the default since Jaui `f1834cf`) already put every rim on the fill's
-   *  handle, which is now the group's. */
+   *  `EndsByKey.blur` falls from 20 to 1 beside them -- twenty fills become one group build. */
   GroupBuilds = 0;
   GroupMembers = 0;
   GroupFallbacks = 0;
@@ -245,8 +189,7 @@ export class SceneReadLedger {
   /** `?glass-programs`: glass batches routed to each variant this frame, and the ones an armed
    *  arm could NOT route (a predicate failed on some instance) that drew with the full program.
    *  `NoGlow` / `NoSpec` count batches shaded by a program compiled with that define. Always booked:
-   *  four increments per glass batch, and the arm is on by default. */
-  GlassBorderOnlyBatches = 0;
+   *  on by default. */
   GlassNoGlowBatches = 0;
   GlassNoSpecBatches = 0;
   GlassProgramFallbacks = 0;
@@ -294,12 +237,6 @@ export class SceneReadLedger {
     this.AtlasMembers = 0;
     this.AtlasSolo = 0;
     this.AtlasBytes = 0;
-    this.BordersDirect = 0;
-    this.BordersPyramid = 0;
-    this.BordersFromFill = 0;
-    this.BordersRimBuilt = 0;
-    this.BorderFragments = 0;
-    this.BorderQuadFragments = 0;
     this.AtlasDraws = 0;
     this.PresampledBuilds = 0;
     this.GaussianBuilds = 0;
@@ -313,15 +250,6 @@ export class SceneReadLedger {
     this.SurfaceChainFill = 0;
     this.SurfaceChainReads = 0;
     this.SurfaceExtents = [];
-    this.ReadLevelBuilds = 0;
-    this.ReadLevelPasses = 0;
-    this.ReadLevelFill = 0;
-    this.ReadLevelReads = 0;
-    this.ReadLevelBlit = 0;
-    this.ReadLevelChainPasses = 0;
-    this.ReadLevelChainFill = 0;
-    this.ReadLevelChainReads = 0;
-    this.ReadLevelChainBlit = 0;
     this.GroupBuilds = 0;
     this.GroupMembers = 0;
     this.GroupFallbacks = 0;
@@ -332,7 +260,6 @@ export class SceneReadLedger {
     this.ShadowProbeBinds = 0;
     this.GlassDraws = 0;
     this.GlassCensus = EmptyGlassFragCensus();
-    this.GlassBorderOnlyBatches = 0;
     this.GlassNoGlowBatches = 0;
     this.GlassNoSpecBatches = 0;
     this.GlassProgramFallbacks = 0;
@@ -395,25 +322,6 @@ export class SceneReadLedger {
   /** `n` surfaces the atlas plan could not take, and which built exactly as they do today. */
   NoteAtlasSolo = (n: number): void => { this.AtlasSolo += n; };
 
-  /** One glass border computed its backdrop directly - one blit, no pyramid. */
-  NoteBorderDirect = (): void => { this.BordersDirect++; };
-
-  /** One glass border built a pyramid: the flag is off, or the admission rule refused this build. */
-  NoteBorderPyramid = (): void => { this.BordersPyramid++; };
-
-  /** One glass border took its own FILL's pyramid - no rim build, no copy, no second region. */
-  NoteBorderFromFill = (): void => { this.BordersFromFill++; };
-
-  /** One glass border built its own rim pyramid while `?border-source=fill` was armed: the
-   *  admission rule refused it. Never counted on the `scene` arm, where every rim builds one by
-   *  definition and a column reading 20 on both arms would say nothing. */
-  NoteBorderRimBuilt = (): void => { this.BordersRimBuilt++; };
-
-  /** One direct rim DREW: `band` fragments inside its annulus, `quad` in its rasterised rect. */
-  NoteBorderFragments = (band: number, quad: number): void => {
-    this.BorderFragments += band;
-    this.BorderQuadFragments += quad;
-  };
   /** `n` draws one atlas build issued -- `2 x depth` instanced, or `2 x depth x members`. */
   NoteAtlasDraws = (n: number): void => { this.AtlasDraws += n; };
 
@@ -468,21 +376,6 @@ export class SceneReadLedger {
       : this.SurfaceExtents.map((e) => `${e.W}x${e.H}@k${e.K}:${e.Allocs}`).join(',');
   }
 
-  /** One level-plan build: what it cost, and what the chain would have cost for it. */
-  NoteReadLevel = (
-    level: { Passes: number; Fill: number; Reads: number; Blit: number },
-    chain: { Passes: number; Fill: number; Reads: number; Blit: number },
-  ): void => {
-    this.ReadLevelBuilds++;
-    this.ReadLevelPasses += level.Passes;
-    this.ReadLevelFill += level.Fill;
-    this.ReadLevelReads += level.Reads;
-    this.ReadLevelBlit += level.Blit;
-    this.ReadLevelChainPasses += chain.Passes;
-    this.ReadLevelChainFill += chain.Fill;
-    this.ReadLevelChainReads += chain.Reads;
-    this.ReadLevelChainBlit += chain.Blit;
-  };
   /** One pyramid built for a group of glass siblings under `?glass-group`. */
   NoteGroupBuild = (): void => { this.GroupBuilds++; };
 
@@ -523,8 +416,7 @@ export class SceneReadLedger {
 
   /** One glass batch took `kind` under an armed `?glass-programs`. */
   NoteGlassProgram = (kind: GlassProgramKind): void => {
-    if (kind === 'borderOnly') this.GlassBorderOnlyBatches++;
-    else if (kind === 'noLight') { this.GlassNoGlowBatches++; this.GlassNoSpecBatches++; }
+    if (kind === 'noLight') { this.GlassNoGlowBatches++; this.GlassNoSpecBatches++; }
     else this.GlassProgramFallbacks++;
   };
 }

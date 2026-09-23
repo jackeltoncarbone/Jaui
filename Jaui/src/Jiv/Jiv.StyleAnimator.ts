@@ -95,9 +95,8 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['ChromaticAberration',    s => s.ChromaticAberration,          (s, v) => { s.ChromaticAberration = v; }],
   ['EdgeLightTop',           s => s.EdgeLightTop,                 (s, v) => { s.EdgeLightTop = v; }],
   ['EdgeLightBottom',        s => s.EdgeLightBottom,              (s, v) => { s.EdgeLightBottom = v; }],
-  ['BorderVariance',         s => s.BorderVariance,               (s, v) => { s.BorderVariance = v; }],
-  ['BorderAlphaVariance',    s => s.BorderAlphaVariance,          (s, v) => { s.BorderAlphaVariance = v; }],
-  ['BorderFresnelStrength',  s => s.BorderFresnelStrength,         (s, v) => { s.BorderFresnelStrength = v; }],
+  ['RimWidth',               s => s.RimWidth,                     (s, v) => { s.RimWidth = v; }],
+  ['RimStrength',            s => s.RimStrength,                  (s, v) => { s.RimStrength = v; }],
   ['InnerBlur',              s => s.InnerBlur,                    (s, v) => { s.InnerBlur = v; }],
 
   // Transform — per-channel (legacy compound; superseded by Visual*).
@@ -141,18 +140,6 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BorderBlur',             s => s.BorderBlur,                   (s, v) => { s.BorderBlur = v; }],
   ['BorderFade',             s => s.BorderFade,                   (s, v) => { s.BorderFade = v; }],
   ['BorderOffset',           s => s.BorderOffset,                 (s, v) => { s.BorderOffset = v; }],
-  // Border-zone backdrop filter — bucket `BorderFilter`.
-  ['BorderFilter',           s => s.BorderBackdropBlur,           (s, v) => { s.BorderBackdropBlur = v; }],
-  ['BorderFilter',           s => s.BorderBrightness,             (s, v) => { s.BorderBrightness = v; }],
-  ['BorderFilter',           s => s.BorderSaturation,             (s, v) => { s.BorderSaturation = v; }],
-  ['BorderFilter',           s => s.BorderContrast,               (s, v) => { s.BorderContrast = v; }],
-  // The additive rim's amount springs with the rest of its bucket, so `:Hover { BorderFilter:
-  // Lift(90) }` eases in over the same 140ms as the Brightness beside it rather than snapping.
-  ['BorderFilter',           s => s.BorderLift,                   (s, v) => { s.BorderLift = v; }],
-  // Fresnel-highlight grade — bucket `BorderFresnelFilter`. Springs as plain scalars;
-  // the quantization into a_Outline.y happens per-frame at push, not here.
-  ['BorderFresnelFilter',    s => s.BorderFresnelBrightness,      (s, v) => { s.BorderFresnelBrightness = v; }],
-  ['BorderFresnelFilter',    s => s.BorderFresnelSaturation,      (s, v) => { s.BorderFresnelSaturation = v; }],
 
   // Shadow
   ['ShadowColor',            s => s.ShadowColor.R,                (s, v) => { s.ShadowColor.R = v; }],

@@ -2,8 +2,7 @@
  * A CPU PORT OF THE FOUR HOPS AND OF THE CONSUMER'S READ, for one question:
  * what does `?glass-presample` do to the picture?
  *
- * The template is `Border.Kernel.Source.ts` -- the border lanes' port of the same hops -- and the
- * claim it exists to settle is narrower than theirs. `PresamplePlanFor` argues, from the phase
+ * The claim it exists to settle is narrow. `PresamplePlanFor` argues, from the phase
  * and the tap offset alone, that a presampled build's first three hops ARE the unflagged build's
  * first three hops; if that is right then the only thing left to compare is the LAST 2x
  * reconstruction, which is the pyramid's 8-tap tent hop on one arm and the consumer's hardware

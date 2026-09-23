@@ -390,14 +390,6 @@ export interface LiftCensus {
    *  `textInk=N` with `authored=0 inherited=0 liftUnder=0 liftGraded=0` is the signature of this zone
    *  working as designed -- the ink moved and nothing else did. */
   TextInk: number;
-  /** Rims that DREW additive this frame -- `BorderFilter: Lift()` on a glass rim that owns its own
-   *  draw. Counted at the `'GlassBorderOnly'` push, so it counts the draw and not the intention: a
-   *  style that authored the lift on a rim the overlay never emitted cannot raise it.
-   *
-   *  Disjoint from every other counter here. A rim lift emits NO shape draw and takes NO blend of its
-   *  own -- it is arithmetic inside a draw that was already happening -- so `rimLift=N` with
-   *  `authored=0 inherited=0 liftUnder=0 liftGraded=0 blends=0` is this zone working as designed. */
-  RimLift: number;
   /** The shape draw's two implementations. */
   Under: number;
   Graded: number;
@@ -423,7 +415,7 @@ export const LiftGateLine = (c: LiftCensus): string => {
   return `jaui:lift armed=${c.Armed}`
     + ` lifts=${c.Authored + c.Inherited} authored=${c.Authored} inherited=${c.Inherited}`
     + ` ignoredSampling=${c.IgnoredSampling}`
-    + ` textInk=${c.TextInk} rimLift=${c.RimLift}`
+    + ` textInk=${c.TextInk}`
     + ` liftUnder=${c.Under} liftGraded=${c.Graded}`
     + ` liftDraws=${c.LiftDraws} liftBuilds=${c.Builds}`
     + ` cascadeVisited=${c.CascadeVisited} cascadeCarried=${c.CascadeCarried}`

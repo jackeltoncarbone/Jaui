@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   Sig, DamageRegion, PaintLedger, PickEvictions, ChainBytesFor, GuardedRect, UnionRect,
-  RECORD_NODE, RECORD_RIM, RECORD_JANVAS, READER_FILL, READER_PBLUR, DAMAGE_MAX_PIECES, BLUR_READ_GUARD_PX,
+  RECORD_NODE, RECORD_EDGE, RECORD_JANVAS, READER_FILL, READER_PBLUR, DAMAGE_MAX_PIECES, BLUR_READ_GUARD_PX,
   type ReaderWhy,
 } from '../src/Core/Blur.Cache';
 import { RegionArea } from '../src/Core/Occlusion';
@@ -268,13 +268,13 @@ describe('PaintLedger -- what makes a reader clean', () => {
     }
   });
 
-  it('RECORD_RIM is its own record: a node\'s rim and its fill never collide as a duplicate', () => {
+  it('RECORD_EDGE is its own record: a node\'s edge and its fill never collide as a duplicate', () => {
     const l = new PaintLedger<string>();
     const n = {};
     l.NewSeed().Number(1);
     l.BeginFrame(100, 100);
     l.Open(n, RECORD_NODE); l.Extend(0, 0, 10, 10); l.Close();
-    l.Open(n, RECORD_RIM); l.Extend(0, 0, 10, 10); l.Close();
+    l.Open(n, RECORD_EDGE); l.Extend(0, 0, 10, 10); l.Close();
     expect(l.Stats.Duplicate).toBe(0);
     l.Open(n, RECORD_NODE); l.Extend(0, 0, 10, 10); l.Close();
     expect(l.Stats.Duplicate).toBe(1);

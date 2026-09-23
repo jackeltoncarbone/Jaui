@@ -15,10 +15,9 @@ layout(location = 8) in vec4 a_StyleParams;   // borderEdgeAa, smoothness, opaci
 layout(location = 9) in vec4 a_Grading;       // brightness, saturation, contrast, frostLod
 layout(location = 10) in vec4 a_Refraction;   // thickness, bezelWidth, refractionStrength, bezelScale
 layout(location = 11) in vec4 a_Lighting;     // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
-layout(location = 12) in vec4 a_Specular;     // specIntensity, specSharpness, chromaticAberration, innerBlur
-layout(location = 13) in vec4 a_RimEdge;      // edgeLightTop, edgeLightBottom, borderVariance, bulge
-layout(location = 14) in vec4 a_Outline;      // packed rim amounts, packed Fresnel grade, clipOffset, clipCount
-layout(location = 15) in vec4 a_BorderFilter; // brightnessMul, saturationMul, contrastMul, lodOffset
+layout(location = 12) in vec4 a_Specular;     // specIntensity, specGlow, chromaticAberration, innerBlur + borderFade
+layout(location = 13) in vec4 a_RimEdge;      // edgeLightTop, edgeLightBottom, free, curvature
+layout(location = 14) in vec4 a_Outline;      // free, free, clipOffset, clipCount
 
 uniform vec2 u_Resolution;
 // Projection sub-window for retained-mode layer capture. Screen-space device
@@ -83,7 +82,6 @@ flat out vec4 v_Lighting;
 flat out vec4 v_Specular;
 flat out vec4 v_RimEdge;
 flat out vec4 v_Outline;
-flat out vec4 v_BorderFilter;
 
 void main() {
     // Style varyings — identical for 2D and 3D.
@@ -103,7 +101,6 @@ void main() {
     v_Specular = a_Specular;
     v_RimEdge = a_RimEdge;
     v_Outline = a_Outline;
-    v_BorderFilter = a_BorderFilter;
     // Only a body tinted toward black, at brightness 1, is on the ramp GlassAdaptGrade inverts.
     if (u_GlassAdapt.x >= 0.0 && u_GlassAdapt.y > 0.0 && a_Lighting.y < 0.0 && a_Grading.x == 1.0) {
         float peak = texelFetch(u_ShadowState, ivec2(int(u_GlassAdapt.x), 0), 0).b;

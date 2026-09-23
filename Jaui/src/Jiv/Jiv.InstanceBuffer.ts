@@ -2,6 +2,7 @@ import type { Jiv } from './Jiv';
 import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
 import { FoldLift, LiftGraded } from '../Core/Lift';
 import type { LiftValue } from '../Core/Lift';
+import type { JivShape } from './Jiv.Rim';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -11,7 +12,7 @@ import type { LiftValue } from '../Core/Lift';
 // to fetch this panel's homography from the shared u_XformTex by index and
 // project the natural corners. 2D panels are byte-identical to before.
 
-// Per-instance floats (15 vec4 slots = 60 floats = 240 bytes):
+// Per-instance floats (14 vec4 slots = 56 floats = 224 bytes):
 //   loc  1: a_Rect         (x, y, w, h)  — the AABB of the (possibly rotated) panel
 //   loc  2: a_PanelGeom    (cosθ, sinθ, halfW, halfH)
 //          The panel CENTER (cx, cy) is recomputed in-shader as the AABB center
@@ -33,18 +34,12 @@ import type { LiftValue } from '../Core/Lift';
 //          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
 //          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularGlow, chromaticAberration, innerBlur + borderFade packed)
-//   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, borderVariance, curvature in device px)
-//   loc 14: a_Outline      (packed rim amounts, packed Fresnel grade + additive-rim flag, clipOffset, clipCount)
-//          .x  = _packOutlineAmounts(borderAlphaVariance, borderFresnelStrength)
-//          .y  = _packFresnelGrade(fresnelBrightness, fresnelSaturation) [+ RIM_ADDITIVE_FLAG]
+//   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, free, curvature in device px)
+//   loc 14: a_Outline      (free, free, clipOffset, clipCount)
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
-//   loc 15: a_BorderFilter (brightnessMul, saturationMul, contrastMul, lodOffset)
-//
-// WebGL2 guarantees only 16 vertex attribute slots (locations 0..15), so we
-// pack clip_meta into `a_Outline`'s padding rather than adding a 17th slot.
 
-export const JIV_FLOATS_PER_INSTANCE = 60;
+export const JIV_FLOATS_PER_INSTANCE = 56;
 
 /** Quantize a grade multiplier to an integer code. `scale` = codes per unit,
  *  `max` = the code ceiling (bit budget). Non-finite → identity (1). */
@@ -66,60 +61,6 @@ const _q = (v: number, scale: number, max: number): number => {
 const _packInnerBlurFade = (innerBlur: number, fadePx: number): number =>
   Math.round(Math.min(63.75, Math.max(0, fadePx)) * 4) * 1024 + Math.round(Math.min(1, Math.max(0, innerBlur)) * 1000);
 
-/** Both rim AMOUNTS in one lane. `BorderFresnelFilter` needed somewhere to live and
- *  WebGL2 guarantees only 16 vertex attributes, every one of which is already spoken
- *  for — so the two amounts that used to hold a_Outline.xy share .x, and .y carries
- *  the Fresnel's grade.
- *
- *  BorderAlphaVariance is a true 0..1 fraction (the stroke's alpha floor is 1 - it),
- *  so it gets 11 bits over [0,1]. BorderFresnelStrength is a mix WEIGHT and authors
- *  deliberately push it past 1 to overshoot the target (Toggle.jss sits at 1.1), so
- *  it gets 12 bits over [0,2] instead of being clamped to a range it does not have.
- *  Steps are 1/2047 and 1/1024; both modulate an 8-bit output, so neither can be the
- *  thing a gradient bands on. Max code 2047*4096 + 2048 = 8_386_560, exact in a
- *  24-bit mantissa. The panel frag and Panel.wgsl both reverse this. */
-const _packOutlineAmounts = (alphaVariance: number, fresnelStrength: number): number =>
-  _qAmount(alphaVariance, 1, 2047) * 4096 + _qAmount(fresnelStrength, 2, 1024);
-
-/** Quantize an AMOUNT over [0, `ceiling`] to `codes` steps per unit-of-ceiling.
- *  Unlike `_q` the identity here is 0 (absent), not 1, so a non-finite value turns
- *  the effect OFF rather than to full. */
-const _qAmount = (v: number, ceiling: number, codes: number): number => {
-  const x = Number.isFinite(v) ? v : 0;
-  const max = Math.round(ceiling * codes);
-  const code = Math.round(x * codes);
-  return code < 0 ? 0 : code > max ? max : code;
-};
-
-/** The Fresnel highlight's grade in one lane: brightness*256 over [0,4) in the high
- *  10 bits, saturation*256 over [0,4) in the low 10. Both are animated through the
- *  StyleAnimator as plain scalars and only quantize HERE, at push, so a spring runs
- *  at full float precision and lands on a 1/256 step. Max code 1023*1024+1023 =
- *  1_048_575. The panel frag reverses this. */
-const _packFresnelGrade = (brightness: number, saturation: number): number =>
-  _q(brightness, 256, 1023) * 1024 + _q(saturation, 256, 1023);
-
-/** THE ADDITIVE RIM's one bit, and why it is only a bit.
- *
- *  `BorderFilter: Lift(n)` needs TWO things in the fragment: an AMOUNT and a switch from mix to add.
- *  There is no lane for the amount -- WebGL2 guarantees 16 vertex attributes, locations 0..15 are all
- *  spoken for, and the stride is 60 floats = exactly 15 vec4 of instance data. Nine spare bits do not
- *  exist either: `_packOutlineAmounts` reaches 8_386_560 of a 24-bit mantissa (ONE bit spare) and
- *  `_packInnerBlurFade` reaches 262_120 (six).
- *
- *  So the amount is not carried separately at all. A lift is a color TIMES an amount, which is one
- *  vector, and this rim's color is already in the instance: `a_BorderColor.rgb`. The push premultiplies
- *  it by the signed amount, exactly as `'LiftOnly'` below premultiplies the shape draw's fill
- *  (`l * c.R`), and this flag is all that is left to say -- ADD this rgb at the rim's weight rather
- *  than MIX toward it. `a_BorderColor.a` is untouched and stays the weight it always was, so a press
- *  that raises the rim's alpha still brightens an additive rim.
- *
- *  It rides `a_Outline.y`, whose `_packFresnelGrade` payload maxes at 1_048_575 -- under 2^20, so this
- *  2^21 flag cannot collide with it, and the sum maxes at 3_145_727, exact in a 24-bit mantissa with
- *  room to spare. The `.x` lane's single spare bit was the alternative and is left alone: one bit of
- *  headroom is not a place to put a flag that a future amount may want to grow into. */
-export const RIM_ADDITIVE_FLAG = 2097152;
-
 const _packFgGrade = (brightness: number, saturation: number, contrast: number): number => {
   const b = _q(brightness, 256, 1023);
   const s = _q(saturation, 32, 127);
@@ -129,9 +70,57 @@ const _packFgGrade = (brightness: number, saturation: number, contrast: number):
 
 const _FG_GRADE_IDENTITY = _packFgGrade(1, 1, 1);
 
+/** A panel's shape and placement in device px, as its instance packs them: the shape the rim walks
+ *  and the fill draws are the same numbers. */
+export interface JivPanelShape extends JivShape {
+  Radii: [number, number, number, number];
+  CenterX: number;
+  CenterY: number;
+  Cos: number;
+  Sin: number;
+}
+
+export const NewJivPanelShape = (): JivPanelShape => ({
+  HalfWidth: 0, HalfHeight: 0, Radii: [0, 0, 0, 0], Smoothness: 0, CenterX: 0, CenterY: 0, Cos: 1, Sin: 0,
+});
+
+/** The shape lanes `JivInstanceBuffer.Push` packs, from the cascaded matrix `m`, written into `out`. */
+export const JivPanelShapeOf = (jiv: Jiv, dpr: number, m: Mat2x3, out: JivPanelShape = NewJivPanelShape()): JivPanelShape => {
+  const style = jiv.RenderStyle;
+  const cx = matScaleX(m);
+  const cy = matScaleY(m);
+  const avgScale = (cx + cy) * 0.5;
+  const halfWidth = cx * jiv.Width * dpr * 0.5;
+  const halfHeight = cy * jiv.Height * dpr * 0.5;
+  const centerLX = jiv.X + jiv.Width * 0.5;
+  const centerLY = jiv.Y + jiv.Height * 0.5;
+  // The drawn radius carries the smoothness compensation, which on a shallow box lands close to half
+  // the short axis. Whether a corner is a CAPSULE is the author's intent, so the shader is also handed
+  // the authored radius and decides saturation from it. Everything past half the box saturates alike.
+  const raw = style.BorderRadiusRaw;
+  const authoredMin = Math.min(Math.max(Math.min(raw[0], raw[1], raw[2], raw[3]), 0) * avgScale * dpr,
+    Math.min(halfWidth, halfHeight) + 1);
+  const r = style.BorderRadius;
+  out.HalfWidth = halfWidth;
+  out.HalfHeight = halfHeight;
+  out.Radii[0] = r[0] * avgScale * dpr;
+  out.Radii[1] = r[1] * avgScale * dpr;
+  out.Radii[2] = r[2] * avgScale * dpr;
+  out.Radii[3] = r[3] * avgScale * dpr;
+  // Smoothness rides with the authored radius in one float: the 0..1 fraction is the smoothness and the
+  // whole part above it is the authored radius in sixteenths of a device pixel. A clip shape passes a
+  // bare smoothness and decodes an authored radius of 0.
+  out.Smoothness = Math.max(0, Math.min(1, style.BorderRadiusSmoothness)) + 2 * Math.round(authoredMin * 16);
+  out.CenterX = matApplyX(m, centerLX, centerLY) * dpr;
+  out.CenterY = matApplyY(m, centerLX, centerLY) * dpr;
+  out.Cos = matCos(m);
+  out.Sin = matSin(m);
+  return out;
+};
+
 /**
  * CPU-side instance data packer for Jiv panels. Reads from Jiv.RenderStyle
- * and packs 60 floats per instance into a Float32Array. Backend-agnostic —
+ * and packs 56 floats per instance into a Float32Array. Backend-agnostic —
  * the Renderer consumes the raw data via PanelAddInstance().
  */
 export class JivInstanceBuffer {
@@ -142,6 +131,7 @@ export class JivInstanceBuffer {
   private _data: Float32Array;
   private _capacity: number;
   private _count: number = 0;
+  private readonly _shape: JivPanelShape = NewJivPanelShape();
 
   constructor(initialCapacity: number = 64) {
     this._capacity = initialCapacity;
@@ -169,21 +159,13 @@ export class JivInstanceBuffer {
    */
   /** `borderMode` controls how this instance treats its border stroke, used
    *  by the `BorderLayer` paint-ordering feature:
-   *    • 'Normal'      — border painted with the panel (default, today's path).
+   *    • 'Normal'      — border painted with the panel (default).
    *    • 'Suppress'    — panel drawn with NO border; the border is emitted
    *                      separately as a 'BorderOnly' instance interleaved
    *                      among children at the node's BorderLayer position.
    *    • 'BorderOnly'  — only the border stroke paints: background, shadow,
-   *                      and (non-glass) fill are zeroed so the instance is a
+   *                      and fill are zeroed so the instance is a
    *                      transparent quad carrying just the stroke.
-   *    • 'GlassBorderOnly' — re-emits the FULL glass rim (refiltered backdrop +
-   *                      BorderColor/BorderFilter grading) on a transparent
-   *                      interior. Keeps Thickness + the backdrop filter intact
-   *                      (the rim must sample the real backdrop) and zeroes only
-   *                      fill + shadow; the shader's border-only flag (signalled
-   *                      by a NEGATIVE borderEdgeAa) skips interior fill/effects
-   *                      but still runs the glass border zone. Drawn with the
-   *                      glass shader + a real scene snapshot by emitBorderOverlay.
    *    • 'LiftOnly'    — `BackdropFilter: Lift(n)`'s under-draw (Core/Lift.ts): the element's
    *                      SHAPE (radii, smoothness, clip stack, opacity) filled with |n| / 255 on
    *                      every channel at alpha 1, and nothing else — no border, no shadow, no
@@ -192,7 +174,7 @@ export class JivInstanceBuffer {
    *                      exactly the coverage the element's own fill would have had. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
-          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'GlassBorderOnly' | 'LiftOnly' = 'Normal',
+          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'LiftOnly' = 'Normal',
           /** `'LiftOnly'` only: the additive color to fill with, when it is NOT the backdrop zone's.
            *  The FOREGROUND zone and the inherited `Lift:` property carry their own color+amount and
            *  share this one push, because the additive draw is the same draw (Core/Lift.ts). */
@@ -202,24 +184,13 @@ export class JivInstanceBuffer {
     const style = jiv.RenderStyle;
     const d = dpr;
     const offset = this._count * JIV_FLOATS_PER_INSTANCE;
+    const shape = JivPanelShapeOf(jiv, d, m, this._shape);
 
-    // Axis scales + rotation basis come FROM THE CASCADED MATRIX, so a panel
-    // rotated by an ancestor (the parent's rotation accumulated into `m`)
-    // rotates with it. cos/sin are the ACCUMULATED basis — NOT the node's own
-    // Transform.Rotation (that was already folded into `m` by renderNode, so
-    // reading it again here would double-count). At rotation 0 / no Visual*,
-    // m = [cx,0,0,cy,ox,oy] → cx=|a|, cy=|d|, cos=1, sin=0: legacy values.
-    const cx = matScaleX(m);
-    const cy = matScaleY(m);
-    const cos = matCos(m);
-    const sin = matSin(m);
-    const w = cx * jiv.Width * d;   // unrotated device size (SDF half-extents)
-    const h = cy * jiv.Height * d;
     // Border / shadow widths scale with the rendered geometry so they
     // stay visually proportional under a Visual* cascade — matches CSS
     // where transform on an ancestor scales its painted output.
     // Average the axes so non-uniform scale doesn't pinch shadows.
-    const avgScale = (cx + cy) * 0.5;
+    const avgScale = (matScaleX(m) + matScaleY(m)) * 0.5;
     const borderWidth = style.BorderWidth * avgScale * d;
     const borderEdgeAa = style.BorderBlur * avgScale * d;
     const _ns = JivInstanceBuffer.DiagNoShadow;
@@ -233,32 +204,25 @@ export class JivInstanceBuffer {
     const marginX = Math.max(shadowMarginX, borderMargin);
     const marginY = Math.max(shadowMarginY, borderMargin);
 
-    // Panel center: map the node's LOCAL center through the full matrix so the
-    // accumulated rotation+translation places it at its true rotated position.
-    const centerLX = jiv.X + jiv.Width * 0.5;
-    const centerLY = jiv.Y + jiv.Height * 0.5;
-    const cxDev = matApplyX(m, centerLX, centerLY) * d;
-    const cyDev = matApplyY(m, centerLX, centerLY) * d;
-
-    const halfW = w / 2;
-    const halfH = h / 2;
+    const halfW = shape.HalfWidth;
+    const halfH = shape.HalfHeight;
     // Expand the AABB so the rotated quad (plus border/shadow margins) stays
     // inside the rasterized rectangle: a rect of half-extents (a, b) rotated by
     // θ has axis-aligned half-extents (|cos|·a + |sin|·b, |sin|·a + |cos|·b).
-    const aCos = Math.abs(cos);
-    const aSin = Math.abs(sin);
+    const aCos = Math.abs(shape.Cos);
+    const aSin = Math.abs(shape.Sin);
     const rotHalfX = aCos * (halfW + marginX) + aSin * (halfH + marginY);
     const rotHalfY = aSin * (halfW + marginX) + aCos * (halfH + marginY);
 
     const data = this._data;
 
-    data[offset + 0] = cxDev - rotHalfX;
-    data[offset + 1] = cyDev - rotHalfY;
+    data[offset + 0] = shape.CenterX - rotHalfX;
+    data[offset + 1] = shape.CenterY - rotHalfY;
     data[offset + 2] = rotHalfX * 2;
     data[offset + 3] = rotHalfY * 2;
 
-    data[offset + 4] = cos;
-    data[offset + 5] = sin;
+    data[offset + 4] = shape.Cos;
+    data[offset + 5] = shape.Sin;
     data[offset + 6] = halfW;
     data[offset + 7] = halfH;
 
@@ -275,23 +239,10 @@ export class JivInstanceBuffer {
       data[offset + 5] = xformIndex;
     }
 
-    // The drawn radius carries the smoothness compensation, which on a shallow box lands close to half
-    // the short axis. Whether a corner is a CAPSULE is the author's intent, not a property of that
-    // compensated number, so the shader is handed the authored radius and decides saturation from it.
-    // Capping the drawn radius instead (the previous fix) kept rectangles rectangular but stole the
-    // flare the compensation had just added, so the corner never reached concentric.
-    const halfMin = Math.min(halfW, halfH);
-    const rawMin = Math.min(
-      style.BorderRadiusRaw[0], style.BorderRadiusRaw[1],
-      style.BorderRadiusRaw[2], style.BorderRadiusRaw[3],
-    );
-    // Everything past half the box saturates alike, so clamp before packing and keep the number small.
-    const authoredMin = Math.min(Math.max(rawMin, 0) * avgScale * d, halfMin + 1);
-
-    data[offset + 8] = style.BorderRadius[0] * avgScale * d;
-    data[offset + 9] = style.BorderRadius[1] * avgScale * d;
-    data[offset + 10] = style.BorderRadius[2] * avgScale * d;
-    data[offset + 11] = style.BorderRadius[3] * avgScale * d;
+    data[offset + 8] = shape.Radii[0];
+    data[offset + 9] = shape.Radii[1];
+    data[offset + 10] = shape.Radii[2];
+    data[offset + 11] = shape.Radii[3];
 
     data[offset + 12] = style.Background.Color.R;
     data[offset + 13] = style.Background.Color.G;
@@ -314,28 +265,17 @@ export class JivInstanceBuffer {
     data[offset + 27] = borderWidth;
 
     data[offset + 28] = borderEdgeAa;
-    // Smoothness rides with the authored radius in one float: smoothness is a 0..1 fraction, so the
-    // authored radius sits above it in whole units, in sixteenths of a device pixel. The fragment
-    // shader splits them again in CornerEval. A clip shape passes a bare smoothness and decodes an
-    // authored radius of 0, which is correct for it — the clip encoder flattens smoothness to 0 for
-    // genuinely round shapes and the superellipse draws those exactly.
-    data[offset + 29] = Math.max(0, Math.min(1, style.BorderRadiusSmoothness))
-      + 2 * Math.round(authoredMin * 16);
+    data[offset + 29] = shape.Smoothness;
     // Implicit Presence fade now lives in the default `Opacity: Presence`
     // (Jiv.Defaults) — RenderStyle.Opacity already carries the current
     // spring value. Authors override via `Opacity: 1` for no fade or
     // `Opacity: <expr>` for a custom curve.
     data[offset + 30] = jiv.EffectiveOpacity;
-    // offset+31 (a_StyleParams.w) was the materialType flag, but in production
-    // the shader picks the glass/non-glass variant at compile time, so this
-    // lane is free. It now carries the foreground Filter GRADE — brightness,
-    // saturation, AND contrast — bit-packed into this one UNIVERSAL lane so the
-    // foreground filter renders identically on every material (glass + plain
-    // panels alike), without spending one of WebGL2's full 16 vertex-attribute
-    // slots. Values are the CASCADED Effective* (a parent's `Filter` folds into
-    // descendants). brightness gets 10 bits (smooth animation), saturation /
-    // contrast 7 each; all three are exact in a 24-bit float mantissa. The frag
-    // unpacks and runs applyGrading. NaN-guarded so it can never black a panel.
+    // The foreground Filter GRADE -- brightness, saturation AND contrast -- bit-packed into one lane so
+    // it renders identically on every material. Values are the CASCADED Effective* (a parent's
+    // `Filter` folds into descendants). brightness gets 10 bits (smooth animation), saturation /
+    // contrast 7 each; all three are exact in a 24-bit float mantissa. NaN-guarded so it can never
+    // black a panel.
     data[offset + 31] = _packFgGrade(jiv.EffectiveBrightness, jiv.EffectiveSaturation, jiv.EffectiveContrast);
 
     // A lift that could not be drawn under the element rides in the grade it already runs (Core/Lift.ts).
@@ -363,27 +303,21 @@ export class JivInstanceBuffer {
 
     data[offset + 48] = style.EdgeLightTop;
     data[offset + 49] = style.EdgeLightBottom;
-    data[offset + 50] = style.BorderVariance;
+    data[offset + 50] = 0;
     // Curvature is a LENGTH (the lens cap's height), so it scales to device px like BezelWidth.
     data[offset + 51] = style.Curvature * avgScale * d;
 
-    data[offset + 52] = _packOutlineAmounts(style.BorderAlphaVariance, style.BorderFresnelStrength);
-    data[offset + 53] = _packFresnelGrade(style.BorderFresnelBrightness, style.BorderFresnelSaturation);
+    data[offset + 52] = 0;
+    data[offset + 53] = 0;
     data[offset + 54] = clipOffset;
     data[offset + 55] = clipCount;
-
-    data[offset + 56] = style.BorderBrightness;
-    data[offset + 57] = style.BorderSaturation;
-    data[offset + 58] = style.BorderContrast;
-    data[offset + 59] = style.BorderBackdropBlur;
 
     // ── BorderLayer paint-ordering overrides ──
     // 'Suppress' draws the panel WITHOUT its border (the border re-appears as a
     // separate 'BorderOnly' instance interleaved among children). 'BorderOnly'
     // strips everything BUT the stroke: transparent background + no shadow, and
-    // Thickness=0 so the frag takes the plain non-glass border composite (a
-    // glass refraction/rim pass over a transparent fill would draw nothing
-    // useful, and we want a clean stroke regardless of the host material).
+    // Thickness=0 so the frag takes the plain stroke composite regardless of
+    // the host material.
     if (borderMode === 'Suppress') {
       data[offset + 27] = 0;  // borderWidth
       data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0; // BorderColor
@@ -391,43 +325,14 @@ export class JivInstanceBuffer {
       data[offset + 15] = 0;  // Background alpha → no fill
       data[offset + 23] = 0;  // ShadowColor alpha → no shadow
       data[offset + 36] = 0;  // Thickness → non-glass stroke path
-      // Neutralize the backdrop filter too — without this, a host with a
-      // BackdropFilter (every JwiftGlass surface) keeps hasBackdropFilter==true
-      // on the stroke-only quad, and emitBorderOverlay draws it with a NULL
-      // backdrop (the dummy BLACK texture), so the frag fills the WHOLE panel
-      // interior with graded black ≈ flat grey OVER the glass. The overlay must
-      // carry ONLY the stroke.
+      // Neutralize the backdrop filter too: a host with a BackdropFilter would keep
+      // hasBackdropFilter true on the stroke-only quad, which draws with no backdrop bound
+      // (the dummy BLACK texture) and would fill the WHOLE interior with graded black.
       data[offset + 32] = 1;  // BackdropBrightness → identity
       data[offset + 33] = 1;  // BackdropSaturation → identity
       data[offset + 34] = 1;  // BackdropContrast → identity
       data[offset + 35] = 0;  // frost LOD → no backdrop sample
       data[offset + 41] = 0;  // body Tint → the stroke quad tints nothing
-    } else if (borderMode === 'GlassBorderOnly') {
-      // Glass rim over children: keep Thickness + the backdrop filter (the rim
-      // samples the REAL backdrop), zero only fill + shadow, and set the
-      // shader's border-only flag by NEGATING borderEdgeAa (offset 28). The
-      // frag abs()'s it for the feather and treats the sign as "skip interior".
-      data[offset + 15] = 0;  // Background alpha → no fill
-      data[offset + 23] = 0;  // ShadowColor alpha → no shadow
-      // Border-only flag. Carry a tiny magnitude when the feather is 0 so the
-      // sign survives (−0 is not < 0 in GLSL); the rim AA stays effectively crisp.
-      data[offset + 28] = -Math.max(borderEdgeAa, 1e-3);
-      // THE ADDITIVE RIM (`BorderFilter: Lift(n)`). Premultiplied into the rim's OWN color lane, for
-      // the reason on RIM_ADDITIVE_FLAG: a lift is a color times an amount, which is one vector, and
-      // there is no sixteenth attribute to carry the amount beside it. The alpha is left alone -- it
-      // is the rim's weight in both modes, so a press that raises it still brightens the stroke.
-      //
-      // This is the ONLY mode that premultiplies, and deliberately: it is the one push that is
-      // guaranteed to reach the glass border zone, where `borderBackdrop` -- the gather of what lies
-      // under the stroke -- is what the rgb gets added to. `Jaui._refuseRimLift` throws by name for
-      // every other rim, so a premultiplied color can never reach the flat stroke path and paint a
-      // dimmed line instead of an additive one.
-      if (style.BorderLift !== 0) {
-        data[offset + 16] = style.BorderColor.R * style.BorderLift;
-        data[offset + 17] = style.BorderColor.G * style.BorderLift;
-        data[offset + 18] = style.BorderColor.B * style.BorderLift;
-        data[offset + 53] += RIM_ADDITIVE_FLAG;
-      }
     } else if (borderMode === 'LiftOnly') {
       // THE ADDITIVE COLOR's fill: |amount| times the color, per channel, at alpha 1 (Core/Lift.ts).
       // The blend's `SRC_ALPHA` factor then multiplies it by the element's own coverage, so a
@@ -447,9 +352,7 @@ export class JivInstanceBuffer {
       data[offset + 32] = 1; data[offset + 33] = 1; data[offset + 34] = 1; data[offset + 35] = 0;
       data[offset + 36] = 0; data[offset + 41] = 0; data[offset + 43] = 0;
       data[offset + 44] = 0; data[offset + 46] = 0; data[offset + 47] = 0;
-      data[offset + 48] = 0; data[offset + 49] = 0; data[offset + 50] = 0;
-      data[offset + 52] = 0;
-      data[offset + 56] = 1; data[offset + 57] = 1; data[offset + 58] = 1; data[offset + 59] = 0;
+      data[offset + 48] = 0; data[offset + 49] = 0;
     }
 
     this._count++;

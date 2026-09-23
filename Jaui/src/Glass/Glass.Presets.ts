@@ -13,16 +13,10 @@ export const LiquidGlass: Partial<JivStyle> = {
 
   // Shape / alpha — fully transparent so only refracted backdrop + effects show
   Background: 'rgba(255, 255, 255, 0)',
-  // BorderColor is a TINT applied over the border-zone backdrop, not an opaque
-  // stroke. Low alpha = subtle white wash. Set to 0 for pure backdrop-tinted rim.
-  BorderColor: 'rgba(255, 255, 255, 0.12)',
-  BorderWidth: '1.4',
   BorderRadius: '32',
-  // Border-zone backdrop refilter — brighter + more saturated than the panel
-  // face so the rim catches color like a real glass bevel. Blur() here is the
-  // extra LOD octave offset on top of the panel's own blur LOD (negative =
-  // sharper rim, positive = softer).
-  BorderFilter: 'Blur(-0.5) Brightness(1.35) Saturate(1.25)',
+  // The rim: Apple's hairline, lit toward LightAngle and its bounce.
+  RimWidth: '0.85px',
+  RimStrength: '0.25',
 
   // Ambient drop shadow — Apple shadows are SUBTLE; ~18% alpha, soft blur
   ShadowColor: 'rgba(0, 0, 0, 0.18)',
@@ -58,11 +52,6 @@ export const LiquidGlass: Partial<JivStyle> = {
   EdgeLightTop: '0.16',
   EdgeLightBottom: '0.03',
 
-  // Variable border width (thicker on lit side)
-  BorderVariance: '0.3',
-  BorderAlphaVariance: '0.2',
-  BorderFresnelStrength: '0.25',
-
   // Center slightly more blurred than rim (longer optical path)
   InnerBlur: '0.25',
 };
@@ -73,9 +62,9 @@ export const LiquidGlass: Partial<JivStyle> = {
  */
 export const ClearGlass: Partial<JivStyle> = {
   Background: 'rgba(255, 255, 255, 0)',
-  BorderColor: 'rgba(255, 255, 255, 0.45)',
-  BorderWidth: '1',
   BorderRadius: '32',
+  RimWidth: '0.85px',
+  RimStrength: '0.35',
 
   BackdropFilter: 'Blur(1) Saturate(1.1)',
 
@@ -94,8 +83,5 @@ export const ClearGlass: Partial<JivStyle> = {
   ChromaticAberration: '0.3',
   EdgeLightTop: '0.22',
   EdgeLightBottom: '0.05',
-  BorderVariance: '0.4',
-  BorderAlphaVariance: '0.05',
-  BorderFresnelStrength: '0.45',
   InnerBlur: '0.1',
 };

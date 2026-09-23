@@ -243,23 +243,13 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
   // Filters — each authored as a CSS-shaped function list, normalized into
   // the per-zone scalar render fields the shader already consumes. Blur()'s
-  // arg stays a Length and resolves under ctx (frost px for BackdropFilter,
-  // LOD octave offset for BorderFilter); a missing Blur() = 0.
+  // arg stays a Length and resolves under ctx (the frost px for BackdropFilter);
+  // a missing Blur() = 0.
   const fg = ParseFilter(_resolveGradeArgs(ResolveTernary(s.Filter, ctx), ctx), 'foreground');
   const backdrop = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BackdropFilter, ctx), ctx));
-  // THE ZONE ARGUMENT IS LOAD-BEARING AND WAS MISSING. This call passed no zone, which is the
-  // `'backdrop'` DEFAULT, so every `BorderFilter` in the app was parsed, validated and cached as a
-  // backdrop filter: `_cacheBorder` was unreachable, the border zone's refusals never fired outside a
-  // unit test that called `ParseFilter(x, 'border')` by hand, and `BorderFilter: Lift(60)` was
-  // accepted and silently dropped. The guard was right; only its locator was wrong.
-  const border = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BorderFilter, ctx), ctx), 'border');
-  // The rim's Fresnel highlight grades separately from the rim's gather: the gather is
-  // the backdrop seen THROUGH the bevel, the highlight is what the lit face throws back.
-  // Brightness + Saturate only; the 'fresnel' zone throws on Blur()/Contrast().
-  const fresnel = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BorderFresnelFilter, ctx), ctx), 'fresnel');
   // The INK zone. Takes `Lift()` only, so the only field of this parse that is ever read is `.Lift`
   // -- the amount that scales the element's own ink. It resolves through the SAME `_resolveGradeArgs`
-  // as its four siblings, so `TextFilter: Lift(30 * @Dark - 20 * @Light)` flips with the theme in one
+  // as its siblings, so `TextFilter: Lift(30 * @Dark - 20 * @Light)` flips with the theme in one
   // line exactly as a wash does.
   const ink = ParseFilter(_resolveGradeArgs(ResolveTernary(s.TextFilter, ctx), ctx), 'text');
   const resolveBlur = (raw: string | null): number => (raw !== null ? Resolve(raw, ctx, 'W') : 0);
@@ -352,10 +342,9 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     ChromaticAberration: Resolve(s.ChromaticAberration, ctx, 'W'),
     EdgeLightTop: Resolve(s.EdgeLightTop, ctx, 'W'),
     EdgeLightBottom: Resolve(s.EdgeLightBottom, ctx, 'W'),
-    BorderVariance: Resolve(s.BorderVariance, ctx, 'W'),
-    BorderAlphaVariance: Resolve(s.BorderAlphaVariance, ctx, 'W'),
-    BorderFresnelStrength: Resolve(s.BorderFresnelStrength, ctx, 'W'),
     InnerBlur: Resolve(s.InnerBlur, ctx, 'W'),
+    RimWidth: Math.max(0, Resolve(ResolveTernary(s.RimWidth, ctx), ctx, 'W')),
+    RimStrength: Math.max(0, Math.min(1, Resolve(ResolveTernary(s.RimStrength, ctx), ctx, 'W'))),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
 
@@ -380,18 +369,9 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderWidth: Resolve(s.BorderWidth, ctx, 'W'),
     BorderBlur: Resolve(s.BorderBlur, ctx, 'W'),
     BorderFade: Resolve(s.BorderFade, ctx, 'W'),
-    BorderBackdropBlur: resolveBlur(border.BlurRaw),
     BorderOffset: Resolve(s.BorderOffset, ctx, 'W'),
     ContainBorder: s.ContainBorder,
     BorderLayer: Resolve(s.BorderLayer, ctx, 'W'),
-
-    BorderBrightness: border.Brightness,
-    BorderSaturation: border.Saturation,
-    BorderContrast: border.Contrast,
-    BorderLift: border.Lift,
-
-    BorderFresnelBrightness: fresnel.Brightness,
-    BorderFresnelSaturation: fresnel.Saturation,
 
     ShadowColor: ParseColor(ResolveVars(ResolveTernary(s.ShadowColor, ctx), ctx)),
     ShadowBlur: Resolve(s.ShadowBlur, ctx, 'W'),

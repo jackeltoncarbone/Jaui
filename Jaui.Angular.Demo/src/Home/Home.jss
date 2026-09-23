@@ -184,9 +184,8 @@ SectionTitle {
 LiquidGlass {
   Background: rgba(255, 255, 255, 0)
   BorderRadius: 32pt
-  BorderWidth: 1pt
-  BorderBlur: 0.25pt
-  BorderFilter: Brightness(1.25) Saturate(1.5)
+  RimWidth: 0.85px
+  RimStrength: 0.25
 
   ShadowColor: rgba(0, 0, 0, 0.18)
   ShadowBlur: 22pt
@@ -207,9 +206,6 @@ LiquidGlass {
   ChromaticAberration: 0.3
   EdgeLightTop: 0
   EdgeLightBottom: 0.03
-  BorderVariance: 0
-  BorderAlphaVariance: 0
-  BorderFresnelStrength: 0
   InnerBlur: 0
 }
 
@@ -489,25 +485,20 @@ BorderLayerFront {
   BorderLayer: 1
 }
 
-/* Glass rim over children: a LiquidGlass box whose FULL glass border
-   (refiltered backdrop + BorderFilter grading) re-emits at BorderLayer 10,
+/* Glass rim over children: a glass box whose rim paints at BorderLayer 10,
    ON TOP of the oversized orange fill tile that reaches the box edge. The
-   rim should read as a real light-gathering glass edge over the tile, not a
-   flat stroke. */
+   rim should read as light the edge catches over the tile, not a flat
+   stroke. */
 BorderLayerGlass {
   BorderLayer: 10
   // Material is DERIVED, never authored: Thickness above 0 is what routes this
   // through the glass pipeline.
   Thickness: 12pt
   Background: rgba(255, 255, 255, 0.04)
-  BorderColor: rgba(255, 255, 255, 0.5)
-  BorderWidth: 18pt
-  // The frost and the rim grade are authored as filters. BackdropFrostBlur /
-  // BorderBrightness / BorderSaturation are JivRenderStyle fields — what these
-  // RESOLVE to — and were dead keys here, so this demo has never actually shown
-  // the light-gathering edge the comment above describes. It does now.
+  BorderWidth: 0pt
+  RimWidth: 0.85px
+  RimStrength: 0.4
   BackdropFilter: Blur(6pt)
-  BorderFilter: Brightness(1.5) Saturate(1.4)
 }
 
 BorderLayerTag {

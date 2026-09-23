@@ -193,31 +193,7 @@ export interface JivStyle {
    *  and never touching this element's own ink; see `Core/Lift.ts` for the
    *  two implementations the engine picks between. */
   BackdropFilter: string;
-  /** Border-zone backdrop filter — frost LOD offset + grade applied in the
-   *  rim region only. Per-box. `Blur(len)` is the LOD octave offset vs the
-   *  panel face (negative = sharper rim, positive = softer). */
-  BorderFilter: string;
-  /** Grade on the border's FRESNEL HIGHLIGHT — the lit-side flare the rim throws
-   *  where it faces `LightAngle`. A filter, like its three siblings, but over the
-   *  highlight's color rather than the zone's gather:
-   *
-   *    BorderFresnelFilter: Brightness(1.1) Saturate(1.6)
-   *
-   *  • `Saturate(x)` — chroma gain ABOUT WHITE. The highlight's hue is the border
-   *    gather's own, driven to full value; `x` is how far past that hue it pushes.
-   *    1 = the gather's hue exactly, 0 = plain white, >1 = more saturated than the
-   *    thing it reflects (what a real bevel does). Engine default 1.6.
-   *  • `Brightness(x)` — a final multiplier on the highlight's value. 1 = pinned to
-   *    full value (the default); below 1 dims the flare, above 1 burns it toward
-   *    white. Identity 1.
-   *
-   *  `Blur()` and `Contrast()` are REFUSED here and throw — see Filter.Parse's
-   *  `'fresnel'` zone for why neither has a meaning on a normalized highlight.
-   *  HOW MUCH of the highlight there is at all is `BorderFresnelStrength`; this
-   *  property only says what color it is, exactly as `BorderColor.a` and
-   *  `BorderFilter` already split amount from grade for the rim itself. */
-  BorderFresnelFilter: string;
-  /** THE INK ZONE -- the fifth filter zone, and the only one that touches the element's TEXT and
+  /** THE INK ZONE -- the third filter zone, and the only one that touches the element's TEXT and
    *  nothing else:
    *
    *      TextFilter: Lift(30)        // the ink ADDS, at 30/255 of its own Color
@@ -289,20 +265,17 @@ export interface JivStyle {
   EdgeLightTop: string;
   EdgeLightBottom: string;
 
-  // Shape-driven variables
-  BorderVariance: string;
-  BorderAlphaVariance: string;
-  /** How much Fresnel highlight the border carries on its lit side, 0..1. 0 = the
-   *  stroke is its `BorderColor` all the way round; 1 = the lit side reaches the
-   *  full highlight. Falls off as `pow(lightFacing, 3)` away from `LightAngle`, so
-   *  even at 1 only the facing arc burns. Default 0, which is what keeps a plain
-   *  border a plain uniform stroke. The highlight's COLOR is `BorderFresnelFilter`.
-   *
-   *  This was spelled `BorderFresnelBrightness` until the Fresnel got a filter, and
-   *  that name was the bug: it is an amount, never a brightness, and a request to
-   *  saturate the rim kept being answered with it. */
-  BorderFresnelStrength: string;
   InnerBlur: string;
+
+  /** THE RIM: the light the edge catches, a hairline screened onto whatever is already drawn there
+   *  (Jiv/Jiv.Rim.ts). `RimWidth` is its core, a length in `px`: a HAIRLINE, so it never scales with
+   *  PointScale or a Visual transform, and it is never drawn under one device pixel. Apple's core is
+   *  about 0.85px. Default 0, no rim. */
+  RimWidth: string;
+  /** The rim's peak brightness, 0..1, where it faces `LightAngle` and its bounce opposite; ninety
+   *  degrees off, it keeps 0.15 of this. Screened, so over the Apple dark body (luma 26) 0.25 lifts
+   *  the lit lobes by about 57. Default 0. */
+  RimStrength: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.
   // Internal/legacy. Author-facing visual transform lives on the
@@ -341,9 +314,8 @@ export interface JivStyle {
   BorderWidth: string;
   /** Edge feather half-width in CSS px. Controls how soft the border
    *  stroke's silhouette edge is — larger = softer/glowier outline. At
-   *  `0.5` the edge is antialiased over ~1 physical px (the old hardcoded
-   *  default). At `0` the edge is a hard step (aliased). The border-zone
-   *  backdrop blur + grade live on `BorderFilter` instead. */
+   *  `0.5` the edge is antialiased over ~1 physical px. At `0` the edge is
+   *  a hard step (aliased). */
   BorderBlur: string;
   /** How far the stroke fades INWARD past its width, a length. The outer edge stays as sharp as
    *  BorderBlur makes it; the inner edge eases from full stroke to nothing over this distance, so a
@@ -456,11 +428,11 @@ export interface JivRenderStyle {
   ChromaticAberration: number;
   EdgeLightTop: number;
   EdgeLightBottom: number;
-  BorderVariance: number;
-  BorderAlphaVariance: number;
-  /** Resolved `BorderFresnelStrength` — the 0..1 amount of the border's Fresnel. */
-  BorderFresnelStrength: number;
   InnerBlur: number;
+
+  /** Resolved `RimWidth`, CSS px (the walk multiplies by the device pixel ratio). */
+  RimWidth: number;
+  RimStrength: number;
 
   Transform: Transform;
 
@@ -482,7 +454,6 @@ export interface JivRenderStyle {
   BorderWidth: number;
   BorderBlur: number;
   BorderFade: number;
-  BorderBackdropBlur: number;
   BorderOffset: number;
   ContainBorder: boolean;
   /** Resolved border paint position in the child-`Layer` space. Default 0:
@@ -490,24 +461,6 @@ export interface JivRenderStyle {
    *  greater than a child's Layer paints the border in front of that child;
    *  lower paints it behind. See JivStyle.BorderLayer. */
   BorderLayer: number;
-
-  BorderBrightness: number;
-  BorderSaturation: number;
-  BorderContrast: number;
-  /** THE ADDITIVE RIM. `BorderFilter: Lift(n)`'s amount as a signed fraction of full scale (n / 255).
-   *  Identity 0, which is the mix the rim has always drawn. Non-zero makes the stroke ADD
-   *  `BorderColor.rgb * this` to the gather it already holds, at the SAME weight the mix used
-   *  (`BorderColor.a * strokeBrightness`), so the taper survives and the rim's hue and chroma become
-   *  exactly the gather's instead of being scaled by `(1 - weight)` toward BorderColor.
-   *
-   *  Only a GLASS rim that owns its own draw can carry it -- `Jaui._refuseRimLift` names the rest. */
-  BorderLift: number;
-
-  /** Resolved `BorderFresnelFilter` grade over the rim's Fresnel highlight.
-   *  Brightness is a final value multiplier (identity 1); Saturation is the
-   *  highlight's chroma gain about white (engine default 1.6). */
-  BorderFresnelBrightness: number;
-  BorderFresnelSaturation: number;
 
   ShadowColor: Color;
   ShadowBlur: number;

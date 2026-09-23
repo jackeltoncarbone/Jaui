@@ -7,18 +7,17 @@
  * from, the flag's parse, and the FRAGMENT CENSUS that gives the Mac's per-fragment reading a
  * denominator.
  *
- * Pure arithmetic, no GL, for the reason `Scene.Ledger` and `Border.Direct` are their own modules:
- * it can be unit-tested without the renderer's shader imports.
+ * Pure arithmetic, no GL, for the reason `Scene.Ledger` is its own module: it can be unit-tested
+ * without the renderer's shader imports.
  */
 
-/** The shader's bits, by name. `Jiv.Panel.frag` declares the same ten `GLASS_SKIP_*` constants and
+/** The shader's bits, by name. `Jiv.Panel.frag` declares the same nine `GLASS_SKIP_*` constants and
  *  `tests/Glass.Skip.test.ts` reads that file and holds the two tables to each other. */
 export const GLASS_SKIP_STAGES = {
   backdrop: 1,
   ca: 2,
   rim: 4,
   specular: 8,
-  border: 16,
   sdf: 32,
   grade: 64,
   shadow: 128,
@@ -65,8 +64,8 @@ export const ParseGlassSkip = (raw: string): number | null => {
  * Per glass fragment, what it pays, summed over every glass draw in a frame.
  *
  * Counted by walking EVERY pixel centre of the instance's quad through a CPU port of the shader's
- * own gates -- the corner field's distance and normal, the bezel hump, the rim band, the border
- * annulus, the rim-specular band -- so the numbers are the shader's branches evaluated, not an
+ * own gates -- the corner field's distance and normal, the bezel hump, the rim band, the
+ * rim-specular band -- so the numbers are the shader's branches evaluated, not an
  * area formula. Float64 where the GPU runs float32, so a pixel sitting on a gate's edge can land on
  * the other side; that moves a count by the perimeter's worth of pixels at most.
  */
@@ -79,8 +78,6 @@ export interface GlassFragCensus {
   Face: number;
   /** The wide rim glow's band on a FILL draw (`dist > -max(0.75*bezel, 6)`, inside the face). */
   Band: number;
-  /** The border annulus (`borderBase > 0.001`), where the border zone's tap runs. */
-  Border: number;
   /** `dist >= 0.5`: outside the face -- the shadow skirt. */
   Skirt: number;
   /** Skirt fragments the `skirt` arm discards (outside the face's padded BOX). The rest of the
@@ -102,7 +99,7 @@ export interface GlassFragCensus {
 }
 
 export const EmptyGlassFragCensus = (): GlassFragCensus => ({
-  Instances: 0, Frags: 0, Face: 0, Band: 0, Border: 0, Skirt: 0, Cut: 0, Ca3: 0,
+  Instances: 0, Frags: 0, Face: 0, Band: 0, Skirt: 0, Cut: 0, Ca3: 0,
   Taps: 0, TapsFull: 0, ClipFetches: 0, PillApprox: 0, Projective: 0,
 });
 
@@ -113,16 +110,16 @@ export const AddGlassFragCensus = (into: GlassFragCensus, c: GlassFragCensus): v
 /** Offsets into one packed panel instance (`Jiv.InstanceBuffer.Push`). */
 const O = {
   RectX: 0, RectY: 1, RectW: 2, RectH: 3, Cos: 4, Sin: 5, HalfW: 6, HalfH: 7, Radii: 8,
-  BorderWidth: 27, EdgeAa: 28, Smooth: 29, Thickness: 36, Bezel: 37, BezelScale: 39,
-  LightAngle: 40, SpecIntensity: 44, Ca: 46, SpecPacked: 47, BorderVariance: 50, ClipCount: 55,
+  EdgeAa: 28, Smooth: 29, Thickness: 36, Bezel: 37, BezelScale: 39,
+  LightAngle: 40, SpecIntensity: 44, Ca: 46, ClipCount: 55,
 } as const;
 
 /** Every instance float `GlassInstanceCensus` reads other than the rect origin (which enters the key
  *  as its fractional part). Exported so a test can assert it against the reads in the source. */
 export const GLASS_CENSUS_KEY_OFFSETS: readonly number[] = [
   O.RectW, O.RectH, O.Cos, O.Sin, O.HalfW, O.HalfH, O.Radii, O.Radii + 1, O.Radii + 2, O.Radii + 3,
-  O.BorderWidth, O.EdgeAa, O.Smooth, O.Thickness, O.Bezel, O.BezelScale, O.LightAngle, O.SpecIntensity,
-  O.Ca, O.SpecPacked, O.BorderVariance, O.ClipCount,
+  O.EdgeAa, O.Smooth, O.Thickness, O.Bezel, O.BezelScale, O.LightAngle, O.SpecIntensity,
+  O.Ca, O.ClipCount,
 ];
 const smoothstep = (e0: number, e1: number, x: number): number => {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
@@ -203,16 +200,12 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
   const cxr = x0 + w * 0.5, cyr = y0 + h * 0.5;
   const radii = [d[b + O.Radii], d[b + O.Radii + 1], d[b + O.Radii + 2], d[b + O.Radii + 3]];
   const edgeAa = d[b + O.EdgeAa];
-  const borderOnly = edgeAa < 0;
   const aa = Math.max(Math.abs(edgeAa), 1e-4);
-  const bw = d[b + O.BorderWidth];
   const bezel = Math.max(d[b + O.Bezel], 0.5);
   const s = Math.max(d[b + O.BezelScale], 0.05);
   const ca = d[b + O.Ca];
   const thickness = d[b + O.Thickness];
   const specI = d[b + O.SpecIntensity];
-  const variance = d[b + O.BorderVariance];
-  const borderFade = Math.floor(d[b + O.SpecPacked] / 1024) / 4;
   const clipCount = d[b + O.ClipCount];
   const lx = Math.cos(d[b + O.LightAngle]), ly = -Math.sin(d[b + O.LightAngle]);
   const rimBand = Math.max(bezel * 0.75, 6);
@@ -258,29 +251,17 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
     const hump = Math.max(inward, outward);
     const noTaps = skip('backdrop');
     let taps = 0;
-    if (!borderOnly) {
-      const three = ca * hump * 3 >= 0.5;
-      if (three) c.Ca3++;
-      taps += noTaps ? 0 : (three && !skip('ca') ? 3 : 1);
-      const inBand = fillPos && dist > -rimBand;
-      if (inBand) c.Band++;
-      if (inBand && !skip('rim') && !noTaps) taps++;
-      if (specI > 0 && fillPos && !skip('specular') && !noTaps) {
-        const band = (1 - smoothstep(-aa, aa, dist)) * smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
-        const k = nx * lx + ny * ly;
-        const align = Math.max(k, -k * 0.95);
-        if (band > 0 && align > 0) taps++;
-      }
-    }
-    const k = nx * lx + ny * ly;
-    const widthScale = 1 + variance * (Math.max(k, -k * 0.95) * 2 - 1);
-    const varied = Math.max(bw * widthScale, 0);
-    const drawn = Math.max(varied, 1);
-    const fadeIn = Math.max(borderFade * widthScale, aa);
-    const base = (1 - smoothstep(-aa, aa, dist)) * smoothstep(-drawn - fadeIn, -drawn + aa, dist) * (varied / drawn);
-    if (base > 0.001) {
-      c.Border++;
-      if (!skip('border') && !noTaps) taps++;
+    const three = ca * hump * 3 >= 0.5;
+    if (three) c.Ca3++;
+    taps += noTaps ? 0 : (three && !skip('ca') ? 3 : 1);
+    const inBand = fillPos && dist > -rimBand;
+    if (inBand) c.Band++;
+    if (inBand && !skip('rim') && !noTaps) taps++;
+    if (specI > 0 && fillPos && !skip('specular') && !noTaps) {
+      const band = (1 - smoothstep(-aa, aa, dist)) * smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
+      const k = nx * lx + ny * ly;
+      const align = Math.max(k, -k * 0.95);
+      if (band > 0 && align > 0) taps++;
     }
     if (fillPos) c.Face++; else c.Skirt++;
     return taps;
