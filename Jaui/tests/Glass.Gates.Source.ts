@@ -55,7 +55,7 @@ export interface GateSite {
 const CALL_SITES: Partial<Record<GlassSkipStage, RegExp>> = {
   backdrop: /\bsampleBackdrop\(/,
   sdf: /\b(ShapeEval|ShapeSDF|CornerDist)\(/,
-  clip: /\bclipStackDistance\(/,
+  clip: /\bcornerQueries\(/,
 };
 
 /** A value a gated block HANDS ON is declared ahead of the gate with no initialiser and first

@@ -289,7 +289,7 @@ describe('what the borderless program keeps, byte for byte', () => {
     expect(src).toContain('vec4 resolveBgFill(vec2 panelLocal) {');
     expect(src).toContain('float gradDither = (gradientNoise(floor(gl_FragCoord.xy)) - 0.5) / 255.0;');
     expect(src).toContain('result.rgb += gradDither / max(result.a, 0.25);');
-    expect(src).toContain('float clipStackDistance(vec2 pixel, int offset, int count) {');
+    expect(src).toContain('float cornerQueries(vec2 pixel, int offset, int count, bool wantShadow, vec2 shadowP, vec2 shadowHalf,');
     expect(src).toContain('shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;');
     expect(src).toContain('vec3 applyGrading(vec3 color, float brightness, float saturation, float contrast) {');
     expect(src).toContain('result.rgb = applyGrading(result.rgb, fgB / 256.0, fgS / 32.0, fgC / 32.0);');

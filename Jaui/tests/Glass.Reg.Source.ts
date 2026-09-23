@@ -232,8 +232,9 @@ export const FREE_ALIASES = new Set([
 export const ANCHORS = {
   /** The main corner field: `ShapeEval`, 6-8 pow on 87% of fragments. */
   sdf: 'ShapeEval(p, panelHalfSize, v_Radii, effectiveSmooth, mode, dist, normal);',
-  /** The drop shadow's corner field: a second 6 pow. */
-  shadow: 'float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);',
+  /** The drop shadow's corner field, which since 2026-09-22 is the SAME call site as the clip stack's:
+   *  `cornerQueries` asks both (Perf/BootCompile.Windows.Finding.md). */
+  shadow: 'float clipD = cornerQueries(v_PixelPos, int(v_Outline.z), int(v_Outline.w), wantShadow,',
   /** The refraction footprint: the one derivative. */
   lod: 'float refractFp = length(fwidth(refractOffset));',
   /** The body's taps. */

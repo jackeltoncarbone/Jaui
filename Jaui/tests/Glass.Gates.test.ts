@@ -122,7 +122,9 @@ describe('GLASS_NO_GATE_<S> - one gate compiled away, every statement kept', () 
     };
     expect(gatesIn('full')).toEqual([...STAGES]);
     expect(gatesIn('noLight')).toEqual(['backdrop', 'ca', 'border', 'sdf', 'grade', 'shadow', 'skirt', 'clip']);
-    expect(gatesIn('borderOnly')).toEqual(['backdrop', 'border', 'sdf', 'skirt', 'clip']);
+    // `shadow` is in the rim program since the shadow gate sits beside the shared corner-field query; a rim
+    // overlay packs a shadow alpha of 0, so the gated line is compiled and never taken.
+    expect(gatesIn('borderOnly')).toEqual(['backdrop', 'border', 'sdf', 'shadow', 'skirt', 'clip']);
   });
 });
 
@@ -248,9 +250,9 @@ describe('every ?glass-gates variant is whole: balanced, every read declared and
 //
 //                         skirt clip  sdf  bezel refract lod   ca  backdrop grade absorb shadow ambient rim spec border  grad
 const MAP: Record<GlassProgramKind, Record<string, number | null>> = {
-  full:       { skirt: 0, clip: 0, sdf: 28, '+bezel': 14, '+refract': 23, '+lod': 24, ca: 25, backdrop: 31, grade: 20, '+absorb': 19, shadow: 28, '+ambient': 26, rim: 28, specular: 17, border: 5, '+grad': 10 },
-  noLight:    { skirt: 0, clip: 0, sdf: 23, '+bezel': 14, '+refract': 23, '+lod': 24, ca: 25, backdrop: 26, grade: 20, '+absorb': 18, shadow: 23, '+ambient': 21, rim: null, specular: null, border: 5, '+grad': 10 },
-  borderOnly: { skirt: 0, clip: 0, sdf: 7, '+bezel': 11, '+refract': 13, '+lod': 10, ca: null, backdrop: 8, grade: null, '+absorb': null, shadow: null, '+ambient': null, rim: null, specular: null, border: 5, '+grad': 7 },
+  full:       { skirt: 0, clip: 10, sdf: 10, '+bezel': 14, '+refract': 23, '+lod': 24, ca: 25, backdrop: 31, grade: 20, '+absorb': 19, shadow: 10, '+ambient': 26, rim: 28, specular: 17, border: 5, '+grad': 10 },
+  noLight:    { skirt: 0, clip: 10, sdf: 10, '+bezel': 14, '+refract': 21, '+lod': 22, ca: 23, backdrop: 24, grade: 18, '+absorb': 16, shadow: 10, '+ambient': 21, rim: null, specular: null, border: 5, '+grad': 10 },
+  borderOnly: { skirt: 0, clip: 8, sdf: 7, '+bezel': 11, '+refract': 13, '+lod': 10, ca: null, backdrop: 8, grade: null, '+absorb': null, shadow: 8, '+ambient': null, rim: null, specular: null, border: 5, '+grad': 7 },
 };
 
 const mapOf = (kind: GlassProgramKind): Record<string, number | null> => {
@@ -284,9 +286,12 @@ describe('the gate map, computed from the source', () => {
     // In the RIM program the refraction chain is the largest set any gate touches, old or new.
     const rimAll = Object.entries(rim).filter(([, v]) => v !== null).sort((a, b) => b[1]! - a[1]!);
     expect(rimAll[0][0]).toBe('+refract');
-    // Nothing is carried through the two gates at the head of main: the skirt discard and the clip
-    // stack run before the first value is made.
-    expect([fill.skirt, fill.clip, rim.skirt, rim.clip]).toEqual([0, 0, 0, 0]);
+    // Nothing is carried through the skirt discard, the first statement of main. The clip stack no
+    // longer runs before the first value is made: since 2026-09-22 it asks the drop shadow's distance
+    // in the same corner-field call (cornerQueries), so it sits below the local frame the shadow needs
+    // and carries it -- 10 in the fill, 8 in the rim, both far under either program's peak.
+    expect([fill.skirt, rim.skirt]).toEqual([0, 0]);
+    expect([fill.clip, rim.clip]).toEqual([10, 8]);
   });
 
   it('a new gate moves no value: every heavy statement holds what it held without it', () => {

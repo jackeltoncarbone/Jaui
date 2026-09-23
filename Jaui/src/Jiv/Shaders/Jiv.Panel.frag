@@ -1092,11 +1092,7 @@ vec3 sampleBackdropDirect(vec2 uv, float extraLod, float frostLod) {
 // agree corner-for-corner across the Rect↔Circle↔Pill morph. No parallel
 // superellipse here: one implementation, two callers. The `mode` arg is
 // vestigial (CornerEval derives the regime from geometry) so pass 0.
-float clipShapeDistance(vec2 pixel, vec4 rect, vec4 radii, float smoothness) {
-    vec2 center = rect.xy + rect.zw * 0.5;
-    vec2 halfSize = rect.zw * 0.5;
-    return ShapeSDF(pixel - center, halfSize, radii, smoothness, 0);
-}
+// (This was `clipShapeDistance`; its three lines are inline in cornerQueries below.)
 
 // Loop bounded by a constant so drivers with stricter GLSL ES 3.00 loop
 // heuristics still unroll / accept it. Practical clip-stack depth never
@@ -1105,30 +1101,60 @@ const int MAX_CLIP_DEPTH = 16;
 
 // Intersection of a clip stack — a pixel is inside the combined clip iff
 // it's inside every individual clip. Signed distance = max of per-clip SDFs.
-float clipStackDistance(vec2 pixel, int offset, int count) {
+//
+// ONE CALL SITE FOR THE CORNER FIELD, SHARED WITH THE DROP SHADOW (2026-09-22). The shadow asks the
+// same question of the same function -- `ShapeSDF` of a rounded shape -- so it rides this loop as one
+// more query after the clips (`wantShadow`, answered in `shadowDist`). On Windows FXC inlines every
+// call site of a function, and the corner field (superellipse + pill polyline) is the heaviest code in
+// this shader: a second call site for the shadow was ~22% of the seven panel programs' compile
+// (Perf/BootCompile.Windows.Finding.md). Each query is the call it always was, with the inputs it
+// always had, so every distance is bit-identical; only the number of copies FXC compiles changes.
+float cornerQueries(vec2 pixel, int offset, int count, bool wantShadow, vec2 shadowP, vec2 shadowHalf,
+                    vec4 shadowRadii, float shadowSmooth, out float shadowDist) {
+    shadowDist = 1e20;
+    int nClips = min(count, MAX_CLIP_DEPTH);
 #if !defined(MATERIAL_FLAT)
-    if (GlassSkips(GLASS_SKIP_CLIP)) return -1e20;
+    if (GlassSkips(GLASS_SKIP_CLIP)) nClips = 0;
 #endif
+    int queries = nClips + (wantShadow ? 1 : 0);
     float d = -1e20;
-    for (int i = 0; i < MAX_CLIP_DEPTH; i++) {
-        if (i >= count) break;
-        int base = (offset + i) * 3;
-        vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
-        vec4 radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
-        vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
-        // meta = (Smoothness, cosθ, sinθ, _). Un-rotate the sample about the
-        // clip's center by R(-θ) so a ROTATED clip parent clips its children
-        // along the rotated edges (the axis-aligned rounded-rect SDF then runs
-        // in the clip's local frame). cos=1/sin=0 ⇒ identity (unrotated clips
-        // unchanged). Center = rect.xy + rect.zw*0.5 (rect.xy is center−half).
-        vec2 cc = rect.xy + rect.zw * 0.5;
-        vec2 rel = pixel - cc;
-        vec2 local = vec2(rel.x * meta.y + rel.y * meta.z,
-                          -rel.x * meta.z + rel.y * meta.y) + cc;
-        d = max(d, clipShapeDistance(local, rect, radii, meta.x));
+    for (int i = 0; i < MAX_CLIP_DEPTH + 1; i++) {
+        if (i >= queries) break;
+        vec2 q;
+        vec2 halfSize;
+        vec4 radii;
+        float smoothness;
+        if (i < nClips) {
+            int base = (offset + i) * 3;
+            vec4 rect = texelFetch(u_ClipTex, ivec2(base, 0), 0);
+            radii = texelFetch(u_ClipTex, ivec2(base + 1, 0), 0);
+            vec4 meta = texelFetch(u_ClipTex, ivec2(base + 2, 0), 0);
+            // meta = (Smoothness, cosθ, sinθ, _). Un-rotate the sample about the
+            // clip's center by R(-θ) so a ROTATED clip parent clips its children
+            // along the rotated edges (the axis-aligned rounded-rect SDF then runs
+            // in the clip's local frame). cos=1/sin=0 ⇒ identity (unrotated clips
+            // unchanged). Center = rect.xy + rect.zw*0.5 (rect.xy is center−half).
+            vec2 cc = rect.xy + rect.zw * 0.5;
+            vec2 rel = pixel - cc;
+            vec2 local = vec2(rel.x * meta.y + rel.y * meta.z,
+                              -rel.x * meta.z + rel.y * meta.y) + cc;
+            // clipShapeDistance's own arithmetic, inline: the offset from the clip's center.
+            q = local - (rect.xy + rect.zw * 0.5);
+            halfSize = rect.zw * 0.5;
+            smoothness = meta.x;
+        } else {
+            q = shadowP;
+            halfSize = shadowHalf;
+            radii = shadowRadii;
+            smoothness = shadowSmooth;
+        }
+        float di = ShapeSDF(q, halfSize, radii, smoothness, 0);
+        if (i < nClips) d = max(d, di);
+        else shadowDist = di;
     }
     return d;
 }
+
 
 // ── THE LENS FIELD (aave's, Jwift/Shared/Research/Aave.Glass.md) ─────────────────────────────────
 // Jack, of aave.com/design/building-glass-for-the-web: "for the glass. this is the key."
@@ -1181,9 +1207,8 @@ void main() {
     // SDF-based so AA'd panel silhouettes, borders, and glyphs fade smoothly
     // at the clip edge instead of being hard-cut (the old boolean discard
     // nullified the 1-pixel feather on everything it touched).
-    float clipD = clipStackDistance(v_PixelPos, int(v_Outline.z), int(v_Outline.w));
-    if (clipD > 1.0) discard;
-    float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
+    // The clip stack is asked a few lines down, TOGETHER with the drop shadow's distance, once the
+    // shadow's inputs exist (cornerQueries).
 
     vec2 panelCenter = v_PanelGeom.xy;
     vec2 panelHalfSize = v_PanelGeom.zw;
@@ -1277,6 +1302,28 @@ void main() {
     // Pill/Circle bake their own exponent in ShapeSDF/ShapeGrad and ignore this.
     int mode = ShapeMode(panelHalfSize, v_Radii);
     float effectiveSmooth = smoothness;
+    // The clip stack and the drop shadow through ONE call site of the corner field (cornerQueries).
+    // Moved below the local frame from the top of main because the shadow's point lives here; a
+    // discarded fragment still writes nothing, so only the order of the work changes. Every program
+    // takes it: a rim overlay (GLASS_BORDER_ONLY) packs a shadow alpha of 0 (Jiv.InstanceBuffer.Push),
+    // so its shadow query never runs, and GLASS_REG reads the answer at its own shadow site.
+    // Written as a line MATERIAL_FLAT deletes, not one it rewrites, so the flat program stays a
+    // deletion from the non-glass one (Flat.Program.test.ts).
+    bool wantShadow = v_ShadowColor.a > 1e-4;
+#if !defined(MATERIAL_FLAT)
+    if (GlassSkips(GLASS_SKIP_SHADOW)) wantShadow = false;
+#endif
+    float shadowDist;
+    float clipD = cornerQueries(v_PixelPos, int(v_Outline.z), int(v_Outline.w), wantShadow,
+                                p - shadowOffset, panelHalfSize, v_Radii, effectiveSmooth, shadowDist);
+    if (clipD > 1.0) discard;
+    float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
+    // The shadow is finished HERE, so what the rest of the body carries is one float (as GLASS_REG's
+    // early shadow always did), not the distance and its gate.
+    float shadowAlpha = 0.0;
+    if (wantShadow) {
+        shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
+    }
 
     // ── SDF + normal ──
     // Single dispatch for pill mode → one polyline scan instead of two
@@ -1295,18 +1342,6 @@ void main() {
 #else
     vec2 normal;
     ShapeEval(p, panelHalfSize, v_Radii, effectiveSmooth, mode, dist, normal);
-#endif
-#if defined(GLASS_REG) && !defined(GLASS_BORDER_ONLY)
-    // GLASS_REG: the drop shadow (below, after the rim glow, is where the other programs have it)
-    // runs HERE, beside the main corner field, while almost nothing else is live. What it hands
-    // on is one float; what it used to hold across its own corner field was the whole body.
-    float shadowAlpha = 0.0;
-    if (GlassSkips(GLASS_SKIP_SHADOW)) {} else
-    if (v_ShadowColor.a > 1e-4) {
-        vec2 sp = p - shadowOffset;
-        float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
-        shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
-    }
 #endif
     float edgeDist = max(-dist, 0.0);                 // positive inside
 
@@ -1764,17 +1799,7 @@ void main() {
     // GLASS_REG runs this beside the main corner field instead (above); GLASS_BORDER_ONLY never
     // runs it, because a rim overlay's shadow alpha is 0 (`Jiv.InstanceBuffer.Push`) and its only
     // reader, the fill composite, is excluded with it.
-#if !defined(GLASS_REG) && !defined(GLASS_BORDER_ONLY)
-    float shadowAlpha = 0.0;
-#if !defined(MATERIAL_FLAT)
-    if (GlassSkips(GLASS_SKIP_SHADOW)) {} else
-#endif
-    if (v_ShadowColor.a > 1e-4) {
-        vec2 sp = p - shadowOffset;
-        float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);
-        shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
-    }
-#endif
+    // `shadowAlpha` was finished with the clip stack (cornerQueries, above).
 
     // ── Fill: source composited over the (refracted, filtered, absorbed) backdrop.
     //

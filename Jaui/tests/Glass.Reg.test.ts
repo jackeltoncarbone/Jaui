@@ -79,7 +79,9 @@ describe('GLASS_BORDER_ONLY - the rim overlay program is a deletion plus its sta
       'vec3 sG = sampleBackdrop(uvG, lodBoost, frostLod);',
       'backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);',
       'vec3 absorb = pow(max(v_Tint.rgb, vec3(0.0001)), vec3(pathLength * v_Tint.a));',
-      'float shadowDist = ShapeSDF(sp, panelHalfSize, v_Radii, effectiveSmooth, mode);',
+      // The shadow's own distance now rides the shared corner-field query (never taken on a rim: its
+      // shadow alpha is packed 0); what the rim program removes is the shadow's only reader.
+      'float outA = fillA + shadowAlpha * (1.0 - fillA);',
       'vec4 fillSrc = resolveBgFill(panelLocal);',
       'vec3 rimSample = sampleBackdrop(rimUv, 0.0, frostLod);',
       'float hemiAmbient = (edgeLightTop * hemiTop + edgeLightBottom * hemiBottom);',
@@ -90,7 +92,7 @@ describe('GLASS_BORDER_ONLY - the rim overlay program is a deletion plus its sta
 
   it('keeps everything the border zone reads, and everything after it', () => {
     for (const stmt of [
-      'float clipD = clipStackDistance(v_PixelPos, int(v_Outline.z), int(v_Outline.w));',
+      'float clipD = cornerQueries(v_PixelPos, int(v_Outline.z), int(v_Outline.w), wantShadow,',
       'ShapeEval(p, panelHalfSize, v_Radii, effectiveSmooth, mode, dist, normal);',
       'float refractFp = length(fwidth(refractOffset));',
       'lodBoost = ((rimBoost * 1.5 + innerBlur * 1.0) * glassiness + refractLod) * frostReq;',
@@ -169,9 +171,11 @@ describe('GLASS_REG - the same lines in another order', () => {
 
   it('moves what the register map says it moves', () => {
     const before = (lines: readonly Line[], a: string, b: string): boolean => pos(lines, a) < pos(lines, b);
-    // The drop shadow's corner field beside the main one, ahead of the bezel.
-    expect(before(reg, 'float shadowDist = ShapeSDF(sp,', 'float edgeDist = max(-dist, 0.0);')).toBe(true);
-    expect(before(GLASS, 'float shadowDist = ShapeSDF(sp,', 'float edgeDist = max(-dist, 0.0);')).toBe(false);
+    // The drop shadow finished ahead of the bezel. This was GLASS_REG's own move and is now EVERY
+    // program's: since the shadow's distance rides the clip stack's corner-field call (cornerQueries,
+    // Perf/BootCompile.Windows.Finding.md), every program hands on one float from the top of main.
+    expect(before(reg, 'shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist)', 'float edgeDist = max(-dist, 0.0);')).toBe(true);
+    expect(before(GLASS, 'shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist)', 'float edgeDist = max(-dist, 0.0);')).toBe(true);
     // The fill composite straight after the taps: before the border chain and the rim glow.
     expect(before(reg, 'vec4 result = vec4(outRGB, outA);', 'float keyAlign = dot(normal, lightDir);')).toBe(true);
     expect(before(reg, 'vec4 result = vec4(outRGB, outA);', 'vec3 rimSample = sampleBackdrop(rimUv,')).toBe(true);
@@ -243,23 +247,23 @@ describe('GLASS_REG_REMAT and GLASS_NO_SKIP_GATES', () => {
 // statement. The FILL draw runs NO_LIGHT on glass-grid, the RIM draw BORDER_ONLY; today both ran GLASS.
 //
 //                     sdf  shadow  lod  taps  fill  glow  spec  zone   peak
-// Re-pinned 2026-09-22 for aave's lens (Jwift/Shared/Research/Aave.Glass.md): the rim-specular tap and
-// the Blinn-Phong catchlight are gone, the highlight is one adaptive composite, and the taps read the lens
-// field's offset. No stage holds more than before; the glow tap drops 34 -> 31 and the highlight 23 -> 18.
+// Re-pinned 2026-09-22 (again) for the shared corner-field query: the drop shadow's distance rides the
+// clip stack's call (cornerQueries) and its alpha is finished there, so the `shadow` column is now that
+// call. No anchor holds more than before; the shadow's own corner field drops 28 -> 11 in GLASS.
 const MAP: Record<string, Array<number | null>> = {
-  GLASS:             [13,   28,   26,   25,   26,   31,   18,    8],
-  NO_LIGHT:          [13,   23,   26,   25,   21, null, null,    8],
-  BORDER_ONLY:       [10, null,   13, null, null, null, null,    8],
-  REG:               [11,   11,   23,   22,   14,   28,   18,    8],
-  REG_NO_LIGHT:      [11,   11,   21,   20,   11, null, null,    8],
-  REG_BORDER_ONLY:   [ 8, null,   10, null, null, null, null,    8],
-  REMAT:             [ 9,    9,   20,   19,   13,   27,   18,    8],
-  REMAT_NO_LIGHT:    [ 9,    9,   18,   17,   11, null, null,    8],
-  REMAT_BORDER_ONLY: [ 8, null,   10, null, null, null, null,    8],
-  NOGATES:           [13,   28,   26,   25,   26,   31,   18,    8],
+  GLASS:             [13,   11,   26,   25,   26,   31,   18,    8],
+  NO_LIGHT:          [13,   11,   24,   23,   21, null, null,    8],
+  BORDER_ONLY:       [10,    9,   13, null, null, null, null,    8],
+  REG:               [11,    9,   23,   22,   14,   28,   18,    8],
+  REG_NO_LIGHT:      [11,    9,   21,   20,   11, null, null,    8],
+  REG_BORDER_ONLY:   [ 8,    7,   10, null, null, null, null,    8],
+  REMAT:             [ 9,    7,   20,   19,   13,   27,   18,    8],
+  REMAT_NO_LIGHT:    [ 9,    7,   18,   17,   11, null, null,    8],
+  REMAT_BORDER_ONLY: [ 8,    7,   10, null, null, null, null,    8],
+  NOGATES:           [13,   11,   26,   25,   26,   31,   18,    8],
 };
 const PEAK: Record<string, number> = {
-  GLASS: 31, NO_LIGHT: 26, BORDER_ONLY: 13, REG: 28, REG_NO_LIGHT: 21, REG_BORDER_ONLY: 10,
+  GLASS: 31, NO_LIGHT: 24, BORDER_ONLY: 13, REG: 28, REG_NO_LIGHT: 21, REG_BORDER_ONLY: 10,
   REMAT: 27, REMAT_NO_LIGHT: 18, REMAT_BORDER_ONLY: 10, NOGATES: 31,
 };
 
@@ -284,14 +288,17 @@ describe('the register map, computed from the source', () => {
     const g = registerMap('GLASS');
     const r = registerMap('REG_NO_LIGHT');
     // Today the rim glow's tap holds the whole body: the backdrop, the border chain, the edge light it
-    // is about to write, and `p` / `pLocal` / `mode` for stages that come after it. It no longer holds
-    // the fill's texture coordinate: `baseUv`'s last reader was the rim-specular tap, which went with
-    // the catchlight when the highlight became aave's.
-    expect(g.glow!.Names).toEqual(expect.arrayContaining(['backdrop', 'widthScale', 'edgeLightRgb', 'pLocal', 'mode']));
+    // is about to write, and `p` / `pLocal` for stages that come after it. It no longer holds the fill's
+    // texture coordinate (`baseUv`'s last reader was the rim-specular tap, gone with the catchlight) nor
+    // `mode` (its last reader was the late shadow site, gone into the shared corner-field query).
+    expect(g.glow!.Names).toEqual(expect.arrayContaining(['backdrop', 'widthScale', 'edgeLightRgb', 'pLocal']));
     expect(g.glow!.Names).not.toContain('baseUv');
-    // Today the shadow's corner field (a second 6 pow) runs holding 28; under REG it holds 11.
-    expect(g.shadow!.Components).toBe(28);
-    expect(r.shadow!.Names).toEqual(['borderFade', 'clipAlpha', 'dist', 'innerBlur', 'normal', 'p', 'pLocal', 'shadowAlpha']);
+    expect(g.glow!.Names).not.toContain('mode');
+    // The shadow's corner field is the clip stack's call now, at the top of main, holding 11 in GLASS
+    // and 9 under REG (it held 28 at its old late site). What it carries is the local frame and the
+    // shadow's own two outputs.
+    expect(g.shadow!.Components).toBe(11);
+    expect(r.shadow!.Names).toEqual(['borderFade', 'innerBlur', 'mode', 'p', 'pLocal', 'shadowDist', 'wantShadow']);
     // Under REG the backdrop dies at the fill composite and never meets the border chain.
     expect(r.fill!.Names).not.toContain('widthScale');
     expect(r.zone!.Names).toEqual(['alignment', 'borderBase', 'clipAlpha', 'fillAlpha', 'result']);

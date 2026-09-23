@@ -746,7 +746,7 @@ describe('Jiv.Panel.frag - the same ten bits, every gate present, none of it out
 
   it('the skirt discard is the FIRST statement of main, ahead of the clip stack', () => {
     const main = FRAG.slice(FRAG.indexOf('void main() {'));
-    expect(main.indexOf('GlassSkirtCut()')).toBeLessThan(main.indexOf('clipStackDistance('));
+    expect(main.indexOf('GlassSkirtCut()')).toBeLessThan(main.indexOf('cornerQueries('));
   });
 });
 

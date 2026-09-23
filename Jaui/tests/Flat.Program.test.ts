@@ -147,7 +147,7 @@ describe('what the flat program keeps, byte for byte', () => {
   });
 
   it('keeps the corner SDF, the clip stack, the hairline floor and applyGrading', () => {
-    expect(src).toContain('float clipStackDistance(vec2 pixel, int offset, int count) {');
+    expect(src).toContain('float cornerQueries(vec2 pixel, int offset, int count, bool wantShadow, vec2 shadowP, vec2 shadowHalf,');
     expect(src).toContain('vec3 applyGrading(vec3 color, float brightness, float saturation, float contrast) {');
     expect(src).toContain('const float BORDER_MIN_DEVICE_PX = 1.0;');
     expect(src).toContain('float borderCoverage = variedBorderWidth / drawnBorderWidth;');
