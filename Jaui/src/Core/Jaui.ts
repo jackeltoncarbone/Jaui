@@ -2089,7 +2089,7 @@ export class Canvas implements DirtyTracker {
    *  dirty node or the RequestFrame caller keeping it awake, by name. */
   private _awake = {
     Since: 0, Renders: 0, Layout: 0, Anim: new Map<string, number>(),
-    Dirty: new Map<string, number>(), Need: new Map<string, number>(),
+    Dirty: new Map<string, number>(), Need: new Map<string, number>(), Miss: new Map<string, number>(),
   };
 
   private _flushAwake = (now: number, rendered: boolean, layoutDirty: boolean): void => {
@@ -2102,9 +2102,9 @@ export class Canvas implements DirtyTracker {
       const top = (m: Map<string, number>): string => m.size === 0 ? 'none'
         : [...m].sort((x, y) => y[1] - x[1]).slice(0, 6).map(([k, n]) => `${k}:${n}`).join(',');
       JTrace(`jaui:awake renders=${a.Renders} layout=${a.Layout} anim=${top(a.Anim)}`
-        + ` dirty=${top(a.Dirty)} need=${top(a.Need)}`);
+        + ` dirty=${top(a.Dirty)} need=${top(a.Need)} blurMiss=${top(a.Miss)}`);
     }
-    a.Since = now; a.Renders = 0; a.Layout = 0; a.Anim.clear(); a.Dirty.clear(); a.Need.clear();
+    a.Since = now; a.Renders = 0; a.Layout = 0; a.Anim.clear(); a.Dirty.clear(); a.Need.clear(); a.Miss.clear();
   };
 
   private _pendingCapture: ((b: Blob | null) => void) | null = null;
@@ -5313,6 +5313,10 @@ export class Canvas implements DirtyTracker {
     }
     stats.Misses++;
     r.NoteBlurCacheMiss();
+    if (JauiTracing()) {
+      const k = `${owner.Classes.length > 0 ? owner.Classes.join('.') : '-'}/${v.Why}`;
+      this._awake.Miss.set(k, (this._awake.Miss.get(k) ?? 0) + 1);
+    }
     if (v.Why === 'clean') stats.Cold++;
     else stats.Why[v.Why]++;
     if (slot !== null) slot.Valid = false;
