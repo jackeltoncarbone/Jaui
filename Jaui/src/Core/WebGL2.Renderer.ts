@@ -3572,13 +3572,34 @@ export class WebGL2Renderer implements Renderer {
     if (pa.length !== pb.length) return -1;
     const per = pa.length / (w * h);
     let diff = 0;
+    let maxDelta = 0;
+    const packed = per === 1;
     for (let t = 0; t < pa.length; t += per) {
       for (let c = 0; c < per; c++) {
-        if (pa[t + c] !== pb[t + c]) { diff++; break; }
+        if (pa[t + c] !== pb[t + c]) {
+          diff++;
+          if (packed) {
+            // rgb10a2: three 10-bit channels and a 2-bit alpha, the largest channel step in 1/1023.
+            const x = pa[t] as number, y = pb[t] as number;
+            for (const [sh, mask] of [[0, 1023], [10, 1023], [20, 1023], [30, 3]] as const) {
+              const d = Math.abs(((x >>> sh) & mask) - ((y >>> sh) & mask)) * (mask === 3 ? 341 : 1);
+              if (d > maxDelta) maxDelta = d;
+            }
+          } else {
+            const d = Math.abs((pa[t + c] as number) - (pb[t + c] as number));
+            if (d > maxDelta) maxDelta = d;
+          }
+          break;
+        }
       }
     }
+    this.BlurCacheLastMaxDelta = maxDelta;
     return diff;
   };
+
+  /** The largest channel difference the last `BlurCacheCompare` saw, in the read format's own units
+   *  (1/1023 for rgb10a2). How BIG a mismatch is, beside how many texels it covers. */
+  BlurCacheLastMaxDelta = 0;
 
   private _bcReadLevel0 = (tex: WebGLTexture, w: number, h: number): ArrayLike<number> => {
     const gl = this._gl;

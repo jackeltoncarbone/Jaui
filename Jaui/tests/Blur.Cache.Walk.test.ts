@@ -190,8 +190,9 @@ const scene = (search: string, opts: { Mismatch?: () => number; Siblings?: boole
 const settle = (s: Scene): void => { for (let i = 0; i < 120; i++) s.Frame(); };
 
 describe('?blur-cache -- the flag', () => {
-  it('is OFF by default: no record, no store, every surface builds every frame', () => {
-    const s = scene('');
+  it('is ON by default, and ?blur-cache=off is the control: no record, no store, every surface builds every frame', () => {
+    expect(scene('').Frame().Census.Armed).toBe('on');
+    const s = scene('?blur-cache=off');
     settle(s);
     const f = s.Frame();
     expect(f.Census.Armed).toBe('off');

@@ -1431,7 +1431,13 @@ export class Canvas implements DirtyTracker {
    *  only under `?wkr-shared-backdrop`, only with glass footprints, and only within one frame --
    *  "drawn since the shared build", which on a page that repaints everything every frame is never
    *  empty. A region built from it would read `hits=0` forever. See `Core/Blur.Cache.ts`. */
-  private _blurCache: 'off' | 'on' | 'verify' = 'off';
+  //  ON BY DEFAULT since 2026-09-23. Verify sessions at phone size over home, market, library,
+  //  explore, changelog and profile (scrolling and the hero autoplay): 8,000+ verified hits, and the
+  //  only mismatches were a handful of texels under the tab bar and one pill, max 2/1023 in rgb10a2,
+  //  the adaptive shadow's ease rounding one step differently from its declaration. That is below one
+  //  8-bit display step, so no screen can show it. On the M4 at phone size the cache measured
+  //  35.3 -> 25.7 ms per frame. `?blur-cache=off` is the control; `?blur-cache=verify` still audits.
+  private _blurCache: 'off' | 'on' | 'verify' = 'on';
   private _blurCacheRefused = '';
   private readonly _bc = new PaintLedger<BlurCacheSlot>();
   /** True for the length of one ledgered walk; every hook is one boolean when it is false. */
@@ -5299,7 +5305,7 @@ export class Canvas implements DirtyTracker {
       if (texels !== 0) {
         JTrace(`jaui:blur-cache mismatch kind=${kind === READER_FILL ? 'fill' : kind === READER_RIM ? 'rim' : 'pblur'}`
           + ` node=${bc.Id(owner)} classes=${owner.Classes.length > 0 ? owner.Classes.join('.') : '-'}`
-          + ` region=${region.x},${region.y},${region.w}x${region.h} texels=${texels} frame=${bc.Frame}`
+          + ` region=${region.x},${region.y},${region.w}x${region.h} texels=${texels} maxDelta=${r.BlurCacheLastMaxDelta} frame=${bc.Frame}`
           + ` read=${r.BlurCacheReadKind}`);
         st.Slot = r.BlurCacheStore(fresh, slot, bc.Frame);
       }
@@ -10061,7 +10067,7 @@ export class Canvas implements DirtyTracker {
       // the gate line prints, so the two instruments cannot disagree.
       g.__jauiLift = () => this._liftCensus();
     }
-    // `?blur-cache=on|off|verify` -- A CLEAN BACKDROP DOES NOT REBUILD ITS BLUR. Default OFF.
+    // `?blur-cache=on|off|verify` -- A CLEAN BACKDROP DOES NOT REBUILD ITS BLUR. Default ON.
     //
     // Parsed after every flag it interrogates, and each refusal names the thing it cannot stand
     // beside. They are all one of two shapes: an arm that answers "where does this surface's pyramid
