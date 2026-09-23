@@ -1,10 +1,7 @@
 /**
- * WebGL2 implementation of the Renderer interface.
- *
- * Wraps the original WebGL2 rendering subsystems (ShaderCompiler, Framebuffer,
- * BlurPass, Blit, Geometry.Quad) into the Renderer interface so Jaui.ts can
- * use it as a drop-in alternative to WebGPURenderer. This is the default
- * backend — works on every browser, every GPU, every driver.
+ * WebGL2 implementation of the Renderer interface: the engine's backend, on every browser, every
+ * GPU, every driver. Wraps the WebGL2 subsystems (ShaderCompiler, Framebuffer, BlurPass, Blit,
+ * Geometry.Quad) behind the semantic operations Jaui.ts orchestrates.
  */
 
 import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop, type GlassAdapt } from './Renderer';

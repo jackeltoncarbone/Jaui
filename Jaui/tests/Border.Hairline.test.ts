@@ -20,7 +20,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  readGlsl, readWgsl, glslMinDevicePx, wgslMinDevicePx,
+  readGlsl, glslMinDevicePx,
   borderAlpha, borderAlphaBeforeFix, peakAlpha, inkAlpha, worstPhaseAlpha,
   type Rim,
 } from './Border.Hairline.Source';
@@ -34,11 +34,7 @@ const FEATHERS = [0, 0.25, 0.5, 0.6, 0.9, 1.2];
 
 const MIN = glslMinDevicePx();
 
-describe('GLSL and WGSL agree on the hairline floor', () => {
-  it('both backends declare the same BORDER_MIN_DEVICE_PX', () => {
-    expect(wgslMinDevicePx()).toBeCloseTo(glslMinDevicePx(), 6);
-  });
-
+describe('the hairline floor', () => {
   it('the floor is one device pixel', () => {
     expect(glslMinDevicePx()).toBe(1.0);
   });
@@ -52,30 +48,17 @@ describe('GLSL and WGSL agree on the hairline floor', () => {
       .toBeLessThan(src.indexOf('float drawnBorderWidth'));
   });
 
-  it('WGSL clamps the drawn width and carries the remainder as coverage', () => {
-    const src = readWgsl();
-    expect(src).toContain('let drawn_border_width = max(varied_border_width, BORDER_MIN_DEVICE_PX);');
-    expect(src).toContain('let border_coverage = varied_border_width / drawn_border_width;');
-    expect(src.indexOf('let local_border_width = border_width * width_scale;'))
-      .toBeLessThan(src.indexOf('let drawn_border_width'));
-  });
-
-  it('both border sites in each backend draw at the floor and scale by coverage', () => {
+  it('both border sites draw at the floor and scale by coverage', () => {
     const glsl = readGlsl();
     // The glass rim and the plain stroke are two separate sites; both must be fixed.
     expect(glsl.split('smoothstep(-drawnBorderWidth - fadeIn, -drawnBorderWidth + aa, dist)').length - 1).toBe(2);
     expect(glsl.split('* borderInner * borderCoverage;').length - 1).toBe(2);
-
-    const wgsl = readWgsl();
-    expect(wgsl.split('smoothstep(-aa, aa, dist + drawn_border_width)').length - 1).toBe(2);
-    expect(wgsl.split('* border_inner * border_coverage;').length - 1).toBe(2);
   });
 
-  it('the dead per-pixel feather scaling is gone from both backends', () => {
+  it('the dead per-pixel feather scaling is gone', () => {
     // `localBorderEdgeAa` was computed and never used. Scaling the feather WITH the width is not the
     // fix and is actively worse: it shrinks the footprint exactly where it is already too small.
     expect(readGlsl()).not.toContain('localBorderEdgeAa');
-    expect(readWgsl()).not.toContain('local_border_edge_aa');
   });
 });
 

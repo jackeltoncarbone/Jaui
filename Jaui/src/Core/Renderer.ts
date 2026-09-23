@@ -1,24 +1,16 @@
 /**
- * Renderer — GPU backend abstraction.
+ * Renderer — the GPU backend's semantic operations.
  *
- * WebGPU.Renderer implements this. A hypothetical WebGL2.Renderer could too.
- * The render loop in Jaui.ts calls these methods instead of raw GPU API,
- * so the orchestration logic (pass ordering, tree traversal, frost-LOD math)
- * stays in one place and the GPU submission is swappable.
- *
- * The interface models semantic render operations — "draw a batch of panels",
- * "compute the blur pyramid" — not raw GPU state. This is intentional:
- * WebGL2 and WebGPU have fundamentally different execution models (state
- * machine vs command encoder). A low-level wrapper would just re-expose one
- * and force the other to emulate it.
+ * The render loop in Jaui.ts calls these methods instead of raw GPU API, so the orchestration logic
+ * (pass ordering, tree traversal, frost-LOD math) stays in one place. The interface models "draw a
+ * batch of panels", "compute the blur pyramid", not raw GPU state. WebGL2.Renderer implements it.
  */
 
 import type { GradientCurve } from './Gradient.Curve';
 import type { PassProfile } from './Pass.Timers';
 
 // ─── Opaque Handles ────────────────────────────────────────────────────────
-// Callers never inspect these. The WebGPU implementation stores GPUTexture
-// inside; a WebGL2 implementation would store WebGLTexture. Neither leaks.
+// Callers never inspect these. The WebGL2 implementation stores its WebGLTexture inside.
 
 export interface GpuTextureHandle {
   readonly _brand: 'GpuTextureHandle';

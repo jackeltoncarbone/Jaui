@@ -16,8 +16,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  readGlsl, readWgsl, readProgressiveGlsl, readProgressiveWgsl,
-  glslGradeSteps, wgslGradeSteps, glslTintBody, wgslTintBody, TINT_BODY,
+  readGlsl, readProgressiveGlsl, readProgressiveWgsl,
+  glslGradeSteps, glslTintBody, TINT_BODY,
   grade, tint, display, hue, greyFloor, luma, STEPS_BEFORE_FIX,
   type Rgb, type Grade,
 } from './Grading.Order.Source';
@@ -31,13 +31,9 @@ const VIVID: Grade = { Contrast: 0.7, Saturation: 3.5, Brightness: 0.7 };
 
 const AFTER = glslGradeSteps();
 
-describe('both backends run the grade contrast, saturation, brightness', () => {
+describe('the grade runs contrast, saturation, brightness', () => {
   it('GLSL applyGrading', () => {
     expect(glslGradeSteps()).toEqual(['Contrast', 'Saturation', 'Brightness']);
-  });
-
-  it('WGSL apply_grading agrees with GLSL', () => {
-    expect(wgslGradeSteps()).toEqual(glslGradeSteps());
   });
 
   it('the progressive blur grades in the same order (GLSL and WGSL)', () => {
@@ -51,9 +47,8 @@ describe('both backends run the grade contrast, saturation, brightness', () => {
     }
   });
 
-  it('the tint is a mix toward black or white in both backends', () => {
+  it('the tint is a mix toward black or white', () => {
     expect(glslTintBody()).toMatch(TINT_BODY);
-    expect(wgslTintBody()).toMatch(TINT_BODY);
   });
 
   it('the body, the flat backdrop and the rim are tinted; the foreground Filter grade is not', () => {
@@ -62,8 +57,6 @@ describe('both backends run the grade contrast, saturation, brightness', () => {
     // Four grade calls (glass body, flat backdrop, rim, foreground) plus the definition.
     expect(glsl.match(/applyGrading\(/g)?.length).toBe(5);
     expect(glsl).toMatch(/result\.rgb = applyGrading\(result\.rgb, fgB/);
-    const wgsl = readWgsl();
-    expect(wgsl.match(/apply_tint\(apply_grading\(/g)?.length).toBe(3);
   });
 });
 

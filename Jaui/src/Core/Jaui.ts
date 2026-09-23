@@ -10804,11 +10804,8 @@ export { Jiv } from '../Jiv/Jiv';
 export type { Vec2, Vec4, Rect, Color, DeviceTier, DirtyFlags } from './Types';
 export { DirtyFlag } from './Types';
 export type { Renderer } from './Renderer';
-// Renderers are exported directly — callers pick the one they want and
-// hand it to `new Canvas(el, renderer)`. No auto-pick factory: the choice
-// between WebGL2 (sync) and WebGPU (async) is the caller's to make.
+// The renderer is exported directly; the caller constructs it and hands it to `new Canvas(el, renderer)`.
 export { WebGL2Renderer } from './WebGL2.Renderer';
-export { WebGPURenderer } from './WebGPU.Renderer';
 
 // Jiv
 export type { JivStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BackgroundValue, GradientStop } from '../Jiv/Jiv.Types';

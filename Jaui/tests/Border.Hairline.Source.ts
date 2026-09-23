@@ -2,7 +2,7 @@
  * Reads the border's hairline handling straight out of the SHADER SOURCES.
  *
  * Same discipline as Pill.Curve.Source: the numbers and the expressions come from the real
- * `.frag` / `.wgsl` files, never from a copy kept here, so changing the shader without changing
+ * `.frag`, never from a copy kept here, so changing the shader without changing
  * the test fails the test instead of quietly invalidating it.
  */
 import { readFileSync } from 'node:fs';
@@ -11,25 +11,17 @@ import { fileURLToPath } from 'node:url';
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 export const GLSL_PATH = join(SRC, 'Jiv', 'Shaders', 'Jiv.Panel.frag');
-export const WGSL_PATH = join(SRC, 'Core', 'Shaders', 'Panel.wgsl');
 
 export const readGlsl = (): string => readFileSync(GLSL_PATH, 'utf8');
-export const readWgsl = (): string => readFileSync(WGSL_PATH, 'utf8');
 
-/** The hairline floor in device pixels, as each backend declares it. */
+/** The hairline floor in device pixels, as the shader declares it. */
 export const glslMinDevicePx = (): number => {
   const m = /const\s+float\s+BORDER_MIN_DEVICE_PX\s*=\s*([\d.]+)\s*;/.exec(readGlsl());
   if (!m) throw new Error('could not find BORDER_MIN_DEVICE_PX in Jiv.Panel.frag');
   return Number(m[1]);
 };
 
-export const wgslMinDevicePx = (): number => {
-  const m = /const\s+BORDER_MIN_DEVICE_PX\s*:\s*f32\s*=\s*([\d.]+)\s*;/.exec(readWgsl());
-  if (!m) throw new Error('could not find BORDER_MIN_DEVICE_PX in Panel.wgsl');
-  return Number(m[1]);
-};
-
-/** `smoothstep` as GLSL and WGSL both define it. */
+/** `smoothstep` as GLSL defines it. */
 export const smoothstep = (a: number, b: number, x: number): number => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);

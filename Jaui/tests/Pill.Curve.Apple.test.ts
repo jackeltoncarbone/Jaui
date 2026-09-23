@@ -8,21 +8,11 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  readGlslCurve, readWgslCurve, appleCap,
+  readGlslCurve, appleCap,
   APPLE_LEAD_IN, APPLE_EXPONENT_X, APPLE_EXPONENT_Y,
 } from './Pill.Curve.Source';
 
 describe('pill curve tracks Apple', () => {
-  it('GLSL and WGSL carry the same curve', () => {
-    const a = readGlslCurve(), b = readWgslCurve();
-    expect(b.maxExtent).toBeCloseTo(a.maxExtent, 6);
-    expect(b.points.length).toBe(a.points.length);
-    for (let i = 0; i < a.points.length; i++) {
-      expect(b.points[i][0]).toBeCloseTo(a.points[i][0], 5);
-      expect(b.points[i][1]).toBeCloseTo(a.points[i][1], 5);
-    }
-  });
-
   it('the lead-in is Apple measured value', () => {
     expect(readGlslCurve().maxExtent).toBeCloseTo(APPLE_LEAD_IN, 4);
   });

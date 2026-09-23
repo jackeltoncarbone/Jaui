@@ -2,7 +2,7 @@
  * Reads the backdrop grade and the glass body tint straight out of the SHADER SOURCES.
  *
  * Same discipline as Border.Hairline.Source: the ORDER the grade runs in is taken from the real
- * `.frag` / `.wgsl` function bodies, statement by statement, and the numbers are computed in that
+ * `.frag` function bodies, statement by statement, and the numbers are computed in that
  * order. Reorder the shader and these numbers move with it; there is no copy of the order kept here.
  */
 import { readFileSync } from 'node:fs';
@@ -13,7 +13,6 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const read = (...parts: string[]): string => readFileSync(join(SRC, ...parts), 'utf8').replace(/\r\n/g, '\n');
 
 export const readGlsl = (): string => read('Jiv', 'Shaders', 'Jiv.Panel.frag');
-export const readWgsl = (): string => read('Core', 'Shaders', 'Panel.wgsl');
 export const readProgressiveGlsl = (): string => read('ProgressiveBlur', 'ProgressiveBlur.Shader.ts');
 export const readProgressiveWgsl = (): string => read('Core', 'Shaders', 'ProgressiveBlur.wgsl');
 
@@ -54,11 +53,8 @@ export const gradeSteps = (fnBody: string): GradeStep[] => {
 export const glslGradeSteps = (): GradeStep[] =>
   gradeSteps(body(readGlsl(), /vec3\s+applyGrading\s*\(/, 'applyGrading in Jiv.Panel.frag'));
 
-export const wgslGradeSteps = (): GradeStep[] =>
-  gradeSteps(body(readWgsl(), /fn\s+apply_grading\s*\(/, 'apply_grading in Panel.wgsl'));
 
 export const glslTintBody = (): string => body(readGlsl(), /vec3\s+applyTint\s*\(/, 'applyTint in Jiv.Panel.frag');
-export const wgslTintBody = (): string => body(readWgsl(), /fn\s+apply_tint\s*\(/, 'apply_tint in Panel.wgsl');
 
 /** The tint as both shaders write it: `mix(color, vec3(step(0, tint)), abs(tint))`. `tintMatchesSource`
  *  asserts that really is the body. */
