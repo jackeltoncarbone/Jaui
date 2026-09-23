@@ -173,10 +173,11 @@ const _preparePanelProgram = (gl: WebGL2RenderingContext, p: WebGLProgram): _Pan
 };
 
 /** The rim's white term as a share of its gain. Fitted jointly to Apple's rim peaks over the body just
- *  inside them (speaker button over teal, Control Center Wi-Fi pill over blue, the Safari more button
- *  over lavender, the App Store search button over saturated blue): gain 0.23 and white 0.11 of the
- *  remaining headroom. A larger white term turns the rim over a saturated color into a pale line. */
-const RIM_WHITE_SHARE = 0.48;
+ *  inside them: the speaker button over teal, the Control Center Wi-Fi pill over blue, the Safari more
+ *  button over lavender, the App Store search button over saturated blue, and the Photos buttons over
+ *  busy concert photos, where the lit lobes stand 40 to 69 above a body of 40 to 80. Gain 0.24 and white
+ *  0.23 of the remaining headroom. The white is what holds the rim over a dark, busy body. */
+const RIM_WHITE_SHARE = 0.96;
 
 /** Splice the shared clip-stack chunk into a program that asks for it. */
 const _withClipStack = (source: string): string => {

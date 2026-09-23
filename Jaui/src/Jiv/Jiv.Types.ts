@@ -272,8 +272,8 @@ export interface JivStyle {
   RimWidth: string;
   /** The rim's peak GAIN, 0..1, at the two points where the outline faces `LightAngle` and its bounce,
    *  dying with distance from them. What is under the rim is multiplied by 1 + this, then screened
-   *  toward white by 0.48 of it, so it keeps its hue: over teal it reads as a lighter, still-saturated
-   *  teal, over a saturated blue as a brighter blue. Apple's is about 0.23. Default 0. */
+   *  toward white by 0.96 of it, so it keeps its hue and still stands clear of a dark, busy body: over
+   *  teal it reads as a lighter, still-saturated teal. Apple's is about 0.24. Default 0. */
   RimStrength: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.

@@ -168,7 +168,7 @@ export const RECORD_JANVAS = 3;
 
 /** Why a record is dirty with no float to show for it: its pixels come from state the CPU cannot see.
  *  Each is a producer that does not declare, wired here as ALWAYS CHANGED over its own footprint. */
-export type FreshCause = 'janvas' | 'shadow' | 'group';
+export type FreshCause = 'janvas' | 'shadow' | 'group' | 'edge';
 
 interface PaintRecord {
   A: number;
@@ -230,7 +230,7 @@ export class PaintLedger<Slot> {
   /** Rendered frames seen. A reader is only ever compared against the frame immediately before. */
   Frame = 0;
   readonly Stats: PaintLedgerFrame = {
-    Changed: 0, New: 0, Gone: 0, Fresh: { janvas: 0, shadow: 0, group: 0 }, Untracked: 0, Duplicate: 0, Seeded: false,
+    Changed: 0, New: 0, Gone: 0, Fresh: { janvas: 0, shadow: 0, group: 0, edge: 0 }, Untracked: 0, Duplicate: 0, Seeded: false,
   };
 
   private readonly _ids = new WeakMap<object, number>();
@@ -275,7 +275,7 @@ export class PaintLedger<Slot> {
     this.Region.Reset(w, h);
     const s = this.Stats;
     s.Changed = 0; s.New = 0; s.Gone = 0; s.Untracked = 0; s.Duplicate = 0;
-    s.Fresh.janvas = 0; s.Fresh.shadow = 0; s.Fresh.group = 0;
+    s.Fresh.janvas = 0; s.Fresh.shadow = 0; s.Fresh.group = 0; s.Fresh.edge = 0;
     s.Seeded = this._seed.A !== this._seedA || this._seed.B !== this._seedB || w !== this._w || h !== this._h;
     this._seedA = this._seed.A;
     this._seedB = this._seed.B;

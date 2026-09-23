@@ -213,7 +213,7 @@ export interface BlurCacheFrame {
   Changed: number;
   New: number;
   Gone: number;
-  Fresh: Record<'janvas' | 'shadow' | 'group', number>;
+  Fresh: Record<'janvas' | 'shadow' | 'group' | 'edge', number>;
   Untracked: number;
   Duplicate: number;
   Seeded: boolean;
@@ -2873,6 +2873,12 @@ export class Canvas implements DirtyTracker {
     // Track whether we've built a blur for the current snapshot
     let lastBackdrop: GpuTextureHandle | null = null;
     let lastBaseFrostLod: number = 0;
+    // THE SCROLL EDGE'S BACKDROP, for the glass inside it. A progressive blur (a scroll edge strip)
+    // builds a sharp-rooted pyramid of the scene as it was BEFORE the strip dims and blurs it, and a bar
+    // floating in the strip samples that pyramid at its own frost instead of building one from the dimmed
+    // scene. So the bar reads brighter than the dimmed surround it sits on, as Apple's does, and costs no
+    // build of its own. Scoped to the strip's subtree; null everywhere else.
+    let edgeBackdrop: { Handle: GpuTextureHandle; Region: { x: number; y: number; w: number; h: number }; MaxLod: number } | null = null;
     // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
     // contract means the scene is different every frame; caching snapshots
     // across surfaces was already unsafe. Each glass/pblur now builds its
@@ -3201,6 +3207,8 @@ export class Canvas implements DirtyTracker {
       // node's children have walked, because the node's edge paints among them (`descendChildren`)
       // and has to land in the same target the fill did.
       let cardOpen = false;
+      // Set by this node's progressive blur, if it draws one: the pyramid its subtree's glass samples.
+      let edgeHere: typeof edgeBackdrop = null;
 
       // BorderLayer: when this Jiv asks for its border to paint at a non-zero
       // position in its children's Layer space, suppress the border on the
@@ -3391,6 +3399,7 @@ export class Canvas implements DirtyTracker {
           return built;
         });
         lastBaseFrostLod = 0;
+        if (lastBackdrop !== null) edgeHere = { Handle: lastBackdrop, Region: region, MaxLod: maxLod };
         r.RebindSceneTarget();
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
@@ -3586,6 +3595,15 @@ export class Canvas implements DirtyTracker {
           // the build is a lookup and the scene target was never unbound here — which is why the
           // `RebindSceneTarget` below stays inside the branch that actually left it.
           const preFill = this._blurFirst || this._phasedWalk ? this._blurFirstFill.get(node) : undefined;
+          // Inside a scroll edge: the strip's own pyramid, when this surface's sample region lies within
+          // it and every level it reads was built. The strip's level n is a Gaussian of dpr * 2^n device
+          // px from a raw level 0, so this surface's frost lands at log2(frost) above it, and its base is
+          // log2(dpr). A frost-0 surface reads the raw scene snapshot, which the strip has since dimmed,
+          // so it builds its own.
+          const edgeLevels = Math.log2(Math.max(frostCssPx, _rsAdaptiveShadow ? SHADOW_DETAIL_MIN_PT : 0, 1));
+          const edgeFill = edgeBackdrop !== null && plan.InstFrostLod >= SCENE_TAP_FROST_LOD
+            && _regionContains(edgeBackdrop.Region, region) && edgeLevels <= edgeBackdrop.MaxLod
+            ? edgeBackdrop : null;
           // `?glass-group`: THE GROUP'S BACKDROP, AND THE POINT IT IS CAPTURED AT.
           //
           // This line is the whole of the law in the walk. The FIRST member of a group to reach it
@@ -3607,6 +3625,12 @@ export class Canvas implements DirtyTracker {
             // every frame -- correct, and printed as `grouped=` so a page that groups is not read as
             // a page the cache failed on.
             if (this._bcOn) { this._bc.Fresh('group'); this._bcStats.Grouped++; }
+          } else if (edgeFill !== null) {
+            lastBackdrop = edgeFill.Handle;
+            lastBaseFrostLod = Math.log2(d);
+            // `?blur-cache`: the strip's pyramid is keyed to the strip, not to this surface, so this
+            // surface's pixels are called changed every frame, as a glass group's members are.
+            if (this._bcOn) this._bc.Fresh('edge');
           } else if (preFill !== undefined) {
             lastBackdrop = preFill;
             this._blurFirstStats.Used++;
@@ -3966,8 +3990,12 @@ export class Canvas implements DirtyTracker {
 
       if (this._bcOn) this._bc.Close();
 
-      // Walk children in Layer order (ties break by tree order)
+      // Walk children in Layer order (ties break by tree order). A progressive blur hands its pyramid
+      // to its subtree's glass for the length of the subtree.
+      const outerEdge = edgeBackdrop;
+      if (edgeHere !== null) edgeBackdrop = edgeHere;
       descendChildren(node, eff, stack, scope, effH, childPersp);
+      edgeBackdrop = outerEdge;
 
       // Close the card composite. The pending batches drain FIRST: anything still buffered belongs
       // to this subtree and would otherwise be flushed into the scene by the next category
@@ -4922,7 +4950,7 @@ export class Canvas implements DirtyTracker {
       + ` bytes=${(r.BlurCacheBytes / (1024 * 1024)).toFixed(1)}MB slots=${r.BlurCacheSlots}`
       + ` dirtyPieces=${reg.Full ? 'full' : reg.Count} dirtyPx=${(reg.Px / 1e6).toFixed(1)}M`
       + ` changed=${st.Changed} new=${st.New} gone=${st.Gone}`
-      + ` fresh=janvas:${st.Fresh.janvas},shadow:${st.Fresh.shadow},group:${st.Fresh.group}`
+      + ` fresh=janvas:${st.Fresh.janvas},shadow:${st.Fresh.shadow},group:${st.Fresh.group},edge:${st.Fresh.edge}`
       + ` shadowStill=${r.ShadowStill}`
       + ` untracked=${st.Untracked} dup=${st.Duplicate} seeded=${st.Seeded ? 1 : 0}`
       + ` resting=${resting ? 1 : 0} vacuous=${vacuous ? 1 : 0}`
