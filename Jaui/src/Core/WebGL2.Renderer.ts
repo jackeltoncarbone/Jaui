@@ -761,7 +761,6 @@ export class WebGL2Renderer implements Renderer {
     scene: WebGLUniformLocation | null;
     pyramid: WebGLUniformLocation | null;
     pyramidXf: WebGLUniformLocation | null;
-    pyramidSize: WebGLUniformLocation | null;
     maxLod: WebGLUniformLocation | null;
     direction: WebGLUniformLocation | null;
     feather: WebGLUniformLocation | null;
@@ -1167,9 +1166,9 @@ export class WebGL2Renderer implements Renderer {
     this._paceLastRetiredAt = 0;
 
     // ── One compile batch for every program an UNFLAGGED page can draw with ──
-    // EIGHTEEN programs stand between a cold tab and its first pixel: the seven panel variants (two
+    // NINETEEN programs stand between a cold tab and its first pixel: the seven panel variants (two
     // of them the glass program's `?glass-programs` cuts), the text, stroke, two SVG, blit,
-    // clip-mask, progressive-blur and adaptive-shadow singles, and the three kernels every
+    // clip-mask, progressive-blur and adaptive-shadow singles, and the four kernels every
     // `BlurPass` has. Twelve programs are NOT here, and each is a flag's: the five a `BlurPass` binds
     // only under an atlas arm, the eighth panel variant only `?border-direct` binds, the three
     // `?glass-reg` cuts and the three `?glass-gates` cuts -- see `ArmFlaggedPrograms`,
@@ -4330,12 +4329,9 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(this._progBlurLocs.scene, 0);
     gl.uniform1i(this._progBlurLocs.pyramid, 1);
     // The pyramid holds a REGION of the screen. The ramp, the feather and the clip all still
-    // run in screen UV — only the two fetches map through this, and the cubic reconstruction
-    // needs the pyramid's own texel grid rather than the canvas's.
+    // run in screen UV; only the fetches map through this.
     const pxf = _regionOf(params.Pyramid);
     gl.uniform4f(this._progBlurLocs.pyramidXf, pxf.ScaleX, pxf.ScaleY, pxf.OffsetX, pxf.OffsetY);
-    gl.uniform2f(this._progBlurLocs.pyramidSize,
-      pxf.TexelsX || this._width, pxf.TexelsY || this._height);
     gl.uniform1i(this._progBlurLocs.clipTex, 2);
     gl.uniform2i(this._progBlurLocs.clipMeta, params.ClipOffset, params.ClipCount);
     gl.uniform1f(this._progBlurLocs.maxLod, params.MaxLod);
@@ -5633,7 +5629,6 @@ export class WebGL2Renderer implements Renderer {
       scene: gl.getUniformLocation(p, 'u_Scene'),
       pyramid: gl.getUniformLocation(p, 'u_Pyramid'),
       pyramidXf: gl.getUniformLocation(p, 'u_PyramidXf'),
-      pyramidSize: gl.getUniformLocation(p, 'u_PyramidSize'),
       maxLod: gl.getUniformLocation(p, 'u_MaxLod'),
       direction: gl.getUniformLocation(p, 'u_Direction'),
       feather: gl.getUniformLocation(p, 'u_Feather'),

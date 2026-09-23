@@ -209,6 +209,26 @@ void main() {
 }
 `;
 
+// The mip chain's hop: four bilinear taps at +-0.75 source texel on both axes, a separable
+// [1 3 3 1] / 8 binomial. `DOWN_FRAG` at offset 1.0 is a 2x2 box, whose levels read as blocks and
+// boil under scroll. `targets` 2 writes the same texel to both of `?mip-mrt`'s attachments.
+const MIP_FRAG = (targets: 1 | 2): string => `#version 300 es
+precision highp float;
+in vec2 v_Uv;
+uniform sampler2D u_Tex;
+${HP_DOWN}
+${targets === 2 ? 'layout(location = 0) out vec4 fragColor;\nlayout(location = 1) out vec4 fragColor1;' : 'out vec4 fragColor;'}
+${TAP_PLAIN}
+void main() {
+    vec2 hp = u_HalfPixel * 1.5;
+    vec3 sum = TAP(v_Uv - hp).rgb;
+    sum += TAP(v_Uv + hp).rgb;
+    sum += TAP(v_Uv + vec2(hp.x, -hp.y)).rgb;
+    sum += TAP(v_Uv - vec2(hp.x, -hp.y)).rgb;
+    fragColor = vec4(sum * 0.25, 1.0);${targets === 2 ? '\n    fragColor1 = fragColor;' : ''}
+}
+`;
+
 // Upsample: 8-tap "tent" kernel
 const UP_FRAG = (SLOT_TAP: string, HP: string = HP_UP): string => `#version 300 es
 precision highp float;
@@ -842,13 +862,14 @@ export const PyramidFill = (rectW: number, rectH: number, k: number, depth: numb
  *  exists to be box-averaged 16x straight back down.
  *
  *  THE PLAN: the chain's own first Down hop (same program, same uniforms, so level 1 is the chain's
- *  level 1), then box hops (`DOWN_FRAG` at `u_Offset` 1.0, `GenerateOutputMipmap`'s hop) down to the
+ *  level 1), then box hops (`DOWN_FRAG` at `u_Offset` 1.0) down to the
  *  deepest level the chain would have had, and a blit of ONLY the levels the read can reach into
  *  the output's mip slots. No Up pass, no level-0 write. Level `i` is `box(2^i)` of the region,
  *  because a Down hop at any `t <= 1` is an exact 2x2 box (its four corner taps each land inside
- *  the same 2x2 cell and sum to it); the chain's level `i` was `box(2^i)` of the Up pass's output.
- *  The difference is the Up pass's own smoothing, about sigma 1.15 device px, in front of a 16 px
- *  box. That is a change of picture inside the rim band and it is predicted, not claimed away.
+ *  the same 2x2 cell and sum to it); the chain's level `i` is `MIP_FRAG`'s binomial hops of the Up
+ *  pass's output. The difference is those kernels plus the Up pass's own smoothing, about sigma
+ *  1.15 device px, in front of a 16 px box. That is a change of picture inside the rim band and it
+ *  is predicted, not claimed away.
  *
  *  Which levels a read reaches. `LINEAR_MIPMAP_LINEAR` at LOD `L` reads `floor(L)` and the level
  *  above it. `L` reaches the shader as a varying, so it can land a few ulp either side of an
@@ -1079,10 +1100,10 @@ interface _AtlasPrograms {
   UpSlotInst: ShaderProgram;
 }
 
-/** Programs EVERY `BlurPass` compiles, because an unflagged page binds all three: the plain DOWN
- *  and UP kernels (per-card rims, the fills' pyramids, the shared backdrop, the progressive blur's
- *  root) and the 1-tap COPY that seeds a pyramid. */
-export const BLUR_PROGRAMS_BOOT = 3;
+/** Programs EVERY `BlurPass` compiles, because an unflagged page binds all four: the plain DOWN
+ *  and UP kernels (per-card rims, the fills' pyramids, the shared backdrop), the 1-tap COPY that
+ *  seeds a pyramid, and the MIP hop that builds its mip chain. */
+export const BLUR_PROGRAMS_BOOT = 4;
 /** Programs only an atlas arm compiles. See `_AtlasPrograms` and `EnsureAtlasPrograms`. */
 export const BLUR_PROGRAMS_ATLAS = 5;
 
@@ -1091,6 +1112,7 @@ export class BlurPass {
   private _down: ShaderProgram;
   private _up: ShaderProgram;
   private _copy: ShaderProgram;
+  private _mip: ShaderProgram;
   /** The atlas kernels, or null on every pass that has not been asked for them -- which is EVERY
    *  pass on an unflagged page, because `?pyramid-atlas` is off by default (Jack's fourth ruling)
    *  and the atlas path is the only thing that binds them.
@@ -1247,7 +1269,7 @@ export class BlurPass {
   static TempLoad: 'discard' | 'clear' | 'keep' = 'discard';
   /** `?mip-mrt`: from level 2 down, ONE draw writes each output mip level twice -- into its scratch
    *  target (the next hop's source) and into its own slot of the output texture -- instead of a
-   *  draw into scratch followed by a NEAREST 1:1 blit across. Same DOWN taps on the same source
+   *  draw into scratch followed by a NEAREST 1:1 blit across. Same MIP taps on the same source
    *  texels, so the same pixels; one render pass per level instead of two. Level 1 still goes the
    *  old way: its source IS the output's level 0, and writing a level of the texture being sampled
    *  is the feedback loop WebGL2 forbids (pinning BASE/MAX_LEVEL to escape it leaves the attached
@@ -1312,6 +1334,9 @@ export class BlurPass {
   private _upSrcLoc: WebGLUniformLocation | null = null;
   private _copyTexLoc: WebGLUniformLocation | null = null;
   private _copySrcLoc: WebGLUniformLocation | null = null;
+  private _mipTexLoc: WebGLUniformLocation | null = null;
+  private _mipHpLoc: WebGLUniformLocation | null = null;
+  private _mipSrcLoc: WebGLUniformLocation | null = null;
   private _dsTexLoc: WebGLUniformLocation | null = null;
   private _dsHpLoc: WebGLUniformLocation | null = null;
   private _dsOffLoc: WebGLUniformLocation | null = null;
@@ -1412,11 +1437,12 @@ export class BlurPass {
     this._chainsLive = chains;
     this._gl = gl;
     const b = batch ?? new ShaderBatch(gl);
-    // BLUR_PROGRAMS_BOOT, and only these: the three an unflagged page binds. The atlas kernels are
+    // BLUR_PROGRAMS_BOOT, and only these: the four an unflagged page binds. The atlas kernels are
     // compiled by `EnsureAtlasPrograms` when a flag asks for them.
     this._down = b.Add(VERT, DOWN_FRAG(TAP_PLAIN));
     this._up = b.Add(VERT, UP_FRAG(TAP_PLAIN));
     this._copy = b.Add(VERT, COPY_FRAG);
+    this._mip = b.Add(VERT, MIP_FRAG(1));
     this._quad = new QuadGeometry(gl);
 
     // Level chains are built on demand by `_useChain` — which size to build is not known
@@ -1540,6 +1566,9 @@ export class BlurPass {
     this._upSrcLoc = gl.getUniformLocation(this._up.Program, 'u_SrcRect');
     this._copyTexLoc = gl.getUniformLocation(this._copy.Program, 'u_Tex');
     this._copySrcLoc = gl.getUniformLocation(this._copy.Program, 'u_SrcRect');
+    this._mipTexLoc = gl.getUniformLocation(this._mip.Program, 'u_Tex');
+    this._mipHpLoc = gl.getUniformLocation(this._mip.Program, 'u_HalfPixel');
+    this._mipSrcLoc = gl.getUniformLocation(this._mip.Program, 'u_SrcRect');
     // The atlas kernels when this pass has them AND their batch has been resolved by whoever owns
     // it. `EnsureAtlasPrograms` wires its own when it owns the batch, so this is the other case:
     // the programs joined a batch the RENDERER resolves, and this is the call that follows it.
@@ -2579,14 +2608,14 @@ export class BlurPass {
    *  (non-monotonic σ), which trilinear interpolation then visualised as
    *  the same stamps near the bottom of the ramp.
    *
-   *  Algorithm: build mip levels 1..N by iterating the 5-tap DOWN kernel
-   *  starting from level 0 itself. Each step is a small Gaussian
+   *  Algorithm: build mip levels 1..N by iterating the 4-tap MIP kernel
+   *  starting from level 0 itself. Each step is a small binomial
    *  downsample of the previous mip — σ adds in quadrature, so successive
    *  mips have monotonically increasing source-pixel σ. High-frequency
    *  content is already smoothed by the time we downsample, so blocks
    *  dissolve into a smooth gradient.
    *
-   *  Cost: one DOWN pass per mip level on rapidly-shrinking images + matching
+   *  Cost: one MIP pass per mip level on rapidly-shrinking images + matching
    *  blits. Every level is the REGION's, not the canvas's, so there is no rect to
    *  track and no guard band to erode — the whole level is valid because the whole
    *  level was written. A consumer whose deepest sample is LOD 0 (`maxLod <= 0`)
@@ -2644,15 +2673,14 @@ export class BlurPass {
     // box-filtered deep mips instead).
     out.EnsureMipLevels(stopLevel);
 
-    // Iterative 5-tap DOWN starting from level 0. _levels[1..N] are
+    // Iterative MIP hops starting from level 0. _levels[1..N] are
     // re-purposed as scratch FBOs — their previous contents (dual-filter
     // intermediates from the Blur() call) are no longer needed.
     gl.disable(gl.BLEND);
     gl.disable(gl.SCISSOR_TEST);
-    gl.useProgram(this._down.Program);
-    gl.uniform1i(this._downTexLoc, 0);
-    gl.uniform1f(this._downOffLoc, 1.0);
-    this._setSrcRect(this._downSrcLoc, null, 1, 1);
+    gl.useProgram(this._mip.Program);
+    gl.uniform1i(this._mipTexLoc, 0);
+    this._setSrcRect(this._mipSrcLoc, null, 1, 1);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(this._quad.Vao);
 
@@ -2669,7 +2697,7 @@ export class BlurPass {
       this._levels[i].Resize(newW, newH);
       const dst = this._levels[i];
       this._bindTarget(dst, `mip${i}`);
-      gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
+      gl.uniform2f(this._mipHpLoc, 0.5 / srcW, 0.5 / srcH);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
       this._draws++;
@@ -2686,7 +2714,7 @@ export class BlurPass {
 
   /** `?mip-mrt`'s chain. Level 1 is `_generateOutputMipmap`'s own hop (scratch, then blitted); every
    *  level after it is one two-target draw that reads the previous SCRATCH level, so the output
-   *  texture is attached and never sampled. Called with the DOWN program, VAO and texture unit 0
+   *  texture is attached and never sampled. Called with the MIP program, VAO and texture unit 0
    *  already set up by the caller. */
   private _mipMrt = (out: Framebuffer, stopLevel: number): void => {
     const gl = this._gl;
@@ -2695,7 +2723,7 @@ export class BlurPass {
     if (w1 === srcW && h1 === srcH) return;
     this._levels[1].Resize(w1, h1);
     this._bindTarget(this._levels[1], 'mip1');
-    gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
+    gl.uniform2f(this._mipHpLoc, 0.5 / srcW, 0.5 / srcH);
     gl.bindTexture(gl.TEXTURE_2D, out.Texture);
     gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
     this._draws++;
@@ -2705,7 +2733,6 @@ export class BlurPass {
     const m = this._ensureMipMrt();
     gl.useProgram(m.Program.Program);
     gl.uniform1i(m.Tex, 0);
-    gl.uniform1f(m.Off, 1.0);
     this._setSrcRect(m.Src, null, 1, 1);
     gl.bindFramebuffer(gl.FRAMEBUFFER, m.Fbo);
     let depth = 1;
@@ -2740,17 +2767,14 @@ export class BlurPass {
     this._blitMips(out, 1, 1);
   };
 
-  /** The two-target DOWN program and its framebuffer, compiled on first use: an unflagged page never
+  /** The two-target MIP program and its framebuffer, compiled on first use: an unflagged page never
    *  pays for it. */
   private _ensureMipMrt = (): { Program: ShaderProgram; Fbo: WebGLFramebuffer; Tex: WebGLUniformLocation | null;
-    Hp: WebGLUniformLocation | null; Off: WebGLUniformLocation | null; Src: WebGLUniformLocation | null } => {
+    Hp: WebGLUniformLocation | null; Src: WebGLUniformLocation | null } => {
     if (this._mipMrtState !== null) return this._mipMrtState;
     const gl = this._gl;
     const b = new ShaderBatch(gl);
-    const frag = DOWN_FRAG(TAP_PLAIN)
-      .replace('out vec4 fragColor;', 'layout(location = 0) out vec4 fragColor;\nlayout(location = 1) out vec4 fragColor1;')
-      .replace('fragColor = vec4(sum / 8.0, 1.0);', 'fragColor = vec4(sum / 8.0, 1.0);\n    fragColor1 = fragColor;');
-    const program = b.Add(VERT, frag);
+    const program = b.Add(VERT, MIP_FRAG(2));
     b.Resolve();
     const fbo = gl.createFramebuffer();
     if (!fbo) throw new Error('[Jaui] Failed to create mip-mrt FBO');
@@ -2761,12 +2785,12 @@ export class BlurPass {
     this._mipMrtState = {
       Program: program, Fbo: fbo,
       Tex: gl.getUniformLocation(p, 'u_Tex'), Hp: gl.getUniformLocation(p, 'u_HalfPixel'),
-      Off: gl.getUniformLocation(p, 'u_Offset'), Src: gl.getUniformLocation(p, 'u_SrcRect'),
+      Src: gl.getUniformLocation(p, 'u_SrcRect'),
     };
     return this._mipMrtState;
   };
   private _mipMrtState: { Program: ShaderProgram; Fbo: WebGLFramebuffer; Tex: WebGLUniformLocation | null;
-    Hp: WebGLUniformLocation | null; Off: WebGLUniformLocation | null; Src: WebGLUniformLocation | null } | null = null;
+    Hp: WebGLUniformLocation | null; Src: WebGLUniformLocation | null } | null = null;
 
   /** Blit `_levels[from..to]` into the same mip slots of `out`. */
   private _blitMips = (out: Framebuffer, from: number, to: number): void => {
@@ -2809,8 +2833,7 @@ export class BlurPass {
    * 0 this plan never wrote.
    *
    * Hop 1 is issued with the chain's program, tap offset, source rect and half-texel, in the
-   * chain's order, so level 1 holds the chain's level-1 texels. From hop 2 on it is
-   * `_generateOutputMipmap`'s hop, reading a level of this chain instead of the output.
+   * chain's order, so level 1 holds the chain's level-1 texels. From hop 2 on each hop is a 2x2 box.
    */
   BlurReadLevel = (input: WebGLTexture, width: number, height: number, radius: number,
     plan: ReadLevelPlan): WebGLTexture => {

@@ -1,10 +1,8 @@
 /**
  * ProgressiveBlur shader — draws a quad over the composited scene and
  * outputs a per-pixel continuously-variable Gaussian blur by sampling a
- * single mipmapped blur pyramid at a ramp-driven LOD. The pyramid is the
- * same one built for glass panels (Dual Filter → generateMipmap), so the
- * progressive-blur pass has zero extra blur work — just one textureLod
- * per fragment.
+ * single mipmapped blur pyramid at a ramp-driven LOD: the two octaves around
+ * that LOD, each reconstructed on its own texel grid, blended by its fraction.
  *
  * Ramp mapping:
  *   ramp = 0.0 → unblurred scene (clear end, dest shows through)
@@ -71,7 +69,6 @@ uniform sampler2D u_Pyramid;                // mipmapped blur pyramid (LOD 0 = s
 // (1,1,0,0) when the region IS the canvas. Density is unchanged: one level-0 texel per device
 // pixel either way, which is why the LOD arithmetic below still measures in screen UV.
 uniform vec4 u_PyramidXf;
-uniform vec2 u_PyramidSize;                 // level-0 dimensions in TEXELS (the cubic needs its grid)
 uniform float u_MaxLod;                     // max mipmap LOD to sample (maps to ramp = 1.0)
 uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 ToRight
 uniform float u_Feather;                    // ramp length in device px (0 = span whole element)
@@ -105,17 +102,6 @@ float _ign(vec2 p) {
 float triDither(vec2 p) {
     return (_ign(p) + _ign(p + vec2(113.0, 71.0)) - 1.0) / 255.0;
 }
-// White-noise hash (Dave Hoskins). Decorrelated at ALL pixel coordinates, so
-// unlike IGN it has no regular diagonal structure. Used for the large (±0.5)
-// LOD jitter below, where IGN's structure reads as a Moiré weave on smooth
-// blurred regions. IGN is kept for the ±1-LSB color dither (triDither), where
-// its even distribution matters and its structure is sub-perceptual.
-float _wn(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-
 // 4-tap cubic B-spline upsample. The progressive ramp's heavy end samples a
 // tiny mip (LOD ~5 = 1/32 res); a plain bilinear textureLod magnifies that
 // mip's texel grid into visible soft "blocks". A cubic B-spline
@@ -133,11 +119,7 @@ vec4 cubicWeights(float v) {
     return vec4(x, y, z, w) * (1.0 / 6.0);
 }
 
-// texSize = the pyramid's effective resolution at this (fractional) LOD,
-// i.e. u_Resolution / 2^lod. textureLod still does the trilinear mip blend;
-// the B-spline reconstructs smoothly across that level's texel grid.
 vec3 textureBicubicLod(sampler2D tex, vec2 uv, float lod, vec2 texSize) {
-    // uv and texSize are BOTH in the pyramid's own frame — the caller maps them.
     vec2 invTexSize = 1.0 / texSize;
     vec2 coord = uv * texSize - 0.5;
     vec2 fxy = fract(coord);
@@ -159,6 +141,13 @@ vec3 textureBicubicLod(sampler2D tex, vec2 uv, float lod, vec2 texSize) {
     float sx = s.x / (s.x + s.y);
     float sy = s.z / (s.z + s.w);
     return mix(mix(s3, s2, sx), mix(s1, s0, sx), sy);
+}
+
+// One pyramid level on its own texel grid, which on an odd-sized region is not level 0's halved.
+// Level 0 is the sharp scene at one texel per device pixel, so a single tap is exact there.
+vec3 sampleLevel(vec2 uv, int level) {
+    if (level == 0) return textureLod(u_Pyramid, uv, 0.0).rgb;
+    return textureBicubicLod(u_Pyramid, uv, float(level), vec2(textureSize(u_Pyramid, level)));
 }
 
 float pickClipRadius(vec2 p, vec4 radii) {
@@ -338,19 +327,6 @@ void main() {
     // ramp looks exponential to the eye. Squaring makes the perceived blur
     // increase feel linear (gentle near clear end, steeper near blurred end).
     float lod = ramp * ramp * u_MaxLod;
-    // Dissolve mip-transition contours. As lod sweeps across the ramp, each
-    // integer mip boundary is a trilinear crossover between two blur octaves
-    // of (perceptually) different blur amount, which reads as a faint band.
-    // This is BETWEEN mip levels, so precision / bicubic / output dither
-    // can't touch it. A ±0.5-level per-pixel jitter spreads every crossover
-    // into noise the blur + output dither absorb.
-    // Triangular-PDF LOD jitter from two decorrelated IGN samples. Keeps the
-    // ±0.5 peak span needed to cross a mip boundary, but its lower RMS and
-    // decorrelated structure dissolve the crossover bands with far less
-    // visible grain than a single uniform ±0.5 sample (which read as a
-    // structured Moiré on smooth regions).
-    float lodJitter = (_wn(v_PixelPos + 31.0) + _wn(v_PixelPos + 97.0) - 1.0) * 0.5;
-    lod = max(0.0, lod + lodJitter);
     // One level-0 texel IS one device pixel, so a LOD-lod texel is exp2(lod) device px
     // wide wherever the pyramid lives. This inset is measured against the CLIP AABB, which is in
     // screen UV, so it stays screen-relative.
@@ -364,34 +340,14 @@ void main() {
     // Clamped in screen UV (that is the frame the clip AABB is in), then mapped into the
     // pyramid's own UV for the fetches below.
     vec2 pyrUv = safeUv * u_PyramidXf.xy + u_PyramidXf.zw;
-    vec2 pyrSize = u_PyramidSize / exp2(lod);
 
-    // True single-continuum sample. The pyramid's mip 0 IS the sharp scene
-    // (seeded raw — see BlurPass sharp-root), so one continuous LOD ramps from
-    // crisp (lod 0) to heavy (u_MaxLod) with NO sharp/blurred crossfade and no
-    // separate scene texture — true progression, not a mask. Trilinear at low
-    // LOD keeps the clear edge pixel-crisp; the block-free cubic B-spline folds
-    // in as LOD grows (the heavy end magnifies tiny mips, where plain bilinear
-    // would show soft blocks). texSize = pyramid res at this LOD = res / 2^lod.
-    // The blend weight is 0 below lod 1 and 1 above lod 3 — outside that window
-    // one of these two samples is scaled by 0 and discarded. Gate on the weight
-    // so we don't pay for the unused sample (PIXEL-IDENTICAL output):
-    //   • clear end  (lod < 1): 1 trilinear tap instead of 5  (~40% of the ramp)
-    //   • heavy end  (lod > 3): 4 bicubic taps instead of 5
-    //   • transition (1..3):    both, as before
-    // LOD varies smoothly across the gradient, so the branch is spatially
-    // coherent — negligible divergence cost, real bandwidth win.
-    float cubicBlend = smoothstep(1.0, 3.0, lod);
-    vec3 rgb;
-    if (cubicBlend <= 0.0) {
-        rgb = textureLod(u_Pyramid, pyrUv, lod).rgb;
-    } else if (cubicBlend >= 1.0) {
-        rgb = textureBicubicLod(u_Pyramid, pyrUv, lod, pyrSize);
-    } else {
-        vec3 sharpRgb  = textureLod(u_Pyramid, pyrUv, lod).rgb;
-        vec3 smoothRgb = textureBicubicLod(u_Pyramid, pyrUv, lod, pyrSize);
-        rgb = mix(sharpRgb, smoothRgb, cubicBlend);
-    }
+    // The pyramid's level 0 IS the sharp scene (seeded raw, see BlurPass sharp-root), so one continuous
+    // LOD ramps from crisp to heavy with no crossfade. Each octave is reconstructed on its own grid and
+    // the two are blended by the fraction: a smooth blend with nothing per-pixel to boil under scroll.
+    int level = int(lod);
+    float between = lod - float(level);
+    vec3 rgb = sampleLevel(pyrUv, level);
+    if (between > 0.0) rgb = mix(rgb, sampleLevel(pyrUv, level + 1), between);
 
     // Backdrop grading — each factor ramps from 1 (identity, clear end) to its authored value (blurred
     // end), ON THE BLUR'S OWN PROGRESS rather than on ramp. The comment here used to claim it "matches

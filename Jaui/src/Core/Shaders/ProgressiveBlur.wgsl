@@ -85,6 +85,47 @@ fn inside_clip_stack(pixel: vec2f, clip_meta: vec4f) -> bool {
   return true;
 }
 
+// Cubic B-spline weights folded into bilinear taps; see ProgressiveBlur.Shader.ts cubicWeights.
+fn cubic_weights(v: f32) -> vec4f {
+  let n = vec4f(1.0, 2.0, 3.0, 4.0) - v;
+  let s = n * n * n;
+  let x = s.x;
+  let y = s.y - 4.0 * s.x;
+  let z = s.z - 4.0 * s.y + 6.0 * s.x;
+  let w = 6.0 - x - y - z;
+  return vec4f(x, y, z, w) * (1.0 / 6.0);
+}
+
+fn sample_bicubic(uv: vec2f, level: i32, tex_size: vec2f) -> vec3f {
+  let inv_tex_size = 1.0 / tex_size;
+  var coord = uv * tex_size - 0.5;
+  let fxy = fract(coord);
+  coord -= fxy;
+
+  let xcubic = cubic_weights(fxy.x);
+  let ycubic = cubic_weights(fxy.y);
+
+  let c = coord.xxyy + vec2f(-0.5, 1.5).xyxy;
+  let s = vec4f(xcubic.xz + xcubic.yw, ycubic.xz + ycubic.yw);
+  let offset = (c + vec4f(xcubic.yw, ycubic.yw) / s) * inv_tex_size.xxyy;
+
+  let lod = f32(level);
+  let s0 = textureSampleLevel(pyramid, pyramid_sampler, offset.xz, lod).rgb;
+  let s1 = textureSampleLevel(pyramid, pyramid_sampler, offset.yz, lod).rgb;
+  let s2 = textureSampleLevel(pyramid, pyramid_sampler, offset.xw, lod).rgb;
+  let s3 = textureSampleLevel(pyramid, pyramid_sampler, offset.yw, lod).rgb;
+
+  let sx = s.x / (s.x + s.y);
+  let sy = s.z / (s.z + s.w);
+  return mix(mix(s3, s2, sx), mix(s1, s0, sx), sy);
+}
+
+// One pyramid level on its own texel grid, which on an odd-sized pyramid is not level 0's halved.
+fn sample_level(uv: vec2f, level: i32) -> vec3f {
+  if (level == 0) { return textureSampleLevel(pyramid, pyramid_sampler, uv, 0.0).rgb; }
+  return sample_bicubic(uv, level, vec2f(textureDimensions(pyramid, level)));
+}
+
 // Intersection of all active clip AABBs in sample_uv space (scene UV has y
 // flipped vs device px). Used to clamp pyramid lookups so the mip's spatial
 // neighborhood never reaches past the parent's clip — prevents beyond-clip
@@ -137,21 +178,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let ramp = pow(smoothstep(0.0, 1.0, t), uniforms.easing);
 
   // Clamp sample_uv so mipmap neighborhoods never reach past the parent's
-  // clip AABB. Inset by half a texel at the current LOD so the bilinear
-  // footprint at that level lands entirely inside the clip — no beyond-clip
-  // pixels bleeding into blurred results along the clip edges.
+  // clip AABB. Inset by two texels at the current LOD so the bicubic
+  // footprint lands inside the clip — no beyond-clip pixels bleeding into
+  // blurred results along the clip edges.
   let clip_uv = clip_stack_uv_aabb(uniforms.clip_meta, uniforms.resolution);
   let lod = ramp * ramp * uniforms.max_lod;
   let texel_uv = exp2(lod) / uniforms.resolution;
-  let uv_min = clip_uv.xy + texel_uv * 0.5;
-  let uv_max = clip_uv.zw - texel_uv * 0.5;
+  let uv_min = clip_uv.xy + texel_uv * 2.0;
+  let uv_max = clip_uv.zw - texel_uv * 2.0;
   let safe_uv = clamp(in.sample_uv, min(uv_min, uv_max), max(uv_min, uv_max));
 
   let scene_rgb = textureSample(scene, scene_sampler, safe_uv).rgb;
 
   // Quadratic LOD curve — each mipmap LOD doubles sigma, so squaring makes
-  // perceived blur increase feel linear.
-  let blur_rgb = textureSampleLevel(pyramid, pyramid_sampler, safe_uv, lod).rgb;
+  // perceived blur increase feel linear. Each octave is reconstructed on its
+  // own grid and the two are blended by the fraction.
+  let level = i32(lod);
+  let between = lod - f32(level);
+  var blur_rgb = sample_level(safe_uv, level);
+  if (between > 0.0) {
+    let next = min(level + 1, i32(textureNumLevels(pyramid)) - 1);
+    blur_rgb = mix(blur_rgb, sample_level(safe_uv, next), between);
+  }
 
   // Gradual crossfade from unblurred scene into pyramid over first 20%.
   let blend_t = smoothstep(0.0, 0.2, ramp);

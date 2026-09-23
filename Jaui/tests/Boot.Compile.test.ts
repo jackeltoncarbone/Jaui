@@ -71,7 +71,7 @@ describe('a BlurPass compiles what an unflagged page binds, and nothing else', (
   it('the constructor issues exactly BLUR_PROGRAMS_BOOT programs', () => {
     const { Pass, Programs } = Counted();
     expect(Programs()).toBe(BLUR_PROGRAMS_BOOT);
-    expect(BLUR_PROGRAMS_BOOT).toBe(3);
+    expect(BLUR_PROGRAMS_BOOT).toBe(4);
     expect(Pass.AtlasProgramsCompiled).toBe(false);
   });
 
@@ -281,17 +281,17 @@ describe('the boot set is every program an unflagged page can bind, and only tho
     expect(borderAdds[0]).toContain('if (this.DiagBorderDirect)');
   });
 
-  it('the boot set is EIGHTEEN, and the three places that say so agree', () => {
+  it('the boot set is NINETEEN, and the three places that say so agree', () => {
     // Seven panel variants, the eight singles (text, stroke, two SVG, blit, clip mask, progressive
-    // blur, adaptive-shadow probe), and a `BlurPass`'s three. Arithmetic rather than a literal so
+    // blur, adaptive-shadow probe), and a `BlurPass`'s four. Arithmetic rather than a literal so
     // that a variant added anywhere has to move this line too -- as lane glassreg's two
     // `?glass-programs` cuts did (sixteen -> eighteen): the default binds them on glass-grid.
     const SINGLES = 8;
-    expect(PANEL_PROGRAM_COUNT + SINGLES + BLUR_PROGRAMS_BOOT).toBe(18);
+    expect(PANEL_PROGRAM_COUNT + SINGLES + BLUR_PROGRAMS_BOOT).toBe(19);
     expect(GLASS_VARIANT_PROGRAMS).toBe(2);
-    expect(INIT).toContain('EIGHTEEN programs stand between a cold tab and its first pixel');
+    expect(INIT).toContain('NINETEEN programs stand between a cold tab and its first pixel');
     expect(readFileSync(join(__dirname, '../src/Core/Shader.Compiler.ts'), 'utf8'))
-      .toContain('EIGHTEEN IS THE UNFLAGGED SET');
+      .toContain('NINETEEN IS THE UNFLAGGED SET');
     // And the twelve that are NOT in it are exactly the four flags' sets (lane gatebisect's
     // `?glass-gates` family made it twelve).
     expect(BLUR_PROGRAMS_ATLAS + PANEL_PROGRAM_BORDER_DIRECT + GLASS_REG_PROGRAMS + GLASS_GATE_PROGRAMS).toBe(12);
