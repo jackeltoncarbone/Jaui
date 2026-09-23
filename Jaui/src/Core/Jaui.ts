@@ -9,7 +9,7 @@ import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
 import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intrinsic';
 import { TextCache } from '../Text/Text.Cache';
-import { JTrace, JMs } from '../Diagnostics/Jaui.Trace';
+import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
@@ -2070,7 +2070,35 @@ export class Canvas implements DirtyTracker {
    *  called by async producers (image decode, janvas/foreign-renderer change, scroll). */
   RequestFrame = (): void => {
     this._needsRender = true;
+    if (JauiTracing()) {
+      // The caller, one frame up: what asked for a render. Only under ?trace.
+      const line = (new Error().stack ?? '').split('\n')[2]?.trim().replace(/^at /, '').replace(/\s*\(.*$/, '') ?? '?';
+      this._awake.Need.set(line, (this._awake.Need.get(line) ?? 0) + 1);
+    }
     this.Wake();
+  };
+
+  /** `?trace` only: WHY this loop drew, accumulated for a second and printed as `jaui:awake`.
+   *  A still page should print nothing at all; a page that never parks prints the animation, the
+   *  dirty node or the RequestFrame caller keeping it awake, by name. */
+  private _awake = {
+    Since: 0, Renders: 0, Layout: 0, Anim: new Map<string, number>(),
+    Dirty: new Map<string, number>(), Need: new Map<string, number>(),
+  };
+
+  private _flushAwake = (now: number, rendered: boolean, layoutDirty: boolean): void => {
+    const a = this._awake;
+    if (a.Since === 0) a.Since = now;
+    if (rendered) a.Renders++;
+    if (layoutDirty) a.Layout++;
+    if (now - a.Since < 1000) return;
+    if (a.Renders > 0) {
+      const top = (m: Map<string, number>): string => m.size === 0 ? 'none'
+        : [...m].sort((x, y) => y[1] - x[1]).slice(0, 6).map(([k, n]) => `${k}:${n}`).join(',');
+      JTrace(`jaui:awake renders=${a.Renders} layout=${a.Layout} anim=${top(a.Anim)}`
+        + ` dirty=${top(a.Dirty)} need=${top(a.Need)}`);
+    }
+    a.Since = now; a.Renders = 0; a.Layout = 0; a.Anim.clear(); a.Dirty.clear(); a.Need.clear();
   };
 
   private _pendingCapture: ((b: Blob | null) => void) | null = null;
@@ -2385,7 +2413,13 @@ export class Canvas implements DirtyTracker {
     // one-frame-stale value (the rotating-panel blur lagging its edge). Stepping
     // here couples spring-write → render-read in one frame. The manager's loop
     // is now schedule-only; this does NOT change any rAF kick or the boot path.
+    const awake = JauiTracing() ? this._awake : null;
+    if (awake !== null) this._animationManager.ActiveNames = [];
     this._animationManager.StepFrame(dt);
+    if (awake !== null) {
+      for (const n of this._animationManager.ActiveNames ?? []) awake.Anim.set(n, (awake.Anim.get(n) ?? 0) + 1);
+      this._animationManager.ActiveNames = null;
+    }
 
     // Phase timing — active when the debug HUD is on OR `?wkr-jaui-prof` was
     // set. Gate reads at each boundary rather than branching inside hot loops;
@@ -2503,6 +2537,7 @@ export class Canvas implements DirtyTracker {
 
     const renderActive = layoutDirty || this._animationManager.IsRunning || this._needsRender;
     this._needsRender = false;
+    if (JauiTracing()) this._flushAwake(performance.now(), renderActive, layoutDirty);
     if (renderActive) {
       this._renderHold = 3; // render this frame + a 2-frame settle tail
       if (this._adaptiveShadowsDrawn) {
@@ -7442,6 +7477,11 @@ export class Canvas implements DirtyTracker {
    *  keep the dirty path branchless. Cleared after every solve. */
   Notify = (node: JauiElement): void => {
     this._dirtyNodes.add(node);
+    if (JauiTracing()) {
+      const cls = (node as unknown as { Classes?: readonly string[] }).Classes;
+      const key = cls !== undefined && cls.length > 0 ? cls.join('.') : node.constructor?.name ?? '?';
+      this._awake.Dirty.set(key, (this._awake.Dirty.get(key) ?? 0) + 1);
+    }
     // The whole tree's dirty marks funnel through here -- `MarkLayoutDirty` is the only writer of
     // the Layout flag and it ends in this call -- which makes this the one place a parked loop can
     // learn that layout or text changed. Guarded on `_parked` inside `Wake`, so the ordinary case

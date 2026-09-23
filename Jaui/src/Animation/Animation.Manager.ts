@@ -57,8 +57,19 @@ export class AnimationManager {
    */
   StepFrame = (dt: number): void => {
     let anyActive = false;
+    const names = this.ActiveNames;
     for (const a of this._animatables) {
-      if (a.Tick(dt)) anyActive = true;
+      if (a.Tick(dt)) {
+        anyActive = true;
+        if (names !== null) {
+          // Name the NODE when the animatable owns one, or `JivStyleAnimator:61` says only that
+          // some style somewhere is moving.
+          const own = a as unknown as { _jiv?: { Classes?: readonly string[] }; _element?: { Classes?: readonly string[] } };
+          const cls = (own._jiv ?? own._element)?.Classes;
+          const kind = a.constructor?.name || 'anonymous';
+          names.push(cls !== undefined && cls.length > 0 ? `${kind}(${cls.join('.')})` : kind);
+        }
+      }
     }
     this._running = anyActive;
     // Fire OnFrame (→ RequestFrame) ONLY when something actually animated this frame.
@@ -81,4 +92,9 @@ export class AnimationManager {
   };
 
   get IsRunning(): boolean { return this._running; }
+
+  /** `?trace` only: the host sets this to an array and every animatable that reports itself still
+   *  running pushes its class name, so `jaui:awake` can say WHICH animation kept a still page
+   *  drawing. Null (the shipping case) costs one comparison per animatable per frame. */
+  ActiveNames: string[] | null = null;
 }
