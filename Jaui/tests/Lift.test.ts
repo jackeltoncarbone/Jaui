@@ -507,7 +507,7 @@ describe('the blend states, as the renderer sets them and as GL defines them', (
   it('the under-draw is emitted before the node\'s own branch, so nothing of the element precedes it', () => {
     const walkSrc = readJaui();
     const lift = walkSrc.indexOf('emitLiftUnder(node, shape, eff');
-    const chain = walkSrc.indexOf("} else if (material === 'ProgressiveBlur' && !this._diagNoPblur) {");
+    const chain = walkSrc.indexOf("} else if (material === 'ProgressiveBlur' && this._pblurOn(node)) {");
     expect(lift).toBeGreaterThan(0);
     expect(lift).toBeLessThan(chain);
   });

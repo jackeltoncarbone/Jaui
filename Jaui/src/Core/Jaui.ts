@@ -82,7 +82,13 @@ const SHADOW_DETAIL_MIN_PT = 4;
 /** `?ablate`: the arms it knows, the rendered frames each holds for, and the render-to-render gap
  *  past which the page was idle rather than slow. */
 const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui',
-  'snap64', 'snap256'];
+  'snap64', 'snap256', 'no-pblur-draw', 'no-pblur-deep', 'no-pblur-shallow'];
+/** `no-pblur-deep` / `no-pblur-shallow`: which progressive blurs they drop, by the pyramid depth the
+ *  walk would build (`maxLod`). Home's hero carries a deep one (Blur(160pt) on a phone, 7.3 levels over
+ *  the whole canvas) and a shallow one (the 2pt saturation wash, 1 level, also the whole canvas); the
+ *  top and bottom edges sit between at 4. Every other surface is unaffected. */
+const ABLATE_PBLUR_DEEP_LOD = 6;
+const ABLATE_PBLUR_SHALLOW_LOD = 1;
 /** The `snapN` arms: the blur extent unit each one sets (see `RegionExtentSnap`). A surface whose
  *  clipped size changes every scrolled frame allocates a new target every frame at unit 1; at unit N
  *  it allocates once per N px of change. The hero's trace: 14-24 allocations a frame, below it 2-4. */
@@ -2124,6 +2130,8 @@ export class Canvas implements DirtyTracker {
   private _ablateApply = (arm: string): void => {
     this._diagNoBlur = arm === 'no-blur';
     this._diagNoPblur = arm === 'no-pblur';
+    this._diagNoPblurDraw = arm === 'no-pblur-draw';
+    this._ablatePblur = arm === 'no-pblur-deep' ? 'deep' : arm === 'no-pblur-shallow' ? 'shallow' : null;
     this._diagNoPanels = arm === 'no-panels';
     this._diagNoGlassDraw = arm === 'no-glass-draw';
     this._diagNoShadow = arm === 'no-shadow';
@@ -2131,6 +2139,18 @@ export class Canvas implements DirtyTracker {
     this._occlusion = arm !== 'no-occlusion';
     this._diagNoUi = arm === 'no-ui';
     RegionExtentSnap.Unit = ABLATE_SNAP[arm] ?? this._ablateSnapBase;
+  };
+  /** `?ablate`'s depth-selective progressive-blur arms; null draws every one. */
+  private _ablatePblur: 'deep' | 'shallow' | null = null;
+  /** Does this ProgressiveBlur node take the progressive-blur path this frame? `?no-pblur` says no to
+   *  all of them; the ablate depth arms say no to one class, with the SAME depth the walk computes
+   *  (`maxLod = max(1, log2(frost))`, the dpr cancels). A refused node paints exactly as `?no-pblur`
+   *  paints it, so each arm is `?no-pblur` restricted to its surfaces. */
+  private _pblurOn = (node: Jiv): boolean => {
+    if (this._diagNoPblur) return false;
+    if (this._ablatePblur === null) return true;
+    const lod = Math.max(1, Math.log2(Math.max(1, node.RenderStyle.BackdropFrostBlur)));
+    return this._ablatePblur === 'deep' ? lod < ABLATE_PBLUR_DEEP_LOD : lod > ABLATE_PBLUR_SHALLOW_LOD;
   };
   /** The extent unit the URL asked for, which every arm but a `snapN` one runs at. */
   private _ablateSnapBase = 1;
@@ -3707,7 +3727,7 @@ export class Canvas implements DirtyTracker {
         // This node's panel, text and vector belong to another pass. Nothing here, deliberately:
         // the counters, the buffers and the ledger must see exactly one paint of this node per
         // frame, in exactly one of the three passes.
-      } else if (material === 'ProgressiveBlur' && !this._diagNoPblur) {
+      } else if (material === 'ProgressiveBlur' && this._pblurOn(node)) {
         // Flush both pending batches: the pblur snapshots the scene and
         // samples it — so the scene must contain everything drawn so
         // far. Deferred panels AND text in the buffers haven't hit the
@@ -6315,7 +6335,7 @@ export class Canvas implements DirtyTracker {
    *  `_phasedStrays.Pblur` counts it. */
   private _phasedHoldsBack = (node: Jiv): boolean => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return false;
-    if (node.RenderStyle.Material === 'ProgressiveBlur' && !this._diagNoPblur) return false;
+    if (node.RenderStyle.Material === 'ProgressiveBlur' && this._pblurOn(node)) return false;
     if (this._glassFillTakesPyramid(node)) return true;
     return node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)
       && _isGlass(node.RenderStyle.Material);
@@ -6863,7 +6883,7 @@ export class Canvas implements DirtyTracker {
     // reaches the glass fill. Its own pyramid is NOT pre-built: it is seeded from a snapshot of
     // the scene-so-far, so moving it in front of the bed would change what it samples rather than
     // only when it is built. Those stay in the walk and the report says how many did.
-    const isPblur = node.RenderStyle.Material === 'ProgressiveBlur' && !this._diagNoPblur;
+    const isPblur = node.RenderStyle.Material === 'ProgressiveBlur' && this._pblurOn(node);
     // Counted on the FILL phase only: `?blur-phased` runs this traversal twice a frame, once per
     // site, and a surface counted in both would report double the number of surfaces the flag
     // could not move.

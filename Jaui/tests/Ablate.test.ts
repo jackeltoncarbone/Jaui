@@ -12,7 +12,7 @@ const JAUI = readFileSync(join(__dirname, '../src/Core/Jaui.ts'), 'utf8').replac
 describe('ablate > arms, the per-frame fields they flip, and the cache refusal', () => {
   it('knows its arms and throws on any other by name', () => {
     expect(JAUI).toContain(`const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui',
-  'snap64', 'snap256'];`);
+  'snap64', 'snap256', 'no-pblur-draw', 'no-pblur-deep', 'no-pblur-shallow'];`);
     expect(JAUI).toContain('const ABLATE_SNAP: Record<string, number> = { snap64: 64, snap256: 256 };');
     expect(JAUI).toContain("throw new Error(`[Jaui] ?ablate arm '${a}' is not one of ${known.join(',')}`);");
   });
@@ -25,7 +25,8 @@ describe('ablate > arms, the per-frame fields they flip, and the cache refusal',
     const start = JAUI.indexOf('private _ablateApply = ');
     const body = JAUI.slice(start, JAUI.indexOf('};', start));
     for (const f of ['_diagNoBlur', '_diagNoPblur', '_diagNoPanels', '_diagNoGlassDraw', '_diagNoShadow',
-      'JivInstanceBuffer.DiagNoShadow', '_occlusion', '_diagNoUi', 'RegionExtentSnap.Unit']) {
+      'JivInstanceBuffer.DiagNoShadow', '_occlusion', '_diagNoUi', 'RegionExtentSnap.Unit',
+      '_diagNoPblurDraw', '_ablatePblur']) {
       expect(body).toContain(f);
     }
   });
@@ -39,5 +40,12 @@ describe('ablate > arms, the per-frame fields they flip, and the cache refusal',
     expect(JAUI).toContain('for (const name of new Set(a.Arms)) {');
     expect(JAUI).toContain('RegionExtentSnap.Unit = ABLATE_SNAP[arm] ?? this._ablateSnapBase;');
     expect(JAUI).toContain('this._ablateSnapBase = RegionExtentSnap.Unit;');
+  });
+
+  it('the depth arms drop ONE class of progressive blur, at the depth the walk itself computes', () => {
+    expect(JAUI).toContain("} else if (material === 'ProgressiveBlur' && this._pblurOn(node)) {");
+    expect(JAUI).toContain("const isPblur = node.RenderStyle.Material === 'ProgressiveBlur' && this._pblurOn(node);");
+    expect(JAUI).toContain('const lod = Math.max(1, Math.log2(Math.max(1, node.RenderStyle.BackdropFrostBlur)));');
+    expect(JAUI).not.toContain("'ProgressiveBlur' && !this._diagNoPblur");
   });
 });
