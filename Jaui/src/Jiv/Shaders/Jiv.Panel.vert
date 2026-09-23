@@ -16,7 +16,7 @@ layout(location = 9) in vec4 a_Grading;       // brightness, saturation, contras
 layout(location = 10) in vec4 a_Refraction;   // thickness, refraction band, free, refraction amount
 layout(location = 11) in vec4 a_Lighting;     // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
 layout(location = 12) in vec4 a_Specular;     // specIntensity, specGlow, chromaticAberration, innerBlur + borderFade
-layout(location = 13) in vec4 a_RimEdge;      // edgeLightTop, edgeLightBottom, free, curvature
+layout(location = 13) in vec4 a_RimEdge;      // edgeLightTop, edgeLightBottom, rim lobe width, rim strength
 layout(location = 14) in vec4 a_Outline;      // free, free, clipOffset, clipCount
 
 uniform vec2 u_Resolution;

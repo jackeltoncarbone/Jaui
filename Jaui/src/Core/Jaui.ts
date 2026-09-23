@@ -15,7 +15,6 @@ import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
-import { RIM_SIDE_SHARE, type RimDrawParams } from '../Jiv/Jiv.Rim';
 import {
   CascadeLift, FoldLift, InkBlendOf, Lift, LiftAmount, LiftGateLine, LiftGraded, LiftInkAmount,
   LiftInkScale, LiftRefusalOf, LiftSamplesBackdrop, LiftTouchesInk, LIFT_WHITE, ShapeBlendOf,
@@ -492,7 +491,7 @@ interface GlassBlurPlan {
   TapReach: number;
   /** Whether the adaptive-shadow probe will run for this surface (it deepens `MaxLod`). */
   AdaptiveShadow: boolean;
-  /** `JivFrostCssPx` floored at 1pt — what the margin and the radius are built from. */
+  /** `JivFrostCssPx` floored at one device pixel — what the margin and the radius are built from. */
   FrostCssPx: number;
 }
 
@@ -3041,9 +3040,13 @@ export class Canvas implements DirtyTracker {
           this._panelBuffer.Begin();
         }
         if (rimEmits && r2 instanceof WebGL2Renderer) {
-          const rim = this._rimDrawOf(node, eff, ownClip.Offset, ownClip.Count, ownXform);
-          if (this._bcOn) this._bcNoteRim(node, eff, effH, rim);
-          r2.RimDraw(flushW, flushH, rim);
+          this._panelBuffer.Begin();
+          this._panelBuffer.Push(node, this._dpr, eff, ownClip.Offset, ownClip.Count, ownXform, 'RimOnly');
+          if (this._bcOn) this._bcNotePanel(ownClip.Offset, ownClip.Count, ownXform);
+          r2.PanelBeginBatch();
+          r2.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+          r2.PanelRimDraw(flushW, flushH);
+          this._panelBuffer.Begin();
           this._counts.Rims++;
         }
         if (this._bcOn) this._bc.Close();
@@ -4872,26 +4875,6 @@ export class Canvas implements DirtyTracker {
     return handle;
   };
 
-  /** A rim was drawn: its parameters, the clip and homography it indexes, and the device rect it can
-   *  light, into the open record. A rim reads the destination through its blend, so a record that
-   *  moved dirties whatever lies under it exactly as a panel's would. */
-  private _bcNoteRim = (node: Jiv, eff: Mat2x3, effH: Mat3x3 | null, rim: RimDrawParams): void => {
-    const bc = this._bc;
-    if (!bc.IsOpen) { bc.NoteUntracked(); return; }
-    const sig = bc.Sig;
-    const shape = rim.Shape;
-    sig.Number(shape.HalfWidth); sig.Number(shape.HalfHeight); sig.Number(shape.Smoothness);
-    for (let i = 0; i < 4; i++) sig.Number(shape.Radii[i]);
-    sig.Number(rim.CenterX); sig.Number(rim.CenterY); sig.Number(rim.Cos); sig.Number(rim.Sin);
-    sig.Number(rim.LobeWidth); sig.Number(rim.SideWidth); sig.Number(rim.Strength);
-    sig.Number(rim.Opacity); sig.Number(rim.LightAngle);
-    this._bcNoteClipXform(rim.ClipOffset, rim.ClipCount, rim.XformIndex);
-    if (rim.XformIndex >= 0) { bc.ExtendAll(); return; }
-    const ab = this._nodeAabb(node, eff, effH);
-    const d = this._dpr;
-    bc.Extend(ab.minX * d - 1, ab.minY * d - 1, ab.maxX * d + 1, ab.maxY * d + 1);
-  };
-
   /** Open the frame: the seed is everything every draw depends on that no instance carries. */
   private _bcBeginFrame = (w: number, h: number): void => {
     this._bcOn = this._blurCache !== 'off';
@@ -5524,30 +5507,6 @@ export class Canvas implements DirtyTracker {
     return !(ownPanelCulled && this._edgeOutsidePaintedArea(node, eff, stack, effH));
   };
 
-  /** One rim draw: the node's shape exactly as its panel instance packs it, placed by the same
-   *  matrix, with the rim's own device-pixel widths. The core is a hairline in DEVICE pixels, as
-   *  Apple's is, so it never scales with the panel. */
-  private _rimDrawOf = (
-    node: Jiv, eff: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number,
-  ): RimDrawParams => {
-    const s = node.RenderStyle;
-    const d = this._dpr;
-    const shape = JivPanelShapeOf(node, d, eff);
-    return {
-      Shape: shape,
-      CenterX: shape.CenterX, CenterY: shape.CenterY, Cos: shape.Cos, Sin: shape.Sin,
-      XformIndex: xformIndex,
-      NaturalX: node.X, NaturalY: node.Y, NaturalWidth: node.Width, NaturalHeight: node.Height,
-      LobeWidth: s.RimWidth * d,
-      SideWidth: RIM_SIDE_SHARE * s.RimWidth * d,
-      Strength: s.RimStrength,
-      Opacity: node.EffectiveOpacity,
-      LightAngle: s.LightAngle * (Math.PI / 180),
-      ClipOffset: clipOffset,
-      ClipCount: clipCount,
-    };
-  };
-
   /** True when this node takes the glass FILL pipeline — the branch that builds a pyramid.
    *
    *  A glass slab (Thickness > 0 → Material LiquidGlass) only takes it when it actually has a
@@ -5573,7 +5532,7 @@ export class Canvas implements DirtyTracker {
     const d = this._dpr;
     const rs = node.RenderStyle;
     const frost = JivFrostCssPx(node);
-    const frostCssPx = Math.max(1, frost);
+    const frostCssPx = Math.max(1 / d, frost);
     const gsx = matScaleX(eff), gsy = matScaleY(eff);
     const avgScale = (gsx + gsy) * 0.5;
     const margin = frostCssPx * d + 8 * d;

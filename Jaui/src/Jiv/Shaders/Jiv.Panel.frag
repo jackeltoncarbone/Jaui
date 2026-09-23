@@ -17,7 +17,7 @@ flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
 flat in vec4 v_Refraction;     // thickness, refraction band, free, refraction amount (device px)
 flat in vec4 v_Lighting;       // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
 flat in vec4 v_Specular;       // specIntensity (edge highlight), specGlow, chromaticAberration, borderFade
-flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, free, free
+flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, rim lobe width (device px), rim strength
 flat in vec4 v_Outline;        // free, free, clipOffset, clipCount
 
 // ── MATERIAL_FLAT: the backdrop's whole apparatus is excluded, not branched over ──
@@ -916,6 +916,78 @@ float BandFalloff(float dist, float depth) {
     return 0.5 * (1.0 + tanh(1.7724538509 * (dist + d) / (d * 1.41421356)));
 }
 
+#if defined(RIM_ONLY)
+// ── THE RIM: the light a glass edge catches, lifted onto whatever is already drawn under it ──
+//
+// Its own instance of this program, drawn at the node's BorderLayer slot so it lands above the
+// node's content, twice: a GAIN (the destination times 1 + this) that keeps the hue, then a small
+// SCREEN toward white at `u_RimPass` of it (WebGL2.Renderer `PanelRimDraw`). The edge is the face's
+// own corner field, so the rim is concentric with the face by construction and antialiased by it.
+//
+// Apple's rim is lit at two points, where the outline faces the light and its bounce, and dies with
+// distance from them: a Gaussian in the distance to each lit point, reaching RIM_REACH of that
+// corner's radius, over a weaker term in how squarely the edge faces the light. Fitted to the iPhone
+// speaker button (a lobe about 100 degrees wide at half strength, the sides at a tenth of it) and the
+// Safari address pill (its straight top holding a third of the peak past the cap). Its width narrows
+// with it, from `lobe` to RIM_SIDE_SHARE of that.
+uniform float u_RimPass;
+const float RIM_SIDE_SHARE = 0.45;
+const float RIM_REACH = 1.1;
+const float RIM_FACING = 0.66;
+const float RIM_TAIL = 0.15;
+
+// Weight of the lobe where the outline faces `light`: the lit point is that corner's arc at the
+// light's angle, so a circle, a pill and a rounded rectangle all light the same way.
+float RimLobe(vec2 p, vec2 halfSize, vec4 radii, vec2 light) {
+    vec2 s = vec2(light.x < 0.0 ? -1.0 : 1.0, light.y < 0.0 ? -1.0 : 1.0);
+    float r = s.y < 0.0 ? (s.x < 0.0 ? radii.x : radii.y) : (s.x < 0.0 ? radii.w : radii.z);
+    float minHalf = min(halfSize.x, halfSize.y);
+    r = min(r, minHalf);
+    vec2 lit = s * (halfSize - r) + r * light;
+    float reach = RIM_REACH * max(r, 0.25 * minHalf);
+    float t = length(p - lit) / reach;
+    return exp(-t * t);
+}
+
+void main() {
+    vec2 pLocal;
+    if (v_Is3D > 0.5) {
+        pLocal = v_PanelGeom.xy + v_Local;
+    } else {
+        vec2 rel = v_PixelPos - v_Rot.zw;
+        pLocal = vec2(rel.x * v_Rot.x + rel.y * v_Rot.y, -rel.x * v_Rot.y + rel.y * v_Rot.x) + v_Rot.zw;
+    }
+    vec2 halfSize = v_PanelGeom.zw;
+    vec2 p = pLocal - v_PanelGeom.xy;
+    float smoothness = v_StyleParams.y;
+    float lobeWidth = v_RimEdge.z;
+    float dist = CornerDist(p, halfSize, v_Radii, smoothness);
+    float inside = -dist;
+    if (inside > max(lobeWidth, 1.0) * 1.75 + 1.0) discard;
+    float unusedShadow;
+    float clipD = cornerQueries(v_PixelPos, int(v_Outline.z), int(v_Outline.w), false,
+                                p, halfSize, v_Radii, smoothness, unusedShadow);
+    if (clipD > 1.0) discard;
+    float coverage = (1.0 - smoothstep(-0.5, 0.5, dist)) * (1.0 - smoothstep(-0.5, 0.5, clipD));
+
+    vec2 screenLight = vec2(cos(v_Lighting.x), -sin(v_Lighting.x));
+    vec2 light = v_Is3D > 0.5 ? screenLight
+        : vec2(screenLight.x * v_Rot.x + screenLight.y * v_Rot.y, -screenLight.x * v_Rot.y + screenLight.y * v_Rot.x);
+    float cornerRadius = max(max(max(v_Radii.x, v_Radii.y), max(v_Radii.z, v_Radii.w)), 1.0);
+    float facing = dot(RefractionNormal(p, halfSize, min(cornerRadius, min(halfSize.x, halfSize.y))), light);
+    facing = max(facing, -0.95 * facing);
+    float lobe = max(max(RimLobe(p, halfSize, v_Radii, light), 0.95 * RimLobe(p, halfSize, v_Radii, -light)),
+                     RIM_FACING * facing * facing);
+
+    // Never narrower than a device pixel: a thinner core draws at one pixel and carries the rest as gain.
+    float width = mix(RIM_SIDE_SHARE * lobeWidth, lobeWidth, lobe);
+    float drawn = max(width, 1.0);
+    float core = (1.0 - smoothstep(drawn - 0.5, drawn + 0.5, inside)) * (width / drawn);
+    float tail = RIM_TAIL * lobe * (1.0 - smoothstep(drawn, drawn + 0.75 * lobeWidth, inside));
+    float gain = v_RimEdge.w * u_RimPass * v_StyleParams.z * lobe * coverage * (core + tail);
+    fragColor = vec4(vec3(gain), 1.0);
+}
+#else
 void main() {
 #if !defined(MATERIAL_FLAT)
     if (GlassSkips(GLASS_SKIP_SKIRT) && GlassSkirtCut()) discard;
@@ -1160,7 +1232,7 @@ void main() {
     // ── The wide rim glow (FresnelStrength) ──
     // A vibrant band of what lies behind the glass, fading from the outline inward over the band,
     // lit toward LightAngle. The thin light at the outline itself is the RIM, its own draw
-    // (Jiv/Jiv.Rim.ts). Only within `rimBand` of the outline, so the deep interior skips the whole
+    // (the RIM_ONLY program). Only within `rimBand` of the outline, so the deep interior skips the whole
     // block and its extra backdrop tap.
     //
     // GLASS_NO_GLOW excludes the block for a batch whose every instance has FresnelStrength +0, and
@@ -1346,3 +1418,4 @@ void main() {
 
     fragColor = result;
 }
+#endif

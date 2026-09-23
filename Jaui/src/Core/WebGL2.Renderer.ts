@@ -33,9 +33,6 @@ import shadowBackdropFragSrc from '../Jiv/Shaders/Jiv.ShadowBackdrop.frag.gen';
 import textVertSrc from '../Text/Shaders/Text.Quad.vert.gen';
 import textFragSrc from '../Text/Shaders/Text.Quad.frag.gen';
 import clipStackSrc from './Shaders/Clip.Stack.glsl.gen';
-import rimVertSrc from '../Jiv/Shaders/Jiv.Rim.vert.gen';
-import rimFragSrc from '../Jiv/Shaders/Jiv.Rim.frag.gen';
-import { BuildJivOutline, RIM_FLOATS_PER_VERTEX, type JivShape, type RimDrawParams } from '../Jiv/Jiv.Rim';
 import strokeVertSrc from '../Jline/Shaders/Jline.vert.gen';
 import strokeFragSrc from '../Jline/Shaders/Jline.frag.gen';
 import svgFillVertSrc from '../Svg/Shaders/Svg.Fill.vert.gen';
@@ -175,20 +172,11 @@ const _preparePanelProgram = (gl: WebGL2RenderingContext, p: WebGLProgram): _Pan
   return _extractPanelLocs(gl, p);
 };
 
-/** A rim strip resident on the GPU. */
-interface _RimOutline {
-  Buffer: WebGLBuffer;
-  Vao: WebGLVertexArrayObject;
-  Vertices: number;
-}
-
-/** The rim's white term as a share of its gain. Fitted to Apple's rim peaks over the body just inside
- *  them (speaker button over teal, Control Center Wi-Fi pill over blue, the Safari more button over
- *  lavender): gain 0.23 and white 0.19 of the remaining headroom, so white is 0.8 of the gain. */
-const RIM_WHITE_SHARE = 0.8;
-
-/** How many distinct rim shapes stay resident. A page has a few dozen; a spring re-walks its one. */
-const RIM_OUTLINE_CACHE = 96;
+/** The rim's white term as a share of its gain. Fitted jointly to Apple's rim peaks over the body just
+ *  inside them (speaker button over teal, Control Center Wi-Fi pill over blue, the Safari more button
+ *  over lavender, the App Store search button over saturated blue): gain 0.23 and white 0.11 of the
+ *  remaining headroom. A larger white term turns the rim over a saturated color into a pale line. */
+const RIM_WHITE_SHARE = 0.48;
 
 /** Splice the shared clip-stack chunk into a program that asks for it. */
 const _withClipStack = (source: string): string => {
@@ -297,12 +285,12 @@ interface _CardTarget {
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /** Panel program variants compiled from the ONE `Jiv.Panel.frag` AT BOOT: glass, non-glass, flat,
- *  flat-and-borderless, flat-and-borderless-with-a-two-stop-gradient, and the glass program's
- *  `?glass-programs` variant (no-glow + no-spec). Exported so `?flat-program` /
+ *  flat-and-borderless, flat-and-borderless-with-a-two-stop-gradient, the glass program's
+ *  `?glass-programs` variant (no-glow + no-spec), and the rim. Exported so `?flat-program` /
  *  `?borderless-program` / `?two-stop-gradient`'s init marks cannot claim a count the boot does not
  *  build; `tests/Flat.Program.test.ts` asserts `_compilePanelShader` issues exactly this many. */
-export const PANEL_PROGRAM_COUNT = 6;
-/** Of those six, the `?glass-programs` variant: `MATERIAL_GLASS + GLASS_NO_GLOW + GLASS_NO_SPEC`. In
+export const PANEL_PROGRAM_COUNT = 7;
+/** Of those seven, the `?glass-programs` variant: `MATERIAL_GLASS + GLASS_NO_GLOW + GLASS_NO_SPEC`. In
  *  the boot batch on BOTH arms of the flag, the flat program's rule: the default routes to it, and
  *  `=off` must change routing and not boot. */
 export const GLASS_VARIANT_PROGRAMS = 1;
@@ -555,6 +543,8 @@ export class WebGL2Renderer implements Renderer {
   // those stages composite nothing (`Glass.Programs`, `_glassBatchKind`). A uniform branch keeps the
   // heaviest path's registers on every fragment; these do not contain the path at all.
   private _panelShaderGlassNoLight!: ShaderProgram;
+  // The rim: `Jiv.Panel.frag`'s RIM_ONLY main over the flat program's declarations.
+  private _panelShaderRim!: ShaderProgram;
   // Uniform location bundles per variant — each program has its own
   // location IDs even when the uniform names match.
   private _panelLocsGlass!: _PanelLocs;
@@ -563,6 +553,8 @@ export class WebGL2Renderer implements Renderer {
   private _panelLocsBorderless!: _PanelLocs;
   private _panelLocsTwoStop!: _PanelLocs;
   private _panelLocsGlassNoLight!: _PanelLocs;
+  private _panelLocsRim!: _PanelLocs;
+  private _rimPassLoc: WebGLUniformLocation | null = null;
   /** `?glass-skip`'s mask: the `Glass.Skip.GLASS_SKIP_STAGES` bits the glass program skips. 0 is
    *  today's engine, and it is uploaded as 0 on every non-glass draw whatever this holds. Set by
    *  `Jaui._initDebugFromUrl`, which owns the flag and its refusals. */
@@ -992,8 +984,6 @@ export class WebGL2Renderer implements Renderer {
     this._rootBlur = null;
     this._sharedBlur = null;
     this._lastBlur = null;
-    // The rim outlines are VBOs of the dead context.
-    this._rimOutlines = new Map();
     this._shadowShader = null;
     this._shadowLocs = null;
     this._shadowStateTex = null;
@@ -1027,8 +1017,8 @@ export class WebGL2Renderer implements Renderer {
     this._paceLastRetiredAt = 0;
 
     // ── One compile batch for every program an UNFLAGGED page can draw with ──
-    // NINETEEN programs stand between a cold tab and its first pixel: the six panel variants (one of
-    // them the glass program's `?glass-programs` cut), the rim, text, stroke, two SVG, blit,
+    // NINETEEN programs stand between a cold tab and its first pixel: the seven panel variants (one of
+    // them the glass program's `?glass-programs` cut, one the rim), text, stroke, two SVG, blit,
     // clip-mask, progressive-blur and adaptive-shadow singles, and the four kernels every
     // `BlurPass` has. The five a `BlurPass` binds only under an atlas arm are NOT here -- see
     // `ArmFlaggedPrograms` and `BlurPass._atlas`.
@@ -1066,7 +1056,6 @@ export class WebGL2Renderer implements Renderer {
     // page and both paths, whatever the URL says -- `?glass-gaussian` binds the same program.
     this._blur.EnsureGaussianProgram(batch, 'boot');
     this._compilePanelShader(batch);
-    this._compileRimShader(batch);
     this._compileTextShader(batch);
     this._compileStrokeShader(batch);
     this._compileSvgFillShader(batch);
@@ -1273,7 +1262,6 @@ export class WebGL2Renderer implements Renderer {
     const gl = this._gl;
     this._blur.WireLocations();
     this._wirePanelShader(gl);
-    this._wireRimShader(gl);
     this._wireTextShader(gl);
     this._wireStrokeShader(gl);
     this._wireSvgFillShader(gl);
@@ -1668,6 +1656,46 @@ export class WebGL2Renderer implements Renderer {
     this._noteSceneDraw();
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
     if (timed) this._pass!.End();
+  };
+
+  /** Draw the pending batch as RIMS ('RimOnly' instances), twice over the bound target with its
+   *  alpha left alone. First a GAIN (`DST_COLOR, ONE`: dst x (1 + g)), which lifts what is below and
+   *  keeps its hue and most of its saturation, then a small SCREEN toward white (`ONE,
+   *  ONE_MINUS_SRC_COLOR`) at RIM_WHITE_SHARE of it, which is what still reads over black, where a
+   *  gain has nothing to lift. Then the walk's own blend back. */
+  PanelRimDraw = (canvasWidth: number, canvasHeight: number): void => {
+    if (this._panelInstanceCount === 0) return;
+    const gl = this._gl;
+    const locs = this._panelLocsRim;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._panelInstanceBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER,
+      this._panelInstanceData.subarray(0, this._panelInstanceCount * PANEL_FLOATS_PER_INSTANCE),
+      gl.DYNAMIC_DRAW);
+    this._useProgram(this._panelShaderRim.Program);
+    gl.uniform2f(locs.resolution, canvasWidth, canvasHeight);
+    gl.uniform2f(locs.viewOffset, this._captureViewOffsetX, this._captureViewOffsetY);
+    gl.uniform1i(locs.clipTex, 1);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
+    gl.uniform1i(locs.xformTex, 4);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
+    gl.uniform1i(locs.shadowState, 5);
+    gl.uniform2f(locs.shadowBackdrop, -1, 0);
+    gl.uniform2f(locs.glassAdapt, -1, 0);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
+    gl.bindVertexArray(this._panelVao);
+    this._noteSceneDraw();
+    gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.uniform1f(this._rimPassLoc, 1);
+    gl.blendFuncSeparate(gl.DST_COLOR, gl.ONE, gl.ZERO, gl.ONE);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
+    gl.uniform1f(this._rimPassLoc, RIM_WHITE_SHARE);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ZERO, gl.ONE);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
+    this.EnableBlend();
   };
 
   /**
@@ -4770,6 +4798,8 @@ export class WebGL2Renderer implements Renderer {
     // is issued on both arms of `?glass-programs` so that `=off` changes routing and not the boot.
     this._panelShaderGlassNoLight = batch.Add(panelVertSrc, panelFragSrc,
       { MATERIAL_GLASS: true, GLASS_NO_GLOW: true, GLASS_NO_SPEC: true });
+    // A SEVENTH: the rim, the face's own corner field drawn as light at the node's BorderLayer slot.
+    this._panelShaderRim = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, RIM_ONLY: true });
   };
 
   private _wirePanelShader = (gl: WebGL2RenderingContext): void => {
@@ -4783,6 +4813,8 @@ export class WebGL2Renderer implements Renderer {
     this._panelLocsBorderless = _preparePanelProgram(gl, this._panelShaderBorderless.Program);
     this._panelLocsTwoStop = _preparePanelProgram(gl, this._panelShaderTwoStop.Program);
     this._panelLocsGlassNoLight = _preparePanelProgram(gl, this._panelShaderGlassNoLight.Program);
+    this._panelLocsRim = _preparePanelProgram(gl, this._panelShaderRim.Program);
+    this._rimPassLoc = gl.getUniformLocation(this._panelShaderRim.Program, 'u_RimPass');
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jaui] Failed to create panel instance buffer');
@@ -4810,130 +4842,6 @@ export class WebGL2Renderer implements Renderer {
 
   private _compileTextShader = (batch: ShaderBatch): void => {
     this._textShader = batch.Add(textVertSrc, _withClipStack(textFragSrc));
-  };
-
-  // ── The rim ──
-  // A strip along the panel's outline, cached per shape as a VBO with its own VAO: a resting panel
-  // uploads its outline once, and a panel whose size is springing re-walks it on the frame it moves.
-  // Screened onto what is already drawn, so it takes no snapshot, no pyramid and no backdrop tap.
-  private _rimShader!: ShaderProgram;
-  private _rimLocs!: {
-    resolution: WebGLUniformLocation | null;
-    viewOffset: WebGLUniformLocation | null;
-    xformTex: WebGLUniformLocation | null;
-    placement: WebGLUniformLocation | null;
-    xformIndex: WebGLUniformLocation | null;
-    naturalRect: WebGLUniformLocation | null;
-    halfSize: WebGLUniformLocation | null;
-    reach: WebGLUniformLocation | null;
-    clipTex: WebGLUniformLocation | null;
-    clip: WebGLUniformLocation | null;
-    rim: WebGLUniformLocation | null;
-    lightDirection: WebGLUniformLocation | null;
-  };
-  private _rimOutlines = new Map<string, _RimOutline>();
-
-  private _compileRimShader = (batch: ShaderBatch): void => {
-    this._rimShader = batch.Add(rimVertSrc, _withClipStack(rimFragSrc));
-  };
-
-  private _wireRimShader = (gl: WebGL2RenderingContext): void => {
-    const p = this._rimShader.Program;
-    this._rimLocs = {
-      resolution: gl.getUniformLocation(p, 'u_Resolution'),
-      viewOffset: gl.getUniformLocation(p, 'u_ViewOffset'),
-      xformTex: gl.getUniformLocation(p, 'u_XformTex'),
-      placement: gl.getUniformLocation(p, 'u_Placement'),
-      xformIndex: gl.getUniformLocation(p, 'u_XformIndex'),
-      naturalRect: gl.getUniformLocation(p, 'u_NaturalRect'),
-      halfSize: gl.getUniformLocation(p, 'u_HalfSize'),
-      reach: gl.getUniformLocation(p, 'u_Reach'),
-      clipTex: gl.getUniformLocation(p, 'u_ClipTex'),
-      clip: gl.getUniformLocation(p, 'u_Clip'),
-      rim: gl.getUniformLocation(p, 'u_Rim'),
-      lightDirection: gl.getUniformLocation(p, 'u_LightDirection'),
-    };
-  };
-
-  /** The strip for this shape, walked and uploaded on first sight and then reused. Keyed to a
-   *  sixty-fourth of a device pixel, far under anything the edge's antialiasing can show. */
-  private _rimOutline = (shape: JivShape): _RimOutline | null => {
-    if (!(shape.HalfWidth > 0.5 && shape.HalfHeight > 0.5)) return null;
-    const q = (v: number): number => Math.round(v * 64);
-    const key = `${q(shape.HalfWidth)},${q(shape.HalfHeight)},${q(shape.Radii[0])},${q(shape.Radii[1])},`
-      + `${q(shape.Radii[2])},${q(shape.Radii[3])},${shape.Smoothness}`;
-    const hit = this._rimOutlines.get(key);
-    if (hit !== undefined) {
-      this._rimOutlines.delete(key);
-      this._rimOutlines.set(key, hit);
-      return hit;
-    }
-    const gl = this._gl;
-    const data = BuildJivOutline(shape);
-    const buffer = gl.createBuffer();
-    const vao = gl.createVertexArray();
-    if (!buffer || !vao) throw new Error('[Jaui] Failed to create a rim outline buffer');
-    gl.bindVertexArray(vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-    const stride = RIM_FLOATS_PER_VERTEX * 4;
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, stride, 0);
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, stride, 8);
-    gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, stride, 16);
-    gl.enableVertexAttribArray(3);
-    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, stride, 20);
-    gl.bindVertexArray(null);
-    const outline: _RimOutline = { Buffer: buffer, Vao: vao, Vertices: data.length / RIM_FLOATS_PER_VERTEX };
-    this._rimOutlines.set(key, outline);
-    if (this._rimOutlines.size > RIM_OUTLINE_CACHE) {
-      const oldest = this._rimOutlines.keys().next().value as string;
-      const gone = this._rimOutlines.get(oldest)!;
-      gl.deleteVertexArray(gone.Vao);
-      gl.deleteBuffer(gone.Buffer);
-      this._rimOutlines.delete(oldest);
-    }
-    return outline;
-  };
-
-  /** Draw one rim: its strip twice over the bound target, the target's alpha left alone. First a GAIN
-   *  (`DST_COLOR, ONE`: dst x (1 + g)), which lifts what is below and keeps its hue and most of its
-   *  saturation, then a small SCREEN toward white (`ONE, ONE_MINUS_SRC_COLOR`), which is what still
-   *  reads over black, where a gain has nothing to lift. Then the walk's own blend back. */
-  RimDraw = (canvasWidth: number, canvasHeight: number, p: RimDrawParams): void => {
-    const outline = this._rimOutline(p.Shape);
-    if (outline === null) return;
-    const gl = this._gl;
-    const l = this._rimLocs;
-    this._useProgram(this._rimShader.Program);
-    gl.uniform2f(l.resolution, canvasWidth, canvasHeight);
-    gl.uniform2f(l.viewOffset, this._captureViewOffsetX, this._captureViewOffsetY);
-    gl.uniform4f(l.placement, p.CenterX, p.CenterY, p.Cos, p.Sin);
-    gl.uniform1f(l.xformIndex, p.XformIndex);
-    gl.uniform4f(l.naturalRect, p.NaturalX, p.NaturalY, p.NaturalWidth, p.NaturalHeight);
-    gl.uniform2f(l.halfSize, p.Shape.HalfWidth, p.Shape.HalfHeight);
-    gl.uniform2f(l.reach, 1, Math.max(1, p.LobeWidth) * 1.75 + 1);
-    gl.uniform2i(l.clip, p.ClipOffset, p.ClipCount);
-    gl.uniform4f(l.rim, p.LobeWidth, p.SideWidth, p.Strength, p.Opacity);
-    gl.uniform2f(l.lightDirection, Math.cos(p.LightAngle), -Math.sin(p.LightAngle));
-    gl.uniform1i(l.clipTex, 1);
-    gl.uniform1i(l.xformTex, 2);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this._clipTex);
-    gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
-    gl.enable(gl.BLEND);
-    gl.blendEquation(gl.FUNC_ADD);
-    gl.bindVertexArray(outline.Vao);
-    this._noteSceneDraw();
-    gl.blendFuncSeparate(gl.DST_COLOR, gl.ONE, gl.ZERO, gl.ONE);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, outline.Vertices);
-    gl.uniform4f(l.rim, p.LobeWidth, p.SideWidth, p.Strength * RIM_WHITE_SHARE, p.Opacity);
-    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ZERO, gl.ONE);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, outline.Vertices);
-    this.EnableBlend();
   };
 
   private _wireTextShader = (gl: WebGL2RenderingContext): void => {

@@ -2,7 +2,6 @@ import type { Jiv } from './Jiv';
 import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
 import { FoldLift, LiftGraded } from '../Core/Lift';
 import type { LiftValue } from '../Core/Lift';
-import type { JivShape } from './Jiv.Rim';
 import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
@@ -35,7 +34,7 @@ import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
 //          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
 //          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularGlow, chromaticAberration, borderFade in device px)
-//   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, free, free)
+//   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, rim lobe width, rim strength)
 //   loc 14: a_Outline      (free, free, clipOffset, clipCount)
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
@@ -65,8 +64,16 @@ const _packFgGrade = (brightness: number, saturation: number, contrast: number):
 
 const _FG_GRADE_IDENTITY = _packFgGrade(1, 1, 1);
 
-/** A panel's shape and placement in device px, as its instance packs them: the shape the rim walks
- *  and the fill draws are the same numbers. */
+/** A panel's shape in device px: half extents, per-corner drawn radii (tl, tr, br, bl) and the
+ *  smoothness lane (smoothness fraction plus the authored radius in sixteenths of a device px above it). */
+export interface JivShape {
+  HalfWidth: number;
+  HalfHeight: number;
+  Radii: readonly [number, number, number, number];
+  Smoothness: number;
+}
+
+/** A panel's shape and placement in device px, as its instance packs them. */
 export interface JivPanelShape extends JivShape {
   Radii: [number, number, number, number];
   CenterX: number;
@@ -113,7 +120,10 @@ export const JivPanelShapeOf = (jiv: Jiv, dpr: number, m: Mat2x3, out: JivPanelS
   return out;
 };
 
-/** The glass refraction band, as a share of the short half side, clamped to [MIN, MAX] CSS px. */
+/** The glass refraction band: the bezel is the rounded part of the shape, so a share of the corner
+ *  radius, scaled by how round the shape is (radius over the short half side), clamped to [MIN, MAX]
+ *  CSS px and never past the short half side. A circle or a pill bends across most of its radius; a
+ *  large panel with a small corner bends a thin strip at its edge, as Apple's menus and tiles do. */
 const REFRACTION_BAND_SHARE = 0.8;
 const REFRACTION_BAND_MIN = 8;
 const REFRACTION_BAND_MAX = 28;
@@ -122,8 +132,8 @@ const REFRACTION_AMOUNT_SHARE = 1.3;
 
 /** `Blur(Auto)`'s frost: a share of the short half side, clamped to [MIN, AUTO_FROST_MAX] CSS px, so a
  *  small control stays clear and a sheet frosts. */
-const AUTO_FROST_SHARE = 0.06;
-const AUTO_FROST_MIN = 1.5;
+const AUTO_FROST_SHARE = 0.03;
+const AUTO_FROST_MIN = 0.5;
 
 /** The backdrop frost a panel draws with, in CSS px: its authored `Blur()`, or the size rule under `Blur(Auto)`. */
 export const JivFrostCssPx = (jiv: Jiv): number => {
@@ -187,6 +197,9 @@ export class JivInstanceBuffer {
    *                      grade of any kind, no glass. The walk draws it alone, under the element,
    *                      with an additive or reverse-subtract blend, so the fragment's alpha is
    *                      exactly the coverage the element's own fill would have had.
+   *    • 'RimOnly'     — the RIM, for the RIM_ONLY program at the BorderLayer slot: the shape, the
+   *                      clip, the opacity, LightAngle and the rim's lobe width and strength. Its
+   *                      quad is the face and a pixel past it.
    *
    *  `shadow` splits a glass fill from its drop shadow. 'Only' is the shadow alone (no fill, no
    *  border, no backdrop, no glass), which the flat program draws; 'Excluded' is the panel without
@@ -194,7 +207,7 @@ export class JivInstanceBuffer {
    *  the fragments it can light. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
-          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'LiftOnly' = 'Normal',
+          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'LiftOnly' | 'RimOnly' = 'Normal',
           /** `'LiftOnly'` only: the additive color to fill with, when it is NOT the backdrop zone's.
            *  The FOREGROUND zone and the inherited `Lift:` property carry their own color+amount and
            *  share this one push, because the additive draw is the same draw (Core/Lift.ts). */
@@ -214,14 +227,15 @@ export class JivInstanceBuffer {
     const avgScale = (matScaleX(m) + matScaleY(m)) * 0.5;
     const borderWidth = style.BorderWidth * avgScale * d;
     const borderEdgeAa = style.BorderBlur * avgScale * d;
-    const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded';
+    const rimOnly = borderMode === 'RimOnly';
+    const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly;
     const shadowBlur = _ns ? 0 : style.ShadowBlur * avgScale * d;
     const shadowOffX = _ns ? 0 : style.ShadowOffsetX * avgScale * d;
     const shadowOffY = _ns ? 0 : style.ShadowOffsetY * avgScale * d;
 
     const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
     const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
-    const borderMargin = borderWidth + borderEdgeAa + (shadow === 'Excluded' ? 1 : 0);
+    const borderMargin = rimOnly ? 1 : borderWidth + borderEdgeAa + (shadow === 'Excluded' ? 1 : 0);
     const marginX = Math.max(shadowMarginX, borderMargin);
     const marginY = Math.max(shadowMarginY, borderMargin);
 
@@ -309,7 +323,11 @@ export class JivInstanceBuffer {
 
     // The refraction band and the circle map's reach at the outline, in device px (Jiv.Panel.frag).
     const minHalf = Math.min(halfW, halfH);
-    const band = Math.max(REFRACTION_BAND_MIN * d, Math.min(REFRACTION_BAND_MAX * d, REFRACTION_BAND_SHARE * minHalf));
+    const raw = style.BorderRadiusRaw;
+    const cornerRadius = Math.min(Math.max(raw[0], raw[1], raw[2], raw[3], 0) * avgScale * d, minHalf);
+    const roundness = minHalf > 0 ? cornerRadius / minHalf : 0;
+    const band = Math.min(minHalf, Math.max(REFRACTION_BAND_MIN * d,
+      Math.min(REFRACTION_BAND_MAX * d, REFRACTION_BAND_SHARE * cornerRadius * roundness)));
     data[offset + 36] = style.Thickness * avgScale * d;
     data[offset + 37] = band;
     data[offset + 38] = 0;
@@ -327,8 +345,8 @@ export class JivInstanceBuffer {
 
     data[offset + 48] = style.EdgeLightTop;
     data[offset + 49] = style.EdgeLightBottom;
-    data[offset + 50] = 0;
-    data[offset + 51] = 0;
+    data[offset + 50] = rimOnly ? style.RimWidth * d : 0;
+    data[offset + 51] = rimOnly ? style.RimStrength : 0;
 
     data[offset + 52] = 0;
     data[offset + 53] = 0;
