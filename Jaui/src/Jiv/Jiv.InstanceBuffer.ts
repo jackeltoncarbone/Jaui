@@ -1,7 +1,7 @@
 import type { Jiv } from './Jiv';
 import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
-import { FoldLift, LiftGraded } from '../Core/Lift';
-import type { LiftValue } from '../Core/Lift';
+import { FoldVibrancy, VibrancyGraded } from '../Core/Vibrancy';
+import type { VibrancyValue } from '../Core/Vibrancy';
 import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
@@ -182,12 +182,11 @@ export class JivInstanceBuffer {
    *    • 'BorderOnly'  — only the border stroke paints: background, shadow,
    *                      and fill are zeroed so the instance is a
    *                      transparent quad carrying just the stroke.
-   *    • 'LiftOnly'    — `BackdropFilter: Lift(n)`'s under-draw (Core/Lift.ts): the element's
-   *                      SHAPE (radii, smoothness, clip stack, opacity) filled with |n| / 255 on
-   *                      every channel at alpha 1, and nothing else — no border, no shadow, no
-   *                      grade of any kind, no glass. The walk draws it alone, under the element,
-   *                      with an additive or reverse-subtract blend, so the fragment's alpha is
-   *                      exactly the coverage the element's own fill would have had.
+   *    • 'VibrancyOnly' — the vibrancy shape draw (Core/Vibrancy.ts): the element's SHAPE (radii,
+   *                      smoothness, clip stack, opacity) filled with |amount| x color at alpha 1,
+   *                      and nothing else: no border, no shadow, no grade, no glass. The walk draws
+   *                      it alone, under the element, under the vibrancy blend, so the fragment's
+   *                      alpha is exactly the coverage the element's own fill would have had.
    *    • 'RimOnly'     — the RIM, for the RIM_ONLY program at the BorderLayer slot: the shape, the
    *                      clip, the opacity, LightAngle and the rim's lobe width and strength. Its
    *                      quad is the face and a pixel past it.
@@ -198,11 +197,10 @@ export class JivInstanceBuffer {
    *  the fragments it can light. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
-          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'LiftOnly' | 'RimOnly' = 'Normal',
-          /** `'LiftOnly'` only: the additive color to fill with, when it is NOT the backdrop zone's.
-           *  The FOREGROUND zone and the inherited `Lift:` property carry their own color+amount and
-           *  share this one push, because the additive draw is the same draw (Core/Lift.ts). */
-          liftOverride: LiftValue | null = null,
+          borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'VibrancyOnly' | 'RimOnly' = 'Normal',
+          /** `'VibrancyOnly'` only: the value to fill with when it is NOT the backdrop zone's (the
+           *  foreground zone's, or the cascaded property's). */
+          vibrancyOverride: VibrancyValue | null = null,
           shadow: 'Included' | 'Excluded' | 'Only' = 'Included'): void => {
     if (this._count >= this._capacity) this._grow();
 
@@ -304,8 +302,8 @@ export class JivInstanceBuffer {
     // black a panel.
     data[offset + 31] = _packFgGrade(jiv.EffectiveBrightness, jiv.EffectiveSaturation, jiv.EffectiveContrast);
 
-    // A lift that could not be drawn under the element rides in the grade it already runs (Core/Lift.ts).
-    const grade = FoldLift(style.BackdropBrightness, style.BackdropContrast, LiftGraded(jiv));
+    // A vibrancy that could not be drawn under the element rides in the grade it already runs.
+    const grade = FoldVibrancy(style.BackdropBrightness, style.BackdropContrast, VibrancyGraded(jiv));
     data[offset + 32] = grade.Brightness;
     data[offset + 33] = style.BackdropSaturation;
     data[offset + 34] = grade.Contrast;
@@ -374,16 +372,11 @@ export class JivInstanceBuffer {
       data[offset + 34] = 1;  // BackdropContrast → identity
       data[offset + 35] = 0;  // frost LOD → no backdrop sample
       data[offset + 41] = 0;  // body Tint → the stroke quad tints nothing
-    } else if (borderMode === 'LiftOnly') {
-      // THE ADDITIVE COLOR's fill: |amount| times the color, per channel, at alpha 1 (Core/Lift.ts).
-      // The blend's `SRC_ALPHA` factor then multiplies it by the element's own coverage, so a
-      // half-covered edge pixel adds half. `liftOverride` is the FOREGROUND zone's or the inherited
-      // property's color+amount when it is not the backdrop zone's; the zones share this one push
-      // because the additive draw is the same draw.
-      //
-      // A white color leaves this byte-identical to the grey lift that shipped: `l * 1 === l`.
-      const amount = liftOverride === null ? style.BackdropLift : liftOverride.Amount;
-      const c = liftOverride === null ? style.BackdropLiftColor : liftOverride;
+    } else if (borderMode === 'VibrancyOnly') {
+      // The shape draw's fill: |amount| times the color at alpha 1. The premultiplied vibrancy output
+      // then multiplies it by the element's own coverage, so a half-covered edge pixel brings half.
+      const amount = vibrancyOverride === null ? style.BackdropVibrancy : vibrancyOverride.Amount;
+      const c = vibrancyOverride === null ? style.BackdropVibrancyColor : vibrancyOverride;
       const l = Math.abs(amount);
       data[offset + 12] = l * c.R; data[offset + 13] = l * c.G; data[offset + 14] = l * c.B; data[offset + 15] = 1;
       data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0;

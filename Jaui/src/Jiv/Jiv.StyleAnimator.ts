@@ -19,7 +19,7 @@ import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
  *   2. For every numeric binding, spring.Target = targetRender[field]
  *   3. spring.Step(dt); write spring.Value into renderStyle[field]
  *
- * Non-numeric fields (Material, Overflow, LiftDeclaration, booleans) snap — they're
+ * Non-numeric fields (Material, Overflow, VibrancyDeclaration, booleans) snap — they're
  * copied directly into RenderStyle from the target each tick. No spring.
  *
  * Colors, Transform.*, and BorderRadius[] are decomposed into their leaf
@@ -63,24 +63,20 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BackdropFilter',         s => s.BackdropBrightness,           (s, v) => { s.BackdropBrightness = v; }],
   ['BackdropFilter',         s => s.BackdropSaturation,           (s, v) => { s.BackdropSaturation = v; }],
   ['BackdropFilter',         s => s.BackdropContrast,             (s, v) => { s.BackdropContrast = v; }],
-  ['BackdropFilter',         s => s.BackdropLift,                 (s, v) => { s.BackdropLift = v; }],
+  ['BackdropFilter',         s => s.BackdropVibrancy,             (s, v) => { s.BackdropVibrancy = v; }],
+  ['BackdropFilter',         s => s.BackdropVibrancyCover,        (s, v) => { s.BackdropVibrancyCover = v; }],
 
   // Foreground filter grade (multiplies final rgb) — bucket `Filter`, so
   // `@Transition Filter { ... }` springs brightness/saturation/contrast.
   ['Filter',                 s => s.Brightness,                   (s, v) => { s.Brightness = v; }],
   ['Filter',                 s => s.Saturation,                   (s, v) => { s.Saturation = v; }],
   ['Filter',                 s => s.Contrast,                     (s, v) => { s.Contrast = v; }],
-  // The FOREGROUND additive amount springs under `Filter`, beside the grade it sits next to, and it
-  // is SIGNED so a theme flip springs add -> nothing -> subtract and never passes through a wrong
-  // direction. The lift COLORS snap (below): the amount is what animates and what flips with the
-  // theme; the color is the material's identity.
-  ['Filter',                 s => s.ForegroundLift,               (s, v) => { s.ForegroundLift = v; }],
-  // The INK amount springs under its OWN bucket `TextFilter`, not under `Filter`, because it is its
-  // own authorable property and a glyph's glow should be tunable without retiming the element's
-  // grade. Signed, for the same theme-flip reason as its foreground sibling. There is no color to
-  // snap beside it: the ink's color is `Color`, which the text animator already springs.
-  ['TextFilter',             s => s.TextLift,                     (s, v) => { s.TextLift = v; }],
-  ['TextFilter',             s => s.TextVibrant,                  (s, v) => { s.TextVibrant = v; }],
+  // Vibrancy's amount and cover spring beside the grade of their zone. The amount is SIGNED, so a
+  // theme flip springs through nothing and never a wrong direction; the colors snap (below).
+  ['Filter',                 s => s.ForegroundVibrancy,           (s, v) => { s.ForegroundVibrancy = v; }],
+  ['Filter',                 s => s.ForegroundVibrancyCover,      (s, v) => { s.ForegroundVibrancyCover = v; }],
+  ['TextFilter',             s => s.TextVibrancy,                 (s, v) => { s.TextVibrancy = v; }],
+  ['TextFilter',             s => s.TextVibrancyCover,            (s, v) => { s.TextVibrancyCover = v; }],
 
   // Lighting
   ['LightAngle',             s => s.LightAngle,                   (s, v) => { s.LightAngle = v; }],
@@ -179,12 +175,11 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.ProgressiveBlurStops = target.ProgressiveBlurStops;
   render.CornerShape = target.CornerShape;
   render.BackdropFrostAuto = target.BackdropFrostAuto;
-  // The lift declaration and both zone COLORS snap. An additive color's amount is what moves (it
-  // springs in the two buckets above); its hue is not a spring, and `LiftDeclaration` is a tagged
-  // value, not a number.
-  render.LiftDeclaration = target.LiftDeclaration;
-  render.ForegroundLiftColor = target.ForegroundLiftColor;
-  render.BackdropLiftColor = target.BackdropLiftColor;
+  // Vibrancy's declaration and zone COLORS snap: a hue is not a spring, and the declaration is a
+  // tagged value, not a number.
+  render.VibrancyDeclaration = target.VibrancyDeclaration;
+  render.ForegroundVibrancyColor = target.ForegroundVibrancyColor;
+  render.BackdropVibrancyColor = target.BackdropVibrancyColor;
   render.ContainBorder = target.ContainBorder;
   render.InnerShadow = target.InnerShadow;
   render.Isolate = target.Isolate;

@@ -1,6 +1,6 @@
 import type { Color } from '../Core/Types';
-// Type-only, so the Lift <-> Jiv.Types cycle is erased at compile time.
-import type { LiftDeclaration } from '../Core/Lift';
+// Type-only, so the Vibrancy <-> Jiv.Types cycle is erased at compile time.
+import type { VibrancyDeclaration } from '../Core/Vibrancy';
 import type { Transform } from '../Transform/Transform.Types';
 import type { FitMode } from '../Element/Element';
 
@@ -76,13 +76,6 @@ export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRigh
  *    • Dark / Light: always black / always white, whatever the theme (glass over video or a camera). */
 export type TintTone = 'Ground' | 'Ink' | 'Dark' | 'Light';
 
-/* `BlendMode` was here. It was the authoring surface for `PlusLighter` and `Screen` -- CSS
- * `mix-blend-mode`, PascalCased -- and it is GONE, not deprecated. The FOREGROUND zone of the
- * additive color is that surface now (`Filter: Lift(<color>, <amount>)`, Core/Lift.ts), which is the
- * same idea with the color the property always needed. `Screen` left with it: it is not additive and
- * not a color offset, it is a different equation, and no site in the app wanted it. `CompositeBlend`
- * in Core/Lift.ts remains the internal name for the GL state, which is what it always was. */
-
 /**
  * Authorable style — every numeric / dimensional / color / transform field is
  * a CSS-style string (or a bare number as a convenience fast-path for simple
@@ -148,20 +141,15 @@ export interface JivStyle {
   // Fill
   Background: string;
 
-  /** THE ADDITIVE COLOR, as an INHERITED property -- the one that cascades, like `color` (Core/Lift.ts).
+  /** VIBRANCY as an INHERITED property, the one that cascades like `color` (Core/Vibrancy.ts):
    *
-   *      Lift: rgb(255, 255, 255) @JwiftWashLift     // a color then a signed amount, 0-255 units
-   *      Lift: None                                  // the reset, per node AND its subtree
-   *      Lift: Inherit                               // the initial value: take the ancestor's
+   *      Vibrancy: rgb(255, 255, 255) @JwiftVibrancySecondaryFill   // color, signed amount [, cover]
+   *      Vibrancy: None                                             // the reset, node AND subtree
+   *      Vibrancy: Inherit                                          // the initial value
    *
-   *  Set it on a container and the container lifts its backdrop AND every descendant's own paint adds
-   *  instead of covering. The same color-then-amount pair `Lift()` takes, because it is one idea with
-   *  one spelling wherever it appears. `Isolate: true` is the subtree barrier -- the value neither
-   *  arrives nor leaves -- and it is the same word that already stops the `Filter` cascade.
-   *
-   *  Additive STACKS: a label on an additive card adds twice. That is what light does, and it costs no
-   *  render target, which is the whole reason this shape is affordable. */
-  Lift: string;
+   *  On a container, the container's shape draw treats its backdrop and every descendant's own paint
+   *  is vibrant. `Isolate: true` is the subtree barrier. */
+  Vibrancy: string;
 
   // ── Filters (CSS-shaped, ordered function lists) ──────────────────
   // One property per zone; each is a space-separated list of PascalCase
@@ -188,39 +176,18 @@ export interface JivStyle {
   Filter: string;
   /** Backdrop filter — frost + grade on the glass/backdrop behind this box
    *  (CSS `backdrop-filter`). Per-box; never inherited. `Blur(len)` is the
-   *  frost radius. `Lift(n)` adds a signed constant `n` (of 255) to every
-   *  channel of the backdrop inside this box's shape, carrying its colour at 1
-   *  and never touching this element's own ink; see `Core/Lift.ts` for the
-   *  two implementations the engine picks between. */
+   *  frost radius. `Vibrancy([color,] amount [, cover])` treats the backdrop
+   *  inside this box's shape and never this element's own ink
+   *  (Core/Vibrancy.ts). */
   BackdropFilter: string;
-  /** THE INK ZONE -- the third filter zone, and the only one that touches the element's TEXT and
-   *  nothing else:
+  /** THE INK ZONE: only the element's TEXT, nothing else (Core/Vibrancy.ts):
    *
-   *      TextFilter: Lift(30)        // the ink ADDS, at 30/255 of its own Color
-   *      TextFilter: Lift(-20)       // the ink SUBTRACTS
-   *      TextFilter: None            // the default: the ink covers, as ink does
+   *      TextFilter: Vibrancy(255, @JwiftVibrancyLabel)   // Apple's label vibrancy
+   *      TextFilter: Vibrancy(60)                        // a glow: the ink adds at 60/255 of Color
+   *      TextFilter: None                                // the default: the ink covers
    *
-   *  It takes `Lift()` and NOTHING else (`Filter.Parse`'s `'text'` zone refuses the grade functions
-   *  and every blur by name, each naming the property that does own it).
-   *
-   *  WHAT IT IS FOR. `Filter: Lift()` is the element-WIDE lever: it makes the fill, the border, the
-   *  shadow AND the ink additive together, because they are one draw. There was no way to say "this
-   *  element's GLYPH glows and its fill is untouched" -- which is what a label over live imagery
-   *  wants. This is that.
-   *
-   *  The amount SCALES the ink: `Lift(255)` adds the ink at its own full `Color`, `Lift(128)` at half.
-   *  That differs from the foreground zone, where the amount belongs to the shape draw and only its
-   *  sign reaches the ink -- because here there is no shape draw for it to belong to. `TextFilter`
-   *  emits NO additive shape draw at all; it changes one draw's blend state and nothing else.
-   *
-   *  IT WORKS ON GLASS, WHICH `Filter: Lift()` DOES NOT. An authored foreground lift is refused on a
-   *  glass or progressive-blur surface because that element's own paint cannot be reached whole. Text
-   *  is not in that draw -- it is emitted into its own batch after the material has committed -- so a
-   *  glass toolbar's glyphs can add while its body samples its backdrop as usual.
-   *
-   *  NOT FOR ORDINARY LABEL INK. Apple: "Symbols and text that appear on Liquid Glass can have color,
-   *  like in a selected tab bar item" -- a lift on ink is for a glyph that should GLOW over live
-   *  content, not a way to brighten text. An ordinary label keeps its ink. */
+   *  It takes `Vibrancy(amount [, cover])` and nothing else; the ink's color is `Color`. The text is
+   *  its own batch, so this works on glass, where `Filter: Vibrancy()` is refused. */
   TextFilter: string;
   /** Cascade barrier for the foreground `Filter`. `true` stops an ancestor's
    *  Filter grade from folding into this element + its subtree (CSS
@@ -378,25 +345,19 @@ export interface JivRenderStyle {
 
   Background: BackgroundValue;
 
-  /** `Lift:`'s resolved declaration for THIS node, before the cascade: `'Inherit'` (not authored),
-   *  `'None'` (the reset) or the authored value. The walk turns it into `Element.EffectiveLift`. */
-  LiftDeclaration: LiftDeclaration;
-  /** `Filter: Lift()`'s amount, a signed fraction of full scale. The element's own ink ADDS. */
-  ForegroundLift: number;
-  /** `TextFilter: Lift()`'s amount, a signed fraction of full scale. ONLY the element's ink adds, at
-   *  `|amount|` of its own `Color`; the fill, border and shadow are untouched. 0 = the ink covers.
-   *  There is no `TextLiftColor`: the ink's color is `Color` on the text style, which is exactly why
-   *  the text zone refuses a color argument (`Filter.Parse._refuseInText`). */
-  TextLift: number;
-  /** `TextFilter: Vibrant()`'s cover, 0..1; 0 = the ink covers. The ink is drawn over what is under it at
-   *  `cover` of its coverage with its own `Color` added at full coverage: `dst (1 - cover a) + Color a`,
-   *  Apple's tab bar ink, which keeps the hue of the glass under it (Core/Lift.ts, `Vibrant`). */
-  TextVibrant: number;
-  /** `Filter: Lift()`'s color, 0..1 per channel. White when the one-argument spelling was used. */
-  ForegroundLiftColor: Color;
-  /** `BackdropFilter: Lift()`'s color, 0..1 per channel. White when the one-argument spelling was
-   *  used, which is what keeps `Lift(18)` byte-identical. */
-  BackdropLiftColor: Color;
+  /** `Vibrancy:`'s resolved declaration for THIS node, before the cascade. The walk turns it into
+   *  `Element.EffectiveVibrancy`. */
+  VibrancyDeclaration: VibrancyDeclaration;
+  /** `Filter: Vibrancy()`'s amount, a signed fraction of full scale, and its cover. */
+  ForegroundVibrancy: number;
+  ForegroundVibrancyCover: number;
+  /** `TextFilter: Vibrancy()`'s amount (scales the ink) and cover. */
+  TextVibrancy: number;
+  TextVibrancyCover: number;
+  /** `Filter: Vibrancy()`'s color, 0..1 per channel; white when none was given. */
+  ForegroundVibrancyColor: Color;
+  /** `BackdropFilter: Vibrancy()`'s color, 0..1 per channel; white when none was given. */
+  BackdropVibrancyColor: Color;
 
   Frost: number;
   BackdropFrostBlur: number;
@@ -412,10 +373,10 @@ export interface JivRenderStyle {
   BackdropBrightness: number;
   BackdropSaturation: number;
   BackdropContrast: number;
-  /** `BackdropFilter: Lift(n)`, as a fraction of full scale (n / 255), signed. The grade above is the
-   *  AUTHORED one; whether the lift is drawn under the element or folded into that grade is decided at
-   *  draw time (`Core/Lift.ts`), because it depends on the cascaded foreground grade. */
-  BackdropLift: number;
+  /** `BackdropFilter: Vibrancy()`'s amount (n / 255, signed) and cover. Whether it is drawn under the
+   *  element or folded into the grade above is decided at draw time (Core/Vibrancy.ts). */
+  BackdropVibrancy: number;
+  BackdropVibrancyCover: number;
 
 
   LightAngle: number;

@@ -40,7 +40,7 @@ import svgFillFragSrc from '../Svg/Shaders/Svg.Fill.frag.gen';
 import svgStrokeVertSrc from '../Svg/Shaders/Svg.Stroke.vert.gen';
 import svgStrokeFragSrc from '../Svg/Shaders/Svg.Stroke.frag.gen';
 import type { StrokeStyle } from './Renderer';
-import type { CompositeBlend } from './Lift';
+import type { VibrancyBlend } from './Vibrancy';
 
 // ─── Jline (stroke) uniform-location bundle ─────────────────────────────────
 interface _StrokeLocs {
@@ -112,7 +112,8 @@ interface _PanelLocs {
   // ── `?glass-skip`'s mask. Declared by the glass and non-glass programs, read only by the glass
   // one (`GlassSkips` is a constant false in the other, so it compiles out and this is null there).
   glassSkip:      WebGLUniformLocation | null;
-  // `BlendMode: Screen`'s premultiplied output. Declared by every panel program; 0 on every other draw.
+  // Vibrancy's cover: -1 on every ordinary draw, else the premultiplied output (Core/Vibrancy.ts).
+  vibrancyCover:    WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -139,6 +140,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   shadowBackdrop: gl.getUniformLocation(p, 'u_ShadowBackdrop'),
   glassAdapt:     gl.getUniformLocation(p, 'u_GlassAdapt'),
   glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
+  vibrancyCover:  gl.getUniformLocation(p, 'u_VibrancyCover'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -571,9 +573,9 @@ export class WebGL2Renderer implements Renderer {
   private _textInstanceData = new Float32Array(0);
   private _textInstanceCount = 0;
   private _textResolutionLoc!: WebGLUniformLocation | null;
-  private _textInkCoverLoc: WebGLUniformLocation | null = null;
-  /** The vibrant ink's cover for the next text draw, 0 for every ordinary one (`SetCompositeBlend`). */
-  private _textInkCover = 0;
+  private _textVibrancyCoverLoc: WebGLUniformLocation | null = null;
+  /** Vibrancy's cover for the draws under `SetVibrancyBlend`, -1 for every ordinary draw. */
+  private _vibrancyCover = -1;
   private _textViewOffsetLoc!: WebGLUniformLocation | null;
   private _textAtlasLoc!: WebGLUniformLocation | null;
 
@@ -746,11 +748,11 @@ export class WebGL2Renderer implements Renderer {
   get GroupBuilds(): number { return this._sceneLedger.GroupBuilds; }
   get GroupMembers(): number { return this._sceneLedger.GroupMembers; }
   get GroupFallbacks(): number { return this._sceneLedger.GroupFallbacks; }
-  /** Lift under-draws, element-blend draws and the blend-state changes they took, this frame. */
-  get LiftDraws(): number { return this._sceneLedger.LiftDraws; }
+  /** Vibrancy shape draws, vibrant paint draws and the blend-state changes they took, this frame. */
+  get ShapeDraws(): number { return this._sceneLedger.ShapeDraws; }
   get BlendDraws(): number { return this._sceneLedger.BlendDraws; }
   get BlendSwitches(): number { return this._sceneLedger.BlendSwitches; }
-  /** Every pyramid build this frame, whichever pass built it: the lift census reads this before and
+  /** Every pyramid build this frame, whichever pass built it: the vibrancy census reads this before and
    *  after an under-drawn element's own paint, and any difference is the lane failing. */
   get PyramidBuilds(): number {
     const l = this._sceneLedger;
@@ -1575,6 +1577,7 @@ export class WebGL2Renderer implements Renderer {
     // only thing that differs. 0 on a non-glass draw whatever the flag holds, so the mask can never
     // reach a program the arm is not about. A null location (the non-glass programs) is a no-op.
     gl.uniform1i(locs.glassSkip, isGlass ? this.DiagGlassSkip : 0);
+    gl.uniform1f(locs.vibrancyCover, this._vibrancyCover);
     if (isGlass && this.DiagGlassSkipCensus) this._noteGlassFragments();
 
     gl.activeTexture(gl.TEXTURE0);
@@ -1787,7 +1790,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(this._textAtlasLoc, 0);
     gl.uniform1i(this._textClipTexLoc, 1);
     gl.uniform1i(this._textXformTexLoc, 2);
-    gl.uniform1f(this._textInkCoverLoc, this._textInkCover);
+    gl.uniform1f(this._textVibrancyCoverLoc, this._vibrancyCover);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(atlas));
@@ -4522,57 +4525,21 @@ export class WebGL2Renderer implements Renderer {
     this._gl.disable(this._gl.BLEND);
   };
 
-  /** The blend for ONE draw that composes against the destination rather than over it. Four states:
-   *  two SIGNS times two ZONES of the additive color (Core/Lift.ts). The `Lift*` pair is the additive
-   *  SHAPE draw and keeps the destination's ALPHA (`ZERO, ONE`), so a transparent element stays
-   *  transparent; the `Plus*` pair is the element's own INK adding or subtracting and accumulates
-   *  coverage the way `EnableBlend` does.
+  /** The blend for ONE vibrancy draw (Core/Vibrancy.ts). The panel and text programs write
+   *  PREMULTIPLIED `(rgb * a, cover * a)` while `_vibrancyCover` is set, so one family serves every zone:
    *
-   *  The panel and text programs write STRAIGHT alpha (rgb, coverage), so the coverage is applied by
-   *  the SRC_ALPHA factor and a half-covered edge pixel gets half:
+   *    rgb    ONE, ONE_MINUS_SRC_ALPHA   FUNC_ADD, or FUNC_REVERSE_SUBTRACT for a negative amount
+   *    alpha  Shape: ZERO, ONE (a transparent element stays transparent)
+   *           Ink:   ONE, ONE_MINUS_SRC_ALPHA
    *
-   *    LiftAdd       FUNC_ADD                rgb  dst + src*srcA     alpha  dst   (amount > 0)
-   *    LiftSubtract  FUNC_REVERSE_SUBTRACT   rgb  dst - src*srcA     alpha  dst   (amount < 0)
-   *    PlusLighter   FUNC_ADD                rgb  dst + src*srcA     alpha  accumulates
-   *    PlusDarker    FUNC_REVERSE_SUBTRACT   rgb  dst - src*srcA     alpha  accumulates
-   *
-   *  `SRC_ALPHA` AND NOT `ONE`, on every one of them. A premultiplied source would take `ONE`; given
-   *  one with `SRC_ALPHA` it would be scaled by its coverage twice and every antialiased edge would
-   *  come out thin (a-squared instead of a). Every state here reads a straight source.
-   *
-   *  `Screen` was the fifth and it is GONE with `BlendMode`. It was the only one that needed a
-   *  premultiplied source -- its destination factor is `1 - src*a` and no blend factor forms a product
-   *  -- which is why `u_PremulOut` existed and why it left too. Undone by `RestoreBlend`, which the
-   *  caller owes before anything else draws.
-   *
-   *  `Vibrant` is the one premultiplied state: the text program writes `ink * a` over `cover * a` while
-   *  `vibrantCover` is set (its `u_InkCover`, Core/Lift.ts), and the factors are `ONE, ONE_MINUS_SRC_ALPHA`. */
-  SetCompositeBlend = (kind: CompositeBlend, vibrantCover: number = 0): void => {
+   *  Undone by `RestoreBlend`, which the caller owes before anything else draws. */
+  SetVibrancyBlend = (blend: VibrancyBlend): void => {
     const gl = this._gl;
     gl.enable(gl.BLEND);
-    this._textInkCover = kind === 'Vibrant' ? vibrantCover : 0;
-    switch (kind) {
-      case 'Vibrant':
-        gl.blendEquation(gl.FUNC_ADD);
-        gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-        break;
-      case 'LiftAdd':
-        gl.blendEquation(gl.FUNC_ADD);
-        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);
-        break;
-      case 'LiftSubtract':
-        gl.blendEquationSeparate(gl.FUNC_REVERSE_SUBTRACT, gl.FUNC_ADD);
-        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);
-        break;
-      case 'PlusLighter':
-        gl.blendEquation(gl.FUNC_ADD);
-        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-        break;
-      case 'PlusDarker':
-        gl.blendEquationSeparate(gl.FUNC_REVERSE_SUBTRACT, gl.FUNC_ADD);
-        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-        break;
-    }
+    this._vibrancyCover = blend.Cover;
+    gl.blendEquationSeparate(blend.Subtract ? gl.FUNC_REVERSE_SUBTRACT : gl.FUNC_ADD, gl.FUNC_ADD);
+    if (blend.Target === 'Shape') gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+    else gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     this._sceneLedger.BlendSwitches++;
   };
 
@@ -4580,14 +4547,14 @@ export class WebGL2Renderer implements Renderer {
    *  factors, straight output. */
   RestoreBlend = (): void => {
     const gl = this._gl;
-    this._textInkCover = 0;
+    this._vibrancyCover = -1;
     gl.blendEquation(gl.FUNC_ADD);
     this.EnableBlend();
     this._sceneLedger.BlendSwitches++;
   };
 
   /** Count what a composite blend drew, so the census can price it against the switches. */
-  NoteLiftDraw = (): void => { this._sceneLedger.LiftDraws++; };
+  NoteShapeDraw = (): void => { this._sceneLedger.ShapeDraws++; };
   NoteBlendDraw = (): void => { this._sceneLedger.BlendDraws++; };
 
   BindDefaultTarget = (clear?: { R: number; G: number; B: number }): void => {
@@ -4795,7 +4762,7 @@ export class WebGL2Renderer implements Renderer {
     this._textInstanceBuffer = buf;
 
     this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
-    this._textInkCoverLoc = gl.getUniformLocation(this._textShader.Program, 'u_InkCover');
+    this._textVibrancyCoverLoc = gl.getUniformLocation(this._textShader.Program, 'u_VibrancyCover');
     this._textViewOffsetLoc = gl.getUniformLocation(this._textShader.Program, 'u_ViewOffset');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
     this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');

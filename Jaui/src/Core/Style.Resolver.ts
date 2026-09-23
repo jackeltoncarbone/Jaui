@@ -6,7 +6,7 @@ import { ResolveLengthTuple4 } from './Length.Tuple';
 import { ParseColor } from './Color.Parse';
 import { ParseBackground } from './Background.Parse';
 import { ParseFilter, SplitTopLevelArgs } from './Filter.Parse';
-import type { LiftDeclaration } from './Lift';
+import type { VibrancyDeclaration } from './Vibrancy';
 import type { Color } from './Types';
 import { ResolveTransform } from '../Transform/Transform.Parse';
 
@@ -117,30 +117,27 @@ export const THEME_DARK_VAR = 'Dark';
 /** The 0/1 twin of THEME_DARK_VAR, so a sheet can weight a light value without writing (1 - @Dark). */
 export const THEME_LIGHT_VAR = 'Light';
 
-// `[^()]*` would stop at the first inner paren, so a two-argument `Lift(rgb(...), @Var)` matched
-// nothing at all and its var was never resolved. One optional nested level is exactly what a color
-// function needs, and it is bounded rather than a general balanced-paren scan, because a grade
-// argument is an ARITHMETIC expression over vars and only its color argument nests.
-const _GRADE_FN = /(Brightness|Saturate|Contrast|Lift|Vibrant)\s*\(((?:[^()]|\([^()]*\))*)\)/gi;
+// One optional nested level, because only `Vibrancy()`'s color argument nests; the rest are arithmetic
+// expressions over vars.
+const _GRADE_FN = /(Brightness|Saturate|Contrast|Vibrancy)\s*\(((?:[^()]|\([^()]*\))*)\)/gi;
+
+/** A color argument after var substitution: a hex, a color function or a named color. */
+const _COLOR_ARG = /^\s*(#|rgba?\(|hsla?\(|[a-z]+\s*$)/i;
 
 /** A grade argument may be a length expression over vars, so a material can state its per-theme grade in
- *  one line: `Contrast(0.6 * @Dark + 1 * @Light)`, and a wash its per-theme lift: `Lift(@JwiftWashLift)`.
- *  Those arguments are evaluated to numbers here, before the filter parse (which caches by string and
- *  reads plain numbers). Literal filters pass through untouched. */
+ *  one line: `Contrast(0.6 * @Dark + 1 * @Light)`, and a wash its per-theme level:
+ *  `Vibrancy(@JwiftVibrancySecondaryFill)`. Those arguments are evaluated to numbers here, before the
+ *  filter parse (which caches by string and reads plain numbers). `Vibrancy()`'s color argument is not
+ *  arithmetic: its vars are resolved where the color is parsed. Literal filters pass through untouched. */
 const _resolveGradeArgs = (raw: string, ctx: ResolveContext): string => {
   if (raw.indexOf('@') < 0) return raw;
   return raw.replace(_GRADE_FN, (whole, fn: string, arg: string) => {
     if (arg.indexOf('@') < 0) return whole;
-    // `Lift(<color>, <amount>)`: the AMOUNT is the length expression and the COLOR is not. Resolving
-    // the color here would hand `rgb(255, 220, 180)` to the arithmetic evaluator. The color's own
-    // vars are resolved by `ResolveVars` at the point the color is parsed -- there is NO color
-    // arithmetic in the resolver, and this shape does not need any.
     const parts = SplitTopLevelArgs(arg);
-    if (parts.length === 2) {
-      const amount = parts[1].indexOf('@') < 0 ? parts[1] : String(Resolve(parts[1], ctx, 'W'));
-      return `${fn}(${parts[0]}, ${amount})`;
-    }
-    return `${fn}(${Resolve(arg.trim(), ctx, 'W')})`;
+    const colorFirst = parts.length >= 2 && _COLOR_ARG.test(ResolveVars(parts[0], ctx));
+    const resolved = parts.map((part, i) =>
+      (colorFirst && i === 0) || part.indexOf('@') < 0 ? part.trim() : String(Resolve(part.trim(), ctx, 'W')));
+    return `${fn}(${resolved.join(', ')})`;
   });
 };
 
@@ -157,60 +154,49 @@ const _resolveTint = (s: JivStyle, ctx: ResolveContext): number => {
   }
 };
 
-/** `Lift: <color> <amount>` -- the INHERITED additive color (Core/Lift.ts). `None` is the reset,
- *  `Inherit` (the initial value) takes the ancestor's. The pair is the same one `Lift()` takes, and
- *  the amount is in 0-255 units in every spelling, so a wash var reads identically in all three
- *  places it can appear.
- *
- *  The color is resolved through `ResolveVars` + `ParseColor` -- the same two steps `Background` and
- *  `BorderColor` take -- and the amount through the length evaluator, which is where the theme flip
- *  lives (`18 * @Dark - 12 * @Light`). There is no color arithmetic here. */
-const _resolveLiftProperty = (raw: string, ctx: ResolveContext): LiftDeclaration => {
+/** `Vibrancy: <color> <amount> [<cover>]`, the INHERITED vibrancy (Core/Vibrancy.ts). `None` is the reset,
+ *  `Inherit` (the initial value) takes the ancestor's. The color resolves through `ResolveVars` +
+ *  `ParseColor`, the amount and cover through the length evaluator, where the theme flip lives. */
+const _resolveVibrancyProperty = (raw: string, ctx: ResolveContext): VibrancyDeclaration => {
   const t = raw.trim();
   if (t === '' || t.toLowerCase() === 'inherit') return 'Inherit';
   if (t.toLowerCase() === 'none') return 'None';
-  // The amount is the LAST whitespace-separated token at paren depth 0, so a color function's own
-  // spaces (`rgb(255 220 180)`, CSS4) do not split the value.
-  const split = _splitColorAndAmount(t);
-  if (split === null) {
+  const tokens = _splitTopLevelWords(t);
+  if (tokens.length < 2 || tokens.length > 3) {
     throw new Error(
-      `[Jaui] Lift: "${raw}" — expected "<color> <amount>", "None" or "Inherit". The amount is signed, ` +
-      'in 0-255 units, and it is what flips with the theme (Lift: rgb(255,255,255) @JwiftWashLift).',
+      `[Jaui] Vibrancy: "${raw}" — expected "<color> <amount> [<cover>]", "None" or "Inherit". The amount is ` +
+      'signed, in 0-255 units, and the cover is 0..1 (Vibrancy: rgb(255, 255, 255) @JwiftVibrancySecondaryFill).',
     );
   }
-  const color = ParseColor(ResolveVars(split.Color, ctx));
-  const n = Resolve(split.Amount, ctx, 'W');
-  if (!Number.isFinite(n)) throw new Error(`[Jaui] Lift: "${raw}" — the amount did not resolve to a number.`);
-  if (Math.abs(n) > 255) throw new Error(`[Jaui] Lift: "${raw}" — the amount is signed and at most 255, got ${n}.`);
-  return { R: color.R, G: color.G, B: color.B, Amount: n / 255 };
+  const color = ParseColor(ResolveVars(tokens[0], ctx));
+  const n = Resolve(tokens[1], ctx, 'W');
+  const cover = tokens.length === 3 ? Resolve(tokens[2], ctx, 'W') : 0;
+  if (!Number.isFinite(n)) throw new Error(`[Jaui] Vibrancy: "${raw}" — the amount did not resolve to a number.`);
+  if (Math.abs(n) > 255) throw new Error(`[Jaui] Vibrancy: "${raw}" — the amount is signed and at most 255, got ${n}.`);
+  if (!(cover >= 0 && cover <= 1)) throw new Error(`[Jaui] Vibrancy: "${raw}" — the cover is 0..1, got ${cover}.`);
+  return { R: color.R, G: color.G, B: color.B, Amount: n / 255, Cover: cover };
 };
 
-/** Split `<color> <amount>` at the last depth-0 whitespace run. Returns null when there is only one
- *  token, because an additive color without an amount has no direction and no theme flip -- that is
- *  the author's omission and it is named rather than defaulted. */
-const _splitColorAndAmount = (t: string): { Color: string; Amount: string } | null => {
+/** Split at depth-0 whitespace, so a color function's own spaces (`rgb(255 220 180)`) stay whole. */
+const _splitTopLevelWords = (t: string): string[] => {
+  const out: string[] = [];
   let depth = 0;
-  let cut = -1;
-  for (let i = 0; i < t.length; i++) {
+  let start = 0;
+  for (let i = 0; i <= t.length; i++) {
     const ch = t[i];
     if (ch === '(') depth++;
     else if (ch === ')') depth--;
-    else if (depth === 0 && /\s/.test(ch)) cut = i;
+    else if (i === t.length || (depth === 0 && /\s/.test(ch))) {
+      if (i > start) out.push(t.slice(start, i));
+      start = i + 1;
+    }
   }
-  if (cut <= 0) return null;
-  const color = t.slice(0, cut).trim();
-  const amount = t.slice(cut + 1).trim();
-  if (color === '' || amount === '') return null;
-  return { Color: color, Amount: amount };
+  return out;
 };
 
-/** A `Lift()` function's color argument, as the render style's `Color`. `null` -- the one-argument
- *  spelling -- is WHITE, which is what keeps `Lift(18)` byte-identical. The alpha is 1 and unused: an
- *  additive color has nothing to be transparent over.
- *
- *  A FRESH object every call, which is `ParseColor`'s own documented rule -- a shared color object
- *  handed to every element would be written through by anything that springs a channel. */
-const _resolveLiftColor = (raw: string | null, ctx: ResolveContext): Color => {
+/** A `Vibrancy()` function's color argument; `null` is white. A FRESH object every call, which is
+ *  `ParseColor`'s own rule: a shared color would be written through by anything that springs a channel. */
+const _resolveVibrancyColor = (raw: string | null, ctx: ResolveContext): Color => {
   if (raw === null) return { R: 1, G: 1, B: 1, A: 1 };
   const c = ParseColor(ResolveVars(raw, ctx));
   return { R: c.R, G: c.G, B: c.B, A: 1 };
@@ -237,10 +223,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // a missing Blur() = 0.
   const fg = ParseFilter(_resolveGradeArgs(ResolveTernary(s.Filter, ctx), ctx), 'foreground');
   const backdrop = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BackdropFilter, ctx), ctx));
-  // The INK zone. Takes `Lift()` only, so the only field of this parse that is ever read is `.Lift`
-  // -- the amount that scales the element's own ink. It resolves through the SAME `_resolveGradeArgs`
-  // as its siblings, so `TextFilter: Lift(30 * @Dark - 20 * @Light)` flips with the theme in one
-  // line exactly as a wash does.
+  // The INK zone. Takes `Vibrancy()` only, through the same arg resolution as its siblings.
   const ink = ParseFilter(_resolveGradeArgs(ResolveTernary(s.TextFilter, ctx), ctx), 'text');
   const frostAuto = backdrop.BlurRaw !== null && backdrop.BlurRaw.trim().toLowerCase() === 'auto';
   const resolveBlur = (raw: string | null): number =>
@@ -293,12 +276,13 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
     Background: ParseBackground(ResolveVars(ResolveTernary(s.Background, ctx), ctx)),
 
-    LiftDeclaration: _resolveLiftProperty(ResolveTernary(s.Lift, ctx), ctx),
-    ForegroundLift: fg.Lift,
-    TextLift: ink.Lift,
-    TextVibrant: ink.Vibrant,
-    ForegroundLiftColor: _resolveLiftColor(fg.LiftColor, ctx),
-    BackdropLiftColor: _resolveLiftColor(backdrop.LiftColor, ctx),
+    VibrancyDeclaration: _resolveVibrancyProperty(ResolveTernary(s.Vibrancy, ctx), ctx),
+    ForegroundVibrancy: fg.Vibrancy,
+    ForegroundVibrancyCover: fg.VibrancyCover,
+    TextVibrancy: ink.Vibrancy,
+    TextVibrancyCover: ink.VibrancyCover,
+    ForegroundVibrancyColor: _resolveVibrancyColor(fg.VibrancyColor, ctx),
+    BackdropVibrancyColor: _resolveVibrancyColor(backdrop.VibrancyColor, ctx),
 
     Frost: Resolve(s.Frost, ctx, 'W'),
     // Heavy-end frost sigma for the pblur material: the foreground Filter blur
@@ -313,7 +297,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BackdropBrightness: backdrop.Brightness,
     BackdropSaturation: backdrop.Saturation,
     BackdropContrast: backdrop.Contrast,
-    BackdropLift: backdrop.Lift,
+    BackdropVibrancy: backdrop.Vibrancy,
+    BackdropVibrancyCover: backdrop.VibrancyCover,
 
     // Foreground filter grade — multiplies the element's final rgb at paint
     // time and cascades to descendants (folded into Effective* downstream).

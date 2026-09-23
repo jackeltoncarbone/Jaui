@@ -7,37 +7,20 @@
  *
  *   Filter:              Brightness(1.08) Saturate(1.12)
  *   BackdropFilter:      Blur(16pt) Brightness(1.25) Saturate(1.25) Contrast(0.75)
- *   TextFilter:          Lift(30)
+ *   TextFilter:          Vibrancy(255, 0.55)
  *
  * Supported functions:
  *   Brightness(x)  Saturate(x)  Contrast(x)   — scalar grade multipliers
  *   Blur(len)                                 — a Length (the foreground blur, or the frost)
- *   Lift(n) / Lift(color, n)                  — Filter + BackdropFilter: an ADDITIVE COLOR, a color
- *                                               times a signed amount in 0-255 units. On the
- *                                               BACKDROP it lifts what is under the element; on the
- *                                               FOREGROUND the element's own ink adds instead of
- *                                               covering. `Lift(n)` is white times n. See Core/Lift.ts
- *   Lift(n)                                   — TextFilter: the element's INK adds, at |n|/255 of its
- *                                               own `Color`, and NOTHING else about the element
- *                                               changes. The one-argument form ONLY — see below.
+ *   Vibrancy([color,] amount [, cover])        — Apple's vibrancy (Core/Vibrancy.ts): `out = dst (1 - cover a)
+ *                                               +/- |amount|/255 color a`. Amount signed in 0-255 units, cover
+ *                                               0..1 (default 0). On BACKDROP it treats what is under the
+ *                                               element; on FOREGROUND the element's own paint is vibrant too;
+ *                                               on TEXT only the ink, and no color argument (the ink has
+ *                                               `Color`), so there the amount scales the ink.
  *
- * … with one exception, which REFUSES rather than accepts-and-ignores: the `text` zone takes Lift()
- * ONLY, and refuses the grade functions and every blur. See `_refuseInText`.
- *
- * ## WHY `Lift()`'s COLOR ARGUMENT IS NOT ACCEPTED IN EVERY ZONE
- *
- * A zone either brings its own color or it does not, and that decides the arity:
- *
- *   • `backdrop` / `foreground` paint an additive draw of the element's SHAPE. There is no source
- *     color there, so the lift supplies one: `Lift(<color>, <amount>)` and the color is ABSOLUTE.
- *   • `text` grades ink that ALREADY HAS a color — `Color`, on the TextStyle. A second color here
- *     could only be a per-channel MULTIPLIER on that ink, which is a different meaning for the same
- *     argument in the same grammar. So the two-argument form is REFUSED in the text zone by name and
- *     the message names `Color` as the property that owns the ink's color.
- *
- * The amount always means "how much", applied to whatever that zone paints: in the foreground zone
- * the amount belongs to the SHAPE draw and only its SIGN reaches the ink (which adds at its own full
- * color); in the text zone there is no shape draw, so the amount scales the ink itself.
+ * The `text` zone takes Vibrancy() ONLY and refuses the grade functions and every blur by name
+ * (`_refuseInText`), rather than accepting and ignoring them.
  *
  * Semantics:
  *   • Identity = the function absent (Brightness/Saturate/Contrast → 1, Blur → none).
@@ -105,19 +88,13 @@ export interface ParsedFilter {
   Saturation: number;
   /** Contrast multiplier. Identity 1. */
   Contrast: number;
-  /** `Lift()`'s amount as a fraction of full scale (n / 255), signed. Identity 0. The zone says which
-   *  side of the element it touches (Core/Lift.ts). In the text zone the magnitude SCALES the ink; in
-   *  the foreground zone only the sign reaches the ink and the magnitude belongs to the shape draw. */
-  Lift: number;
-  /** `Lift()`'s color as AUTHORED, still a string, because the resolver may need to resolve a var in
-   *  it and the parse cache is keyed by string. `null` means the one-argument spelling, which is
-   *  WHITE -- kept as null rather than a white Color so `Lift(18)` allocates nothing and stays
-   *  byte-identical to what shipped. */
-  LiftColor: string | null;
-  /** `Vibrant()`'s cover, 0..1, text zone only. Identity 0 (the ink covers as it always did). The ink is
-   *  then drawn VIBRANT: over what is under it at `cover` of its coverage, its own `Color` added at its
-   *  full coverage, so it keeps the glass's hue under it (Core/Lift.ts, `Vibrant`). */
-  Vibrant: number;
+  /** `Vibrancy()`'s amount as a signed fraction of full scale (n / 255). Identity 0. */
+  Vibrancy: number;
+  /** `Vibrancy()`'s cover, 0..1. Identity 0. */
+  VibrancyCover: number;
+  /** `Vibrancy()`'s color as AUTHORED, still a string, because the resolver resolves its vars and the
+   *  parse cache is keyed by string. `null` is white. */
+  VibrancyColor: string | null;
   /** Raw Length string for the backdrop's frost; null when no Blur() was authored. The
    *  resolver resolves this under the live context. */
   BlurRaw: string | null;
@@ -138,7 +115,7 @@ export type FilterZone = 'foreground' | 'backdrop' | 'text';
  *  `TextFilter` is in this list and therefore on `JivStyle`, NOT on `TextStyle`, even though the ink's
  *  COLOR lives on `TextStyle`: merge-by-function only happens in the `'Style'` slot
  *  (`Jss.Parser._assignToSlot`). On `TextStyle` it would be plain last-wins, so a
- *  `:Hover { TextFilter: Lift(50) }` would clobber the base declaration instead of merging by
+ *  `:Hover { TextFilter: Vibrancy(50) }` would clobber the base declaration instead of merging by
  *  function like its siblings. */
 export const FILTER_PROPS = ['Filter', 'BackdropFilter', 'TextFilter'] as const;
 
@@ -179,19 +156,16 @@ export const AssignStyleWithFilterMerge = (
   }
 };
 
-const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, LiftColor: null, Vibrant: 0, BlurRaw: null, ForegroundBlur: null };
+const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Vibrancy: 0, VibrancyCover: 0, VibrancyColor: null, BlurRaw: null, ForegroundBlur: null };
 
 const _cacheBackdrop = new Map<string, ParsedFilter>();
 const _cacheForeground = new Map<string, ParsedFilter>();
-// The text zone accepts ONLY `Lift()`, so a string the foreground cached (where `Brightness()` is
+// The text zone accepts ONLY `Vibrancy()`, so a string the foreground cached (where `Brightness()` is
 // legal) must not answer for it.
 const _cacheText = new Map<string, ParsedFilter>();
 /** Split a function list into (name, argument) pairs, counting parentheses so a function may take
- *  ANOTHER function as an argument -- which `Lift(rgb(255, 220, 180), 18)` does. The regex this
- *  replaced was `/([A-Za-z]+)\s*\(([^)]*)\)/g`, and `[^)]*` stops at the FIRST `)`: it read that
- *  string as `Lift(rgb(255, 220, 180)` and then found no second function, so the amount vanished
- *  and the lift silently became 0. Nothing caught it, because a dropped argument is not a parse
- *  error. Returns null at the first malformed token rather than skipping it. */
+ *  ANOTHER function as an argument, as `Vibrancy(rgb(255, 220, 180), 18)` does. Returns null at the
+ *  first malformed token rather than skipping it. */
 export const SplitFilterFunctions = (raw: string): { Name: string; Arg: string }[] | null => {
   const out: { Name: string; Arg: string }[] = [];
   let i = 0;
@@ -283,7 +257,7 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
     return IDENTITY;
   }
 
-  const out: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, LiftColor: null, Vibrant: 0, BlurRaw: null, ForegroundBlur: null };
+  const out: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Vibrancy: 0, VibrancyCover: 0, VibrancyColor: null, BlurRaw: null, ForegroundBlur: null };
   // `null` is a MALFORMED list (an unbalanced paren, a bare token, a name with no call). It has to
   // throw rather than fall through as "nothing matched", because a filter string the author wrote and
   // the engine silently dropped is the exact failure the old regex had.
@@ -311,38 +285,18 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
         if (zone === 'text') throw new Error(_refuseInText('Contrast', raw));
         out.Contrast = _num(arg, 'Contrast', raw);
         break;
-      case 'lift': {
-        // The BACKDROP zone lifts what is under the element; the FOREGROUND zone makes the element's
-        // own ink add instead of cover; the TEXT zone makes ONLY the ink add and leaves the fill,
-        // border and shadow alone.
-        const parts = SplitTopLevelArgs(arg);
-        if (parts.length > 2) {
+      case 'vibrancy': {
+        const v = ParseVibrancyArgs(arg, raw);
+        if (zone === 'text' && v.Color !== null) {
           throw new Error(
-            `[Jaui] Lift() takes <amount> or <color>, <amount>; got ${parts.length} arguments in "${raw}".`,
+            `[Jaui] TextFilter: Vibrancy() takes <amount> [, <cover>]; got a color argument in "${raw}". The ink ` +
+            'already has a color (`Color`, on the text style), and the amount scales it: Vibrancy(255, 0.55) is ' +
+            "Apple's label, Vibrancy(60) a glow. Set the ink with Color.",
           );
         }
-        // The ink already HAS a color, so a second one here would be a per-channel multiplier on it
-        // rather than the absolute color it is in the other two zones -- one word, two meanings. The
-        // one-argument form only, and the message names the property that owns the ink's color.
-        if (zone === 'text' && parts.length === 2) {
-          throw new Error(
-            `[Jaui] TextFilter: Lift() takes <amount> only; got a color argument in "${raw}". The ink ` +
-            'already has a color -- `Color`, on the text style -- and the amount says how much of it ' +
-            'ADDS: Lift(255) adds the ink at its own full color, Lift(128) at half, a negative amount ' +
-            'subtracts. A color here could only multiply the ink channel by channel, which is not what ' +
-            'the same argument means on BackdropFilter or Filter (there it IS the color, because an ' +
-            'additive draw of the shape has no other source). Set the ink with Color and the strength ' +
-            'with the amount.',
-          );
-        }
-        // One argument is the amount against WHITE. Two is a color and an amount. `LiftColor: null`
-        // IS white -- the one-argument form must stay byte-identical, so it allocates no color and
-        // takes no different code path downstream.
-        const amountRaw = parts.length === 2 ? parts[1] : parts[0];
-        const n = _num(amountRaw, 'Lift', raw);
-        if (Math.abs(n) > 255) throw new Error(`[Jaui] Lift() takes a signed amount of 255, got ${n} in "${raw}".`);
-        out.Lift = n / 255;
-        out.LiftColor = parts.length === 2 ? parts[0] : null;
+        out.Vibrancy = v.Amount;
+        out.VibrancyCover = v.Cover;
+        out.VibrancyColor = v.Color;
         break;
       }
       case 'blur':
@@ -358,15 +312,6 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
         if (zone === 'text') throw new Error(_refuseInText('LinearProgressiveBlur', raw));
         out.ForegroundBlur = _parseLinear(arg, raw);
         break;
-      case 'vibrant': {
-        if (zone !== 'text') {
-          throw new Error(`[Jaui] Vibrant() is an ink mode and belongs on TextFilter; got it in "${raw}".`);
-        }
-        const cover = _num(arg, 'Vibrant', raw);
-        if (!(cover > 0 && cover <= 1)) throw new Error(`[Jaui] Vibrant() takes a cover in (0, 1], got ${cover} in "${raw}".`);
-        out.Vibrant = cover;
-        break;
-      }
       case 'edgeprogressiveblur':
         if (zone === 'text') throw new Error(_refuseInText('EdgeProgressiveBlur', raw));
         out.ForegroundBlur = _parseEdge(arg, raw);
@@ -374,9 +319,9 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
       default:
         throw new Error(
           zone === 'text'
-            ? `[Jaui] Unknown TextFilter function "${f.Name}" in "${raw}". TextFilter takes Lift() or Vibrant().`
+            ? `[Jaui] Unknown TextFilter function "${f.Name}" in "${raw}". TextFilter takes Vibrancy().`
             : `[Jaui] Unknown filter function "${f.Name}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
-              (zone === 'foreground' ? ', Lift, LinearProgressiveBlur, EdgeProgressiveBlur.' : ', Lift.'),
+              (zone === 'foreground' ? ', Vibrancy, LinearProgressiveBlur, EdgeProgressiveBlur.' : ', Vibrancy.'),
         );
     }
   }
@@ -386,6 +331,27 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
 
   cache.set(raw, out);
   return out;
+};
+
+const _NUMBER = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i;
+
+/** True when a `Vibrancy()` argument is a color rather than a number. After the resolver has run,
+ *  every amount and cover is a plain number, so anything else in the first place is the color. */
+export const IsVibrancyColorArg = (arg: string): boolean => !_NUMBER.test(arg.trim());
+
+/** `Vibrancy([color,] amount [, cover])`, its arguments already resolved to numbers. */
+export const ParseVibrancyArgs = (arg: string, raw: string): { Color: string | null; Amount: number; Cover: number } => {
+  const parts = SplitTopLevelArgs(arg);
+  const color = parts.length >= 2 && IsVibrancyColorArg(parts[0]) ? parts[0] : null;
+  const rest = color === null ? parts : parts.slice(1);
+  if (rest.length < 1 || rest.length > 2 || rest.some((r) => IsVibrancyColorArg(r))) {
+    throw new Error(`[Jaui] Vibrancy() takes [<color>,] <amount> [, <cover>]; got "${raw}".`);
+  }
+  const n = _num(rest[0], 'Vibrancy', raw);
+  if (Math.abs(n) > 255) throw new Error(`[Jaui] Vibrancy() takes a signed amount of at most 255, got ${n} in "${raw}".`);
+  const cover = rest.length === 2 ? _num(rest[1], 'Vibrancy', raw) : 0;
+  if (!(cover >= 0 && cover <= 1)) throw new Error(`[Jaui] Vibrancy() takes a cover in [0, 1], got ${cover} in "${raw}".`);
+  return { Color: color, Amount: n / 255, Cover: cover };
 };
 
 /** Parse `<direction>, <radius> [, <feather>] [, <easing>]` into a directional
@@ -468,7 +434,7 @@ const _parseEdge = (arg: string, raw: string): ForegroundBlur => {
   return { Mode: 'edge', Direction: 'ToTop', Edges: edges, FeatherRaw: feather, Easing: easing, Uniform: false, RadiusRaw: radius };
 };
 
-/** The text zone takes `Lift()` and nothing else. Each refusal names the property that DOES own the
+/** The text zone takes `Vibrancy()` and nothing else. Each refusal names the property that DOES own the
  *  thing asked for, so the author's next move is obvious.
  *
  *  The grade functions are refused rather than folded into the ink color, even though grading a KNOWN
@@ -477,7 +443,7 @@ const _parseEdge = (arg: string, raw: string): ForegroundBlur => {
  *  exists, and it would silently disagree with `Filter` about whether the fill is graded too. The
  *  blurs are refused because a text-only blur is not built at all -- there is no ink-only blur pass. */
 const _refuseInText = (fn: string, raw: string): string =>
-  `[Jaui] TextFilter takes Lift() or Vibrant(); got ${fn}() in "${raw}". ` +
+  `[Jaui] TextFilter takes Vibrancy(); got ${fn}() in "${raw}". ` +
   (fn === 'Brightness' || fn === 'Saturate' || fn === 'Contrast'
     ? 'The foreground `Filter` already grades this element\'s composited pixels, its own text included, '
       + 'so an ink-only grade would be a second spelling for something that exists. Author the grade on '

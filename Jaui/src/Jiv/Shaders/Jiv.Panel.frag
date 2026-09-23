@@ -219,11 +219,10 @@ uniform vec4      u_BgGradTangent[MAX_BG_GRAD_STOPS];
 uniform float     u_BgGradPos[MAX_BG_GRAD_STOPS];
 
 out vec4 fragColor;
-// `u_PremulOut` was here. It premultiplied this fragment's rgb by its alpha for a `BlendMode: Screen`
-// draw, the one blend state whose destination factor (`1 - src*a`) is a product no blend factor forms.
-// `BlendMode` and `Screen` are both gone (Core/Lift.ts): every surviving composite state reads a
-// STRAIGHT source and takes `SRC_ALPHA`, so this program has one fewer uniform branch and writes the
-// same bits it always did on every draw that is not a Screen -- which is now every draw.
+
+// VIBRANCY (Core/Vibrancy.ts): -1 on every ordinary draw; otherwise the output is premultiplied, its
+// light at its coverage over `u_VibrancyCover` of it, for the blend `SetVibrancyBlend` sets.
+uniform float u_VibrancyCover;
 
 #if !defined(MATERIAL_FLAT)
 // Triangular-PDF dither — breaks 8-bit banding on smooth blurred backdrops.
@@ -921,7 +920,7 @@ void main() {
             float spec = 0.5 * min(glowTerm + edgeTerm, 1.0) * lightIntensity * glassiness * fillAlpha;
             // ADAPTIVE: it brightens what is dark and darkens what is bright (aave's luma 0.3 to 0.7), so
             // it reads on any backdrop. An added white washes out over a bright photograph exactly where
-            // a highlight is needed; this is the same reason text inks with Lift.
+            // a highlight is needed; this is the same reason vibrant text is drawn with Vibrancy.
             float specLuma = dot(result.rgb, LUMA);
             float darken = smoothstep(0.3, 0.7, specLuma);
             result.rgb = max(mix(result.rgb + spec, result.rgb * (1.0 - spec), darken), vec3(0.0));
@@ -983,6 +982,6 @@ void main() {
         result.rgb += gradDither / max(result.a, 0.25);
     }
 
-    fragColor = result;
+    fragColor = u_VibrancyCover < 0.0 ? result : vec4(result.rgb * result.a, result.a * u_VibrancyCover);
 }
 #endif

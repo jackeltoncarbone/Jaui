@@ -10,9 +10,9 @@ flat in int v_ClipCount;
 
 uniform sampler2D u_Atlas;
 uniform sampler2D u_ClipTex;
-// VIBRANT INK (Core/Lift.ts): 0 for ordinary text. Otherwise the ink is written premultiplied, its colour
-// at its full coverage over `u_InkCover` of it, for the `ONE, ONE_MINUS_SRC_ALPHA` blend that state sets.
-uniform float u_InkCover;
+// VIBRANCY (Core/Vibrancy.ts): -1 for ordinary text; otherwise the ink is written premultiplied, over
+// `u_VibrancyCover` of its coverage, for the blend `SetVibrancyBlend` sets.
+uniform float u_VibrancyCover;
 
 out vec4 fragColor;
 
@@ -23,11 +23,6 @@ void main() {
     if (clipD > 1.0) discard;
     float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
     vec4 texel = texture(u_Atlas, v_TexCoord);
-    if (u_InkCover > 0.0) {
-        vec4 ink = texel * v_Tint;
-        float coverage = ink.a * v_Opacity * clipAlpha;
-        fragColor = vec4(ink.rgb * coverage, coverage * u_InkCover);
-        return;
-    }
-    fragColor = texel * v_Tint * v_Opacity * clipAlpha;
+    vec4 ink = texel * v_Tint * v_Opacity * clipAlpha;
+    fragColor = u_VibrancyCover < 0.0 ? ink : vec4(ink.rgb * ink.a, ink.a * u_VibrancyCover);
 }

@@ -19,7 +19,7 @@ import type { ResolveContext } from '../Core/Length';
 import { DirtyFlag, type DirtyFlags } from '../Core/Types';
 import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import { Spring } from '../Animation/Spring';
-import type { LiftValue } from '../Core/Lift';
+import type { VibrancyValue } from '../Core/Vibrancy';
 
 /** Side-channel from Element to its owning Canvas (or any consumer that wants
  *  to react to dirty marks). Canvas implements this and registers itself on
@@ -194,16 +194,13 @@ export class Element {
   EffectiveSaturation: number = 1;
   EffectiveContrast: number = 1;
 
-  /** Render-time cascaded ADDITIVE COLOR: the `Lift:` value that reaches this element, or null for
-   *  none (Core/Lift.ts). Mirrors EffectiveOpacity and the grade above -- computed once per frame
-   *  before draw, stored here rather than in RenderStyle so the authored declaration is not clobbered
-   *  by the cascade between frames. `Isolate: true` stops it, the same word that stops the Filter
-   *  grade. */
-  EffectiveLift: LiftValue | null = null;
-  /** True when THIS element is the one that declared its `EffectiveLift`, rather than inheriting it.
-   *  Only an authored lift emits the additive SHAPE draw: cascading that draw would lift the same
-   *  pixels once per descendant, which is the one variant to argue against rather than build. */
-  EffectiveLiftAuthored: boolean = false;
+  /** Render-time cascaded vibrancy: the `Vibrancy:` value that reaches this element, or null
+   *  (Core/Vibrancy.ts). Computed once per frame before draw, like EffectiveOpacity, so the authored
+   *  declaration is never clobbered by the cascade. `Isolate: true` stops it. */
+  EffectiveVibrancy: VibrancyValue | null = null;
+  /** True when THIS element declared its `EffectiveVibrancy`. Only an authored vibrancy emits the
+   *  shape draw: a cascaded one would treat the same pixels once per descendant. */
+  EffectiveVibrancyAuthored: boolean = false;
 
   /** Click handler — fired on pointerup when the release hits the same
    *  Jiv that pointerdown hit (standard click semantics). null = no

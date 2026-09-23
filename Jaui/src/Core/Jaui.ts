@@ -16,12 +16,11 @@ import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import {
-  CascadeLift, FoldLift, InkBlendOf, Lift, LiftAmount, LiftGateLine, LiftGraded, LiftInkAmount,
-  LiftInkScale, LiftRefusalOf, LiftSamplesBackdrop, LiftTouchesInk, LIFT_WHITE, ShapeBlendOf,
-  TextLiftAmount,
-  VIBRANT_EPSILON,
-  type CompositeBlend, type LiftCensus, type LiftMode, type LiftValue,
-} from './Lift';
+  BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
+  Vibrancy, VibrancyBlendOf, VibrancyGateLine, VibrancyGraded, VibrancyInkScale, VibrancyIsActive,
+  VibrancyRefusalOf, VibrancySamplesBackdrop, VibrancyTouchesInk,
+  type VibrancyBlend, type VibrancyCensus, type VibrancyMode, type VibrancyValue,
+} from './Vibrancy';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
 import { ClipStackBuffer, EmptyClipStack, CLIP_FLOATS_PER_ENTRY, type ClipShape, type ClipStack } from './Clip.Stack';
 import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, matScaleY, matCos, matSin } from '../Transform/Mat2x3';
@@ -128,16 +127,15 @@ const PHASED_CHAINS = 20;
  *  AT the panel's own frost sigma, so this is 0 there and the mip chain is skipped outright. */
 const _backdropMaxLod = (frostLod: number, baseFrostLod: number): number => Math.max(0, frostLod - baseFrostLod);
 
-/** A CHROMATIC lift on an element that must take the graded fold. The one lift refusal that is an
- *  author error rather than a choice of implementation, and the reason is a hard engine limit rather
- *  than a preference, so it is stated with the number. */
-const _refuseChromaticGraded = (v: { R: number; G: number; B: number; Amount: number }): string =>
-  `[Jaui] Lift(rgb(${Math.round(v.R * 255)}, ${Math.round(v.G * 255)}, ${Math.round(v.B * 255)}), ` +
-  `${Math.round(v.Amount * 255)}) is CHROMATIC, and this element samples its backdrop, so the lift has ` +
+/** A CHROMATIC vibrancy on an element that must take the graded fold: an author error, and the reason
+ *  is a hard engine limit, so it is stated with the number. */
+const _refuseChromaticGraded = (v: VibrancyValue): string =>
+  `[Jaui] Vibrancy(rgb(${Math.round(v.R * 255)}, ${Math.round(v.G * 255)}, ${Math.round(v.B * 255)}), ` +
+  `${Math.round(v.Amount * 255)}) is CHROMATIC, and this element samples its backdrop, so the vibrancy has ` +
   'to fold into the grade that fragment already runs -- and that grade is three SCALARS (Brightness, ' +
   'Saturation, Contrast) applied to all three channels. A per-channel offset needs three more instance ' +
   "floats, and the stride is already 60 = exactly 15 vec4 attributes of WebGL2's guaranteed 16. Use a " +
-  'GRAY lift on this element (the amount still carries the theme flip), or put the color in the ' +
+  'GRAY vibrancy on this element (the amount still carries the theme flip), or put the color in the ' +
   "element's own paint.";
 
 /** True when a non-glass panel has any non-default backdrop filter set
@@ -146,9 +144,9 @@ const _refuseChromaticGraded = (v: { R: number; G: number; B: number; Amount: nu
  *  like glass does, so the shader's backdrop sample reflects everything
  *  drawn behind the panel.
  *
- *  A `Lift(n)` counts only when it is folded into the grade (Core/Lift.ts): that is the one case in
- *  which the packer writes a non-identity Brightness / Contrast the fragment will sample with. A lift
- *  drawn UNDER the element reads nothing and is its own draw. */
+ *  A vibrancy counts only when it is folded into the grade (Core/Vibrancy.ts): that is the one case in
+ *  which the packer writes a non-identity Brightness / Contrast the fragment will sample with. One drawn
+ *  UNDER the element reads nothing and is its own draw. */
 const _hasBackdropFilter = (node: Jiv): boolean => {
   const s = node.RenderStyle;
   return Math.abs(s.BackdropBrightness - 1) > 0.001
@@ -156,20 +154,25 @@ const _hasBackdropFilter = (node: Jiv): boolean => {
     || Math.abs(s.BackdropContrast - 1) > 0.001
     || s.BackdropFrostBlur > 0.001
     || Math.abs(s.Tint) > 0.001
-    || LiftGraded(node) !== 0;
+    || _isFolded(node);
 };
 
-/** The additive zones ONE node takes this frame, resolved once per node by `_liftZonesOf`.
+/** True when this node's backdrop vibrancy folds into its grade. */
+const _isFolded = (node: Jiv): boolean => {
+  const g = VibrancyGraded(node);
+  return g.Amount !== 0 || g.Cover !== 0;
+};
+
+/** The vibrancy zones ONE node takes this frame, resolved once per node by `_vibrancyZonesOf`.
  *
- *  `Shape` is the additive draw of the element's own silhouette (null = none). `Ink` is the blend the
- *  element's PANEL takes, and `TextInk` the blend its TEXT batch takes -- two fields because they are
- *  two draws, and `TextFilter: Lift()` moves only the second. `TextScale` multiplies the glyph
- *  instance's tint lane so the ink adds `|amount|` of its own color; it is 1 whenever the ink is not
- *  scaled, which keeps every pre-existing path byte-identical. */
-interface LiftZones {
-  Shape: LiftValue | null;
-  Ink: CompositeBlend | null;
-  TextInk: CompositeBlend | null;
+ *  `Shape` is the shape draw of the element's own silhouette (null = none). `Ink` is the blend the
+ *  element's PANEL takes, and `TextInk` the blend its TEXT batch takes: two fields because they are two
+ *  draws, and `TextFilter: Vibrancy()` moves only the second. `TextScale` multiplies the glyph
+ *  instance's tint lane so the ink brings `|amount|` of its own color; 1 whenever it is not scaled. */
+interface VibrancyZones {
+  Shape: VibrancyValue | null;
+  Ink: VibrancyBlend | null;
+  TextInk: VibrancyBlend | null;
   TextScale: number;
 }
 
@@ -1059,33 +1062,25 @@ export class Canvas implements DirtyTracker {
    *  engine's emission byte for byte in the same binary. `_isEmptyPanel` carries the rule. */
   private _emptyPanelCull: boolean = true;
   private _emptyPanelStats = { Panels: 0, Px: 0, Refused: '' };
-  /** THE ADDITIVE COLOR, per rendered frame (Core/Lift.ts). ONE instrument: `__jauiLift()` and the
-   *  `jaui:lift` gate line are both built from this object by `_liftCensus()`, so the two cannot
-   *  disagree -- they did once, and it cost a round trip to notice.
+  /** VIBRANCY, per rendered frame (Core/Vibrancy.ts). ONE instrument: `__jauiVibrancy()` and the
+   *  `jaui:vibrancy` gate line are both built from this object by `_vibrancyCensus()`.
    *
-   *    Authored / Inherited   where each applied lift came from. An AUTHORED lift emits the additive
-   *                           shape draw; an INHERITED one only makes the node's own ink add.
-   *    IgnoredSampling        inherited lifts a node DROPPED because it samples its backdrop, which
-   *                           is not an error -- a cascade that threw the moment it contained one
-   *                           glass child would be unusable.
+   *    Authored / Inherited   where each applied vibrancy came from. An AUTHORED one emits the shape
+   *                           draw; an INHERITED one only makes the node's own paint vibrant.
+   *    IgnoredSampling        inherited vibrancy a node DROPPED because it samples its backdrop.
    *    Under / Graded         the two implementations of the shape draw.
-   *    Refused                why each graded lift could not go under, by name.
-   *    Builds                 every pyramid build an UNDER-drawn element's own paint caused, which
-   *                           must be 0. NON-ZERO IS THIS LANE FAILING.
-   *    CascadeVisited         nodes the lift cascade walked -- its whole cost, since it is one more
-   *                           field on a walk that already runs.
-   *    CascadeCarried         of those, how many came out with a non-None value.
-   *    PanelBatches           the shared Color-batch draws: an additive draw landing mid-run splits
-   *                           one batch into two, so a scene read with and without one prices the
-   *                           switches directly. */
-  private _liftStats = {
+   *    Refused                why each graded shape draw could not go under, by name.
+   *    Builds                 every pyramid build an UNDER-drawn element's own paint caused. MUST BE 0.
+   *    CascadeVisited         nodes the cascade walked; CascadeCarried, how many carried a value.
+   *    PanelBatches           the shared Color-batch draws: a shape draw mid-run splits one in two. */
+  private _vibrancyStats = {
     Authored: 0, Inherited: 0, IgnoredSampling: 0, TextInk: 0,
     Under: 0, Graded: 0, Builds: 0,
     CascadeVisited: 0, CascadeCarried: 0,
     PanelBatches: 0, Refused: {} as Record<string, number>,
   };
-  /** The last `jaui:lift` gate line, printed on a SHAPE change rather than per frame. */
-  private _liftLastLine = '';
+  /** The last `jaui:vibrancy` gate line, printed on a SHAPE change rather than per frame. */
+  private _vibrancyLastLine = '';
   /** The last `jaui:emptypanels` gate line, printed on a SHAPE change rather than per frame. */
   private _emptyPanelLastLine = '';
   /** `?atlas-instanced` -- ONE INSTANCED DRAW PER ATLAS LEVEL, and the question it asks.
@@ -2029,20 +2024,13 @@ export class Canvas implements DirtyTracker {
     const memo = this._subtreeDynamicMemo.get(node);
     if (memo !== undefined) return memo;
     const s = node.RenderStyle;
-    // THE ADDITIVE COLOR reads the destination through the blend unit -- both its shape draw and its
-    // ink blend -- and a capture's destination is a CLEARED layer, not the scene: it would add onto
-    // nothing and the lift would silently vanish from the cached bytes.
-    //
-    // `node.EffectiveLift` AND NOT the node's own style. This is the one place inheritance could go
-    // wrong quietly: an INHERITED lift is not in `RenderStyle` at all, so a subtree whose container
-    // declares the lift outside it would pass a style-only check, get captured, and lose its
-    // backdrop with nothing failing. The cascade runs at frame start (beside `_cascadeFilterGrade`)
-    // and the memo is cleared before it, so the value is there when this is asked. `LiftAmount` is
-    // still read for the BACKDROP zone, which is authored per node and never inherited.
+    // VIBRANCY reads the destination through the blend unit, and a capture's destination is a CLEARED
+    // layer, not the scene. `node.EffectiveVibrancy`, not the node's own style, because an INHERITED
+    // value is not in `RenderStyle`; the cascade runs at frame start, before this is asked.
     let dyn = node instanceof Janvas
       || _isGlass(s.Material) || s.Material === 'ProgressiveBlur'
       || _hasBackdropFilter(node)
-      || LiftAmount(s) !== 0 || LiftTouchesInk(s, node.EffectiveLift)
+      || VibrancyIsActive(s.BackdropVibrancy, s.BackdropVibrancyCover) || VibrancyTouchesInk(s, node.EffectiveVibrancy)
       || (s.RimStrength > 0 && s.RimWidth > 0 && s.Background.Color.A < 0.999);
     if (!dyn) {
       const kids = node.Children as Jiv[];
@@ -2793,13 +2781,11 @@ export class Canvas implements DirtyTracker {
     // fresh grade for the subtree.
     this._cascadeFilterGrade(this.Root, 1, 1, 1);
 
-    // Cascade THE ADDITIVE COLOR (Core/Lift.ts). One more field on the same kind of walk, carrying a
-    // VALUE like `color` does -- no new pass, no render target, no copy, which is the whole reason
-    // this shape is affordable on the phone. `Isolate` is the barrier, the same word that already
-    // stops the Filter grade.
-    this._liftStats.CascadeVisited = 0;
-    this._liftStats.CascadeCarried = 0;
-    this._cascadeLift(this.Root, null);
+    // Cascade VIBRANCY (Core/Vibrancy.ts): one more VALUE on the same kind of walk, like `color`. No new
+    // pass, no render target. `Isolate` is the barrier.
+    this._vibrancyStats.CascadeVisited = 0;
+    this._vibrancyStats.CascadeCarried = 0;
+    this._cascadeVibrancy(this.Root, null);
 
     r.Resize(w, h, this._dpr);
     r.BeginFrame();
@@ -2949,7 +2935,7 @@ export class Canvas implements DirtyTracker {
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
       r.PanelDrawBatch(flushW, flushH, null, 0, this._specTiltX, this._specTiltY);
-      this._liftStats.PanelBatches++;
+      this._vibrancyStats.PanelBatches++;
       this._counts.Panels += this._panelBuffer.Count;
       this._panelBuffer.Begin(); // reset count for the next batch
     };
@@ -2978,29 +2964,26 @@ export class Canvas implements DirtyTracker {
       this._textBuffer.Begin();
     };
 
-    // `BackdropFilter: Lift(n)`'s under-draw (Core/Lift.ts). One instance of the element's own shape
-    // -- `Push` with 'LiftOnly', so the radii, the smoothness, the clip stack, the 3D homography and
-    // the opacity are the ones its fill would have used, and coverage is the SAME SDF evaluation --
-    // filled with |n| / 255 and drawn with the additive (n > 0) or reverse-subtract (n < 0) blend.
-    // No snapshot, no sampler, no pyramid. Both batches flush first, because the blend reads the
-    // destination and everything beneath the element has to be in it.
-    const emitLiftUnder = (node: Jiv, value: LiftValue, eff: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number, override: LiftValue | null): void => {
+    // The vibrancy shape draw (Core/Vibrancy.ts). One instance of the element's own shape, `Push`ed as
+    // 'VibrancyOnly', so the radii, smoothness, clip stack, 3D homography and opacity are the ones its
+    // fill would have used, filled with |amount| x color under the vibrancy blend. No snapshot, no
+    // sampler, no pyramid. Both batches flush first: the blend reads everything beneath the element.
+    const emitVibrancyUnder = (node: Jiv, value: VibrancyValue, eff: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number, override: VibrancyValue | null): void => {
       flushPanels();
       flushText();
       this._panelBuffer.Begin();
-      this._panelBuffer.Push(node, this._dpr, eff, clipOffset, clipCount, xformIndex, 'LiftOnly', override);
-      r2.SetCompositeBlend(ShapeBlendOf(value.Amount));
+      this._panelBuffer.Push(node, this._dpr, eff, clipOffset, clipCount, xformIndex, 'VibrancyOnly', override);
+      r2.SetVibrancyBlend(VibrancyBlendOf('Shape', value.Amount, value.Cover));
       r.PanelBeginBatch();
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
       r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
       r.PanelDrawBatch(flushW, flushH, null, 0, this._specTiltX, this._specTiltY, false, null);
       r2.RestoreBlend();
-      r2.NoteLiftDraw();
+      r2.NoteShapeDraw();
       this._counts.Panels++;
       this._panelBuffer.Begin();
     };
-
 
     // ── Teleport elevation ──
     // A subtree mid-teleport (Element.TeleportSeq != 0 — live-reparented, rect
@@ -3249,67 +3232,53 @@ export class Canvas implements DirtyTracker {
       // pass-1/pass-2 boundary -- see `_phasedPaints`. Its children are walked either way.
       const phasedPaints = this._phasedPass === 0 || this._phasedPaints(node);
 
-      // `BackdropFilter: Lift(n)` (Core/Lift.ts). Drawn HERE, before anything of this node's own --
-      // its fill, border, shadow, text, SVG and children all come later in paint order -- which is
-      // the whole guarantee that the lift never reaches the element's ink. `liftBuilds0` brackets the
-      // node's own paint: an under-drawn element that still caused a pyramid build is the lane failing.
-      let liftBuilds0 = -1;
-      // THE ADDITIVE COLOR (Core/Lift.ts). Two independent switches on one element:
+      // VIBRANCY (Core/Vibrancy.ts). Two independent switches on one element:
       //
-      //   `BackdropFilter: Lift()` owns the additive SHAPE DRAW. It has the two implementations --
-      //      UNDER when nothing beside it samples, folded into the grade when something does -- and
-      //      it is byte-identical to what shipped, because a white color times |n| is |n|.
-      //   `Filter: Lift()` / the inherited `Lift:` property own the INK BLEND: the element's own
-      //      paint ADDS instead of covering. When there is no backdrop-zone lift they also emit the
-      //      shape draw, because the color-times-amount has to land somewhere; when there IS one,
-      //      the backdrop zone's draw is the one emitted, since two would double the offset.
+      //   `BackdropFilter: Vibrancy()` owns the SHAPE DRAW, with two implementations: UNDER when
+      //      nothing beside it samples, folded into the grade when something does.
+      //   `Filter: Vibrancy()` / the inherited `Vibrancy:` property make the element's own paint
+      //      vibrant. Where authored they also emit the shape draw, unless the backdrop zone already
+      //      does, since two would double it. Their shape draw never folds: the fold makes the fill
+      //      opaque over the backdrop, which is exactly the destination vibrant paint is drawn against.
       //
-      // THE SHAPE DRAW FOR THE FOREGROUND AND PROPERTY ZONES IS ALWAYS THE UNDER-DRAW -- it never
-      // folds. The fold writes the element's BACKDROP grade, which makes its fill opaque over that
-      // backdrop; that is the exact destination the additive ink is supposed to be adding to, so the
-      // fold is not an equivalent implementation there, it is a different picture. The refusals that
-      // would have sent it folding are already handled: the SAMPLING ones by `_liftZonesOf` (ignored
-      // when inherited, named when authored), and `Filter` / `Shadow` do not apply because there is
-      // no graded alternative for the fold to be equivalent to.
-      //
-      // Emitted HERE, before anything of this node's own -- its fill, border, shadow, text, SVG and
-      // children all come later in paint order -- which is the whole guarantee that the lift never
-      // reaches the element's ink. `liftBuilds0` brackets the node's own paint: an under-drawn
-      // element that still caused a pyramid build is this lane failing.
-      const zones: LiftZones = phasedPaints
-        ? this._liftZonesOf(node)
+      // Emitted HERE, before anything of this node's own, which is the whole guarantee that the shape
+      // draw never reaches the element's ink. `shapeBuilds0` brackets the node's own paint: an
+      // under-drawn element that still caused a pyramid build is this lane failing.
+      let shapeBuilds0 = -1;
+      const zones: VibrancyZones = phasedPaints
+        ? this._vibrancyZonesOf(node)
         : { Shape: null, Ink: null, TextInk: null, TextScale: 1 };
       const blend = zones.Ink;
       if (phasedPaints) {
-        const backdrop = LiftAmount(node.RenderStyle);
-        if (backdrop !== 0) {
-          this._liftStats.Authored++;
-          const bc = node.RenderStyle.BackdropLiftColor;
-          const shape: LiftValue = { R: bc.R, G: bc.G, B: bc.B, Amount: backdrop };
-          const refusal = LiftRefusalOf(node, shape);
+        const backdrop = BackdropVibrancy(node.RenderStyle);
+        const backdropActive = VibrancyIsActive(backdrop.Amount, backdrop.Cover);
+        if (backdropActive) {
+          this._vibrancyStats.Authored++;
+          const bc = node.RenderStyle.BackdropVibrancyColor;
+          const shape: VibrancyValue = { R: bc.R, G: bc.G, B: bc.B, Amount: backdrop.Amount, Cover: backdrop.Cover };
+          const refusal = VibrancyRefusalOf(node, shape);
           if (refusal === 'ChromaticGraded') {
             // The ONE refusal that is an author error rather than a choice of implementation.
-            this._liftStats.Refused[refusal] = (this._liftStats.Refused[refusal] ?? 0) + 1;
+            this._vibrancyStats.Refused[refusal] = (this._vibrancyStats.Refused[refusal] ?? 0) + 1;
             throw new Error(_refuseChromaticGraded(shape));
           }
           if (refusal === null) {
-            liftBuilds0 = r2.PyramidBuilds;
+            shapeBuilds0 = r2.PyramidBuilds;
             // `override` is null, so the packer reads exactly the style lanes it always read.
-            if (!this._diagNoPanels) emitLiftUnder(node, shape, eff, clipMeta.Offset, clipMeta.Count, xformIndex, null);
-            this._liftStats.Under++;
+            if (!this._diagNoPanels) emitVibrancyUnder(node, shape, eff, clipMeta.Offset, clipMeta.Count, xformIndex, null);
+            this._vibrancyStats.Under++;
           } else {
-            this._liftStats.Graded++;
-            this._liftStats.Refused[refusal] = (this._liftStats.Refused[refusal] ?? 0) + 1;
+            this._vibrancyStats.Graded++;
+            this._vibrancyStats.Refused[refusal] = (this._vibrancyStats.Refused[refusal] ?? 0) + 1;
           }
         } else if (zones.Shape !== null) {
-          this._liftStats.Authored++;
-          liftBuilds0 = r2.PyramidBuilds;
-          if (!this._diagNoPanels) emitLiftUnder(node, zones.Shape, eff, clipMeta.Offset, clipMeta.Count, xformIndex, zones.Shape);
-          this._liftStats.Under++;
+          this._vibrancyStats.Authored++;
+          shapeBuilds0 = r2.PyramidBuilds;
+          if (!this._diagNoPanels) emitVibrancyUnder(node, zones.Shape, eff, clipMeta.Offset, clipMeta.Count, xformIndex, zones.Shape);
+          this._vibrancyStats.Under++;
         }
-        // An INHERITED lift emits no shape draw and still makes this node's ink add, so the census
-        // can answer "authored vs inherited" per frame.
-        if (zones.Ink !== null && zones.Shape === null && backdrop === 0) this._liftStats.Inherited++;
+        // An INHERITED vibrancy emits no shape draw and still makes this node's paint vibrant.
+        if (zones.Ink !== null && zones.Shape === null && !backdropActive) this._vibrancyStats.Inherited++;
       }
 
       if (!phasedPaints) {
@@ -3474,9 +3443,9 @@ export class Canvas implements DirtyTracker {
           Stops: node.RenderStyle.ProgressiveBlurStops,
           Opacity: node.EffectiveOpacity,
           Background: node.RenderStyle.Background.Color,
-          // A progressive blur samples anyway, so a Lift() on one always folds (Core/Lift.ts).
+          // A progressive blur samples anyway, so a vibrancy on one always folds (Core/Vibrancy.ts).
           Grading: {
-            ...FoldLift(node.RenderStyle.BackdropBrightness, node.RenderStyle.BackdropContrast, LiftGraded(node)),
+            ...FoldVibrancy(node.RenderStyle.BackdropBrightness, node.RenderStyle.BackdropContrast, VibrancyGraded(node)),
             Saturation: node.RenderStyle.BackdropSaturation,
           },
           ClipOffset: clipMeta.Offset,
@@ -3904,7 +3873,7 @@ export class Canvas implements DirtyTracker {
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
           r.EnableBlend();
-          if (blend !== null) r2.SetCompositeBlend(blend);
+          if (blend !== null) r2.SetVibrancyBlend(blend);
           r.PanelBeginBatch();
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
@@ -3936,32 +3905,23 @@ export class Canvas implements DirtyTracker {
       const anim = this._textAnimators.get(node);
       if (phasedPaints && anim && anim.Words.length > 0 && node.Visible && node.Width > 0 && node.Height > 0) {
         flushPanels();
-        // The INK's blend, which is NOT the panel's: `TextFilter: Lift()` moves this one and leaves
-        // `zones.Ink` null, so the fill keeps covering. With no `TextFilter` this is `zones.Ink` and
-        // the path below is byte-identical to what shipped.
+        // The INK's blend, which is NOT the panel's: `TextFilter: Vibrancy()` moves this one and leaves
+        // `zones.Ink` null, so the fill keeps covering.
         const inkBlend = zones.TextInk;
         if (inkBlend === null) {
           this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 1);
         } else {
-          // The element's own text is its ink too, so it blends -- in a batch of its own, because the
-          // blend state is per draw. The text program writes straight alpha, which PlusLighter's
-          // SRC_ALPHA factor wants, so the contribution is `color * scale * coverage` and a
-          // half-covered glyph edge adds half.
-          //
-          // `flushText()` FIRST drains other nodes' accumulated glyphs under the ordinary blend, so
-          // the composite state cannot leak onto a sibling's text.
+          // Its own batch, because the blend state is per draw; `flushText()` first drains other nodes'
+          // glyphs under the ordinary blend, so the vibrancy state cannot leak onto a sibling's text.
           flushText();
           this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex, zones.TextScale);
-          r2.SetCompositeBlend(inkBlend, node.RenderStyle.TextVibrant);
+          r2.SetVibrancyBlend(inkBlend);
           flushText();
           r2.RestoreBlend();
           r2.NoteBlendDraw();
-          // Counted where the ink ACTUALLY added, not where the zone was authored: this site is
-          // already inside the "has glyphs, visible, non-empty box" guard, so a `TextFilter` on an
-          // element with no text draws nothing and never reads as one. The test is whether the TEXT
-          // zone supplied this blend, so an element blending only because of `Filter: Lift()` still
-          // counts under `authored`/`inherited` and not here.
-          if (TextLiftAmount(node.RenderStyle) !== 0) this._liftStats.TextInk++;
+          // Counted where the ink was drawn, and only when the TEXT zone supplied the blend.
+          const t = TextVibrancy(node.RenderStyle);
+          if (VibrancyIsActive(t.Amount, t.Cover)) this._vibrancyStats.TextInk++;
         }
       }
 
@@ -4011,7 +3971,7 @@ export class Canvas implements DirtyTracker {
         const _fbg = _fs.Background;
         const _inked = node.EffectiveOpacity > 0.001 && (
           (_fbg.Kind !== 'Color' || _fbg.Color.A > 0.001)
-          || liftBuilds0 >= 0
+          || shapeBuilds0 >= 0
           || _fs.ShadowColor.A > 0.001
           || this._hasPaintedBorder(node)
           || (this._textAnimators.get(node)?.Words.length ?? 0) > 0
@@ -4028,7 +3988,7 @@ export class Canvas implements DirtyTracker {
         }
       }
 
-      if (liftBuilds0 >= 0) this._liftStats.Builds += r2.PyramidBuilds - liftBuilds0;
+      if (shapeBuilds0 >= 0) this._vibrancyStats.Builds += r2.PyramidBuilds - shapeBuilds0;
 
       if (this._bcOn) this._bc.Close();
 
@@ -4167,18 +4127,18 @@ export class Canvas implements DirtyTracker {
     // site from style the walk has already resolved.
     this._emptyPanelStats.Panels = 0;
     this._emptyPanelStats.Px = 0;
-    this._liftStats.Authored = 0;
-    this._liftStats.Inherited = 0;
-    this._liftStats.IgnoredSampling = 0;
-    this._liftStats.TextInk = 0;
-    this._liftStats.Under = 0;
-    this._liftStats.Graded = 0;
-    this._liftStats.Builds = 0;
-    // NOT CascadeVisited / CascadeCarried: the lift cascade runs EARLIER in this same frame (beside
+    this._vibrancyStats.Authored = 0;
+    this._vibrancyStats.Inherited = 0;
+    this._vibrancyStats.IgnoredSampling = 0;
+    this._vibrancyStats.TextInk = 0;
+    this._vibrancyStats.Under = 0;
+    this._vibrancyStats.Graded = 0;
+    this._vibrancyStats.Builds = 0;
+    // NOT CascadeVisited / CascadeCarried: the vibrancy cascade runs EARLIER in this same frame (beside
     // _cascadeFilterGrade), so it resets its own two counters at its call site. Zeroing them here
     // would erase the reading before anything printed it.
-    this._liftStats.PanelBatches = 0;
-    this._liftStats.Refused = {};
+    this._vibrancyStats.PanelBatches = 0;
+    this._vibrancyStats.Refused = {};
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
     if (this._phasedWalk && !this._diagNoUi) {
       // THE PHASED COMPOSITION, run for `?blur-phased` and for the DEFAULT `?pyramid-atlas` alike
@@ -4430,16 +4390,11 @@ export class Canvas implements DirtyTracker {
       if (line !== this._emptyPanelLastLine) { this._emptyPanelLastLine = line; JTrace(line); }
     }
 
-    // THE ADDITIVE COLOR's gate, on a SHAPE change. `liftBuilds=` is the claim: an under-drawn
-    // lift costs one draw and two blend switches and NO build, so anything but 0 there is the lane
-    // failing. `refused=` names every graded lift's reason, so which implementation a class took is
-    // never a mystery. `blendSwitches=` against `panelBatches=` is what the switches cost the batch.
+    // VIBRANCY's gate, on a SHAPE change. `builds=` is the claim: an under-drawn shape draw costs one
+    // draw and two blend switches and NO build. `refused=` names every graded reason.
     if (!this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
-      // ONE instrument. The line is FORMATTED FROM the same census object `__jauiLift()` returns, so
-      // the two cannot print different numbers. They did once -- the line had `blends=` and the
-      // census did not -- and it cost a round trip to notice.
-      const line = LiftGateLine(this._liftCensus());
-      if (line !== this._liftLastLine) { this._liftLastLine = line; JTrace(line); }
+      const line = VibrancyGateLine(this._vibrancyCensus());
+      if (line !== this._vibrancyLastLine) { this._vibrancyLastLine = line; JTrace(line); }
     }
 
     // `?glass-presample`'s gate, on the same terms: a SHAPE change, not a frame.
@@ -4598,20 +4553,16 @@ export class Canvas implements DirtyTracker {
     for (const child of node.Children) this._cascadeOpacity(child as Jiv, eff);
   };
 
-  /** THE ADDITIVE COLOR's cascade. `CascadeLift` holds the algebra; this is the walk. Writes
-   *  `EffectiveLift` (the value that reaches this node, or null) and `EffectiveLiftAuthored` (whether
-   *  the node is the one that declared it, which is what decides whether it emits the additive SHAPE
-   *  draw -- an inherited lift must not, or the same pixels would be lifted once per descendant).
-   *
-   *  Counted, because the cascade's own cost is part of the effect field. */
-  private _cascadeLift = (node: Jiv, parent: LiftValue | null): void => {
+  /** VIBRANCY's cascade. `CascadeVibrancy` holds the algebra; this is the walk. Writes
+   *  `EffectiveVibrancy` and `EffectiveVibrancyAuthored` (only an authored one emits a shape draw). */
+  private _cascadeVibrancy = (node: Jiv, parent: VibrancyValue | null): void => {
     const rs = node.RenderStyle;
-    const r = CascadeLift(rs.LiftDeclaration, parent, node === this.Root, rs.Isolate);
-    node.EffectiveLift = r.Self;
-    node.EffectiveLiftAuthored = r.Authored;
-    this._liftStats.CascadeVisited++;
-    if (r.Self !== null) this._liftStats.CascadeCarried++;
-    for (const child of node.Children) this._cascadeLift(child as Jiv, r.ToChildren);
+    const r = CascadeVibrancy(rs.VibrancyDeclaration, parent, node === this.Root, rs.Isolate);
+    node.EffectiveVibrancy = r.Self;
+    node.EffectiveVibrancyAuthored = r.Authored;
+    this._vibrancyStats.CascadeVisited++;
+    if (r.Self !== null) this._vibrancyStats.CascadeCarried++;
+    for (const child of node.Children) this._cascadeVibrancy(child as Jiv, r.ToChildren);
   };
 
   private _cascadeFilterGrade = (
@@ -4747,8 +4698,8 @@ export class Canvas implements DirtyTracker {
   private _bcInstallHooks = (): void => {
     const panel = this._panelBuffer;
     const panelPush = panel.Push;
-    panel.Push = (jiv, dpr, m, clipOffset = 0, clipCount = 0, xformIndex = -1, borderMode, liftOverride, shadow) => {
-      panelPush(jiv, dpr, m, clipOffset, clipCount, xformIndex, borderMode, liftOverride, shadow);
+    panel.Push = (jiv, dpr, m, clipOffset = 0, clipCount = 0, xformIndex = -1, borderMode, vibrancyOverride, shadow) => {
+      panelPush(jiv, dpr, m, clipOffset, clipCount, xformIndex, borderMode, vibrancyOverride, shadow);
       if (this._bcOn) this._bcNotePanel(clipOffset, clipCount, xformIndex);
     };
     const text = this._textBuffer;
@@ -5147,7 +5098,7 @@ export class Canvas implements DirtyTracker {
    *    result.a *= opacity * clipAlpha                      -> 0 * anything = 0 (which is why
    *                                                            EffectiveOpacity is not a clause)
    *
-   *  The foreground grade and both dithers that follow write `result.rgb` only; they cannot lift
+   *  The foreground grade and both dithers that follow write `result.rgb` only; they cannot raise
    *  an alpha of 0. And `EnableBlend` / `BeginScenePass` set FUNC_ADD with
    *  `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)` for RGB and `(ONE, ONE_MINUS_SRC_ALPHA)` for alpha, so
    *  `dst.rgb = src.rgb*0 + dst.rgb*1` and `dst.a = 0*1 + dst.a*(1-0)` -- the destination is
@@ -5155,41 +5106,28 @@ export class Canvas implements DirtyTracker {
    *
    *  Every clause below is EXACT rather than an epsilon, because a 0.0005 that survived would
    *  multiply the destination by 0.9995 and that is not the same picture. */
-  /** THE ADDITIVE COLOR's two zones for one element (Core/Lift.ts), resolved at DRAW time because
-   *  both answers depend on the cascade:
+  /** VIBRANCY's zones for one element (Core/Vibrancy.ts), resolved at DRAW time because they depend
+   *  on the cascade:
    *
-   *    Shape  the additive SHAPE draw's color+amount, or null. Emitted only where the lift is
-   *           AUTHORED -- `BackdropFilter: Lift()`, `Filter: Lift()`, or the `Lift:` property
-   *           declared on this node. An INHERITED lift never emits one, because cascading a backdrop
-   *           op would lift the same pixels once per descendant.
-   *    Ink    the GL state this element's OWN paint takes to ADD instead of cover, or null for
-   *           source-over. `Filter: Lift()` and the `Lift:` property (authored OR inherited) set it;
-   *           `BackdropFilter: Lift()` never does -- that is what "backdrop only" means.
+   *    Shape  the shape draw's value, or null. Only where AUTHORED: `Filter: Vibrancy()` or the
+   *           `Vibrancy:` property declared on this node (the backdrop zone emits its own).
+   *    Ink    the blend this element's own paint takes, or null for source-over. `Filter: Vibrancy()`
+   *           and the `Vibrancy:` property (authored OR inherited) set it; the backdrop zone never does.
    *
-   *  WHERE THE MORE SPECIFIC SPELLING WINS: a node that authors both a zone function and the `Lift:`
-   *  property takes the FUNCTION's value for that zone. The function names one side of the element;
-   *  the property is the inherited default for both, and a default loses to a statement.
+   *  The zone function wins over the property on the node that authors both: a default loses to a
+   *  statement.
    *
-   *  THE REFUSALS. An element that SAMPLES its backdrop cannot have additive ink at all -- its fill is
-   *  drawn by the glass or progressive-blur branch, not the flat one this blend is wired into. So:
-   *    - an INHERITED lift on such a node is IGNORED and the node paints normally, counted as
-   *      `IgnoredSampling`. A cascade that threw the moment it contained one glass child would be
-   *      unusable, and the author did not put the lift there.
-   *    - an AUTHORED lift on such a node THROWS by name. That is an author error, and the other is not.
-   *  An SVG and a border re-emitted among children (`BorderLayer`) refuse the same way, for the same
-   *  reason: the blend cannot reach the element's paint whole, and a blend that silently skipped part
-   *  of it would be a different picture wearing the property's name. */
-  /** THE ADDITIVE COLOR's effect field, per rendered frame. The ONE instrument: `__jauiLift()`
-   *  returns this object and the `jaui:lift` gate line is formatted from it, so the two cannot
-   *  disagree. The blend counters live on the RENDERER, not in `_liftStats`, because they are counted
-   *  at the draw call -- and they belong here anyway, since without them the ink blend has no evidence
-   *  at all: a page whose additive ink silently did nothing would read identically to one where it
-   *  worked. */
-  private _liftCensus = (): LiftCensus => {
+   *  An element that SAMPLES its backdrop cannot have vibrant paint: its fill is drawn by the glass or
+   *  progressive-blur branch. An INHERITED value there is ignored (`IgnoredSampling`); an AUTHORED one
+   *  throws by name. An SVG and a border re-emitted among children refuse the same way. The ink zone
+   *  is exempt from all of this: the text is its own batch, after the material has committed. */
+  /** VIBRANCY's effect field, per rendered frame: `__jauiVibrancy()` returns it and the gate line is
+   *  formatted from it. The blend counters live on the RENDERER, counted at the draw call. */
+  private _vibrancyCensus = (): VibrancyCensus => {
     const gl2 = this._renderer instanceof WebGL2Renderer ? this._renderer : null;
-    const st = this._liftStats;
+    const st = this._vibrancyStats;
     return {
-      Armed: Lift.Mode,
+      Armed: Vibrancy.Mode,
       Authored: st.Authored,
       Inherited: st.Inherited,
       IgnoredSampling: st.IgnoredSampling,
@@ -5200,76 +5138,57 @@ export class Canvas implements DirtyTracker {
       CascadeVisited: st.CascadeVisited,
       CascadeCarried: st.CascadeCarried,
       PanelBatches: st.PanelBatches,
-      LiftDraws: gl2 === null ? 0 : gl2.LiftDraws,
+      ShapeDraws: gl2 === null ? 0 : gl2.ShapeDraws,
       Blends: gl2 === null ? 0 : gl2.BlendDraws,
       BlendSwitches: gl2 === null ? 0 : gl2.BlendSwitches,
       Refused: { ...st.Refused },
     };
   };
 
-  private _liftZonesOf = (node: Jiv): LiftZones => {
+  private _vibrancyZonesOf = (node: Jiv): VibrancyZones => {
     const s = node.RenderStyle;
-    const eff = node.EffectiveLift;
-    const fgAmount = LiftInkAmount(s.ForegroundLift);
-    const propAmount = eff === null ? 0 : LiftInkAmount(eff.Amount);
+    const eff = node.EffectiveVibrancy;
+    const fg = ForegroundVibrancy(s);
+    const prop = CascadedVibrancy(eff);
 
-    // THE INK ZONE (`TextFilter: Lift()`), resolved FIRST and INDEPENDENTLY of everything below.
-    //
-    // It does not pass through the sampling refusals and it must not: those refuse an element whose
-    // own paint "cannot be reached whole", and they are right about the fill, the border and the
-    // shadow, which are one fragment with the material. The TEXT is not in that fragment -- it is
-    // emitted into its own batch, from its own atlas, after the material has committed -- so a glass
-    // surface's ink can add while its body samples its backdrop exactly as before. That is the
-    // capability this zone exists for, and it is why the refusal list below is not consulted.
-    //
-    // It also emits NO shape draw, so it never reaches `Shape` and can never raise `Under`/`Graded`.
-    const textAmount = TextLiftAmount(s);
-    // A vibrant ink is its own blend and scales nothing; it takes the text batch whatever the lift says.
-    const vibrant = s.TextVibrant > VIBRANT_EPSILON;
-    const textInk = vibrant ? 'Vibrant' : textAmount !== 0 ? InkBlendOf(textAmount) : null;
-    const textScale = !vibrant && textAmount !== 0 ? LiftInkScale(textAmount) : 1;
+    // THE INK ZONE, resolved first and independently: it emits no shape draw and is exempt from the
+    // sampling refusals below.
+    const text = TextVibrancy(s);
+    const textActive = VibrancyIsActive(text.Amount, text.Cover);
+    const textInk = textActive ? VibrancyBlendOf('Ink', text.Amount, text.Cover) : null;
+    const textScale = textActive ? VibrancyInkScale(text.Amount) : 1;
 
-    // The ink amount: the `Filter` zone's if it was authored, else the cascaded property's.
-    const inkAmount = fgAmount !== 0 ? fgAmount : propAmount;
-    const inkColor: LiftValue = fgAmount !== 0
-      ? { R: s.ForegroundLiftColor.R, G: s.ForegroundLiftColor.G, B: s.ForegroundLiftColor.B, Amount: fgAmount }
-      : (eff ?? LIFT_WHITE);
+    // The paint's level: the `Filter` zone's if authored, else the cascaded property's.
+    const fgActive = VibrancyIsActive(fg.Amount, fg.Cover);
+    const level = fgActive ? fg : prop;
+    if (!VibrancyIsActive(level.Amount, level.Cover)) return { Shape: null, Ink: null, TextInk: textInk, TextScale: textScale };
+    const color = fgActive ? s.ForegroundVibrancyColor : (eff ?? { R: 1, G: 1, B: 1 });
 
-    if (inkAmount === 0) return { Shape: null, Ink: null, TextInk: textInk, TextScale: textScale };
-
-    // Authored HERE means this node named the lift, in either zone: only then does it emit the shape
-    // draw. `EffectiveLiftAuthored` is the property's half; a `Filter: Lift()` is authored by
-    // definition.
-    const authoredHere = fgAmount !== 0 || node.EffectiveLiftAuthored;
+    // Authored HERE means this node named it, in either spelling: only then does it emit the shape draw.
+    const authoredHere = fgActive || node.EffectiveVibrancyAuthored;
 
     const why = s.Material !== 'None' ? `its material is ${s.Material}`
-      : LiftSamplesBackdrop(s) ? 'it samples its backdrop (BackdropFilter / Tint)'
+      : VibrancySamplesBackdrop(s) ? 'it samples its backdrop (BackdropFilter / Tint)'
       : node.SvgVector ? 'it paints an SVG'
       : s.BorderLayer !== 0 && this._hasPaintedBorder(node) ? 'its border is re-emitted among its children (BorderLayer)'
       : '';
     if (why !== '') {
       if (!authoredHere) {
-        // Inherited: drop it, count it, paint normally. Not an error. The INK zone survives this --
-        // it was never subject to the refusal (see above), so a glass child inside an additive
-        // cascade still honors its own `TextFilter`.
-        this._liftStats.IgnoredSampling++;
+        this._vibrancyStats.IgnoredSampling++;
         return { Shape: null, Ink: null, TextInk: textInk, TextScale: textScale };
       }
       throw new Error(
-        `[Jaui] Lift(): the FOREGROUND zone makes this element's own paint ADD instead of cover, and ` +
-        `this element's paint cannot be reached whole: ${why}. Author the lift on BackdropFilter ` +
-        '(what is under the element lifts, and its own paint still covers), or set Isolate: true to ' +
-        'stop the cascade before it reaches this node.',
+        `[Jaui] Filter: Vibrancy() makes this element's own paint vibrant, and this element's paint cannot be ` +
+        `reached whole: ${why}. Author it on BackdropFilter (what is under the element is treated, and its ` +
+        'own paint still covers), or set Isolate: true to stop the cascade before it reaches this node.',
       );
     }
+    const ink = VibrancyBlendOf('Ink', level.Amount, level.Cover);
     return {
-      Shape: authoredHere ? { R: inkColor.R, G: inkColor.G, B: inkColor.B, Amount: inkAmount } : null,
-      Ink: InkBlendOf(inkAmount),
-      // `TextFilter` is the more specific zone, so it WINS for the ink when both are authored. The
-      // two are not in conflict and neither is refused: `Filter` still governs the panel draw and
-      // the shape draw, `TextFilter` governs the text batch, and they are different draws. With no
-      // `TextFilter` this is `InkBlendOf(inkAmount)`, which is byte-identical to what shipped.
-      TextInk: textInk ?? InkBlendOf(inkAmount),
+      Shape: authoredHere ? { R: color.R, G: color.G, B: color.B, Amount: level.Amount, Cover: level.Cover } : null,
+      Ink: ink,
+      // `TextFilter` is the more specific zone, so it wins for the text when both are authored.
+      TextInk: textInk ?? ink,
       TextScale: textScale,
     };
   };
@@ -5297,8 +5216,8 @@ export class Canvas implements DirtyTracker {
     // Nothing that reads the destination. THE ADDITIVE COLOR does: an element whose own ink ADDS is
     // not compositing `x * 1 + c * 0`, and withholding its quad is not provably a no-op. This clause
     // was inert while `BlendMode` reached no draw call; it is live now, and it reads the CASCADE
-    // result because an inherited lift is not in this node's own style.
-    if (LiftTouchesInk(s, node.EffectiveLift)) return false;
+    // result because an inherited vibrancy is not in this node's own style.
+    if (VibrancyTouchesInk(s, node.EffectiveVibrancy)) return false;
     const bg = s.Background;
     // An image's alpha lives in the texture and the CPU cannot read it.
     if (bg.Kind === 'Image') return false;
@@ -5877,8 +5796,8 @@ export class Canvas implements DirtyTracker {
     if (effH !== null || eff[1] !== 0 || eff[2] !== 0 || eff[0] <= 0 || eff[3] <= 0) return;
     // An element whose own ink ADDS instead of covering is not a coverer at all, however opaque its
     // fill: it does not hide what is beneath it, it brightens it. Reads the CASCADE result, because
-    // an inherited lift is not in this node's own style.
-    if (LiftTouchesInk(rs, node.EffectiveLift)) return;
+    // an inherited vibrancy is not in this node's own style.
+    if (VibrancyTouchesInk(rs, node.EffectiveVibrancy)) return;
 
     const d = this._dpr;
     const r = this._occlusionShapeRect(node, eff);
@@ -6695,15 +6614,10 @@ export class Canvas implements DirtyTracker {
     }
   };
 
-  /** `inkScale` is `TextFilter: Lift()`'s amount as a fraction of full scale, multiplied into the
-   *  glyph instance's TINT lane -- which is already an RGBA multiplier on the raster, so an additive
-   *  ink costs no attribute, no shader change and no second atlas entry. 1 is "unscaled" and is what
-   *  every path but a lifted ink passes, so those stay byte-identical.
-   *
-   *  RGB ONLY, never the alpha: the fragment writes `texel * tint * opacity * clipAlpha` and the
-   *  blend's source factor is `SRC_ALPHA`, so the contribution is `rgb * a`. Scaling rgb keeps that
-   *  LINEAR in glyph coverage (a half-covered edge adds half); scaling alpha as well would square the
-   *  coverage and thin every antialiased edge -- the `a-squared` trap. */
+  /** `inkScale` is `TextFilter: Vibrancy()`'s |amount|, multiplied into the glyph instance's TINT lane
+   *  (already an RGBA multiplier on the raster), so vibrant ink costs no attribute and no second atlas
+   *  entry. RGB only: the premultiplied output multiplies by coverage once, and scaling the alpha too
+   *  would square it and thin every antialiased edge. 1 is unscaled. */
   private _emitTextFor = (node: Jiv, m: Mat2x3, clipOffset: number, clipCount: number, xformIndex: number = -1, inkScale: number = 1): void => {
     if (node.Width <= 0 || node.Height <= 0 || !node.Visible) return;
     const anim = this._textAnimators.get(node);
@@ -9230,28 +9144,22 @@ export class Canvas implements DirtyTracker {
       const g = globalThis as unknown as { __jauiEmptyPanels?: () => EmptyPanelCensus };
       g.__jauiEmptyPanels = () => ({ Armed: this._emptyPanelCull, ...this._emptyPanelStats });
     }
-    // `?lift=` -- `BackdropFilter: Lift(n)`'s two implementations (Core/Lift.ts). Default `on`: the
-    // engine draws a lift under its element when nothing else there samples, and folds it into the
-    // grade when something does. `graded` sends EVERY lift through the fold -- the equivalence arm,
-    // whose pixels must match `on` to the blend unit's precision and whose `builds=` rises by one per
-    // lift. `off` draws no lift at all, the null arm.
-    if (params.has('lift')) {
-      const raw = (params.get('lift') ?? '').trim();
+    // `?vibrancy=` -- the shape draw's two implementations (Core/Vibrancy.ts). Default `on`: under the
+    // element when nothing else there samples, folded into the grade when something does. `graded`
+    // sends EVERY shape draw through the fold, the equivalence arm; `off` draws none, the null arm.
+    if (params.has('vibrancy')) {
+      const raw = (params.get('vibrancy') ?? '').trim();
       if (raw !== 'on' && raw !== 'graded' && raw !== 'off') {
-        throw new Error(`[Jaui] ?lift takes 'on', 'graded' or 'off', got '${raw}'`);
+        throw new Error(`[Jaui] ?vibrancy takes 'on', 'graded' or 'off', got '${raw}'`);
       }
-      Lift.Mode = raw as LiftMode;
+      Vibrancy.Mode = raw as VibrancyMode;
     }
-    JTrace(`jaui:lift armed=${Lift.Mode} default=${!params.has('lift')}`
-      + (Lift.Mode === 'on' ? '' : ' pixels=DIFFERENT'));
+    JTrace(`jaui:vibrancy armed=${Vibrancy.Mode} default=${!params.has('vibrancy')}`
+      + (Vibrancy.Mode === 'on' ? '' : ' pixels=DIFFERENT'));
     {
-      const g = globalThis as unknown as { __jauiLift?: () => unknown };
-      // The blend counters live on the RENDERER, not in _liftStats, because they are counted at the
-      // draw call. They belong here anyway: the census is the attributable half of this lane's gate,
-      // and without them the ink blend has no evidence at all -- a page whose additive ink silently
-      // did nothing would read identically to one where it worked. Draws and Switches, the same two
-      // the gate line prints, so the two instruments cannot disagree.
-      g.__jauiLift = () => this._liftCensus();
+      const g = globalThis as unknown as { __jauiVibrancy?: () => unknown };
+      // The blend counters live on the RENDERER, counted at the draw call.
+      g.__jauiVibrancy = () => this._vibrancyCensus();
     }
     // `?blur-cache=on|off|verify` -- A CLEAN BACKDROP DOES NOT REBUILD ITS BLUR. Default ON.
     //
