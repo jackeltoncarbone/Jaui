@@ -571,6 +571,9 @@ export class WebGL2Renderer implements Renderer {
   private _textInstanceData = new Float32Array(0);
   private _textInstanceCount = 0;
   private _textResolutionLoc!: WebGLUniformLocation | null;
+  private _textInkCoverLoc: WebGLUniformLocation | null = null;
+  /** The vibrant ink's cover for the next text draw, 0 for every ordinary one (`SetCompositeBlend`). */
+  private _textInkCover = 0;
   private _textViewOffsetLoc!: WebGLUniformLocation | null;
   private _textAtlasLoc!: WebGLUniformLocation | null;
 
@@ -1784,6 +1787,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(this._textAtlasLoc, 0);
     gl.uniform1i(this._textClipTexLoc, 1);
     gl.uniform1i(this._textXformTexLoc, 2);
+    gl.uniform1f(this._textInkCoverLoc, this._textInkCover);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(atlas));
@@ -4539,11 +4543,19 @@ export class WebGL2Renderer implements Renderer {
    *  `Screen` was the fifth and it is GONE with `BlendMode`. It was the only one that needed a
    *  premultiplied source -- its destination factor is `1 - src*a` and no blend factor forms a product
    *  -- which is why `u_PremulOut` existed and why it left too. Undone by `RestoreBlend`, which the
-   *  caller owes before anything else draws. */
-  SetCompositeBlend = (kind: CompositeBlend): void => {
+   *  caller owes before anything else draws.
+   *
+   *  `Vibrant` is the one premultiplied state: the text program writes `ink * a` over `cover * a` while
+   *  `vibrantCover` is set (its `u_InkCover`, Core/Lift.ts), and the factors are `ONE, ONE_MINUS_SRC_ALPHA`. */
+  SetCompositeBlend = (kind: CompositeBlend, vibrantCover: number = 0): void => {
     const gl = this._gl;
     gl.enable(gl.BLEND);
+    this._textInkCover = kind === 'Vibrant' ? vibrantCover : 0;
     switch (kind) {
+      case 'Vibrant':
+        gl.blendEquation(gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        break;
       case 'LiftAdd':
         gl.blendEquation(gl.FUNC_ADD);
         gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.ZERO, gl.ONE);
@@ -4568,6 +4580,7 @@ export class WebGL2Renderer implements Renderer {
    *  factors, straight output. */
   RestoreBlend = (): void => {
     const gl = this._gl;
+    this._textInkCover = 0;
     gl.blendEquation(gl.FUNC_ADD);
     this.EnableBlend();
     this._sceneLedger.BlendSwitches++;
@@ -4782,6 +4795,7 @@ export class WebGL2Renderer implements Renderer {
     this._textInstanceBuffer = buf;
 
     this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
+    this._textInkCoverLoc = gl.getUniformLocation(this._textShader.Program, 'u_InkCover');
     this._textViewOffsetLoc = gl.getUniformLocation(this._textShader.Program, 'u_ViewOffset');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
     this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');

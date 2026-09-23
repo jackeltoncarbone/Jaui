@@ -121,7 +121,7 @@ export const THEME_LIGHT_VAR = 'Light';
 // nothing at all and its var was never resolved. One optional nested level is exactly what a color
 // function needs, and it is bounded rather than a general balanced-paren scan, because a grade
 // argument is an ARITHMETIC expression over vars and only its color argument nests.
-const _GRADE_FN = /(Brightness|Saturate|Contrast|Lift)\s*\(((?:[^()]|\([^()]*\))*)\)/gi;
+const _GRADE_FN = /(Brightness|Saturate|Contrast|Lift|Vibrant)\s*\(((?:[^()]|\([^()]*\))*)\)/gi;
 
 /** A grade argument may be a length expression over vars, so a material can state its per-theme grade in
  *  one line: `Contrast(0.6 * @Dark + 1 * @Light)`, and a wash its per-theme lift: `Lift(@JwiftWashLift)`.
@@ -296,6 +296,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     LiftDeclaration: _resolveLiftProperty(ResolveTernary(s.Lift, ctx), ctx),
     ForegroundLift: fg.Lift,
     TextLift: ink.Lift,
+    TextVibrant: ink.Vibrant,
     ForegroundLiftColor: _resolveLiftColor(fg.LiftColor, ctx),
     BackdropLiftColor: _resolveLiftColor(backdrop.LiftColor, ctx),
 

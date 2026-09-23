@@ -80,6 +80,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // grade. Signed, for the same theme-flip reason as its foreground sibling. There is no color to
   // snap beside it: the ink's color is `Color`, which the text animator already springs.
   ['TextFilter',             s => s.TextLift,                     (s, v) => { s.TextLift = v; }],
+  ['TextFilter',             s => s.TextVibrant,                  (s, v) => { s.TextVibrant = v; }],
 
   // Lighting
   ['LightAngle',             s => s.LightAngle,                   (s, v) => { s.LightAngle = v; }],

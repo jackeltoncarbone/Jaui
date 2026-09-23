@@ -388,6 +388,10 @@ export interface JivRenderStyle {
    *  There is no `TextLiftColor`: the ink's color is `Color` on the text style, which is exactly why
    *  the text zone refuses a color argument (`Filter.Parse._refuseInText`). */
   TextLift: number;
+  /** `TextFilter: Vibrant()`'s cover, 0..1; 0 = the ink covers. The ink is drawn over what is under it at
+   *  `cover` of its coverage with its own `Color` added at full coverage: `dst (1 - cover a) + Color a`,
+   *  Apple's tab bar ink, which keeps the hue of the glass under it (Core/Lift.ts, `Vibrant`). */
+  TextVibrant: number;
   /** `Filter: Lift()`'s color, 0..1 per channel. White when the one-argument spelling was used. */
   ForegroundLiftColor: Color;
   /** `BackdropFilter: Lift()`'s color, 0..1 per channel. White when the one-argument spelling was

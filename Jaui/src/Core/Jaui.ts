@@ -19,6 +19,7 @@ import {
   CascadeLift, FoldLift, InkBlendOf, Lift, LiftAmount, LiftGateLine, LiftGraded, LiftInkAmount,
   LiftInkScale, LiftRefusalOf, LiftSamplesBackdrop, LiftTouchesInk, LIFT_WHITE, ShapeBlendOf,
   TextLiftAmount,
+  VIBRANT_EPSILON,
   type CompositeBlend, type LiftCensus, type LiftMode, type LiftValue,
 } from './Lift';
 import { TextInstanceBuffer, TEXT_FLOATS_PER_INSTANCE } from '../Text/Text.InstanceBuffer';
@@ -3951,7 +3952,7 @@ export class Canvas implements DirtyTracker {
           // the composite state cannot leak onto a sibling's text.
           flushText();
           this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex, zones.TextScale);
-          r2.SetCompositeBlend(inkBlend);
+          r2.SetCompositeBlend(inkBlend, node.RenderStyle.TextVibrant);
           flushText();
           r2.RestoreBlend();
           r2.NoteBlendDraw();
@@ -5223,8 +5224,10 @@ export class Canvas implements DirtyTracker {
     //
     // It also emits NO shape draw, so it never reaches `Shape` and can never raise `Under`/`Graded`.
     const textAmount = TextLiftAmount(s);
-    const textInk = textAmount !== 0 ? InkBlendOf(textAmount) : null;
-    const textScale = textAmount !== 0 ? LiftInkScale(textAmount) : 1;
+    // A vibrant ink is its own blend and scales nothing; it takes the text batch whatever the lift says.
+    const vibrant = s.TextVibrant > VIBRANT_EPSILON;
+    const textInk = vibrant ? 'Vibrant' : textAmount !== 0 ? InkBlendOf(textAmount) : null;
+    const textScale = !vibrant && textAmount !== 0 ? LiftInkScale(textAmount) : 1;
 
     // The ink amount: the `Filter` zone's if it was authored, else the cascaded property's.
     const inkAmount = fgAmount !== 0 ? fgAmount : propAmount;

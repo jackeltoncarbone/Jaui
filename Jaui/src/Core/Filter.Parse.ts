@@ -114,6 +114,10 @@ export interface ParsedFilter {
    *  WHITE -- kept as null rather than a white Color so `Lift(18)` allocates nothing and stays
    *  byte-identical to what shipped. */
   LiftColor: string | null;
+  /** `Vibrant()`'s cover, 0..1, text zone only. Identity 0 (the ink covers as it always did). The ink is
+   *  then drawn VIBRANT: over what is under it at `cover` of its coverage, its own `Color` added at its
+   *  full coverage, so it keeps the glass's hue under it (Core/Lift.ts, `Vibrant`). */
+  Vibrant: number;
   /** Raw Length string for the backdrop's frost; null when no Blur() was authored. The
    *  resolver resolves this under the live context. */
   BlurRaw: string | null;
@@ -175,7 +179,7 @@ export const AssignStyleWithFilterMerge = (
   }
 };
 
-const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, LiftColor: null, BlurRaw: null, ForegroundBlur: null };
+const IDENTITY: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, LiftColor: null, Vibrant: 0, BlurRaw: null, ForegroundBlur: null };
 
 const _cacheBackdrop = new Map<string, ParsedFilter>();
 const _cacheForeground = new Map<string, ParsedFilter>();
@@ -279,7 +283,7 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
     return IDENTITY;
   }
 
-  const out: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, LiftColor: null, BlurRaw: null, ForegroundBlur: null };
+  const out: ParsedFilter = { Brightness: 1, Saturation: 1, Contrast: 1, Lift: 0, LiftColor: null, Vibrant: 0, BlurRaw: null, ForegroundBlur: null };
   // `null` is a MALFORMED list (an unbalanced paren, a bare token, a name with no call). It has to
   // throw rather than fall through as "nothing matched", because a filter string the author wrote and
   // the engine silently dropped is the exact failure the old regex had.
@@ -354,6 +358,15 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
         if (zone === 'text') throw new Error(_refuseInText('LinearProgressiveBlur', raw));
         out.ForegroundBlur = _parseLinear(arg, raw);
         break;
+      case 'vibrant': {
+        if (zone !== 'text') {
+          throw new Error(`[Jaui] Vibrant() is an ink mode and belongs on TextFilter; got it in "${raw}".`);
+        }
+        const cover = _num(arg, 'Vibrant', raw);
+        if (!(cover > 0 && cover <= 1)) throw new Error(`[Jaui] Vibrant() takes a cover in (0, 1], got ${cover} in "${raw}".`);
+        out.Vibrant = cover;
+        break;
+      }
       case 'edgeprogressiveblur':
         if (zone === 'text') throw new Error(_refuseInText('EdgeProgressiveBlur', raw));
         out.ForegroundBlur = _parseEdge(arg, raw);
@@ -361,7 +374,7 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
       default:
         throw new Error(
           zone === 'text'
-            ? `[Jaui] Unknown TextFilter function "${f.Name}" in "${raw}". TextFilter takes Lift() only.`
+            ? `[Jaui] Unknown TextFilter function "${f.Name}" in "${raw}". TextFilter takes Lift() or Vibrant().`
             : `[Jaui] Unknown filter function "${f.Name}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
               (zone === 'foreground' ? ', Lift, LinearProgressiveBlur, EdgeProgressiveBlur.' : ', Lift.'),
         );
@@ -464,7 +477,7 @@ const _parseEdge = (arg: string, raw: string): ForegroundBlur => {
  *  exists, and it would silently disagree with `Filter` about whether the fill is graded too. The
  *  blurs are refused because a text-only blur is not built at all -- there is no ink-only blur pass. */
 const _refuseInText = (fn: string, raw: string): string =>
-  `[Jaui] TextFilter takes Lift() only; got ${fn}() in "${raw}". ` +
+  `[Jaui] TextFilter takes Lift() or Vibrant(); got ${fn}() in "${raw}". ` +
   (fn === 'Brightness' || fn === 'Saturate' || fn === 'Contrast'
     ? 'The foreground `Filter` already grades this element\'s composited pixels, its own text included, '
       + 'so an ink-only grade would be a second spelling for something that exists. Author the grade on '

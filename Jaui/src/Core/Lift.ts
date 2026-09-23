@@ -150,7 +150,20 @@ export type LiftMode = 'on' | 'graded' | 'off';
  *
  *  `PlusLighter` / `PlusDarker` are Apple's own names for this pair (`CGBlendMode.plusLighter` /
  *  `.plusDarker`); they are no longer authorable under any name. */
-export type CompositeBlend = 'LiftAdd' | 'LiftSubtract' | 'PlusLighter' | 'PlusDarker';
+export type CompositeBlend = 'LiftAdd' | 'LiftSubtract' | 'PlusLighter' | 'PlusDarker' | 'Vibrant';
+
+/** VIBRANT INK (`TextFilter: Vibrant(cover)`), Apple's tab bar glyphs and labels. Measured on the native
+ *  iPhone bars (LiquidGlassGallery Web/Full) as the ink pixel against the glass beside it, per channel:
+ *
+ *      out = (1 - cover) dst + ink            dark:  ink 212 of 255, cover 0.55  (App Store 0.63, Photos 0.48)
+ *                                             light: ink 5 of 255,   cover 0.88  (Music)
+ *
+ *  A white screen fits the brightness but keeps a twentieth of the glass's colour, where Apple's ink
+ *  keeps 63 to 88% of it: the ink is a dimmed copy of the glass with a light added, not a paint. It is a
+ *  PREMULTIPLIED source-over, `ink * a` over `cover * a`, so the text program writes that (its
+ *  `u_InkCover`) and the blend is `ONE, ONE_MINUS_SRC_ALPHA`. Unlike an additive ink it is safe in a
+ *  retained capture: over a cleared target it leaves exactly the premultiplied layer to composite. */
+export const VIBRANT_EPSILON = 1e-4;
 
 /** Why a lift's additive draw did not go UNDER the element. The census prints these by name. The first
  *  eight choose the graded fold instead; `ChromaticGraded` is the one that is an author ERROR, because
