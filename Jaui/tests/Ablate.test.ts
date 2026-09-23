@@ -11,7 +11,9 @@ const JAUI = readFileSync(join(__dirname, '../src/Core/Jaui.ts'), 'utf8').replac
 
 describe('ablate > arms, the per-frame fields they flip, and the cache refusal', () => {
   it('knows its arms and throws on any other by name', () => {
-    expect(JAUI).toContain("const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui'];");
+    expect(JAUI).toContain(`const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui',
+  'snap64', 'snap256'];`);
+    expect(JAUI).toContain('const ABLATE_SNAP: Record<string, number> = { snap64: 64, snap256: 256 };');
     expect(JAUI).toContain("throw new Error(`[Jaui] ?ablate arm '${a}' is not one of ${known.join(',')}`);");
   });
 
@@ -23,12 +25,19 @@ describe('ablate > arms, the per-frame fields they flip, and the cache refusal',
     const start = JAUI.indexOf('private _ablateApply = ');
     const body = JAUI.slice(start, JAUI.indexOf('};', start));
     for (const f of ['_diagNoBlur', '_diagNoPblur', '_diagNoPanels', '_diagNoGlassDraw', '_diagNoShadow',
-      'JivInstanceBuffer.DiagNoShadow', '_occlusion', '_diagNoUi']) {
+      'JivInstanceBuffer.DiagNoShadow', '_occlusion', '_diagNoUi', 'RegionExtentSnap.Unit']) {
       expect(body).toContain(f);
     }
   });
 
   it('the renderer takes the no-blur field per frame, which is what lets the arm switch mid-run', () => {
     expect(JAUI).toContain('if (this._renderer instanceof WebGL2Renderer) this._renderer.DiagNoBlur = this._diagNoBlur;');
+  });
+
+  it('a control slot sits beside every arm, and each arm prints once a cycle', () => {
+    expect(JAUI).toContain("for (const a of tested) arms.push('control', a);");
+    expect(JAUI).toContain('for (const name of new Set(a.Arms)) {');
+    expect(JAUI).toContain('RegionExtentSnap.Unit = ABLATE_SNAP[arm] ?? this._ablateSnapBase;');
+    expect(JAUI).toContain('this._ablateSnapBase = RegionExtentSnap.Unit;');
   });
 });

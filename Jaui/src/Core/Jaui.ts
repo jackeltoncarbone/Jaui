@@ -81,7 +81,12 @@ const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 const SHADOW_DETAIL_MIN_PT = 4;
 /** `?ablate`: the arms it knows, the rendered frames each holds for, and the render-to-render gap
  *  past which the page was idle rather than slow. */
-const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui'];
+const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui',
+  'snap64', 'snap256'];
+/** The `snapN` arms: the blur extent unit each one sets (see `RegionExtentSnap`). A surface whose
+ *  clipped size changes every scrolled frame allocates a new target every frame at unit 1; at unit N
+ *  it allocates once per N px of change. The hero's trace: 14-24 allocations a frame, below it 2-4. */
+const ABLATE_SNAP: Record<string, number> = { snap64: 64, snap256: 256 };
 const ABLATE_FRAMES = 12;
 const ABLATE_IDLE_MS = 250;
 /** `?blur-mips=separable`: the deepest LOD a mip consumer may read and still take the separable plan.
@@ -2125,7 +2130,10 @@ export class Canvas implements DirtyTracker {
     JivInstanceBuffer.DiagNoShadow = arm === 'no-shadow';
     this._occlusion = arm !== 'no-occlusion';
     this._diagNoUi = arm === 'no-ui';
+    RegionExtentSnap.Unit = ABLATE_SNAP[arm] ?? this._ablateSnapBase;
   };
+  /** The extent unit the URL asked for, which every arm but a `snapN` one runs at. */
+  private _ablateSnapBase = 1;
 
   /** Book this render's interval to the arm that drew it, and move on every `ABLATE_FRAMES`. The
    *  first interval after a switch is dropped (its start belongs to the other arm), and so is any
@@ -2151,7 +2159,7 @@ export class Canvas implements DirtyTracker {
     const q = (xs: number[], f: number): number => xs[Math.min(xs.length - 1, Math.floor(f * xs.length))];
     const base = a.Samples.get('control');
     const baseMed = base !== undefined && base.length > 0 ? q([...base].sort((x, y) => x - y), 0.5) : NaN;
-    for (const name of a.Arms) {
+    for (const name of new Set(a.Arms)) {
       const xs = [...(a.Samples.get(name) ?? [])].sort((x, y) => x - y);
       if (xs.length === 0) { JTrace(`jaui:ablate cycle=${a.Cycle} arm=${name} n=0`); continue; }
       const med = q(xs, 0.5);
@@ -10290,7 +10298,15 @@ export class Canvas implements DirtyTracker {
       for (const a of arms) {
         if (!known.includes(a)) throw new Error(`[Jaui] ?ablate arm '${a}' is not one of ${known.join(',')}`);
       }
-      if (!arms.includes('control')) arms.unshift('control');
+      // CONTROL BETWEEN EVERY ARM. Arms run in sequence while the page scrolls, so an arm late in the
+      // cycle meets a different stretch of page than one early in it: the first phone trace had
+      // no-shadow and no-occlusion 8-21 ms SLOWER than control, which is the scroll, not the arm.
+      // Interleaving puts a control slot beside every arm, and the pooled control spans the cycle.
+      const tested = arms.filter((a) => a !== 'control');
+      arms.length = 0;
+      for (const a of tested) arms.push('control', a);
+      if (arms.length === 0) arms.push('control');
+      this._ablateSnapBase = RegionExtentSnap.Unit;
       this._ablate = { Arms: arms, I: 0, Count: 0, Last: 0, Skip: true, Cycle: 0, Samples: new Map() };
       this._ablateApply('control');
       JTrace(`jaui:ablate armed arms=${arms.join(',')} frames=${ABLATE_FRAMES} cache=off`);

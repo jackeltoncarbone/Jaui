@@ -935,6 +935,26 @@ export class MainBridge {
       }
       if (document.readyState === 'complete') queueMicrotask(scan);
       else window.addEventListener('load', () => scan(), { once: true });
+      // EVERY STYLESHEET'S OWN LOAD. `index.html` loads Inter with the media="print" onload swap,
+      // which lets that sheet land AFTER the window `load` event, and the canvas draws all the page's
+      // text so the DOM never asks for Inter and `loadingdone` never fires. Both backstops above
+      // missed it: an iPhone trace (2026-09-23) read `fonts:scan sheets=13 faces=1` and drew every
+      // string in the fallback face, where the same page reads `sheets=14 faces=43` when the sheet
+      // wins the race. A link's own `load` is the one event that cannot lose it. Links added later
+      // (`ensureAppearanceFonts`, the picture font loader) are caught by the observer.
+      const watchLink = (el: Element): void => {
+        if (!(el instanceof HTMLLinkElement) || !el.relList.contains('stylesheet')) return;
+        if (watchedLinks.has(el)) return;
+        watchedLinks.add(el);
+        el.addEventListener('load', () => scan(), { once: true });
+      };
+      const watchedLinks = new WeakSet<HTMLLinkElement>();
+      document.querySelectorAll('link').forEach(watchLink);
+      if (typeof MutationObserver !== 'undefined') {
+        new MutationObserver((records) => {
+          for (const r of records) r.addedNodes.forEach((n) => { if (n instanceof Element) watchLink(n); });
+        }).observe(document.head ?? document.documentElement, { childList: true });
+      }
     }
 
     // Focus state — engine's selection-key suppression looks at this. A

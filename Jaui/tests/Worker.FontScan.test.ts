@@ -8,6 +8,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   FirstFontUrl,
   FontFaceFromDeclarations,
@@ -187,5 +189,18 @@ describe('ShouldFetchSheetText', () => {
   it('does not fetch an inline <style>, which has no url to fetch', () => {
     expect(ShouldFetchSheetText(0, false, null, PAGE_URL)).toBe(false);
     expect(ShouldFetchSheetText(0, true, undefined, PAGE_URL)).toBe(false);
+  });
+});
+
+// The Inter sheet is loaded with the media="print" onload swap, so it can land after the window
+// `load` event, and the canvas draws every string so the DOM never asks for Inter and `loadingdone`
+// never fires. An iPhone trace (2026-09-23) showed that race lost: `fonts:scan sheets=13 faces=1`, and
+// the canvas fell back to the fallback face. A stylesheet link's own `load` is the scan that cannot lose it.
+describe('font scan > every stylesheet link rescans when it loads (source)', () => {
+  const SRC = readFileSync(join(__dirname, '../src/Worker/Bridge.Main.ts'), 'utf8').replace(/\r\n/g, '\n');
+  it('watches the links already on the page and the ones added later', () => {
+    expect(SRC).toContain("el.addEventListener('load', () => scan(), { once: true });");
+    expect(SRC).toContain("document.querySelectorAll('link').forEach(watchLink);");
+    expect(SRC).toContain('}).observe(document.head ?? document.documentElement, { childList: true });');
   });
 });
