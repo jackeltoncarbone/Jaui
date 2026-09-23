@@ -4914,9 +4914,9 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1f(l.xformIndex, p.XformIndex);
     gl.uniform4f(l.naturalRect, p.NaturalX, p.NaturalY, p.NaturalWidth, p.NaturalHeight);
     gl.uniform2f(l.halfSize, p.Shape.HalfWidth, p.Shape.HalfHeight);
-    gl.uniform2f(l.reach, 1, p.CoreWidth + p.Shoulder + 1);
+    gl.uniform2f(l.reach, 1, Math.max(1, p.LobeWidth) * 1.75 + 1);
     gl.uniform2i(l.clip, p.ClipOffset, p.ClipCount);
-    gl.uniform4f(l.rim, p.CoreWidth, p.Shoulder, p.Strength, p.Opacity);
+    gl.uniform4f(l.rim, p.LobeWidth, p.SideWidth, p.Strength, p.Opacity);
     gl.uniform2f(l.lightDirection, Math.cos(p.LightAngle), -Math.sin(p.LightAngle));
     gl.uniform1i(l.clipTex, 1);
     gl.uniform1i(l.xformTex, 2);
@@ -4930,7 +4930,7 @@ export class WebGL2Renderer implements Renderer {
     this._noteSceneDraw();
     gl.blendFuncSeparate(gl.DST_COLOR, gl.ONE, gl.ZERO, gl.ONE);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, outline.Vertices);
-    gl.uniform4f(l.rim, p.CoreWidth, p.Shoulder, p.Strength * RIM_WHITE_SHARE, p.Opacity);
+    gl.uniform4f(l.rim, p.LobeWidth, p.SideWidth, p.Strength * RIM_WHITE_SHARE, p.Opacity);
     gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ZERO, gl.ONE);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, outline.Vertices);
     this.EnableBlend();

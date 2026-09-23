@@ -184,7 +184,7 @@ SectionTitle {
 LiquidGlass {
   Background: rgba(255, 255, 255, 0)
   BorderRadius: 32pt
-  RimWidth: 0.85px
+  RimWidth: 0.95px
   RimStrength: 0.25
 
   ShadowColor: rgba(0, 0, 0, 0.18)
@@ -493,7 +493,7 @@ BorderLayerGlass {
   Thickness: 12pt
   Background: rgba(255, 255, 255, 0.04)
   BorderWidth: 0pt
-  RimWidth: 0.85px
+  RimWidth: 0.95px
   RimStrength: 0.4
   BackdropFilter: Blur(6pt)
 }

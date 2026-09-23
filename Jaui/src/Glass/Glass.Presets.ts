@@ -15,7 +15,7 @@ export const LiquidGlass: Partial<JivStyle> = {
   Background: 'rgba(255, 255, 255, 0)',
   BorderRadius: '32',
   // The rim: Apple's hairline, lit toward LightAngle and its bounce.
-  RimWidth: '0.85px',
+  RimWidth: '0.95px',
   RimStrength: '0.25',
 
   // Ambient drop shadow — Apple shadows are SUBTLE; ~18% alpha, soft blur
@@ -55,7 +55,7 @@ export const LiquidGlass: Partial<JivStyle> = {
 export const ClearGlass: Partial<JivStyle> = {
   Background: 'rgba(255, 255, 255, 0)',
   BorderRadius: '32',
-  RimWidth: '0.85px',
+  RimWidth: '0.95px',
   RimStrength: '0.35',
 
   BackdropFilter: 'Blur(1) Saturate(1.1)',

@@ -3,9 +3,8 @@ import { SS_PILL_CURVE, SS_PILL_SEGMENTS } from './Pill.Curve';
 /**
  * THE RIM: the light a glass edge catches, drawn as a thin strip along the panel's outline and
  * lifted onto what is already there, a gain that keeps the color's hue and a little white
- * (Shaders/Jiv.Rim.frag). Apple's is a core of constant width in
- * device pixels whose brightness follows only the angle to the light, easing into the body over about
- * 3% of the panel's short side.
+ * (Shaders/Jiv.Rim.frag). Apple's is a crisp core in device pixels whose width and brightness both
+ * follow the angle to the light: widest at the lit lobes, about a pixel on the sides.
  *
  * `Jiv.Panel.frag` draws a panel's edge from a distance field (`CornerParams`, `ShapeSDF_inner`,
  * `SS_PillSDF`). This file is that field on the CPU, expression for expression, walked once per shape
@@ -23,8 +22,8 @@ export interface JivShape {
   Smoothness: number;
 }
 
-/** The rim's inner shoulder, as a share of the panel's short side. */
-export const RIM_SHOULDER_FRACTION = 0.03;
+/** The rim's width on the sides, as a share of its width at the lobes (`RimWidth`). */
+export const RIM_SIDE_SHARE = 0.45;
 
 /** One rim draw, in device px. `Shape` and the placement are the panel instance's own
  *  (`JivPanelShapeOf`); a projective panel carries its homography row and natural box instead. */
@@ -40,8 +39,9 @@ export interface RimDrawParams {
   NaturalY: number;
   NaturalWidth: number;
   NaturalHeight: number;
-  CoreWidth: number;
-  Shoulder: number;
+  /** Core width where the rim faces the light, and 90 degrees off it. */
+  LobeWidth: number;
+  SideWidth: number;
   Strength: number;
   Opacity: number;
   /** Radians, the panel's LightAngle. */
