@@ -14,10 +14,10 @@ flat in vec4 v_ShadowParams;   // shadowOffX, shadowOffY, shadowBlur, borderWidt
 flat in vec4 v_StyleParams;    // borderEdgeAa, smoothness, opacity, brightness (fg)
                                // borderEdgeAa: half-width of border/silhouette feather (physical px)
 flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
-flat in vec4 v_Refraction;     // thickness, refraction band, free, refraction amount (device px)
-flat in vec4 v_Lighting;       // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
-flat in vec4 v_Specular;       // specIntensity (edge highlight), specGlow, chromaticAberration, borderFade
-flat in vec4 v_RimEdge;        // edgeLightTop, edgeLightBottom, rim lobe width (device px), rim strength
+flat in vec4 v_Refraction;     // thickness, glass span (pt), glass shadow mode, refraction
+flat in vec4 v_Lighting;       // device px per pt, bodyTint (signed), dark scheme, clear glass
+flat in vec4 v_Specular;       // rim amount, rim height (pt), chromaticAberration, borderFade
+flat in vec4 v_RimEdge;        // glass appearance (1 light), backdrop mean luma, free, free
 flat in vec4 v_Outline;        // free, free, clipOffset, clipCount
 
 // ── MATERIAL_FLAT: the backdrop's whole apparatus is excluded, not branched over ──
@@ -49,20 +49,6 @@ flat in vec4 v_Outline;        // free, free, clipOffset, clipCount
 // With the stroke gone the only surviving consumer of the corner field is its DISTANCE, and
 // `CornerDist` returns it from the same `ContinuousCorner` call `CornerEval` makes, with the normal
 // discarded: the substitution is bit-identical by construction, for every shape.
-//
-// ── THE GLASS PROGRAM'S OWN VARIANT (lane glassreg) ──
-//
-// Defined only TOGETHER with MATERIAL_GLASS, as a pair, routed by `WebGL2Renderer._glassBatchKind`
-// off the packed instance floats, every instance of the batch answering yes or the batch taking the
-// full program (and being counted as a fallback).
-//
-//   GLASS_NO_GLOW       every instance has FresnelStrength exactly +0: the wide rim glow's block
-//                       is excluded, so `edgeLightAlpha` / `edgeLightRgb` keep their 0.0 initialisers
-//                       where the block would have produced +0 and a finite colour. The composite
-//                       stays, and is `r*1 + (+0)` on both sides.
-//   GLASS_NO_SPEC       every instance has SpecularIntensity AND SpecularGlow exactly +0: the
-//                       highlight is excluded. `spec` would have been +-0, adding and scaling by
-//                       nothing.
 #if !defined(MATERIAL_FLAT)
 // Dual-filter blurred backdrop pyramid (base sigma = u_BaseFrostLod equivalent).
 // Mipmapped — each integer LOD above the base ≈ doubles the effective sigma.
@@ -92,14 +78,6 @@ uniform vec2 u_Resolution;
 // texel[3i+2] = (smoothness, _, _, _)     unitless (0 = pure circle corners)
 uniform sampler2D u_ClipTex;
 #if !defined(MATERIAL_FLAT)
-// Specular tilt — added to lightDir ONLY for the highlight, not for the
-// ambient or the edge light. Canvas-wide, set by pointer or gyro each frame. This
-// reproduces Apple's gyro-driven catchlight without sliding the virtual
-// "sun" for the rest of the material.
-uniform vec2 u_SpecularTilt;
-#endif
-
-#if !defined(MATERIAL_FLAT)
 // ── ?glass-skip: THE GLASS DRAW PRICED STAGE BY STAGE ──────────────────────────────────────────
 //
 // ONE uniform bitmask, 0 on every draw the flag did not arm, and 0 on every non-glass draw
@@ -111,20 +89,17 @@ uniform vec2 u_SpecularTilt;
 //
 // Every gate below is a pure INSERTION -- a dangling `else`, an early `return`, or a brace pair
 // around statements whose locals die inside it -- so with the mask at 0 not one expression of the
-// glass path is moved or rewritten. The one exception is the Blinn-Phong catchlight, whose three
-// composite lines move up past the declarations above them (they read none of them), so the
-// catchlight and its own composite sit in one block.
+// glass path is moved or rewritten.
 //
 // `GlassSkips` is a constant `false` in the non-glass program, so every gate folds away there and
 // MATERIAL_NONE compiles to the program it was; MATERIAL_FLAT deletes the whole apparatus. The bit
 // values are `Core/Glass.Skip.ts`'s GLASS_SKIP_STAGES, and `tests/Glass.Skip.test.ts` holds the two
-// tables to each other. The gates are also why the glass program is fast: the uniform branches
-// split its live ranges (`Perf/README`, "THE HEAD CELL").
+// tables to each other.
 uniform int u_GlassSkip;
 const int GLASS_SKIP_BACKDROP = 1;     // every backdrop tap returns GLASS_SKIP_FLAT
 const int GLASS_SKIP_CA       = 2;     // chromatic spread off: the 3-tap fill path becomes 1
-const int GLASS_SKIP_RIM      = 4;     // the wide rim glow: its tap and its lighting math
-const int GLASS_SKIP_SPECULAR = 8;     // the highlight
+const int GLASS_SKIP_RIM      = 4;     // the highlight band
+const int GLASS_SKIP_BLEED    = 8;     // the edge bleed and its tap
 const int GLASS_SKIP_SDF      = 32;    // every corner-field evaluation becomes a sharp-rect distance
 const int GLASS_SKIP_GRADE    = 64;    // the body grade + tint as identity (the border zone grades under border)
 const int GLASS_SKIP_SHADOW   = 128;   // the drop shadow as 0
@@ -336,6 +311,7 @@ vec4 resolveBgFill(vec2 panelLocal) {
 }
 
 #include "Corner.Continuous.glsl"
+#include "Glass.Pipeline.glsl"
 
 // The shape's distance, and its distance with the outward normal: the continuous corner, the one model
 // for every rounded shape (Corner.Continuous.glsl). Both come out of the same function, so a caller
@@ -376,6 +352,15 @@ vec3 applyGrading(vec3 color, float brightness, float saturation, float contrast
 // white, by |tint|. A mix toward black keeps the hue exactly; there is no grey anywhere on the path.
 vec3 applyTint(vec3 color, float tint) {
     return mix(color, vec3(step(0.0, tint)), abs(tint));
+}
+
+// The glass's own read: the pyramid at an absolute LOD of our native scale (Glass.Pipeline.glsl's
+// GlassNativeLod), `pixel` in device px. The pyramid was built at u_BaseFrostLod, so that LOD is its level 0.
+vec3 glassSample(vec2 pixel, float lod) {
+    if (GlassSkips(GLASS_SKIP_BACKDROP)) return GLASS_SKIP_FLAT;
+    vec2 uv = pixel / u_Resolution;
+    uv.y = 1.0 - uv.y;
+    return textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, max(0.0, lod - u_BaseFrostLod)).rgb;
 }
 
 // Sample the backdrop at this Jiv's frost. A Jiv that authored no frost samples the raw scene
@@ -471,63 +456,15 @@ float cornerQueries(vec2 pixel, int offset, int count, bool wantShadow, vec2 sha
 }
 
 
-// ── THE REFRACTION BAND ─────────────────────────────────────────────────────────────────────────────
-// Ported from Kyant0's AndroidLiquidGlass (Apache-2.0): the circle map.
-// Within the band (v_Refraction.y) the sample moves inward along the normal by amount * (1 - sqrt(1 - k^2)),
-// k from 1 at the outline to 0 at the band's inner edge. Steep at the outline, so the edge folds and
-// mirrors a thin arc of what lies inside it. Band and amount are Jiv.InstanceBuffer's, in device px.
-// The normal is a rounded rectangle's with the corner softened to 1.5 bands, so the map has no seam
-// where a small corner's normal would turn.
-vec2 RefractionNormal(vec2 p, vec2 halfSize, float radius) {
-    vec2 q = abs(p) - halfSize + radius;
-    vec2 g = (q.x > 0.0 && q.y > 0.0) ? normalize(q) : (q.x > q.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
-    return g * vec2(p.x < 0.0 ? -1.0 : 1.0, p.y < 0.0 ? -1.0 : 1.0);
-}
-
-// The band's own soft edge, for the highlight: about 1 across the band, 0.5 at its inner edge, about
-// 0 on the face. aave's erf(z) ~ tanh(sqrt(pi) z) over the outline inset by `depth`.
-float BandFalloff(float dist, float depth) {
-    float d = max(depth, 0.5);
-    return 0.5 * (1.0 + tanh(1.7724538509 * (dist + d) / (d * 1.41421356)));
-}
-
 #if defined(RIM_ONLY)
-// ── THE RIM: the light a glass edge catches, lifted onto whatever is already drawn under it ──
+// ── THE RIM OF A SURFACE THAT IS NOT GLASS (a solid card's edge) ──
 //
-// Its own instance of this program, drawn at the node's BorderLayer slot so it lands above the
-// node's content, twice: a GAIN (the destination times 1 + this) that keeps the hue, then a small
-// SCREEN toward white at `u_RimPass` of it (WebGL2.Renderer `PanelRimDraw`). The edge is the face's
-// own corner field, so the rim is concentric with the face by construction and antialiased by it.
-//
-// Apple's rim is lit at two points, where the outline faces the light and its bounce, and dies with
-// distance from them: a Gaussian in the distance to each lit point, reaching RIM_REACH of that
-// corner's radius, over a weaker term in how squarely the edge faces the light. Fitted to the iPhone
-// speaker button (a lobe about 100 degrees wide at half strength, the sides at a tenth of it) and the
-// Safari address pill (its straight top holding a third of the peak past the cap). Its width narrows
-// with it, from `lobe` to RIM_SIDE_SHARE of that.
-uniform float u_RimPass;
-const float RIM_SIDE_SHARE = 0.45;
-const float RIM_REACH = 1.1;
-// The lit lobe, its bounce and the facing term, fitted by angle to Apple's round buttons (the iPhone
-// Photos and App Store search buttons): about +32 at the lit corner, +32 to +48 at the bounce and +25 to
-// +30 at the top, where the bounce at 0.95 of the lit lobe ran +78 to +85.
-const float RIM_LIT = 0.7;
-const float RIM_BOUNCE = 0.35;
-const float RIM_FACING = 0.3;
-const float RIM_TAIL = 0.15;
-
-// Weight of the lobe where the outline faces `light`: the lit point is that corner's arc at the
-// light's angle, so a circle, a pill and a rounded rectangle all light the same way.
-float RimLobe(vec2 p, vec2 halfSize, vec4 radii, vec2 light) {
-    vec2 s = vec2(light.x < 0.0 ? -1.0 : 1.0, light.y < 0.0 ? -1.0 : 1.0);
-    float r = s.y < 0.0 ? (s.x < 0.0 ? radii.x : radii.y) : (s.x < 0.0 ? radii.w : radii.z);
-    float minHalf = min(halfSize.x, halfSize.y);
-    r = min(r, minHalf);
-    vec2 lit = s * (halfSize - r) + r * light;
-    float reach = RIM_REACH * max(r, 0.25 * minHalf);
-    float t = length(p - lit) / reach;
-    return exp(-t * t);
-}
+// Apple's highlight pass (Glass.Pipeline.glsl GlassRim): a 1 pt band lit by the key and fill lights,
+// recoloring what is already drawn under it by vibrantColorMatrix. Glass computes it in its own fragment
+// over its face; this program does the same over whatever lies under a solid surface's edge, which it reads
+// from the scene snapshot the walk takes for it (u_Scene), because the recolor is a matrix of that pixel.
+// Its light or dark matrix follows the pixel's own luma: a solid surface has no probe.
+uniform sampler2D u_RimScene;
 
 void main() {
     vec2 pLocal;
@@ -540,32 +477,24 @@ void main() {
     vec2 halfSize = v_PanelGeom.zw;
     vec2 p = pLocal - v_PanelGeom.xy;
     float smoothness = v_StyleParams.y;
-    float lobeWidth = v_RimEdge.z;
-    float dist = CornerDist(p, halfSize, v_Radii, smoothness);
-    float inside = -dist;
-    if (inside > max(lobeWidth, 1.0) * 1.75 + 1.0) discard;
+    float dpr = max(v_Lighting.x, 1e-3);
+    float height = v_Specular.y;
+    float dist;
+    vec2 normal;
+    CornerEval(p, halfSize, v_Radii, smoothness, dist, normal);
+    float d = dist / dpr;
+    if (-d > height + 1.0) discard;
     float unusedShadow;
     float clipD = cornerQueries(v_PixelPos, int(v_Outline.z), int(v_Outline.w), false,
                                 p, halfSize, v_Radii, smoothness, unusedShadow);
     if (clipD > 1.0) discard;
-    float coverage = (1.0 - smoothstep(-0.5, 0.5, dist)) * (1.0 - smoothstep(-0.5, 0.5, clipD));
-
-    vec2 screenLight = vec2(cos(v_Lighting.x), -sin(v_Lighting.x));
-    vec2 light = v_Is3D > 0.5 ? screenLight
-        : vec2(screenLight.x * v_Rot.x + screenLight.y * v_Rot.y, -screenLight.x * v_Rot.y + screenLight.y * v_Rot.x);
-    float cornerRadius = max(max(max(v_Radii.x, v_Radii.y), max(v_Radii.z, v_Radii.w)), 1.0);
-    float facing = dot(RefractionNormal(p, halfSize, min(cornerRadius, min(halfSize.x, halfSize.y))), light);
-    facing = max(facing, -0.95 * facing);
-    float lobe = max(max(RIM_LIT * RimLobe(p, halfSize, v_Radii, light), RIM_BOUNCE * RimLobe(p, halfSize, v_Radii, -light)),
-                     RIM_FACING * facing * facing);
-
-    // Never narrower than a device pixel: a thinner core draws at one pixel and carries the rest as gain.
-    float width = mix(RIM_SIDE_SHARE * lobeWidth, lobeWidth, lobe);
-    float drawn = max(width, 1.0);
-    float core = (1.0 - smoothstep(drawn - 0.5, drawn + 0.5, inside)) * (width / drawn);
-    float tail = RIM_TAIL * lobe * (1.0 - smoothstep(drawn, drawn + 0.75 * lobeWidth, inside));
-    float gain = v_RimEdge.w * u_RimPass * v_StyleParams.z * lobe * coverage * (core + tail);
-    fragColor = vec4(vec3(gain), 1.0);
+    float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
+    vec2 uv = v_PixelPos / u_Resolution;
+    uv.y = 1.0 - uv.y;
+    vec3 under = texture(u_RimScene, uv).rgb;
+    float light = smoothstep(0.45, 0.55, dot(under, GLASS_BT709));
+    float alpha = GlassRimAlpha(d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, height, 0.0);
+    fragColor = vec4(GlassRimMatrix(under, light), alpha * v_StyleParams.z * clipAlpha);
 }
 #else
 void main() {
@@ -637,22 +566,9 @@ void main() {
     float frostLod = v_Grading.w;
 
     float thickness = v_Refraction.x;
-    // The refraction band, which also sets the reach of every other edge effect on the glass.
-    float band = max(v_Refraction.y, 0.5);
-    float refractionAmount = v_Refraction.w;
-
-    vec2 lightDir = vec2(cos(v_Lighting.x), -sin(v_Lighting.x));
     float bodyTint = v_Lighting.y;
-    float lightIntensity = v_Lighting.z;
-    float fresnelStrength = v_Lighting.w;
-
-    float specIntensity = v_Specular.x;
-    float specGlow = v_Specular.y;
     float chromaticAberration = v_Specular.z;
     float borderFade = v_Specular.w;
-
-    float edgeLightTop = v_RimEdge.x;
-    float edgeLightBottom = v_RimEdge.y;
 
     vec2 p = pLocal - panelCenter;
 
@@ -675,7 +591,9 @@ void main() {
     // and its gate.
     float shadowAlpha = 0.0;
     if (wantShadow) {
-        shadowAlpha = smoothstep(shadowBlur, -shadowBlur, shadowDist) * v_ShadowColor.a;
+        // A glass surface's shadow (mode 1 and 2) is Apple's erf fall over two radii; any other is a smoothstep.
+        shadowAlpha = (v_Refraction.z > 0.5 ? GlassShadowFall(shadowDist, shadowBlur)
+                                            : smoothstep(shadowBlur, -shadowBlur, shadowDist)) * v_ShadowColor.a;
     }
 
     // ── SDF + normal ──
@@ -731,62 +649,84 @@ void main() {
     float glassiness = smoothstep(0.0, 1.0, thickness);
 
 #if !defined(MATERIAL_FLAT)
+    // ── APPLE'S GLASS (Glass.Pipeline.glsl, Core/Glass.md) ──
+    // The glassBackground pass (lens, blur, face, edge bleed, holding tone), then the tint and highlight passes,
+    // all over this fragment's own face. Mode 2 is the surface's colored drop shadow, drawn before it.
+    float glassDpr = max(v_Lighting.x, 1e-3);
+    float glassSpan = v_Refraction.y;
+    float glassClear = v_Lighting.w;
+    float glassLight = v_RimEdge.x;
+    float glassShadowTint = 0.0;
+    vec3 glassShadowRgb = vec3(0.0);
     if (materialType == 1.0) {
-        // The circle map, rotated into screen space with the panel.
-        vec2 refractOffset = vec2(0.0);
-        if (edgeDist < band && refractionAmount > 0.0) {
-            float k = 1.0 - edgeDist / band;
-            float minHalf = min(panelHalfSize.x, panelHalfSize.y);
-            float maxRadius = max(max(v_Radii.x, v_Radii.y), max(v_Radii.z, v_Radii.w));
-            vec2 n = RefractionNormal(p, panelHalfSize, min(max(maxRadius, band * 1.5), minHalf));
-            vec2 screenNormal = v_Is3D > 0.5 ? n
-                : vec2(v_Rot.x * n.x - v_Rot.y * n.y, v_Rot.y * n.x + v_Rot.x * n.y);
-            refractOffset = -screenNormal * (refractionAmount * (1.0 - sqrt(max(1.0 - k * k, 0.0))) * glassiness);
-        }
-
-        // FBO has top-of-scene at UV.y=1 (panel/text shaders flip Y in clip space).
-        baseUv = (v_PixelPos + refractOffset) / u_Resolution;
-        baseUv.y = 1.0 - baseUv.y;
-
-        // Chromatic aberration is DISPERSION, proportional to the bend: red at (1 + 0.2 ca) of the
-        // offset, green at (1 + 0.1 ca), blue at the offset itself. Only a class that asks for it (the
-        // moving selection lens) spreads; at rest ChromaticAberration is 0 and this is one tap. Where
-        // the three would land within half a pixel of each other it is one tap too.
-        float caSpreadPx = 0.2 * chromaticAberration * length(refractOffset);
-        if (GlassSkips(GLASS_SKIP_CA)) caSpreadPx = 0.0;
-        if (caSpreadPx < 0.5) {
-            backdrop = sampleBackdrop(baseUv, frostLod);
+        float d = dist / glassDpr;
+        vec2 nScreen = v_Is3D > 0.5 ? normal
+            : vec2(v_Rot.x * normal.x - v_Rot.y * normal.y, v_Rot.y * normal.x + v_Rot.x * normal.y);
+        vec2 ramps = GlassSizeRamps(glassSpan);
+        if (v_Refraction.z > 1.5) {
+            // The colored shadow of large glass: the backdrop past the outline, blurred at 40 pt, saturated
+            // (light) or dimmed (dark), carried by v. Its alpha is the shared fall above.
+            float reach = GlassShift(d, min(0.625 * glassSpan, 75.0), 0.4 * glassSpan);
+            vec3 seen = glassSample(v_PixelPos + nScreen * reach * glassDpr, GlassNativeLod(40.0, glassDpr, glassClear));
+            vec3 mapped = mix(GlassYcc(seen, 0.5, 0.0, 1.0), GlassYcc(seen, 1.0, 0.0, 1.8), glassLight);
+            float layerAlpha = mix(0.2 + 0.16 * ramps.x, 1.0, ramps.y);
+            glassShadowRgb = clamp(mapped * ramps.y / max(layerAlpha, 1e-3), 0.0, 1.0);
+            glassShadowTint = 1.0;
         } else {
-            vec2 uvR = (v_PixelPos + refractOffset * (1.0 + 0.2 * chromaticAberration)) / u_Resolution;
-            vec2 uvG = (v_PixelPos + refractOffset * (1.0 + 0.1 * chromaticAberration)) / u_Resolution;
-            uvR.y = 1.0 - uvR.y;
-            uvG.y = 1.0 - uvG.y;
-            vec3 sR = sampleBackdrop(uvR, frostLod);
-            vec3 sG = sampleBackdrop(uvG, frostLod);
-            vec3 sB = sampleBackdrop(baseUv, frostLod);
-            backdrop = vec3(sR.r, sG.g, sB.b);
+            float lens = v_Refraction.w * glassiness;
+            float innerShift = GlassShift(d, max(-0.8 * glassSpan, -60.0), min(0.25 * glassSpan, 20.0)) * lens;
+            float outerShift = GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;
+            float radius = GlassBlurRadius(glassSpan, glassClear);
+            float innerLod = GlassNativeLod(radius * GlassBlurScale(d + innerShift, glassSpan), glassDpr, glassClear);
+            vec2 innerOffset = nScreen * innerShift * glassDpr;
+            // Dispersion, where a class asks for it (the moving selection lens): red at (1 + 0.2 ca) of the
+            // inner shift, green at (1 + 0.1 ca), blue at the shift itself.
+            float caSpreadPx = 0.2 * chromaticAberration * length(innerOffset);
+            if (GlassSkips(GLASS_SKIP_CA)) caSpreadPx = 0.0;
+            vec3 lensed;
+            if (caSpreadPx < 0.5) {
+                lensed = glassSample(v_PixelPos + innerOffset, innerLod);
+            } else {
+                lensed = vec3(glassSample(v_PixelPos + innerOffset * (1.0 + 0.2 * chromaticAberration), innerLod).r,
+                              glassSample(v_PixelPos + innerOffset * (1.0 + 0.1 * chromaticAberration), innerLod).g,
+                              glassSample(v_PixelPos + innerOffset, innerLod).b);
+            }
+            // The outward-looking sample, at 30% across the outermost point of regular glass, at half radius.
+            float outerMix = (glassClear > 0.5 ? 0.0 : 0.3) * clamp(d + 1.0, 0.0, 1.0);
+            if (outerMix > 0.0) {
+                float outerLod = GlassNativeLod(radius * GlassBlurScale(d + outerShift, glassSpan), glassDpr, glassClear);
+                lensed = mix(lensed, glassSample(v_PixelPos + nScreen * outerShift * glassDpr, outerLod), outerMix);
+            }
+            vec3 face = lensed;
+            if (GlassSkips(GLASS_SKIP_GRADE)) {} else
+            face = GlassFace(lensed, glassSpan, glassClear, glassLight, v_RimEdge.y);
+            // The edge bleed of regular glass from 64 pt: the backdrop 0.35 S outward, blurred at 0.35 S,
+            // weighted toward the face's own darks on light glass and its lights on dark glass.
+            if (ramps.y > 0.0 && glassClear < 0.5 && !GlassSkips(GLASS_SKIP_BLEED)) {
+                float bleedShift = GlassShift(d, 0.35 * glassSpan, 0.35 * glassSpan);
+                vec3 bleed = GlassBleed(glassSample(v_PixelPos + nScreen * bleedShift * glassDpr,
+                                                    GlassNativeLod(0.35 * glassSpan, glassDpr, glassClear)), glassLight);
+                float lum = dot(face, GLASS_BLEED_LUMA);
+                float weight = mix(1.0 - lum, lum, glassLight);
+                weight = weight * weight * clamp(1.0 - d, 0.0, 1.0);
+                face = mix(face, bleed, clamp(weight * weight * ramps.y * mix(0.8, 0.5, glassLight), 0.0, 1.0));
+            }
+            // A vibrancy that could not be drawn under the element (a press fill) rides the grade lanes.
+            face = applyGrading(face, brightness, saturation, contrast);
+            // .tint(color): the Background is the seed.
+            if (v_Tint.a > 0.001) face = mix(face, GlassTint(face, v_Tint.rgb), v_Tint.a);
+            // The holding tone: the interior at 97%, the outer one to two points at full.
+            face = clamp(face * mix(1.0, 0.97, clamp(-1.0 - d, 0.0, 1.0)), 0.0, 1.0);
+            if (!GlassSkips(GLASS_SKIP_RIM))
+            face = GlassRim(face, d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, v_Specular.y, glassClear, glassLight);
+            backdrop = face;
         }
-        if (GlassSkips(GLASS_SKIP_GRADE)) {} else
-        backdrop = applyTint(applyGrading(backdrop, brightness, saturation, contrast), bodyTint);
     } else if (hasBackdropFilter) {
         // Flat panel backdrop sampling — no refraction, no CA.
         vec3 s = sampleBackdrop(baseUv, frostLod);
         backdrop = applyTint(applyGrading(s, brightness, saturation, contrast), bodyTint);
     }
 #endif
-
-    // ── Beer-Lambert tint (multiplicative absorption) ──
-    // Tint.a scales absorption strength; path length grows toward center.
-    // Scaled by `glassiness` so a Thickness=0 panel (no physical thickness
-    // for light to pass through) gets no absorption — the surface tint
-    // composite below takes over instead. Together with that composite,
-    // the glass material treatment is visually continuous as Thickness
-    // springs to/from zero (no seam at the variant boundary).
-    if (materialType == 1.0 && v_Tint.a > 0.001 && glassiness > 0.001) {
-        float pathLength = mix(0.3, 1.0, smoothstep(0.0, band * 2.0, edgeDist)) * glassiness;
-        vec3 absorb = pow(max(v_Tint.rgb, vec3(0.0001)), vec3(pathLength * v_Tint.a));
-        backdrop *= absorb;
-    }
 
 #if !defined(NO_SHAPE_GRADIENT)
     // ── Hairline floor ──
@@ -798,56 +738,6 @@ void main() {
     const float BORDER_MIN_DEVICE_PX = 1.0;
     float drawnBorderWidth = max(borderWidth, BORDER_MIN_DEVICE_PX);
     float borderCoverage = borderWidth / drawnBorderWidth;
-#endif
-
-    // ── The wide rim glow (FresnelStrength) ──
-    // A vibrant band of what lies behind the glass, fading from the outline inward over the band,
-    // lit toward LightAngle. The thin light at the outline itself is the RIM, its own draw
-    // (the RIM_ONLY program). Only within `rimBand` of the outline, so the deep interior skips the whole
-    // block and its extra backdrop tap.
-    //
-    // GLASS_NO_GLOW excludes the block for a batch whose every instance has FresnelStrength +0, and
-    // then the two initialisers are what the composite reads.
-    float edgeLightAlpha = 0.0;
-    vec3 edgeLightRgb = vec3(0.0);
-#if !defined(MATERIAL_FLAT) && !defined(GLASS_NO_GLOW)
-    if (GlassSkips(GLASS_SKIP_RIM)) {} else
-    if (materialType == 1.0 && fillAlpha > 0.0 && dist > -max(band * 0.75, 6.0)) {
-        // Wide rim band — at LEAST 6 px so the glow is actually visible, scaled with the band.
-        float rimBand = max(band * 0.75, 6.0);
-
-        // Proximity: 1 at the outline (dist ≈ 0), 0 a full band inward, 0 outside.
-        // Must be zero where dist > 0 (the expanded-rect shadow region) or the
-        // edge light leaks into the shadow and looks like a dark blob.
-        float edgeProximity = dist > 0.0 ? 0.0 : clamp(1.0 + dist / rimBand, 0.0, 1.0);
-
-        // Single soft falloff — exp 1.6 keeps a strong peak near the rim and a
-        // gentle fade inward.
-        float falloff = pow(edgeProximity, 1.6);
-
-        // Directional: lit side full, unlit side dimmed (not dark). The key light and its bounce from
-        // the opposite side, nearly as bright.
-        float keyAlign = dot(normal, lightDir);
-        float lightFacing = max(max(keyAlign, -keyAlign * 0.95), 0.0);
-        float directional = 0.6 + 0.4 * pow(lightFacing, 1.5);
-
-        // Rim backdrop sample — offset INWARD from the outline so the rim picks up
-        // the color from behind the glass, not the pixel directly beneath it.
-        vec2 rimUv = (v_PixelPos - normal * rimBand * 1.2) / u_Resolution;
-        rimUv.y = 1.0 - rimUv.y;
-        vec3 rimSample = sampleBackdrop(rimUv, frostLod);
-
-        // Saturation + brightness boost — Apple's rim picks up surrounding hue
-        // and intensifies it (the "light gathering" feel).
-        float rimLuma = dot(rimSample, LUMA);
-        vec3 rimVibrant = clamp(mix(vec3(rimLuma), rimSample, 1.6) * 1.25, 0.0, 1.0);
-
-        // Brighter near the rim (specular cap), pure backdrop color deeper in
-        float specularCap = pow(edgeProximity, 3.5);
-        edgeLightRgb = mix(rimVibrant, mix(rimVibrant, vec3(1.0), 0.6), specularCap);
-
-        edgeLightAlpha = falloff * directional * fresnelStrength * fillAlpha;
-    }
 #endif
 
     // ── Fill: source composited over the (refracted, filtered, absorbed) backdrop.
@@ -867,7 +757,11 @@ void main() {
     vec4 fillSrc = resolveBgFill(panelLocal);
     vec3 fillRgb;
     float fillA;
-    if (materialType == 1.0 || hasBackdropFilter) {
+    if (materialType == 1.0) {
+        // Glass's Background is its tint seed, already in the face.
+        fillRgb = backdrop;
+        fillA = fillAlpha;
+    } else if (hasBackdropFilter) {
         float tA = fillSrc.a;
         fillRgb = fillSrc.rgb * tA + backdrop * (1.0 - tA);
         fillA = fillAlpha;
@@ -883,55 +777,9 @@ void main() {
         ? (fillRgb * fillA + v_ShadowColor.rgb * shadowAlpha * (1.0 - fillA)) / outA
         : vec3(0.0);
     vec4 result = vec4(outRGB, outA);
-
 #if !defined(MATERIAL_FLAT)
-    if (materialType == 1.0) {
-        // ── Hemispherical edge light (rim ambient — top vs bottom bias) ──
-        // Apple uses a virtual "sky above, ground below" environment so the
-        // top of the rim picks up brighter ambient than the bottom. In screen
-        // coords (y-down), the TOP edge has normal.y < 0; the BOTTOM has
-        // normal.y > 0. Mix between EdgeLightTop and EdgeLightBottom by the
-        // vertical normal component. Modulated by edge proximity so it only
-        // shows in the rim band, not the flat interior.
-        float hemiTop = max(-normal.y, 0.0);
-        float hemiBottom = max(normal.y, 0.0);
-        float hemiAmbient = (edgeLightTop * hemiTop + edgeLightBottom * hemiBottom);
-        float rimMask = (dist > 0.0)
-            ? 0.0
-            : pow(clamp(1.0 + dist / band, 0.0, 1.0), 2.0);
-        vec3 rimAmbientRgb = vec3(hemiAmbient) * rimMask;
-        result.rgb += rimAmbientRgb * fillAlpha;
-
-        result.rgb = result.rgb * (1.0 - edgeLightAlpha) + edgeLightRgb * edgeLightAlpha;
-        result.a = result.a * (1.0 - edgeLightAlpha) + edgeLightAlpha;
-
-        // GLASS_NO_SPEC: SpecularIntensity AND SpecularGlow are +0 on every instance, so `spec` is +-0
-        // (every other factor is finite) and the composite adds and scales by nothing. Excluded whole.
-#if !defined(GLASS_NO_SPEC)
-        if (!GlassSkips(GLASS_SKIP_SPECULAR)) {
-            // ── THE HIGHLIGHT (aave's) ──
-            // Two terms, both on the NORMALIZED POSITION across the panel, not the surface normal, and
-            // both TWO-SIDED: `abs` puts the light on opposite corners (top left and bottom right at the
-            // default 135), as the iPhone's key light and bounce do.
-            //   * glow: rises toward the two lit corners, confined to the refraction band.
-            //   * edge: 0.3 of the band wide (aave's 3px on a 10px depth), full at the outline.
-            // The tilt slides it.
-            vec2 specLightDir = normalize(lightDir + u_SpecularTilt);
-            vec2 np = clamp(p / max(panelHalfSize, vec2(1.0)), -1.0, 1.0);
-            float axis = abs(dot(np, specLightDir));
-            float glowTerm = specGlow * pow(clamp(axis * 0.70710678, 0.0, 1.0), 1.5) * BandFalloff(dist, band);
-            float edgeW = max(band * 0.3, 1.0);
-            float edgeTerm = specIntensity * (dist < 0.0 ? max(0.0, 1.0 + dist / edgeW) : 0.0) * pow(axis, 1.5);
-            float spec = 0.5 * min(glowTerm + edgeTerm, 1.0) * lightIntensity * glassiness * fillAlpha;
-            // ADAPTIVE: it brightens what is dark and darkens what is bright (aave's luma 0.3 to 0.7), so
-            // it reads on any backdrop. An added white washes out over a bright photograph exactly where
-            // a highlight is needed; this is the same reason vibrant text is drawn with Vibrancy.
-            float specLuma = dot(result.rgb, LUMA);
-            float darken = smoothstep(0.3, 0.7, specLuma);
-            result.rgb = max(mix(result.rgb + spec, result.rgb * (1.0 - spec), darken), vec3(0.0));
-        }
-#endif
-    }
+    // The colored shadow draw carries no face: the shadow alone, where the surface is not.
+    if (glassShadowTint > 0.5) result = vec4(glassShadowRgb, shadowAlpha * (1.0 - fillAlpha));
 #endif
 
     // ── The stroke ──

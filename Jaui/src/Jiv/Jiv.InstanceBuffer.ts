@@ -3,6 +3,7 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 import { FoldVibrancy, VibrancyGraded } from '../Core/Vibrancy';
 import type { VibrancyValue } from '../Core/Vibrancy';
 import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
+import { GLASS_SHADOW_OFFSET_Y, GLASS_SHADOW_RADIUS, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps } from '../Core/Glass.Pipeline';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -111,15 +112,6 @@ export const JivPanelShapeOf = (jiv: Jiv, dpr: number, m: Mat2x3, out: JivPanelS
   return out;
 };
 
-/** The glass refraction band: the bezel is the rounded part of the shape, so a share of the corner
- *  radius, scaled by how round the shape is (radius over the short half side), clamped to [MIN, MAX]
- *  CSS px and never past the short half side. A circle or a pill bends across most of its radius; a
- *  large panel with a small corner bends a thin strip at its edge, as Apple's menus and tiles do. */
-const REFRACTION_BAND_SHARE = 0.8;
-const REFRACTION_BAND_MIN = 8;
-const REFRACTION_BAND_MAX = 28;
-/** How far the circle map reaches at the outline, as a multiple of the band; never past the short half side. */
-const REFRACTION_AMOUNT_SHARE = 1.3;
 
 /** `Blur(Auto)`'s frost: a share of the short half side, clamped to [MIN, AUTO_FROST_MAX] CSS px, so a
  *  small control stays clear and a sheet frosts. */
@@ -127,12 +119,19 @@ const AUTO_FROST_SHARE = 0.03;
 const AUTO_FROST_MIN = 0.5;
 
 /** The backdrop frost a panel draws with, in CSS px: its authored `Blur()`, or the size rule under `Blur(Auto)`. */
-export const JivFrostCssPx = (jiv: Jiv): number => {
+export const JivFrostCssPx = (jiv: Jiv, dpr: number = 1): number => {
   const style = jiv.RenderStyle;
+  // Glass's pyramid is built at its sharpest read (Core/Glass.Pipeline.ts): the frost is Apple's, not authored.
+  if (style.Material === 'LiquidGlass') {
+    return Math.pow(2, GlassBlurNeedsOf(JivGlassSpan(jiv), dpr, style.GlassVariant).BaseLod) / dpr;
+  }
   if (!style.BackdropFrostAuto) return style.BackdropFrostBlur;
   const minHalf = Math.min(jiv.Width, jiv.Height) * 0.5;
   return Math.max(AUTO_FROST_MIN, Math.min(AUTO_FROST_MAX, AUTO_FROST_SHARE * minHalf));
 };
+
+/** A glass surface's span, Apple's S: its minor dimension in points. */
+export const JivGlassSpan = (jiv: Jiv): number => Math.max(1, Math.min(jiv.Width, jiv.Height));
 
 /**
  * CPU-side instance data packer for Jiv panels. Reads from Jiv.RenderStyle
@@ -187,14 +186,14 @@ export class JivInstanceBuffer {
    *                      and nothing else: no border, no shadow, no grade, no glass. The walk draws
    *                      it alone, under the element, under the vibrancy blend, so the fragment's
    *                      alpha is exactly the coverage the element's own fill would have had.
-   *    • 'RimOnly'     — the RIM, for the RIM_ONLY program at the BorderLayer slot: the shape, the
-   *                      clip, the opacity, LightAngle and the rim's lobe width and strength. Its
-   *                      quad is the face and a pixel past it.
+   *    • 'RimOnly'     — the RIM of a surface that is not glass, for the RIM_ONLY program at the
+   *                      BorderLayer slot: the shape, the clip, the opacity and the rim's height and
+   *                      amount. Its quad is the face and a pixel past it.
    *
-   *  `shadow` splits a glass fill from its drop shadow. 'Only' is the shadow alone (no fill, no
-   *  border, no backdrop, no glass), which the flat program draws; 'Excluded' is the panel without
-   *  it, its quad shrunk to the face and a pixel of antialiasing, so the glass program shades only
-   *  the fragments it can light. */
+   *  `shadow` splits a glass fill from its drop shadow. 'Only' is the shadow alone: for glass it is
+   *  Apple's (Core/Glass.md), black from the flat program, or colored from the glass program on
+   *  glass 64 pt and up. 'Excluded' is the panel without it, its quad shrunk to the face and a pixel
+   *  of antialiasing, so the glass program shades only the fragments it can light. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
           borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'VibrancyOnly' | 'RimOnly' = 'Normal',
@@ -217,10 +216,15 @@ export class JivInstanceBuffer {
     const borderWidth = style.BorderWidth * avgScale * d;
     const borderEdgeAa = style.BorderBlur * avgScale * d;
     const rimOnly = borderMode === 'RimOnly';
+    const glass = style.Material === 'LiquidGlass';
+    const span = JivGlassSpan(jiv) * avgScale;
     const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly;
-    const shadowBlur = _ns ? 0 : style.ShadowBlur * avgScale * d;
-    const shadowOffX = _ns ? 0 : style.ShadowOffsetX * avgScale * d;
-    const shadowOffY = _ns ? 0 : style.ShadowOffsetY * avgScale * d;
+    // Glass casts Apple's shadow: offset (0, 8) pt, reaching two radii of 24 pt, its alpha by size.
+    const glassShadowPeak = glass ? GlassShadowPeak(span, style.GlassVariant) : 0;
+    const glassColoredShadow = glass && shadow === 'Only' && GlassSizeRamps(span).V > 0 && glassShadowPeak > 0;
+    const shadowBlur = _ns ? 0 : glass ? 2 * GLASS_SHADOW_RADIUS * avgScale * d : style.ShadowBlur * avgScale * d;
+    const shadowOffX = _ns || glass ? 0 : style.ShadowOffsetX * avgScale * d;
+    const shadowOffY = _ns ? 0 : glass ? GLASS_SHADOW_OFFSET_Y * avgScale * d : style.ShadowOffsetY * avgScale * d;
 
     const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
     const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
@@ -278,10 +282,10 @@ export class JivInstanceBuffer {
     data[offset + 18] = style.BorderColor.B;
     data[offset + 19] = style.BorderColor.A;
 
-    data[offset + 20] = style.ShadowColor.R;
-    data[offset + 21] = style.ShadowColor.G;
-    data[offset + 22] = style.ShadowColor.B;
-    data[offset + 23] = _ns ? 0 : style.ShadowColor.A;
+    data[offset + 20] = glass ? 0 : style.ShadowColor.R;
+    data[offset + 21] = glass ? 0 : style.ShadowColor.G;
+    data[offset + 22] = glass ? 0 : style.ShadowColor.B;
+    data[offset + 23] = _ns ? 0 : glass ? glassShadowPeak : style.ShadowColor.A;
 
     data[offset + 24] = shadowOffX;
     data[offset + 25] = shadowOffY;
@@ -307,35 +311,31 @@ export class JivInstanceBuffer {
     data[offset + 32] = grade.Brightness;
     data[offset + 33] = style.BackdropSaturation;
     data[offset + 34] = grade.Contrast;
-    const blurPx = Math.max(0.5, JivFrostCssPx(jiv) * d);
+    const blurPx = Math.max(0.5, JivFrostCssPx(jiv, d) * d);
     data[offset + 35] = Math.max(0, Math.min(10, Math.log2(blurPx)));
 
-    // The refraction band and the circle map's reach at the outline, in device px (Jiv.Panel.frag).
-    const minHalf = Math.min(halfW, halfH);
-    const rr = style.BorderRadius;
-    const cornerRadius = Math.min(Math.max(rr[0], rr[1], rr[2], rr[3], 0) * avgScale * d, minHalf);
-    const roundness = minHalf > 0 ? cornerRadius / minHalf : 0;
-    const band = Math.min(minHalf, Math.max(REFRACTION_BAND_MIN * d,
-      Math.min(REFRACTION_BAND_MAX * d, REFRACTION_BAND_SHARE * cornerRadius * roundness)));
+    // Apple's glass (Jiv.Panel.frag, Glass.Pipeline.glsl): its span in points, the shadow draw's mode (1 black,
+    // 2 colored), the lens multiplier, the device px per point, the theme, the variant.
     data[offset + 36] = style.Thickness * avgScale * d;
-    data[offset + 37] = band;
-    data[offset + 38] = 0;
-    data[offset + 39] = Math.min(REFRACTION_AMOUNT_SHARE * band, minHalf) * style.Refraction;
+    data[offset + 37] = span;
+    data[offset + 38] = glass && shadow === 'Only' ? (glassColoredShadow ? 2 : 1) : 0;
+    data[offset + 39] = style.Refraction;
 
-    data[offset + 40] = style.LightAngle * (Math.PI / 180);
+    data[offset + 40] = d * avgScale;
     data[offset + 41] = style.Tint;
-    data[offset + 42] = style.LightIntensity;
-    data[offset + 43] = style.FresnelStrength;
+    data[offset + 42] = style.SchemeDark ? 1 : 0;
+    data[offset + 43] = style.GlassVariant === 'Clear' ? 1 : 0;
 
-    data[offset + 44] = style.SpecularIntensity;
-    data[offset + 45] = style.SpecularGlow;
+    // The highlight: each light's amount and the band's depth in points.
+    data[offset + 44] = style.RimStrength;
+    data[offset + 45] = style.RimWidth;
     data[offset + 46] = style.ChromaticAberration;
     data[offset + 47] = style.BorderFade * avgScale * d;
 
-    data[offset + 48] = style.EdgeLightTop;
-    data[offset + 49] = style.EdgeLightBottom;
-    data[offset + 50] = rimOnly ? style.RimWidth * d : 0;
-    data[offset + 51] = rimOnly ? style.RimStrength : 0;
+    data[offset + 48] = 0;
+    data[offset + 49] = 0;
+    data[offset + 50] = 0;
+    data[offset + 51] = 0;
 
     data[offset + 52] = 0;
     data[offset + 53] = 0;
@@ -352,9 +352,11 @@ export class JivInstanceBuffer {
       data[offset + 15] = 0;  // Background alpha → no fill
       data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0; // BorderColor
       data[offset + 27] = 0;  // borderWidth
-      data[offset + 32] = 1; data[offset + 33] = 1; data[offset + 34] = 1; data[offset + 35] = 0; // no backdrop
-      data[offset + 36] = 0;  // Thickness → the flat program
+      data[offset + 32] = 1; data[offset + 33] = 1; data[offset + 34] = 1; // no grade
       data[offset + 41] = 0;  // body Tint
+      data[offset + 44] = 0;  // no highlight
+      // The flat program, unless the shadow reads the backdrop: then the glass program, at the surface's frost.
+      if (!glassColoredShadow) { data[offset + 35] = 0; data[offset + 36] = 0; }
     }
 
     if (borderMode === 'Suppress') {
@@ -384,9 +386,8 @@ export class JivInstanceBuffer {
       data[offset + 24] = 0; data[offset + 25] = 0; data[offset + 26] = 0; data[offset + 27] = 0;
       data[offset + 31] = _FG_GRADE_IDENTITY;
       data[offset + 32] = 1; data[offset + 33] = 1; data[offset + 34] = 1; data[offset + 35] = 0;
-      data[offset + 36] = 0; data[offset + 41] = 0; data[offset + 43] = 0;
+      data[offset + 36] = 0; data[offset + 41] = 0;
       data[offset + 44] = 0; data[offset + 46] = 0; data[offset + 47] = 0;
-      data[offset + 48] = 0; data[offset + 49] = 0;
     }
 
     this._count++;

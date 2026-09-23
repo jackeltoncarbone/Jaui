@@ -13,10 +13,10 @@ layout(location = 6) in vec4 a_ShadowColor;
 layout(location = 7) in vec4 a_ShadowParams;  // shadowOffX, shadowOffY, shadowBlur, borderWidth
 layout(location = 8) in vec4 a_StyleParams;   // borderEdgeAa, smoothness, opacity, materialType
 layout(location = 9) in vec4 a_Grading;       // brightness, saturation, contrast, frostLod
-layout(location = 10) in vec4 a_Refraction;   // thickness, refraction band, free, refraction amount
-layout(location = 11) in vec4 a_Lighting;     // lightAngle (rad), bodyTint (signed), lightIntensity, fresnelStrength
-layout(location = 12) in vec4 a_Specular;     // specIntensity, specGlow, chromaticAberration, innerBlur + borderFade
-layout(location = 13) in vec4 a_RimEdge;      // edgeLightTop, edgeLightBottom, rim lobe width, rim strength
+layout(location = 10) in vec4 a_Refraction;   // thickness, glass span (pt), glass shadow mode, refraction
+layout(location = 11) in vec4 a_Lighting;     // device px per pt, bodyTint (signed), dark scheme, clear glass
+layout(location = 12) in vec4 a_Specular;     // rim amount, rim height (pt), chromaticAberration, borderFade
+layout(location = 13) in vec4 a_RimEdge;      // free
 layout(location = 14) in vec4 a_Outline;      // free, free, clipOffset, clipCount
 
 uniform vec2 u_Resolution;
@@ -28,48 +28,13 @@ uniform vec2 u_Resolution;
 uniform vec2 u_ViewOffset;
 // Shared 3D-transform table (1-row RGBA32F, 3 texels per homography entry).
 uniform sampler2D u_XformTex;
-// Adaptive shadow. One row, one texel per measured surface: R is 0 over a flat light ground and 1 over text
-// or busy content (Jiv.ShadowBackdrop.frag, eased across frames). u_ShadowBackdrop = (slot, adaptive);
-// slot -1 means this draw was not measured and the shadow keeps its authored alpha.
+// The probe state row: one texel per probed glass surface, its G the eased mean luma of the backdrop under it
+// (Jiv.ShadowBackdrop.frag).
 uniform sampler2D u_ShadowState;
-uniform vec2 u_ShadowBackdrop;
-
-// ShadowColor's alpha is the shadow over busy content; the backdrop lowers it by up to `adaptive`.
-float AdaptiveShadowAlpha(float authoredAlpha, float backdropFactor, float adaptive) {
-    return authoredAlpha * mix(1.0, backdropFactor, adaptive);
-}
-
-// Adaptive glass (`?glass-adapt`). u_GlassAdapt = (slot, far): the surface's texel in the same state row
-// (G its mean backdrop luma, B its brightest local luma) and its AdaptiveFar. Slot -1 leaves the authored
-// grade untouched.
-uniform vec2 u_GlassAdapt;
-
-// A grade (brightness, saturation, contrast, signed tint) whose ramp runs from `lo` over black to `hi`
-// over white, carrying the colour `g` carried. Past a tint of zero the body is lifted by a brightness above
-// 1 instead, which is the same (1 - t) scale applyTint cannot write with a negative t.
-vec4 GlassGradeOfEnds(float lo, float hi, vec4 g) {
-    float range = hi - lo;
-    float keep = lo + hi;
-    float carry = g.z * g.y * g.x * (1.0 + g.w);
-    return vec4(max(keep, 1.0), carry / range, range / keep, -max(1.0 - keep, 0.0));
-}
-
-// The authored grade is one affine ramp in luma: over black it lands at `ground`, over white at `far`,
-// and `far` is where the ink sits exactly on its legibility floor (Jwift.Glass.jss, the far-end solve).
-// Over a backdrop whose brightest part is `peak`, the body never gets past ground + (far - ground) * peak,
-// so the ramp can OPEN until that point reaches `far` again -- and no further than openFar, Apple's own
-// far end. Ground and the colour carried (c * s * (1 - t)) stay put; only the range and the tint move.
-// Returns (brightness, saturation, contrast, signed tint). Past a tint of zero the body is lifted by a
-// brightness above 1 instead, which is the same (1 - t) scale applyTint cannot write with a negative t.
-// A ramp that does not open returns the authored numbers themselves, so nothing is re-derived.
-vec4 GlassAdaptGrade(vec4 g, float peak, float openFar) {
-    float scale = g.x * (1.0 + g.w);
-    float ground = scale * (1.0 - g.z) * 0.5;
-    float far = scale * (1.0 + g.z) * 0.5;
-    float opened = min(openFar, ground + (far - ground) / max(peak, 1.0 / 1023.0));
-    if (!(opened > far)) return g;
-    return GlassGradeOfEnds(ground, opened, g);
-}
+// THE GLASS'S APPEARANCE (Core/Glass.md): this draw's texel in that row, or -1 for none. Apple's glass 56 pt and
+// under tracks its backdrop: light over bright content, dark over dim, whatever the theme, the band keeping a
+// mean at the threshold from flickering. Larger glass takes the theme's.
+uniform float u_GlassAppearance;
 
 
 out vec2 v_PixelPos;
@@ -96,25 +61,18 @@ void main() {
     v_Tint = a_Tint;
     v_BorderColor = a_BorderColor;
     v_ShadowColor = a_ShadowColor;
-    if (u_ShadowBackdrop.x >= 0.0) {
-        float backdropFactor = texelFetch(u_ShadowState, ivec2(int(u_ShadowBackdrop.x), 0), 0).r;
-        v_ShadowColor.a = AdaptiveShadowAlpha(a_ShadowColor.a, backdropFactor, u_ShadowBackdrop.y);
-    }
     v_ShadowParams = a_ShadowParams;
     v_StyleParams = a_StyleParams;
     v_Grading = a_Grading;
     v_Refraction = a_Refraction;
     v_Lighting = a_Lighting;
     v_Specular = a_Specular;
-    v_RimEdge = a_RimEdge;
     v_Outline = a_Outline;
-    // Only a body tinted toward black is on the ramp the adaptive grades invert.
-    if (u_GlassAdapt.x >= 0.0 && a_Lighting.y < 0.0) {
-        vec4 state = texelFetch(u_ShadowState, ivec2(int(u_GlassAdapt.x), 0), 0);
-        vec4 grade = vec4(a_Grading.xyz, a_Lighting.y);
-        if (u_GlassAdapt.y > 0.0) grade = GlassAdaptGrade(grade, state.b, u_GlassAdapt.y);
-        v_Grading.xyz = grade.xyz;
-        v_Lighting.y = grade.w;
+    // Unprobed or larger glass takes the theme's appearance, at a mean that puts thin glass on the table's face.
+    v_RimEdge = a_Lighting.z > 0.5 ? vec4(0.0, 0.45, 0.0, 0.0) : vec4(1.0, 0.5, 0.0, 0.0);
+    if (u_GlassAppearance >= 0.0 && a_Refraction.y <= 56.0) {
+        float mean = texelFetch(u_ShadowState, ivec2(int(u_GlassAppearance), 0), 0).g;
+        v_RimEdge.xy = vec2(smoothstep(0.45, 0.55, mean), mean);
     }
 
     // cos can only be in [-1, 1]; the CPU stores 2.0 to flag a projective panel.

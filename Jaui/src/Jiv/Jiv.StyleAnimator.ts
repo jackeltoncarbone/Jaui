@@ -55,7 +55,6 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['Refraction',             s => s.Refraction,                   (s, v) => { s.Refraction = v; }],
   // Signed, so a theme flip springs dark tint → clear → light tint and never passes through grey.
   ['Tint',                   s => s.Tint,                         (s, v) => { s.Tint = v; }],
-  ['AdaptiveFar',            s => s.AdaptiveFar,                  (s, v) => { s.AdaptiveFar = v; }],
 
   // Backdrop filter — every channel springs under the `BackdropFilter`
   // bucket, so `@Transition BackdropFilter { ... }` tunes them together.
@@ -79,14 +78,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['TextFilter',             s => s.TextVibrancyCover,            (s, v) => { s.TextVibrancyCover = v; }],
 
   // Lighting
-  ['LightAngle',             s => s.LightAngle,                   (s, v) => { s.LightAngle = v; }],
-  ['LightIntensity',         s => s.LightIntensity,               (s, v) => { s.LightIntensity = v; }],
-  ['SpecularIntensity',      s => s.SpecularIntensity,            (s, v) => { s.SpecularIntensity = v; }],
-  ['SpecularGlow',           s => s.SpecularGlow,                 (s, v) => { s.SpecularGlow = v; }],
-  ['FresnelStrength',        s => s.FresnelStrength,              (s, v) => { s.FresnelStrength = v; }],
   ['ChromaticAberration',    s => s.ChromaticAberration,          (s, v) => { s.ChromaticAberration = v; }],
-  ['EdgeLightTop',           s => s.EdgeLightTop,                 (s, v) => { s.EdgeLightTop = v; }],
-  ['EdgeLightBottom',        s => s.EdgeLightBottom,              (s, v) => { s.EdgeLightBottom = v; }],
   ['RimWidth',               s => s.RimWidth,                     (s, v) => { s.RimWidth = v; }],
   ['RimStrength',            s => s.RimStrength,                  (s, v) => { s.RimStrength = v; }],
 
@@ -140,7 +132,6 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['ShadowBlur',             s => s.ShadowBlur,                   (s, v) => { s.ShadowBlur = v; }],
   ['ShadowOffsetX',          s => s.ShadowOffsetX,                (s, v) => { s.ShadowOffsetX = v; }],
   ['ShadowOffsetY',          s => s.ShadowOffsetY,                (s, v) => { s.ShadowOffsetY = v; }],
-  ['ShadowAdaptive',         s => s.ShadowAdaptive,               (s, v) => { s.ShadowAdaptive = v; }],
 
   // Appearance
   ['Opacity',                s => s.Opacity,                      (s, v) => { s.Opacity = v; }],
@@ -178,6 +169,8 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   // Vibrancy's declaration and zone COLORS snap: a hue is not a spring, and the declaration is a
   // tagged value, not a number.
   render.VibrancyDeclaration = target.VibrancyDeclaration;
+  render.GlassVariant = target.GlassVariant;
+  render.SchemeDark = target.SchemeDark;
   render.ForegroundVibrancyColor = target.ForegroundVibrancyColor;
   render.BackdropVibrancyColor = target.BackdropVibrancyColor;
   render.ContainBorder = target.ContainBorder;

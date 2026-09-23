@@ -6,7 +6,6 @@
  * after a build. `WebGL2.Renderer` owns the ONE instance and every call site.
  */
 import { AddGlassFragCensus, EmptyGlassFragCensus, type GlassFragCensus } from './Glass.Skip';
-import type { GlassProgramKind } from './Glass.Programs';
 
 /** One per-surface build's level-0 size, factor and own allocations. See `SceneLedger.SurfaceExtents`. */
 export interface SurfaceExtent { W: number; H: number; K: number; Allocs: number }
@@ -185,13 +184,6 @@ export class SceneReadLedger {
    *  because every arm draws the same draw. So must `Frags`; `Taps` is the column a stage moves. */
   GlassDraws = 0;
   GlassCensus: GlassFragCensus = EmptyGlassFragCensus();
-  /** `?glass-programs`: glass batches routed to each variant this frame, and the ones an armed
-   *  arm could NOT route (a predicate failed on some instance) that drew with the full program.
-   *  `NoGlow` / `NoSpec` count batches shaded by a program compiled with that define. Always booked:
-   *  on by default. */
-  GlassNoGlowBatches = 0;
-  GlassNoSpecBatches = 0;
-  GlassProgramFallbacks = 0;
   /** `?blur-cache`, per frame. `Hits` are builds a clean backdrop let the walk skip (under `verify`,
    *  builds it WOULD have skipped -- the build runs anyway and is compared). `Misses` are builds that
    *  ran, cold or dirty. `Stores` copied a clean-but-cold build into the cache, `Evictions` made room
@@ -259,9 +251,6 @@ export class SceneReadLedger {
     this.ShadowProbeBinds = 0;
     this.GlassDraws = 0;
     this.GlassCensus = EmptyGlassFragCensus();
-    this.GlassNoGlowBatches = 0;
-    this.GlassNoSpecBatches = 0;
-    this.GlassProgramFallbacks = 0;
     this.BlurCacheHits = 0;
     this.BlurCacheMisses = 0;
     this.BlurCacheStores = 0;
@@ -411,11 +400,5 @@ export class SceneReadLedger {
     this.BlurCacheVerified++;
     this.TotalBlurCacheVerified++;
     if (mismatch) { this.BlurCacheMismatches++; this.TotalBlurCacheMismatches++; }
-  };
-
-  /** One glass batch took `kind` under an armed `?glass-programs`. */
-  NoteGlassProgram = (kind: GlassProgramKind): void => {
-    if (kind === 'noLight') { this.GlassNoGlowBatches++; this.GlassNoSpecBatches++; }
-    else this.GlassProgramFallbacks++;
   };
 }

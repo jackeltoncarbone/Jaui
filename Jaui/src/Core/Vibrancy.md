@@ -53,7 +53,7 @@ Each level was fitted per theme on Apple's native captures (LiquidGlassGallery),
 
 | Apple level | Jwift token (amount, cover) | Dark | Light | Measured on |
 |---|---|---|---|---|
-| `label` | `@JwiftVibrancyLabel`, `@JwiftVibrancyLabelCover` | 212, 0.55 | 5, 0.88 | Dark: iPhone App Store and Photos tab bars (0.63 and 0.48). Light: Music. The macOS menu label agrees at 0.80. |
+| `label` | `@JwiftVibrancyLabel`, `@JwiftVibrancyLabelCover` | 242, 0.95 | 0, 1 | Apple's own: white at 95% on dark glass, black on light (Core/Glass.md, labels). On glass that tracks its backdrop the ink follows the glass's appearance, not the theme. |
 | `secondaryLabel` | `@JwiftVibrancySecondaryLabel`, `...Cover` | 160, 0.51 | -7, 0.24 | Light: macOS menu shortcuts. Dark is interpolated, because no dark capture held a clean one. |
 | `tertiaryLabel` | `@JwiftVibrancyTertiaryLabel`, `...Cover` | 108, 0.47 | -4, 0.26 | Dark: the footnote on a macOS widget. Light: disabled macOS menu items. |
 | `quaternaryLabel` | none | none | none | No capture in the gallery shows it. |

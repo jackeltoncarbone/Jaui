@@ -4,7 +4,7 @@
  * Geometry.Quad) behind the semantic operations Jaui.ts orchestrates.
  */
 
-import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop, type GlassAdapt } from './Renderer';
+import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop } from './Renderer';
 import { ShaderBatch, ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
@@ -21,7 +21,6 @@ import { BLUR_EASE_SMOOTH } from '../Jiv/Jiv.Types';
 import { SceneReadLedger } from './Scene.Ledger';
 import { BLUR_CACHE_BUDGET_BYTES, ChainBytesFor, PickEvictions } from './Blur.Cache';
 import { EmptyGlassFragCensus, AddGlassFragCensus, GlassInstanceCensus, type GlassFragCensus } from './Glass.Skip';
-import { GlassBatchPredicates, GlassProgramFor, type GlassProgramKind, type GlassProgramsArm } from './Glass.Programs';
 import { ShadowTexelStep } from './Shadow.Texel';
 import { RestartSpread, ProbeDraws, Per, PROBE_SRC_ALPHA, SCENE_PROBE_DRAWS, SMALL_PROBE_DRAWS } from './Restart.Diag';
 import { PACE_FENCE_RING, type PaceFenceSample } from './Tick.Pace';
@@ -103,12 +102,13 @@ interface _PanelLocs {
   backdropXf:   WebGLUniformLocation | null;
   scene:        WebGLUniformLocation | null;
   baseFrostLod: WebGLUniformLocation | null;
-  specTilt:     WebGLUniformLocation | null;
   clipTex:      WebGLUniformLocation | null;
   xformTex:     WebGLUniformLocation | null;
   shadowState:    WebGLUniformLocation | null;
-  shadowBackdrop: WebGLUniformLocation | null;
-  glassAdapt:     WebGLUniformLocation | null;
+  // The glass's appearance: its probe texel, or -1 (Jiv.Panel.vert).
+  glassAppearance: WebGLUniformLocation | null;
+  // The non-glass rim's read of what is under it (RIM_ONLY).
+  rimScene:       WebGLUniformLocation | null;
   // ── `?glass-skip`'s mask. Declared by the glass and non-glass programs, read only by the glass
   // one (`GlassSkips` is a constant false in the other, so it compiles out and this is null there).
   glassSkip:      WebGLUniformLocation | null;
@@ -133,12 +133,11 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   backdropXf:   gl.getUniformLocation(p, 'u_BackdropXf'),
   scene:        gl.getUniformLocation(p, 'u_Scene'),
   baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
-  specTilt:     gl.getUniformLocation(p, 'u_SpecularTilt'),
   clipTex:      gl.getUniformLocation(p, 'u_ClipTex'),
   xformTex:     gl.getUniformLocation(p, 'u_XformTex'),
   shadowState:    gl.getUniformLocation(p, 'u_ShadowState'),
-  shadowBackdrop: gl.getUniformLocation(p, 'u_ShadowBackdrop'),
-  glassAdapt:     gl.getUniformLocation(p, 'u_GlassAdapt'),
+  glassAppearance: gl.getUniformLocation(p, 'u_GlassAppearance'),
+  rimScene:       gl.getUniformLocation(p, 'u_RimScene'),
   glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
   vibrancyCover:  gl.getUniformLocation(p, 'u_VibrancyCover'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
@@ -157,12 +156,6 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
 
 const _BG_UV_IDENTITY = [1, 1, 0, 0];
 
-/** The rim's white term as a share of its gain. Fitted jointly to Apple's rim peaks over the body just
- *  inside them: the speaker button over teal, the Control Center Wi-Fi pill over blue, the Safari more
- *  button over lavender, the App Store search button over saturated blue, and the Photos buttons over
- *  busy concert photos, where the lit lobes stand 40 to 69 above a body of 40 to 80. Gain 0.24 and white
- *  0.23 of the remaining headroom. The white is what holds the rim over a dark, busy body. */
-const RIM_WHITE_SHARE = 0.96;
 
 /** Splice the shared clip-stack chunk into a program that asks for it. */
 const _withClipStack = (source: string): string => {
@@ -271,15 +264,10 @@ interface _CardTarget {
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /** Panel program variants compiled from the ONE `Jiv.Panel.frag` AT BOOT: glass, non-glass, flat,
- *  flat-and-borderless, flat-and-borderless-with-a-two-stop-gradient, the glass program's
- *  `?glass-programs` variant (no-glow + no-spec), and the rim. Exported so `?flat-program` /
- *  `?borderless-program` / `?two-stop-gradient`'s init marks cannot claim a count the boot does not
- *  build; `tests/Flat.Program.test.ts` asserts `_compilePanelShader` issues exactly this many. */
-export const PANEL_PROGRAM_COUNT = 7;
-/** Of those seven, the `?glass-programs` variant: `MATERIAL_GLASS + GLASS_NO_GLOW + GLASS_NO_SPEC`. In
- *  the boot batch on BOTH arms of the flag, the flat program's rule: the default routes to it, and
- *  `=off` must change routing and not boot. */
-export const GLASS_VARIANT_PROGRAMS = 1;
+ *  flat-and-borderless, flat-and-borderless-with-a-two-stop-gradient, and the rim. Exported so
+ *  `?flat-program` / `?borderless-program` / `?two-stop-gradient`'s init marks cannot claim a count the
+ *  boot does not build; `tests/Flat.Program.test.ts` asserts `_compilePanelShader` issues exactly this many. */
+export const PANEL_PROGRAM_COUNT = 6;
 
 /** One adaptive-shadow probe of a `MeasureShadowBackdrops` batch: `MeasureShadowBackdrop`'s own
  *  per-surface arguments, the pyramid and the sharp tap being the group's and shared. */
@@ -498,10 +486,6 @@ export class WebGL2Renderer implements Renderer {
   // are the same text in the same order - the only edit to the `.frag` is which macro the `for`
   // reads its bound from.
   private _panelShaderTwoStop!: ShaderProgram;
-  // The glass program with whole stages compiled out, for a batch every instance of which makes
-  // those stages composite nothing (`Glass.Programs`, `_glassBatchKind`). A uniform branch keeps the
-  // heaviest path's registers on every fragment; these do not contain the path at all.
-  private _panelShaderGlassNoLight!: ShaderProgram;
   // The rim: `Jiv.Panel.frag`'s RIM_ONLY main over the flat program's declarations.
   private _panelShaderRim!: ShaderProgram;
   // Uniform location bundles per variant — each program has its own
@@ -511,9 +495,7 @@ export class WebGL2Renderer implements Renderer {
   private _panelLocsFlat!: _PanelLocs;
   private _panelLocsBorderless!: _PanelLocs;
   private _panelLocsTwoStop!: _PanelLocs;
-  private _panelLocsGlassNoLight!: _PanelLocs;
   private _panelLocsRim!: _PanelLocs;
-  private _rimPassLoc: WebGLUniformLocation | null = null;
   /** `?glass-skip`'s mask: the `Glass.Skip.GLASS_SKIP_STAGES` bits the glass program skips. 0 is
    *  today's engine, and it is uploaded as 0 on every non-glass draw whatever this holds. Set by
    *  `Jaui._initDebugFromUrl`, which owns the flag and its refusals. */
@@ -521,10 +503,6 @@ export class WebGL2Renderer implements Renderer {
   /** `?glass-skip` armed (`none` included): book every glass draw's fragment census on the ledger.
    *  Off unflagged, so today's engine does not pay for the walk. */
   DiagGlassSkipCensus = false;
-  /** `?glass-programs`: which glass variants a batch may be routed to. Default `on` (both): they are
-   *  pixel-identical by construction and compiled at boot on every arm. Set by
-   *  `Jaui._initDebugFromUrl`, which owns the flag and its refusals. */
-  DiagGlassPrograms: GlassProgramsArm = 'on';
   /** `?flat-program=off` sends every panel back through the full program. Default ON: the flat
    *  program is pixel-identical by construction, so the only reason to hold the old routing is to
    *  measure the two arms against each other in ONE binary. Set by `Jaui._initDebugFromUrl`. */
@@ -574,6 +552,11 @@ export class WebGL2Renderer implements Renderer {
   private _textInstanceCount = 0;
   private _textResolutionLoc!: WebGLUniformLocation | null;
   private _textVibrancyCoverLoc: WebGLUniformLocation | null = null;
+  private _textShadowStateLoc: WebGLUniformLocation | null = null;
+  private _textGlassInkLoc: WebGLUniformLocation | null = null;
+  /** The glass the text drawn next sits on (`SetGlassInk`): its probe slot and whether the theme is dark. */
+  private _glassInkSlot = -1;
+  private _glassInkSchemeLight = 0;
   /** Vibrancy's cover for the draws under `SetVibrancyBlend`, -1 for every ordinary draw. */
   private _vibrancyCover = -1;
   private _textViewOffsetLoc!: WebGLUniformLocation | null;
@@ -763,11 +746,6 @@ export class WebGL2Renderer implements Renderer {
   get ShadowProbeBinds(): number { return this._sceneLedger.ShadowProbeBinds; }
   get GlassDraws(): number { return this._sceneLedger.GlassDraws; }
   get GlassCensus(): GlassFragCensus { return this._sceneLedger.GlassCensus; }
-  /** `?glass-programs`' effect field this frame: batches per variant, and the fallbacks. */
-  get GlassProgramCensus(): { NoGlow: number; NoSpec: number; Fallbacks: number } {
-    const l = this._sceneLedger;
-    return { NoGlow: l.GlassNoGlowBatches, NoSpec: l.GlassNoSpecBatches, Fallbacks: l.GlassProgramFallbacks };
-  }
   /** Cumulative totals for a windowed reader (the `?trace` gesture meter samples at both ends). */
   get SceneLedgerTotals(): { Reads: number; Restarts: number; Switches: number; Frames: number; EndsByKey: Record<string, number> } {
     const l = this._sceneLedger;
@@ -952,8 +930,6 @@ export class WebGL2Renderer implements Renderer {
     this._shadowStateFbo = null;
     this._shadowSlots.clear();
     this._shadowFreeSlots.length = 0;
-    this._stateReadPbo = null;
-    this._stateReadFence = null;
     // The restart probe's program and its two 1x1 targets belonged to the dead context too. Dropped
     // rather than rebuilt here: the probe is built ON FIRST USE (`_ensureRestartProbe`), so a
     // restore re-arms it at the next `BeginFrame` without Init needing to know the flags at all.
@@ -1495,12 +1471,10 @@ export class WebGL2Renderer implements Renderer {
   PanelDrawBatch = (
     canvasWidth: number, canvasHeight: number,
     backdrop: GpuTextureHandle | null, baseFrostLod: number,
-    specTiltX: number, specTiltY: number,
     useGlassShader: boolean = backdrop !== null,
     scene: GpuTextureHandle | null = null,
     bgPaint?: BgPaint,
-    shadowBackdrop?: ShadowBackdrop,
-    glassAdapt?: GlassAdapt,
+    appearance?: ShadowBackdrop,
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
@@ -1538,22 +1512,18 @@ export class WebGL2Renderer implements Renderer {
     // just below), because a Gradient background flushes the Color batch and draws alone. One
     // read of `bgPaint`, no scan.
     const isGlass = useGlassShader;
-    // A glass batch's own program under `?glass-programs`, or null for the full one.
-    const glassKind = isGlass ? this._glassBatchKind() : null;
     const isFlat = !isGlass
       && this.DiagFlatProgram
       && backdrop === null
       && this._batchTakesFlatProgram(baseFrostLod);
     const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
     const isTwoStop = isBorderless && this.DiagTwoStopGradient && _paintFitsTwoStops(bgPaint);
-    const program = glassKind === 'noLight' ? this._panelShaderGlassNoLight
-      : isGlass ? this._panelShaderGlass
+    const program = isGlass ? this._panelShaderGlass
       : isTwoStop ? this._panelShaderTwoStop
       : isBorderless ? this._panelShaderBorderless
       : isFlat ? this._panelShaderFlat
       : this._panelShaderNone;
-    const locs = glassKind === 'noLight' ? this._panelLocsGlassNoLight
-      : isGlass ? this._panelLocsGlass
+    const locs = isGlass ? this._panelLocsGlass
       : isTwoStop ? this._panelLocsTwoStop
       : isBorderless ? this._panelLocsBorderless
       : isFlat ? this._panelLocsFlat
@@ -1572,7 +1542,6 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(locs.clipTex, 1);
     gl.uniform1i(locs.scene, 2);
     gl.uniform1f(locs.baseFrostLod, baseFrostLod);
-    gl.uniform2f(locs.specTilt, specTiltX, specTiltY);
     // `?glass-skip`: unconditional, so every arm issues the SAME call stream and the value is the
     // only thing that differs. 0 on a non-glass draw whatever the flag holds, so the mask can never
     // reach a program the arm is not about. A null location (the non-glass programs) is a no-op.
@@ -1604,14 +1573,10 @@ export class WebGL2Renderer implements Renderer {
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
 
-    // Adaptive shadow state (unit 5), read in the vertex. Slot -1 leaves the authored shadow untouched.
-    const shadowSlot = shadowBackdrop && this._shadowStateTex ? shadowBackdrop.Slot : -1;
+    // The glass's appearance (unit 5), read in the vertex. Set on EVERY batch, because a uniform outlives
+    // the draw that set it and the next batch on this program must not inherit a surface's slot.
     gl.uniform1i(locs.shadowState, 5);
-    gl.uniform2f(locs.shadowBackdrop, shadowSlot, shadowSlot >= 0 ? shadowBackdrop!.Adaptive : 0);
-    // `?glass-adapt`: set on EVERY batch, because a uniform outlives the draw that set it and the next
-    // batch on this program must not inherit a surface's slot. -1 is the authored grade.
-    const adaptSlot = glassAdapt && this._shadowStateTex && glassAdapt.Slot >= 0 ? glassAdapt.Slot : -1;
-    gl.uniform2f(locs.glassAdapt, adaptSlot, adaptSlot >= 0 ? glassAdapt!.OpenFar : 0);
+    gl.uniform1f(locs.glassAppearance, appearance && this._shadowStateTex && appearance.Slot >= 0 ? appearance.Slot : -1);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
 
@@ -1621,12 +1586,10 @@ export class WebGL2Renderer implements Renderer {
     if (timed) this._pass!.End();
   };
 
-  /** Draw the pending batch as RIMS ('RimOnly' instances), twice over the bound target with its
-   *  alpha left alone. First a GAIN (`DST_COLOR, ONE`: dst x (1 + g)), which lifts what is below and
-   *  keeps its hue and most of its saturation, then a small SCREEN toward white (`ONE,
-   *  ONE_MINUS_SRC_COLOR`) at RIM_WHITE_SHARE of it, which is what still reads over black, where a
-   *  gain has nothing to lift. Then the walk's own blend back. */
-  PanelRimDraw = (canvasWidth: number, canvasHeight: number): void => {
+  /** Draw the pending batch as RIMS ('RimOnly' instances): Apple's highlight over what `under` holds of
+   *  the scene beneath them (a snapshot the walk takes), the recolored pixel at the band's alpha, source
+   *  over. The target's alpha is left alone. Then the walk's own blend back. */
+  PanelRimDraw = (canvasWidth: number, canvasHeight: number, under: GpuTextureHandle): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
     const locs = this._panelLocsRim;
@@ -1643,20 +1606,14 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(locs.xformTex, 4);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
-    gl.uniform1i(locs.shadowState, 5);
-    gl.uniform2f(locs.shadowBackdrop, -1, 0);
-    gl.uniform2f(locs.glassAdapt, -1, 0);
-    gl.activeTexture(gl.TEXTURE5);
-    gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
+    gl.uniform1i(locs.rimScene, 2);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, _unwrap(under));
     gl.bindVertexArray(this._panelVao);
     this._noteSceneDraw();
     gl.enable(gl.BLEND);
     gl.blendEquation(gl.FUNC_ADD);
-    gl.uniform1f(this._rimPassLoc, 1);
-    gl.blendFuncSeparate(gl.DST_COLOR, gl.ONE, gl.ZERO, gl.ONE);
-    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
-    gl.uniform1f(this._rimPassLoc, RIM_WHITE_SHARE);
-    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ZERO, gl.ONE);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
     gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, this._panelInstanceCount);
     this.EnableBlend();
   };
@@ -1791,6 +1748,10 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(this._textClipTexLoc, 1);
     gl.uniform1i(this._textXformTexLoc, 2);
     gl.uniform1f(this._textVibrancyCoverLoc, this._vibrancyCover);
+    gl.uniform2f(this._textGlassInkLoc, this._shadowStateTex ? this._glassInkSlot : -1, this._glassInkSchemeLight);
+    gl.uniform1i(this._textShadowStateLoc, 3);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(atlas));
@@ -3620,36 +3581,7 @@ export class WebGL2Renderer implements Renderer {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(backdrop));
     gl.bindVertexArray(this._quad.Vao);
-    // THE SNAP IS THE SHADOW'S, NOT THE MATERIAL'S. One texel carries three readings -- R the shadow's
-    // factor, G and B the backdrop's mean and peak -- and the ease above is a CONSTANT_ALPHA blend, which
-    // is one alpha across all three channels. So the park snap, which is right for R (a parked frame must
-    // carry no history, or the shadow it parks on is a blend of where it has been), was also being applied
-    // to G and B. The glass grade divides by the peak (`Glass.Adapt.ts`, `opened = ground + (far - ground)
-    // / peak`), so a stepped peak is a stepped MATERIAL.
-    //
-    // Jack found it by using it, and every part of his description is this: "Immediately upon hover,
-    // there's more saturation. It snaps, not animates. When I unhover, it stays saturated throughout the
-    // duration of the unhover animations. But then it instantly, at the end, just cuts out." Held through
-    // the animation because the probe was easing; cut at the end because the park took the whole reading
-    // again. `?glass-adapt=off` removed it, which is what named the lane.
-    //
-    // So on a SNAP frame the write is split: R takes the whole reading, G and B keep easing. Two 1x1 draws
-    // on park frames only -- never on an ordinary frame, and never when `fresh`, where a surface with no
-    // history must take all three whole.
-    if (snap && !fresh) {
-      gl.colorMask(true, false, false, false);
-      gl.disable(gl.BLEND);
-      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-      const gbEase = 1 - Math.exp(-Math.max(0, dtSeconds) / SHADOW_EASE_SECONDS);
-      gl.colorMask(false, true, true, false);
-      gl.enable(gl.BLEND);
-      gl.blendColor(0, 0, 0, gbEase);
-      gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
-      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-      gl.colorMask(true, true, true, true);
-    } else {
-      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
-    }
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
     gl.blendColor(0, 0, 0, 0);
     if (!batched) this.RebindSceneTarget();
     if (timed) this._pass!.End();
@@ -3705,56 +3637,6 @@ export class WebGL2Renderer implements Renderer {
   /** Probe writes this frame that provably left their texel where it was. */
   get ShadowStill(): number { return this._shadowStill; }
   private _shadowStill = 0;
-
-  // ── `?glass-adapt`'s census: the state row, read back without a stall ──
-  //
-  // The grade itself never leaves the GPU (the panel vertex stage reads the texel). Only the census
-  // wants the numbers on the CPU, so the row is copied into a pixel-pack buffer behind a fence and
-  // collected on a later frame once the fence has signalled: no `readPixels` into client memory, no
-  // wait. RGBA8, the one read format GLES guarantees for a normalized target, so each reading is to
-  // 1/255 where the texel holds 1/1023.
-  private _stateReadPbo: WebGLBuffer | null = null;
-  private _stateReadFence: WebGLSync | null = null;
-  private _stateReads = 0;
-
-  /** Copy the state row into the pack buffer, unless one is still in flight. False when nothing was
-   *  issued. Called after the frame's last draw, so it reads the texels that frame drew with. */
-  RequestShadowStateRead = (): boolean => {
-    if (this._stateReadFence !== null || this._shadowStateFbo === null) return false;
-    const gl = this._gl;
-    if (this._stateReadPbo === null) {
-      this._stateReadPbo = gl.createBuffer()!;
-      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this._stateReadPbo);
-      gl.bufferData(gl.PIXEL_PACK_BUFFER, SHADOW_STATE_SLOTS * 4, gl.STREAM_READ);
-    } else {
-      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this._stateReadPbo);
-    }
-    const prevRead = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._shadowStateFbo);
-    gl.readPixels(0, 0, SHADOW_STATE_SLOTS, 1, gl.RGBA, gl.UNSIGNED_BYTE, 0);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevRead);
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-    this._stateReadFence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
-    return true;
-  };
-
-  /** Collect the read into `out` (SHADOW_STATE_SLOTS * 4 bytes) if its fence has signalled. */
-  PollShadowStateRead = (out: Uint8Array): boolean => {
-    const fence = this._stateReadFence;
-    if (fence === null) return false;
-    const gl = this._gl;
-    const status = gl.getSyncParameter(fence, gl.SYNC_STATUS) as number;
-    if (status !== gl.SIGNALED) return false;
-    gl.deleteSync(fence);
-    this._stateReadFence = null;
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this._stateReadPbo);
-    gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, out, 0, SHADOW_STATE_SLOTS * 4);
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-    this._stateReads++;
-    return true;
-  };
-
-  get ShadowStateReads(): number { return this._stateReads; }
 
   EndShadowBackdropFrame = (): void => {
     for (const [key, entry] of this._shadowSlots) {
@@ -4533,6 +4415,13 @@ export class WebGL2Renderer implements Renderer {
    *           Ink:   ONE, ONE_MINUS_SRC_ALPHA
    *
    *  Undone by `RestoreBlend`, which the caller owes before anything else draws. */
+  /** The glass the text drawn next sits on: its probe slot, whose appearance its labels follow (Core/Glass.md),
+   *  and whether the theme is dark. -1 for none. The walk flushes the text batch on both sides of a change. */
+  SetGlassInk = (slot: number, schemeDark: boolean): void => {
+    this._glassInkSlot = slot;
+    this._glassInkSchemeLight = schemeDark ? 0 : 1;
+  };
+
   SetVibrancyBlend = (blend: VibrancyBlend): void => {
     const gl = this._gl;
     gl.enable(gl.BLEND);
@@ -4705,12 +4594,7 @@ export class WebGL2Renderer implements Renderer {
       batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true });
     this._panelShaderTwoStop = batch.Add(panelVertSrc, panelFragSrc,
       { MATERIAL_FLAT: true, NO_SHAPE_GRADIENT: true, TWO_STOP_GRADIENT: true });
-    // A SIXTH: the glass program with whole stages compiled out (lane glassreg). The default routes
-    // a glass batch with no body glow and no highlight to it, so it belongs to the boot set, and it
-    // is issued on both arms of `?glass-programs` so that `=off` changes routing and not the boot.
-    this._panelShaderGlassNoLight = batch.Add(panelVertSrc, panelFragSrc,
-      { MATERIAL_GLASS: true, GLASS_NO_GLOW: true, GLASS_NO_SPEC: true });
-    // A SEVENTH: the rim, the face's own corner field drawn as light at the node's BorderLayer slot.
+    // A SIXTH: the rim of a surface that is not glass, at the node's BorderLayer slot.
     this._panelShaderRim = batch.Add(panelVertSrc, panelFragSrc, { MATERIAL_FLAT: true, RIM_ONLY: true });
   };
 
@@ -4724,9 +4608,7 @@ export class WebGL2Renderer implements Renderer {
     this._panelLocsFlat  = _extractPanelLocs(gl, this._panelShaderFlat.Program);
     this._panelLocsBorderless = _extractPanelLocs(gl, this._panelShaderBorderless.Program);
     this._panelLocsTwoStop = _extractPanelLocs(gl, this._panelShaderTwoStop.Program);
-    this._panelLocsGlassNoLight = _extractPanelLocs(gl, this._panelShaderGlassNoLight.Program);
     this._panelLocsRim = _extractPanelLocs(gl, this._panelShaderRim.Program);
-    this._rimPassLoc = gl.getUniformLocation(this._panelShaderRim.Program, 'u_RimPass');
 
     const buf = gl.createBuffer();
     if (!buf) throw new Error('[Jaui] Failed to create panel instance buffer');
@@ -4734,22 +4616,6 @@ export class WebGL2Renderer implements Renderer {
 
     // Dedicated VAO for panel rendering (separate from text)
     this._panelVao = this._createInstancedVao(gl, this._panelInstanceBuffer, PANEL_ATTR_COUNT, PANEL_BYTES_PER_INSTANCE);
-  };
-
-  /**
-   * Which glass program this batch takes: `Glass.Programs.GlassBatchPredicates` asks every instance
-   * its two questions off the packed floats the fragment reads, and `GlassProgramFor` turns the
-   * answers into a kind under the armed `?glass-programs`. A batch an armed arm could not route is
-   * booked as a fallback, so a variant that silently stopped applying reads `fallbacks=` above zero
-   * rather than passing for a null. Under `off` nothing is scanned and nothing is booked.
-   */
-  private _glassBatchKind = (): GlassProgramKind => {
-    const arm = this.DiagGlassPrograms;
-    if (arm === 'off') return 'full';
-    const kind = GlassProgramFor(
-      GlassBatchPredicates(this._panelInstanceData, this._panelInstanceCount, PANEL_FLOATS_PER_INSTANCE), arm);
-    this._sceneLedger.NoteGlassProgram(kind);
-    return kind;
   };
 
   private _compileTextShader = (batch: ShaderBatch): void => {
@@ -4763,6 +4629,8 @@ export class WebGL2Renderer implements Renderer {
 
     this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
     this._textVibrancyCoverLoc = gl.getUniformLocation(this._textShader.Program, 'u_VibrancyCover');
+    this._textShadowStateLoc = gl.getUniformLocation(this._textShader.Program, 'u_ShadowState');
+    this._textGlassInkLoc = gl.getUniformLocation(this._textShader.Program, 'u_GlassInk');
     this._textViewOffsetLoc = gl.getUniformLocation(this._textShader.Program, 'u_ViewOffset');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
     this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');

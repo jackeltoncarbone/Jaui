@@ -11,6 +11,7 @@
  * without the renderer's shader imports.
  */
 import { ContinuousCorner } from '../Jiv/Corner.Continuous';
+import { GlassSizeRamps } from './Glass.Pipeline';
 
 /** The shader's bits, by name. `Jiv.Panel.frag` declares the same nine `GLASS_SKIP_*` constants and
  *  `tests/Glass.Skip.test.ts` reads that file and holds the two tables to each other. */
@@ -18,7 +19,7 @@ export const GLASS_SKIP_STAGES = {
   backdrop: 1,
   ca: 2,
   rim: 4,
-  specular: 8,
+  bleed: 8,
   sdf: 32,
   grade: 64,
   shadow: 128,
@@ -65,8 +66,8 @@ export const ParseGlassSkip = (raw: string): number | null => {
  * Per glass fragment, what it pays, summed over every glass draw in a frame.
  *
  * Counted by walking EVERY pixel centre of the instance's quad through a CPU port of the shader's
- * own gates -- the corner field's distance and normal, the refraction band, the rim glow's band,
- * the specular band -- so the numbers are the shader's branches evaluated, not an
+ * own gates -- the corner field's distance, the outer lens sample's outermost point, the edge bleed,
+ * the dispersion -- so the numbers are the shader's branches evaluated, not an
  * area formula. Float64 where the GPU runs float32, so a pixel sitting on a gate's edge can land on
  * the other side; that moves a count by the perimeter's worth of pixels at most.
  */
@@ -77,7 +78,7 @@ export interface GlassFragCensus {
   Frags: number;
   /** `fillAlpha > 0` (dist < 0.5): inside the face's silhouette. */
   Face: number;
-  /** The wide rim glow's band on a FILL draw (`dist > -max(0.75*bezel, 6)`, inside the face). */
+  /** The outermost point of regular glass, where the outer lens sample is mixed in. */
   Band: number;
   /** `dist >= 0.5`: outside the face -- the shadow skirt. */
   Skirt: number;
@@ -108,15 +109,14 @@ export const AddGlassFragCensus = (into: GlassFragCensus, c: GlassFragCensus): v
 /** Offsets into one packed panel instance (`Jiv.InstanceBuffer.Push`). */
 const O = {
   RectX: 0, RectY: 1, RectW: 2, RectH: 3, Cos: 4, Sin: 5, HalfW: 6, HalfH: 7, Radii: 8,
-  EdgeAa: 28, Smooth: 29, Thickness: 36, Refraction: 38,
-  LightAngle: 40, SpecIntensity: 44, Ca: 46, ClipCount: 55,
+  EdgeAa: 28, Smooth: 29, Thickness: 36, Span: 37, Refraction: 39, Dpr: 40, Clear: 43, Ca: 46, ClipCount: 55,
 } as const;
 
 /** Every instance float `GlassInstanceCensus` reads other than the rect origin (which enters the key
  *  as its fractional part). Exported so a test can assert it against the reads in the source. */
 export const GLASS_CENSUS_KEY_OFFSETS: readonly number[] = [
   O.RectW, O.RectH, O.Cos, O.Sin, O.HalfW, O.HalfH, O.Radii, O.Radii + 1, O.Radii + 2, O.Radii + 3,
-  O.EdgeAa, O.Smooth, O.Thickness, O.Refraction, O.LightAngle, O.SpecIntensity,
+  O.EdgeAa, O.Smooth, O.Thickness, O.Span, O.Refraction, O.Dpr, O.Clear,
   O.Ca, O.ClipCount,
 ];
 const smoothstep = (e0: number, e1: number, x: number): number => {
@@ -168,17 +168,14 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
   const cxr = x0 + w * 0.5, cyr = y0 + h * 0.5;
   const radii = [d[b + O.Radii], d[b + O.Radii + 1], d[b + O.Radii + 2], d[b + O.Radii + 3]];
   const edgeAa = d[b + O.EdgeAa];
-  const aa = Math.max(Math.abs(edgeAa), 1e-4);
-  const band = Math.max(0.09 * 2 * Math.min(hx, hy), 0.5);
+  const span = d[b + O.Span];
+  const dpr = Math.max(d[b + O.Dpr], 1e-3);
+  const clear = d[b + O.Clear] > 0.5;
   const refraction = d[b + O.Refraction];
   const ca = d[b + O.Ca];
-  const thickness = d[b + O.Thickness];
-  const specI = d[b + O.SpecIntensity];
+  const glassiness = smoothstep(0, 1, d[b + O.Thickness]);
+  const bleeds = !clear && GlassSizeRamps(span).V > 0;
   const clipCount = d[b + O.ClipCount];
-  const lx = Math.cos(d[b + O.LightAngle]), ly = -Math.sin(d[b + O.LightAngle]);
-  const rimBand = Math.max(band * 0.75, 6);
-  const glassiness = smoothstep(0, 1, thickness);
-  const rimSpecW = Math.max(thickness * 0.18, 0.75 * glassiness);
   const pad = 2 + Math.abs(edgeAa);
 
   const smooth = d[b + O.Smooth];
@@ -197,24 +194,21 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
     }
     if (skip('sdf')) sharpRect(px, py, hx, hy, e);
     else ContinuousCorner(px, py, hx, hy, radii, smooth, e);
-    const dist = e[0], nx = e[1], ny = e[2];
+    const dist = e[0];
+    const dPt = dist / dpr;
     const fillPos = dist < 0.5;
-    const edge = 1 - Math.min(1, Math.max(-dist, 0) / band);
-    const offset = (band / 3) * edge * edge * edge * refraction * glassiness;
     const noTaps = skip('backdrop');
     let taps = 0;
-    const three = 0.2 * ca * offset >= 0.5;
+    // The inner lens shift at the outline is the bezel's full amount, max(-0.8 S, -60) pt.
+    const h = Math.min(1, Math.max(0, -dPt / Math.max(Math.min(0.25 * span, 20), 1e-4)));
+    const shiftPx = Math.max(-0.8 * span, -60) * (1 - Math.sqrt(h * (2 - h))) * refraction * glassiness * dpr;
+    const three = 0.2 * ca * Math.abs(shiftPx) >= 0.5;
     if (three) c.Ca3++;
     taps += noTaps ? 0 : (three && !skip('ca') ? 3 : 1);
-    const inBand = fillPos && dist > -rimBand;
-    if (inBand) c.Band++;
-    if (inBand && !skip('rim') && !noTaps) taps++;
-    if (specI > 0 && fillPos && !skip('specular') && !noTaps) {
-      const specBand = (1 - smoothstep(-aa, aa, dist)) * smoothstep(-rimSpecW - aa, -rimSpecW + aa, dist);
-      const k = nx * lx + ny * ly;
-      const align = Math.max(k, -k * 0.95);
-      if (specBand > 0 && align > 0) taps++;
-    }
+    const outer = !clear && fillPos && dPt > -1;
+    if (outer) c.Band++;
+    if (outer && !noTaps) taps++;
+    if (bleeds && fillPos && !skip('bleed') && !noTaps) taps++;
     if (fillPos) c.Face++; else c.Skirt++;
     return taps;
   };

@@ -75,6 +75,7 @@ export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRigh
  *    • Ink:    the opposite neutral, white in dark and black in light (a selection or highlight).
  *    • Dark / Light: always black / always white, whatever the theme (glass over video or a camera). */
 export type TintTone = 'Ground' | 'Ink' | 'Dark' | 'Light';
+export type GlassVariant = 'Regular' | 'Clear';
 
 /**
  * Authorable style — every numeric / dimensional / color / transform field is
@@ -197,50 +198,29 @@ export interface JivStyle {
   // Physical material — the Jiv is a slab with measurable properties
   Frost: string;
   Thickness: string;
-  /** How far the glass bends what is behind it, as a multiple of Apple's: 1 is the full circle map
-   *  across the edge band (Jiv.Panel.frag), which folds a thin mirrored arc at the outline; 0 is a
-   *  flat pane. */
+  /** How far the glass bends what is behind it, as a multiple of Apple's quarter-circle bezel
+   *  (Core/Glass.md): 1 is Apple's, 0 a flat pane. */
   Refraction: string;
+  /** Apple's glass variant (Core/Glass.md): `Regular` (the default) or `Clear`. Everything else about a
+   *  glass surface, its blur, face, bleed, shadow and highlight, follows from its size and its backdrop. */
+  GlassVariant: GlassVariant;
   /** The body's neutral pigment, 0..1: how far the graded backdrop is pulled toward the `TintTone`
    *  neutral. Applied after the BackdropFilter grade and before the Background fill, so it is the
    *  dimming (or lightening) layer of the material, not a colour. A length expression, so
    *  `0.3 * @Dark + 0.4 * @Light` gives a material its own strength per theme. Default 0. A
-   *  control with its own colour (an accent CTA) sets `Tint: 0` and paints its Background. */
+   *  Not read by glass, whose face is Apple's (Core/Glass.md); a glass Background is its tint seed. */
   Tint: string;
   /** Which neutral `Tint` pulls toward. Default `Ground` (black in dark, white in light). */
   TintTone: TintTone;
-  /** A luma, 0..2: the far end of the greyscale ramp (the body over white) this glass OPENS to when
-   *  what is behind it leaves the ink room, as Apple's does ("the amount of tint and the dynamic range
-   *  shift"). Read per surface from the adaptive-shadow probe's backdrop luma; never past the far end
-   *  the authored grade already reaches over white, so the ink is never less legible than the static
-   *  grade made it. Only a body tinted toward black opens. Default 0, the authored grade. */
-  AdaptiveFar: string;
-
-
-  // Lighting
-  LightAngle: string;        // degrees
-  LightIntensity: string;
-
-  // Specular catchlight
-  SpecularIntensity: string;
-  SpecularGlow: string;
-
-  // Fresnel + chromatic
-  FresnelStrength: string;
+  /** Dispersion across the lens, 0 on Apple's standard glass: red at (1 + 0.2 ca) of the bend, green at
+   *  (1 + 0.1 ca). The moving selection lens uses it. */
   ChromaticAberration: string;
-  EdgeLightTop: string;
-  EdgeLightBottom: string;
 
-
-  /** THE RIM: the light the edge catches, a hairline lifted onto whatever is already drawn there
-   *  (the panel program's RIM_ONLY variant). `RimWidth` is its core where it faces the light, a length in `px`: a HAIRLINE,
-   *  so it never scales with PointScale or a Visual transform. Away from the lit points it narrows to
-   *  0.45 of that, never drawn under one device pixel. Apple's is about 0.95px. Default 0, no rim. */
+  /** THE RIM, Apple's highlight (Core/Glass.md): a band `RimWidth` deep lit by a key light upper left and
+   *  a fill lower right, recoloring what is under it by Apple's vibrant color matrix. Apple's is 1 pt.
+   *  Glass draws it over its own face; any other surface over what is drawn under its edge. Default 0. */
   RimWidth: string;
-  /** The rim's peak GAIN, 0..1, at the two points where the outline faces `LightAngle` and its bounce,
-   *  dying with distance from them. What is under the rim is multiplied by 1 + this, then screened
-   *  toward white by 0.96 of it, so it keeps its hue and still stands clear of a dark, busy body: over
-   *  teal it reads as a lighter, still-saturated teal. Apple's is about 0.24. Default 0. */
+  /** Each light's amount, 0..1. Apple's is 0.5. Default 0, no rim. */
   RimStrength: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.
@@ -303,11 +283,6 @@ export interface JivStyle {
   ShadowBlur: string;
   ShadowOffsetX: string;
   ShadowOffsetY: string;
-  /** 0..1: how much the backdrop decides the shadow's opacity, as Apple's Liquid Glass does. ShadowColor's
-   *  alpha is the opacity over text and busy content; over a flat light ground it falls to
-   *  `alpha * (1 - ShadowAdaptive)`. Read from the backdrop a glass or backdrop-filter surface already
-   *  samples, never from the theme. Default 0, a fixed shadow. */
-  ShadowAdaptive: string;
   InnerShadow: boolean;
 
   // Appearance
@@ -365,11 +340,12 @@ export interface JivRenderStyle {
   BackdropFrostAuto: boolean;
   Thickness: number;
   Refraction: number;
+  GlassVariant: GlassVariant;
+  /** The theme the element resolved under: glass without a probe takes its appearance. */
+  SchemeDark: boolean;
   /** Signed body tint: negative pulls toward black, positive toward white, magnitude = strength.
    *  Signed so a theme flip springs through clear glass rather than through grey. */
   Tint: number;
-  /** The resolved `AdaptiveFar`, 0 when the grade stays as authored. */
-  AdaptiveFar: number;
   BackdropBrightness: number;
   BackdropSaturation: number;
   BackdropContrast: number;
@@ -379,18 +355,9 @@ export interface JivRenderStyle {
   BackdropVibrancyCover: number;
 
 
-  LightAngle: number;
-  LightIntensity: number;
-
-  SpecularIntensity: number;
-  SpecularGlow: number;
-
-  FresnelStrength: number;
   ChromaticAberration: number;
-  EdgeLightTop: number;
-  EdgeLightBottom: number;
 
-  /** Resolved `RimWidth`, CSS px (the walk multiplies by the device pixel ratio). */
+  /** Resolved `RimWidth`, in points. */
   RimWidth: number;
   RimStrength: number;
 
@@ -426,7 +393,6 @@ export interface JivRenderStyle {
   ShadowBlur: number;
   ShadowOffsetX: number;
   ShadowOffsetY: number;
-  ShadowAdaptive: number;
   InnerShadow: boolean;
 
   /** Foreground grade — multiplies the element's FINAL composited rgb

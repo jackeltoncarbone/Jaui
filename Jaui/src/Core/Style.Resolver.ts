@@ -292,8 +292,9 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BackdropFrostAuto: !fgBlur && frostAuto,
     Thickness: thickness,
     Refraction: Resolve(s.Refraction, ctx, 'W'),
+    GlassVariant: ResolveTernary(s.GlassVariant, ctx) === 'Clear' ? 'Clear' : 'Regular',
+    SchemeDark: parseFloat(ctx.Vars?.get(THEME_DARK_VAR) ?? '1') >= 0.5,
     Tint: _resolveTint(s, ctx),
-    AdaptiveFar: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.AdaptiveFar, ctx), ctx, 'W'))),
     BackdropBrightness: backdrop.Brightness,
     BackdropSaturation: backdrop.Saturation,
     BackdropContrast: backdrop.Contrast,
@@ -308,15 +309,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     Isolate: s.Isolate === 'true' || (s.Isolate as unknown) === true,
 
 
-    LightAngle: Resolve(s.LightAngle, ctx, 'W'),
-    LightIntensity: Resolve(s.LightIntensity, ctx, 'W'),
 
-    SpecularIntensity: Resolve(s.SpecularIntensity, ctx, 'W'),
-    SpecularGlow: Resolve(s.SpecularGlow, ctx, 'W'),
-    FresnelStrength: Resolve(s.FresnelStrength, ctx, 'W'),
     ChromaticAberration: Resolve(s.ChromaticAberration, ctx, 'W'),
-    EdgeLightTop: Resolve(s.EdgeLightTop, ctx, 'W'),
-    EdgeLightBottom: Resolve(s.EdgeLightBottom, ctx, 'W'),
     RimWidth: Math.max(0, Resolve(ResolveTernary(s.RimWidth, ctx), ctx, 'W')),
     RimStrength: Math.max(0, Math.min(1, Resolve(ResolveTernary(s.RimStrength, ctx), ctx, 'W'))),
 
@@ -351,7 +345,6 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     ShadowBlur: Resolve(s.ShadowBlur, ctx, 'W'),
     ShadowOffsetX: Resolve(s.ShadowOffsetX, ctx, 'W'),
     ShadowOffsetY: Resolve(s.ShadowOffsetY, ctx, 'H'),
-    ShadowAdaptive: Math.max(0, Math.min(1, Resolve(ResolveTernary(s.ShadowAdaptive, ctx), ctx, 'W'))),
     InnerShadow: s.InnerShadow,
 
     Opacity: Resolve(s.Opacity, ctx, 'W'),

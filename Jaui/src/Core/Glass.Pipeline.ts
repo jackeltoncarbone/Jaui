@@ -1,0 +1,95 @@
+/**
+ * Apple's Liquid Glass, the CPU half: the size laws the instance packer, the blur plan and the shadow read.
+ * The fragment half is `Jiv/Shaders/Glass.Pipeline.glsl`; the two state the same constants. Every value
+ * and its source is in `Core/Glass.md`.
+ */
+
+export type GlassVariant = 'Regular' | 'Clear';
+
+/** Glass this small tracks its backdrop's luma: its appearance and its face follow what is behind it. */
+export const GLASS_TRACKS_LUMA_SPAN = 56;
+
+/** `u` ramps over S = 48..160 pt and `v` over 64..160 pt, S being the shape's minor dimension. */
+export const GlassSizeRamps = (span: number): { U: number; V: number } => ({
+  U: Math.max(0, Math.min(1, (span - 48) / 112)),
+  V: Math.max(0, Math.min(1, (span - 64) / 96)),
+});
+
+/** The backdrop's scale in Apple's pipeline: a quarter for regular glass, a half for clear. */
+export const GlassBackdropScale = (variant: GlassVariant): number => (variant === 'Clear' ? 0.5 : 0.25);
+
+/** BlurRadius in points: 1.33 to 4 over `u` for regular glass, 1 for clear. */
+export const GlassBlurRadius = (span: number, variant: GlassVariant): number =>
+  variant === 'Clear' ? 1 : 1.3333 + 2.6667 * GlassSizeRamps(span).U;
+
+/** A radius in points to Apple's LOD on its backdrop texture: `r` in backdrop texels, then log2. */
+export const GlassAppleLod = (radiusPt: number, dpr: number, variant: GlassVariant): number => {
+  const r = radiusPt * GlassBackdropScale(variant) * dpr * 1.6;
+  return Math.max(0, r < 2 ? Math.log2(1 + 0.5 * r) : Math.log2(r));
+};
+
+/**
+ * THE MAPPING TO OUR NATIVE PYRAMID. Apple samples a quarter (clear: half) resolution texture at a mip
+ * LOD; we never render below native, so we sample our own native pyramid at the LOD with the same blur.
+ * Apple's level L holds texels 2^L / backdropScale device px wide; a texel reads as a Gaussian of
+ * GLASS_TEXEL_SIGMA of its width. Our LOD n is a Gaussian of 2^n device px, so
+ * n = L + log2(GLASS_TEXEL_SIGMA / backdropScale). 0.35 is fitted to SwiftUI's own render of the same
+ * inputs (the detail left in the body, regular and clear), not read from Apple.
+ */
+export const GLASS_TEXEL_SIGMA = 0.35;
+export const GlassNativeLod = (appleLod: number, variant: GlassVariant): number =>
+  appleLod + Math.log2(GLASS_TEXEL_SIGMA / GlassBackdropScale(variant));
+
+/** The body's LOD at blur scale `k` (0.5 at the edge ramp's floor, 1 in the body), on our pyramid. */
+export const GlassBodyLod = (span: number, k: number, dpr: number, variant: GlassVariant): number =>
+  GlassNativeLod(GlassAppleLod(GlassBlurRadius(span, variant) * k, dpr, variant), variant);
+
+/** Edge bleed: opacity over `v` (0 below 64 pt), outward shift and blur, and its LOD. Off on clear glass. */
+export const GlassBleedLod = (span: number, dpr: number, variant: GlassVariant): number =>
+  GlassNativeLod(GlassAppleLod(0.7 * span * 0.5, dpr, variant), variant);
+
+/** The drop shadow: offset (0, 8) pt, radius 24 pt, reaching 2 radii; its colored read blurs at 40 pt. */
+export const GLASS_SHADOW_OFFSET_Y = 8;
+export const GLASS_SHADOW_RADIUS = 24;
+export const GLASS_SHADOW_BLUR = 40;
+export const GlassShadowLod = (dpr: number, variant: GlassVariant): number =>
+  GlassNativeLod(GlassAppleLod(GLASS_SHADOW_BLUR, dpr, variant), variant);
+/** How far the colored shadow's read reaches outward: min(0.625 S, 75) pt. */
+export const GlassShadowAmount = (span: number): number => Math.min(0.625 * span, 75);
+
+/** The shadow's peak alpha: opacity (0.5 - 0.25u) times its fill (black 0.12 plus SDR 0.08 + 0.16u), or
+ *  times 1 where the colored read takes over (v). Clear glass casts none. */
+export const GlassShadowPeak = (span: number, variant: GlassVariant): number => {
+  if (variant === 'Clear') return 0;
+  const { U, V } = GlassSizeRamps(span);
+  const fill = 0.12 + 0.08 + 0.16 * U;
+  return (0.5 - 0.25 * U) * (fill + (1 - fill) * V);
+};
+
+/**
+ * The pyramid a glass surface needs, in our LOD units: built at its sharpest read (the outer sample at
+ * half radius) and deep enough for its deepest (the body at full radius; the bleed and the colored shadow
+ * on large glass). `Reach` is how far past the face, in points, any of its reads can land.
+ */
+export interface GlassBlurNeeds {
+  BaseLod: number;
+  MaxLod: number;
+  ReachPt: number;
+}
+
+export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVariant): GlassBlurNeeds => {
+  const base = GlassBodyLod(span, 0.5, dpr, variant);
+  let top = GlassBodyLod(span, 1, dpr, variant);
+  const sigmaPt = (lod: number): number => Math.pow(2, lod) / dpr;
+  // The outer sample looks 0.2 S past the outline.
+  let reach = 0.2 * span + 3 * sigmaPt(base);
+  const { V } = GlassSizeRamps(span);
+  if (V > 0 && variant === 'Regular') {
+    const bleed = GlassBleedLod(span, dpr, variant);
+    const shadow = GlassShadowLod(dpr, variant);
+    top = Math.max(top, bleed, shadow);
+    reach = Math.max(reach, 0.35 * span + 3 * sigmaPt(bleed),
+      2 * GLASS_SHADOW_RADIUS + GLASS_SHADOW_OFFSET_Y + GlassShadowAmount(span) + 3 * sigmaPt(shadow));
+  }
+  return { BaseLod: base, MaxLod: Math.max(1, Math.ceil(top - base)), ReachPt: reach };
+};

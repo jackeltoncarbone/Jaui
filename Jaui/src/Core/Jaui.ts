@@ -14,7 +14,8 @@ import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
-import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
+import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
+import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak } from './Glass.Pipeline';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
   Vibrancy, VibrancyBlendOf, VibrancyGateLine, VibrancyGraded, VibrancyInkScale, VibrancyIsActive,
@@ -27,8 +28,7 @@ import { type Mat2x3, MAT_IDENTITY, matMul, matApplyX, matApplyY, matScaleX, mat
 import { ParseColor } from './Color.Parse';
 import { type Mat3x3, mat3Mul, mat3FromAffine, mat3Project3D, mat3ApplyPoint } from '../Transform/Mat3x3';
 import { XformBuffer, XFORM_FLOATS_PER_ENTRY } from '../Transform/Xform.Buffer';
-import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop, type GlassAdapt, type ProgressiveBlurParams } from './Renderer';
-import { EmptyGlassAdaptCensus, GlassAdaptCensusOf, GlassAdaptLine, type GlassAdaptCensus, type GlassAdaptDraw } from './Glass.Adapt';
+import { SHADOW_EASE_SECONDS, SHADOW_SETTLE_TAUS, SHADOW_SETTLE_TAUS_UNSNAPPED, type Renderer, type GpuTextureHandle, type BgPaint, type ShadowBackdrop, type ProgressiveBlurParams } from './Renderer';
 // `?blur-first` names the pyramid pool's own chain key so the report can say how many chains
 // forty builds actually resolve to. These three are the exact functions `BlurPass.Blur` uses to
 // pick it, exported for exactly this reason (see `BaseDownsampleFactor`'s own note) — a second
@@ -41,9 +41,8 @@ import {
   type AtlasBuildMember, type BackdropUnionPlan,
 } from './BlurPass';
 import { RadiusForFetches, type SeparableKRule, type SeparableSigma } from './Blur.Separable';
-import { EmptyGlassFragCensus, GlassSkipNames, ParseGlassSkip, GLASS_SKIP_STAGES, type GlassFragCensus } from './Glass.Skip';
+import { EmptyGlassFragCensus, GlassSkipNames, ParseGlassSkip, type GlassFragCensus } from './Glass.Skip';
 import { GlassSoloReasonAt, GlassSoloTally, type GlassSoloReason } from './Glass.Group.Why';
-import { GLASS_PROGRAMS_PREEMPT, ParseGlassPrograms, type GlassProgramsArm } from './Glass.Programs';
 import { PlanBackdropAtlas, AtlasAdmitsMember, ATLAS_LIMITS_WIRED, ATLAS_BUDGET_BYTES } from './Blur.Atlas';
 import {
   PlanOcclusion, CoveredPixels, CoveredRegion, IntersectRegions, RasterPixels, IntersectPixelRect,
@@ -93,9 +92,6 @@ const ABLATE_IDLE_MS = 250;
  *  One LOD, because past it a re-based (`k > 1`) level 0 moves the picture rather than the rounding --
  *  see `_maySeparable`. */
 const SEPARABLE_MIP_MAX_LOD = 1;
-/** `?glass-adapt`'s census reads the probe state row back once per this many rendered frames (and on every
- *  snap frame). A pack-buffer copy of 256 bytes behind a fence; see `_glassAdaptEndFrame`. */
-const GLASS_ADAPT_CENSUS_FRAMES = 30;
 
 /** The frost LOD an INSTANCE carries, from `JivFrostCssPx`. Mirror of Jiv.InstanceBuffer (`data[offset + 35]`). */
 const _instanceFrostLod = (frostCssPx: number, dpr: number): number =>
@@ -409,16 +405,6 @@ export interface ShadowProbeCensus {
   Refused: string;
 }
 
-/** `?glass-programs`, per rendered frame: the arm, the panel programs the boot compiles, and the
- *  glass batches the variant took (and the ones that fell back). */
-export interface GlassProgramsCensus {
-  Arm: GlassProgramsArm;
-  Programs: number;
-  NoGlow: number;
-  NoSpec: number;
-  Fallbacks: number;
-}
-
 /** `?glass-skip`, per rendered frame. `Draws` and `Census.Frags` must read the same on every arm
  *  as on `none` -- the arms change what a glass fragment DOES, never which draws run or how big
  *  they are -- and `Census.Taps` against `Census.TapsFull` is what a stage removed. */
@@ -440,7 +426,7 @@ import { ScrollManager } from '../Scroll/Scroll.Manager';
 import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
-import { WebGL2Renderer, PANEL_PROGRAM_COUNT, SHADOW_STATE_SLOTS } from './WebGL2.Renderer';
+import { WebGL2Renderer, PANEL_PROGRAM_COUNT } from './WebGL2.Renderer';
 import type { ShadowProbe, BlurCacheSlot } from './WebGL2.Renderer';
 import { Framebuffer } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
@@ -602,8 +588,6 @@ export class Canvas implements DirtyTracker {
    *  to override which scroll container receives keyboard scroll keys. */
   get Focus(): FocusManager { return this._focusManager; }
   /** Specular tilt offset — added to lightDir for specular computations only. */
-  private _specTiltX: number = 0;
-  private _specTiltY: number = 0;
   private _animationManager = new AnimationManager();
   private _animators = new Map<JauiElement, JivAnimator>();
   /** Nodes already warned about non-finite layout results (one warn per node). */
@@ -980,37 +964,11 @@ export class Canvas implements DirtyTracker {
   private _shadowProbeLastLine = '';
   /** The slot each member's probe wrote at the group's capture, with the rect it probed so the walk
    *  can check the member it draws is the one that was measured. */
-  private _groupShadow = new Map<Jiv, { Slot: number; Adaptive: number; Rect: { x: number; y: number; w: number; h: number } }>();
+  private _groupShadow = new Map<Jiv, { Slot: number; Rect: { x: number; y: number; w: number; h: number } }>();
   /** `Grouped`: members whose draw took a capture-time reading. `Moved`: members probed at the
    *  capture whose walk rect differed, or who fell back off the group after it was probed -- it
    *  must read 0; a non-zero reading voids the cell. */
   private _shadowProbeStats = { Grouped: 0, Moved: 0 };
-  /** `?glass-adapt=on|off` -- THE GLASS GRADE OPENS WITH ITS BACKDROP (`Core/Glass.Adapt.ts`).
-   *
-   *  `on` (default) hands every glass draw that authors an `AdaptiveFar` its probe slot, and the panel
-   *  vertex stage opens the body's range as far as the texel's brightest backdrop luma leaves the ink
-   *  room. `off` hands none: every batch uploads slot -1 and the vertex stage takes the authored grade
-   *  untouched, today's engine byte for byte. The probe writes its luma channels on BOTH arms (they
-   *  cost it one `max` and nothing reads them on `off`), so the arms differ in the draw and nowhere else. */
-  // DEFAULT ON. The hover snap Jack saw ("immediately upon hover, there's more saturation. It snaps, not
-  // animates ... then it instantly, at the end, just cuts out") was the grade's ELIGIBILITY, not the
-  // texel: a glass press stated a Brightness above 1, and only a body at brightness 1 was adapted, so a
-  // hover dropped the surface off the adaptive grade in one frame and the release put it back in one.
-  // The grade now adapts at any brightness (the press is a folded fill) and the probe's G and B keep easing
-  // through a park, so the material moves with its inputs and never steps.
-  private _glassAdapt: 'on' | 'off' = 'on';
-  private _glassAdaptRefused = '';
-  /** This frame's adapted draws, for the census; and draws that wanted to adapt but had no probe. */
-  private _glassAdaptDraws: GlassAdaptDraw[] = [];
-  private _glassAdaptUnprobed = 0;
-  private _glassAdaptCensus: GlassAdaptCensus = EmptyGlassAdaptCensus('on', '');
-  /** The draws of the frame whose state row is in flight. */
-  private _glassAdaptPending: GlassAdaptDraw[] = [];
-  private _glassAdaptPendingUnprobed = 0;
-  private _glassAdaptPendingFrame = -1;
-  private _glassAdaptRow = new Uint8Array(SHADOW_STATE_SLOTS * 4);
-  private _glassAdaptFrame = 0;
-  private _glassAdaptLastLine = '';
   /** `?blur-cache`'s last FILL verdict, for the probe that follows it: a clean fill is a probe whose
    *  pyramid and sharp tap are last frame's (`Shadow.Texel`). And each surface's last probe rect. */
   private _bcFillClean: Jiv | null = null;
@@ -1023,11 +981,6 @@ export class Canvas implements DirtyTracker {
   private _glassSkipRefused = '';
   /** The last `jaui:glass-skip` gate line, printed on a SHAPE change like every gate above it. */
   private _glassSkipLastLine = '';
-  /** `?glass-programs` -- the glass program's compiled-out variants (`Glass.Programs`). Default `on`:
-   *  pixel-identical by construction, compiled at boot on every arm, so `off` is a routing change. */
-  private _glassPrograms: GlassProgramsArm = 'on';
-  /** The last `jaui:glass-programs` gate line: the batch counts, printed when they change. */
-  private _glassProgramsLastLine = '';
   /** `?emptypanels` -- A PANEL THAT PAINTS NOTHING IS NOT PUSHED. Default ON.
    *
    *  A fully transparent background with no painted border and no shadow shades its whole quad to
@@ -1415,7 +1368,6 @@ export class Canvas implements DirtyTracker {
     this._listenForTextSelection();
     this._inputRouter.Listen();
     this._listenForFontLoad();
-    void this._listenForSpecularTilt;
 
     // ── WebGL context-loss recovery ──
     // iOS (and any platform under GPU memory pressure) kills a backgrounded tab's
@@ -2721,8 +2673,6 @@ export class Canvas implements DirtyTracker {
   private _render = (dt: number): void => {
     const r = this._renderer;
     this._adaptiveShadowsDrawn = false;
-    this._glassAdaptDraws = [];
-    this._glassAdaptUnprobed = 0;
     this._bcFillClean = null;
     const w = Math.round(this._width * this._dpr);
     const h = Math.round(this._height * this._dpr);
@@ -2863,6 +2813,8 @@ export class Canvas implements DirtyTracker {
     // scene. So the bar reads brighter than the dimmed surround it sits on, as Apple's does, and costs no
     // build of its own. Scoped to the strip's subtree; null everywhere else.
     let edgeBackdrop: EdgeBackdrop | null = null;
+    // The glass whose labels the text drawn now sits on (`SetGlassInk`): its probe slot and theme, or -1.
+    let glassInk = { Slot: -1, Dark: false };
     // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
     // contract means the scene is different every frame; caching snapshots
     // across surfaces was already unsafe. Each glass/pblur now builds its
@@ -2908,7 +2860,7 @@ export class Canvas implements DirtyTracker {
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, this._panelBuffer.Count * JIV_FLOATS_PER_INSTANCE);
-      r.PanelDrawBatch(flushW, flushH, null, 0, this._specTiltX, this._specTiltY);
+      r.PanelDrawBatch(flushW, flushH, null, 0);
       this._vibrancyStats.PanelBatches++;
       this._counts.Panels += this._panelBuffer.Count;
       this._panelBuffer.Begin(); // reset count for the next batch
@@ -2952,7 +2904,7 @@ export class Canvas implements DirtyTracker {
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
       r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-      r.PanelDrawBatch(flushW, flushH, null, 0, this._specTiltX, this._specTiltY, false, null);
+      r.PanelDrawBatch(flushW, flushH, null, 0, false, null);
       r2.RestoreBlend();
       r2.NoteShapeDraw();
       this._counts.Panels++;
@@ -3022,7 +2974,7 @@ export class Canvas implements DirtyTracker {
           r.EnableBlend();
           r.PanelBeginBatch();
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-          r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null);
+          r.PanelDrawBatch(w, h, null, 0, false, null);
           this._counts.Panels++;
           this._panelBuffer.Begin();
         }
@@ -3030,9 +2982,17 @@ export class Canvas implements DirtyTracker {
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, ownClip.Offset, ownClip.Count, ownXform, 'RimOnly');
           if (this._bcOn) this._bcNotePanel(ownClip.Offset, ownClip.Count, ownXform);
+          // Apple's highlight recolors what is under the band by a matrix of that pixel, so it reads a
+          // snapshot of the scene under the node's box.
+          const box = this._nodeAabb(node, eff, effH);
+          const under = r2.SnapshotScreen({
+            x: Math.max(0, Math.floor(box.minX * this._dpr) - 1), y: Math.max(0, Math.floor(box.minY * this._dpr) - 1),
+            w: Math.ceil((box.maxX - box.minX) * this._dpr) + 2, h: Math.ceil((box.maxY - box.minY) * this._dpr) + 2,
+          });
+          r2.RebindSceneTarget();
           r2.PanelBeginBatch();
           r2.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-          r2.PanelRimDraw(flushW, flushH);
+          r2.PanelRimDraw(flushW, flushH, under);
           this._panelBuffer.Begin();
           this._counts.Rims++;
         }
@@ -3190,6 +3150,8 @@ export class Canvas implements DirtyTracker {
       let cardOpen = false;
       // Set by this node's progressive blur, if it draws one: the pyramid its subtree's glass samples.
       let edgeHere: typeof edgeBackdrop = null;
+      // A probed glass surface this node draws: its subtree's labels follow its appearance.
+      let glassInkHere = -1;
 
       // BorderLayer: when this Jiv asks for its border to paint at a non-zero
       // position in its children's Layer space, suppress the border on the
@@ -3643,7 +3605,7 @@ export class Canvas implements DirtyTracker {
         if (groupShadow !== undefined) {
           const gr = groupShadow.Rect;
           if (gr.x !== px || gr.y !== py || gr.w !== pw || gr.h !== ph) this._shadowProbeStats.Moved++;
-          shadowBackdrop = { Slot: groupShadow.Slot, Adaptive: groupShadow.Adaptive };
+          shadowBackdrop = { Slot: groupShadow.Slot };
           this._shadowProbeStats.Grouped++;
           this._adaptiveShadowsDrawn = true;
         } else if (preShadow !== undefined) {
@@ -3664,7 +3626,7 @@ export class Canvas implements DirtyTracker {
           const inputsSame = this._bcOn && this._bcFillClean === node && sameRect;
           const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt, inputsSame);
           if (slot >= 0) {
-            shadowBackdrop = { Slot: slot, Adaptive: _rs.ShadowAdaptive };
+            shadowBackdrop = { Slot: slot };
             this._adaptiveShadowsDrawn = true;
           }
         }
@@ -3692,12 +3654,17 @@ export class Canvas implements DirtyTracker {
         r.EnableBlend();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
-        if (_rs.ShadowColor.A > 0.001 && !JivInstanceBuffer.DiagNoShadow) {
+        // Glass casts Apple's shadow whatever it authored (Core/Glass.md): black from the flat program, or,
+        // from 64 pt, the backdrop past its outline, read from its own pyramid by the glass program.
+        const glassShadow = _isGlass(material) ? this._glassShadowPeak(node, eff) : 0;
+        if ((_isGlass(material) ? glassShadow > 0 : _rs.ShadowColor.A > 0.001) && !JivInstanceBuffer.DiagNoShadow) {
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 'Normal', null, 'Only');
+          const colored = this._panelBuffer.Data[38] > 1.5;
           r.PanelBeginBatch();
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-          r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, undefined, shadowBackdrop);
+          if (colored) r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, true, sceneSnap, undefined, shadowBackdrop);
+          else r.PanelDrawBatch(w, h, null, 0, false, null);
           this._counts.Panels++;
         }
         this._panelBuffer.Begin();
@@ -3749,18 +3716,15 @@ export class Canvas implements DirtyTracker {
             if (!(r instanceof WebGL2Renderer) || r.ShadowTexelMoved(node)) this._bc.Fresh('shadow');
           }
         }
-        // `?glass-adapt`: the grade reads the SAME texel the shadow does, so it rides the probe's slot,
-        // its snap and its declaration, and costs the draw one uniform.
-        const glassAdapt = this._glassAdaptFor(node, shadowBackdrop);
-        if (glassAdapt !== undefined && this._bcOn) {
-          this._bc.Sig.Number(glassAdapt.OpenFar);
-        }
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
-          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, undefined, glassAdapt);
+          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop);
         }
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
+        // Only glass that tracks its backdrop can take an appearance its theme does not have.
+        if (_isGlass(material) && shadowBackdrop !== undefined
+            && JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5 <= GLASS_TRACKS_LUMA_SPAN) glassInkHere = shadowBackdrop.Slot;
         else this._counts.Panels++;
         if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
         // Reset the shared panel buffer so this glass instance isn't picked
@@ -3842,7 +3806,7 @@ export class Canvas implements DirtyTracker {
           r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-          r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, flatBgPaint);
+          r.PanelDrawBatch(w, h, null, 0, false, null, flatBgPaint);
           if (blend !== null) { r2.RestoreBlend(); r2.NoteBlendDraw(); }
           this._counts.Panels++;
           if (flatBgPaint !== undefined && flatBgPaint.Mode === 'Image') this._counts.Image++;
@@ -3960,7 +3924,18 @@ export class Canvas implements DirtyTracker {
       // to its subtree's glass for the length of the subtree.
       const outerEdge = edgeBackdrop;
       if (edgeHere !== null) edgeBackdrop = edgeHere;
+      const outerInk = glassInk;
+      if (glassInkHere >= 0) {
+        flushText();
+        glassInk = { Slot: glassInkHere, Dark: node.RenderStyle.SchemeDark };
+        r2.SetGlassInk(glassInk.Slot, glassInk.Dark);
+      }
       descendChildren(node, eff, stack, scope, effH, childPersp);
+      if (glassInkHere >= 0) {
+        flushText();
+        glassInk = outerInk;
+        r2.SetGlassInk(outerInk.Slot, outerInk.Dark);
+      }
       edgeBackdrop = outerEdge;
 
       // Close the card composite. The pending batches drain FIRST: anything still buffered belongs
@@ -4306,16 +4281,6 @@ export class Canvas implements DirtyTracker {
       if (line !== this._glassSkipLastLine) { this._glassSkipLastLine = line; JTrace(line); }
     }
 
-    // `?glass-programs`' gate, on the same terms: printed when the counts change. A fallback above
-    // zero is a batch the armed variant could not take.
-    if (this._glassPrograms !== 'off' && this._renderer instanceof WebGL2Renderer) {
-      const c = this._renderer.GlassProgramCensus;
-      const line = `jaui:glass-programs armed=${this._glassPrograms} programs=${PANEL_PROGRAM_COUNT}`
-        + ` noGlow=${c.NoGlow} noSpec=${c.NoSpec} fallbacks=${c.Fallbacks}`
-        + ' pixels=SAME';
-      if (line !== this._glassProgramsLastLine) { this._glassProgramsLastLine = line; JTrace(line); }
-    }
-
     // `?occlusion`'s gate, on the same terms: a SHAPE change, not a frame.
     //
     // `coverers=<planned>/<seen>` and `missed=` are the two that must hold, and they are printed
@@ -4502,7 +4467,6 @@ export class Canvas implements DirtyTracker {
       r.InvalidateFrameTransients();
     }
 
-    if (r instanceof WebGL2Renderer) this._glassAdaptEndFrame(r);
     r.EndShadowBackdropFrame();
     r.EndFrame();
   };
@@ -4867,8 +4831,6 @@ export class Canvas implements DirtyTracker {
     const bc = this._bc;
     const seed = bc.NewSeed();
     seed.Number(w); seed.Number(h); seed.Number(this._dpr);
-    // `u_SpecularTilt`, a uniform of every panel draw.
-    seed.Number(this._specTiltX); seed.Number(this._specTiltY);
     // The glyph atlas every text instance's UVs index, and its flush epoch.
     const atlas = this._textCache.Atlas;
     seed.Number(atlas ? bc.Id(atlas) : 0);
@@ -5453,6 +5415,8 @@ export class Canvas implements DirtyTracker {
     const s = node.RenderStyle;
     if (!(s.RimWidth > 0 && s.RimStrength > 0 && node.EffectiveOpacity > 0.001
           && node.Visible && node.Width > 0 && node.Height > 0)) return false;
+    // Glass draws its highlight in its own fragment, over its face.
+    if (_isGlass(s.Material) && this._glassFillTakesPyramid(node)) return false;
     return !(ownPanelCulled && this._edgeOutsidePaintedArea(node, eff, stack, effH));
   };
 
@@ -5468,6 +5432,10 @@ export class Canvas implements DirtyTracker {
       && material !== 'ProgressiveBlur' && !this._diagNoGlass;
   };
 
+  /** A glass surface's shadow peak at its rendered size (Core/Glass.Pipeline.ts); 0 on clear glass. */
+  private _glassShadowPeak = (node: Jiv, eff: Mat2x3): number =>
+    GlassShadowPeak(JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5, node.RenderStyle.GlassVariant);
+
   /** The glass FILL pyramid's plan: the region it is built over, the sigma it is built at, and how
    *  deep a chain the surface can read.
    *
@@ -5480,11 +5448,15 @@ export class Canvas implements DirtyTracker {
   ): GlassBlurPlan => {
     const d = this._dpr;
     const rs = node.RenderStyle;
-    const frost = JivFrostCssPx(node);
+    const frost = JivFrostCssPx(node, d);
     const frostCssPx = Math.max(1 / d, frost);
     const gsx = matScaleX(eff), gsy = matScaleY(eff);
     const avgScale = (gsx + gsy) * 0.5;
-    const margin = frostCssPx * d + 8 * d;
+    // Glass reads past its face (the outer lens sample, and on large glass the edge bleed and the colored
+    // shadow) and deeper than its base (the body at full radius): Core/Glass.Pipeline.ts says how far.
+    const glass = _isGlass(rs.Material)
+      ? GlassBlurNeedsOf(JivGlassSpan(node) * avgScale, d, rs.GlassVariant) : null;
+    const margin = Math.max(frostCssPx * d + 8 * d, glass !== null ? glass.ReachPt * avgScale * d : 0);
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
     // second reading of them: the surface draws with its shadow excluded, so its quad is the face,
     // the border and a pixel of antialiasing. The shadow is its own draw and never samples.
@@ -5492,9 +5464,8 @@ export class Canvas implements DirtyTracker {
     const ab = this._nodeAabb(node, eff, effH);
     const px = ab.minX * d, py = ab.minY * d;
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
-    const adaptiveShadow = ((rs.ShadowAdaptive > 0 && rs.ShadowColor.A > 0.001)
-      || rs.AdaptiveFar > 0)
-      && !JivInstanceBuffer.DiagNoShadow;
+    // Every glass surface is probed: its appearance is its backdrop's (Core/Glass.md).
+    const adaptiveShadow = glass !== null;
     const instFrostLod = _instanceFrostLod(frost, d);
     const baseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
     return {
@@ -5510,6 +5481,7 @@ export class Canvas implements DirtyTracker {
       // detail LOD, so it floors the depth.
       MaxLod: Math.max(
         _backdropMaxLod(instFrostLod, baseFrostLod),
+        glass !== null ? glass.MaxLod : 0,
         adaptiveShadow ? Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - baseFrostLod : 0,
       ),
       BaseFrostLod: baseFrostLod,
@@ -5701,7 +5673,7 @@ export class Canvas implements DirtyTracker {
         detailLod, b.Handle, r.SceneTexture, dt,
       );
       if (slot < 0) continue;
-      this._phasedShadow.set(b.Node, { Slot: slot, Adaptive: b.Node.RenderStyle.ShadowAdaptive });
+      this._phasedShadow.set(b.Node, { Slot: slot });
       this._adaptiveShadowsDrawn = true;
     }
   };
@@ -5984,7 +5956,7 @@ export class Canvas implements DirtyTracker {
       r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
       r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
       r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-      r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, paint);
+      r.PanelDrawBatch(w, h, null, 0, false, null, paint);
       this._counts.Panels++;
       this._counts.Image++;
       this._panelBuffer.Begin();
@@ -6418,48 +6390,6 @@ export class Canvas implements DirtyTracker {
     return handle;
   };
 
-  /** `?glass-adapt`: this glass draw's adapt, or undefined for the authored grade. A surface that authors
-   *  an `AdaptiveFar` but was not probed (no adaptive shadow, no frost, no free slot) has no reading to
-   *  open by, keeps the authored grade, and is counted as `unprobed` rather than silently static. */
-  private _glassAdaptFor = (node: Jiv, shadow: ShadowBackdrop | undefined): GlassAdapt | undefined => {
-    if (this._glassAdapt !== 'on') return undefined;
-    const rs = node.RenderStyle;
-    if (!(rs.AdaptiveFar > 0)) return undefined;
-    if (shadow === undefined || shadow.Slot < 0) { this._glassAdaptUnprobed++; return undefined; }
-    const adapt: GlassAdapt = { Slot: shadow.Slot, OpenFar: rs.AdaptiveFar };
-    this._glassAdaptDraws.push({
-      Slot: shadow.Slot, OpenFar: rs.AdaptiveFar,
-      Grade: { Brightness: rs.BackdropBrightness, Saturation: rs.BackdropSaturation, Contrast: rs.BackdropContrast, Tint: rs.Tint },
-    });
-    return adapt;
-  };
-
-  /** `?glass-adapt`'s census, at the end of a rendered frame, before the probe slots are released.
-   *
-   *  Collects a state row whose fence has signalled and resolves it against the draws of the frame it
-   *  was read on; then, every `GLASS_ADAPT_CENSUS_FRAMES` rendered frames and on every snap frame (the
-   *  frame a page parks on), issues the next read. One pack-buffer copy of a 64-texel row per read,
-   *  never a wait, and never on `off`, which is the engine without this lane. */
-  private _glassAdaptEndFrame = (r: WebGL2Renderer): void => {
-    if (this._glassAdapt !== 'on') return;
-    const c = this._glassAdaptCensus;
-    if (this._glassAdaptPendingFrame >= 0 && r.PollShadowStateRead(this._glassAdaptRow)) {
-      c.Frame = this._glassAdaptPendingFrame;
-      c.Reads = r.ShadowStateReads;
-      GlassAdaptCensusOf(c, this._glassAdaptPending, this._glassAdaptPendingUnprobed, this._glassAdaptRow);
-      this._glassAdaptPendingFrame = -1;
-      const line = GlassAdaptLine(c);
-      if (line !== this._glassAdaptLastLine) { this._glassAdaptLastLine = line; JTrace(line); }
-    }
-    const frame = this._glassAdaptFrame++;
-    const due = frame % GLASS_ADAPT_CENSUS_FRAMES === 0 || r.ShadowSnap;
-    if (due && this._glassAdaptPendingFrame < 0 && r.RequestShadowStateRead()) {
-      this._glassAdaptPending = this._glassAdaptDraws;
-      this._glassAdaptPendingUnprobed = this._glassAdaptUnprobed;
-      this._glassAdaptPendingFrame = frame;
-    }
-  };
-
   /** `?shadow-probe=group`: THE GROUP'S ADAPTIVE-SHADOW PROBES, taken at its capture.
    *
    *  The walk's own arguments, from the plan the scan recorded for each member -- the rect, the
@@ -6488,7 +6418,7 @@ export class Canvas implements DirtyTracker {
     const slots = r.MeasureShadowBackdrops(probes, handle, r.SceneTexture, dt);
     for (let i = 0; i < nodes.length; i++) {
       if (slots[i] < 0) continue;
-      this._groupShadow.set(nodes[i], { Slot: slots[i], Adaptive: nodes[i].RenderStyle.ShadowAdaptive, Rect: probes[i].Rect });
+      this._groupShadow.set(nodes[i], { Slot: slots[i], Rect: probes[i].Rect });
     }
     return true;
   };
@@ -7158,42 +7088,6 @@ export class Canvas implements DirtyTracker {
       this.Wake();
     });
     observer.observe(this.Element as unknown as Element);
-  };
-
-  /** Pointer tracking → specular tilt. Simulates Apple's gyro-driven catchlight:
-   *  as the user moves the cursor, the specular highlight slides across the
-   *  rim. `SpecularTilt` is only applied to specular math (Blinn-Phong catchlight
-   *  + rim-spec highlight) — not to ambient, edge light, or border directionality,
-   *  which stay anchored to the stylesheet-set `LightAngle`. */
-  // Retained for future mobile gyro wiring; see constructor note. The
-  // `void` reference at the end of the constructor keeps TS happy without
-  // a suppression comment until we actually wire it up.
-  private _listenForSpecularTilt = (): void => {
-    const updateFromEvent = (clientX: number, clientY: number): void => {
-      const r = this._pageRect();
-      // Map pointer to [-1, +1] relative to canvas center, then scale to a
-      // modest tilt magnitude (Apple's gyro tilt rarely exceeds ~30°, which
-      // in light-direction space is about 0.5 unit). Clamp to ±0.5.
-      const tx = ((clientX - r.left) / Math.max(r.width, 1) - 0.5) * 2;
-      const ty = ((clientY - r.top) / Math.max(r.height, 1) - 0.5) * 2;
-      this._specTiltX = Math.max(-0.5, Math.min(0.5, tx * 0.5));
-      // Y note: screen Y grows downward, but LightAngle's y convention has
-      // "up" as negative in screen space (matches the instance buffer's
-      // `lightY = -sin(rad)`). So mouse moving DOWN should shift the
-      // specular origin DOWN in the light source, i.e. tilt.y positive.
-      this._specTiltY = Math.max(-0.5, Math.min(0.5, ty * 0.5));
-      this.RequestFrame();
-    };
-
-    this._on('pointermove', (e: PointerEvent) => {
-      updateFromEvent(e.clientX, e.clientY);
-    }, { passive: true });
-
-    this._on('pointerleave', () => {
-      this._specTiltX = 0;
-      this._specTiltY = 0;
-      this.RequestFrame();
-    }, { passive: true });
   };
 
   /** Pointer → interaction states (Hover / Active). The topmost hit Jiv
@@ -8219,29 +8113,6 @@ export class Canvas implements DirtyTracker {
         : tsBad ? ` reason=only-on-and-off-are-values-got-${twoStop}` : '';
       JTrace(`jaui:two-stop-gradient armed=${tsArmed ? 'on' : 'off'} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}${tsWhy}`);
     }
-    // `?glass-programs=<on|off>` -- PIXEL-IDENTICAL BY CONSTRUCTION, DEFAULT ON.
-    //
-    // A glass batch whose every instance has FresnelStrength and SpecularIntensity/Glow exactly +0
-    // takes MATERIAL_GLASS + GLASS_NO_GLOW + GLASS_NO_SPEC; anything else takes the full glass
-    // program and is COUNTED as a fallback. The exclusion removes code whose output is provably zero
-    // for every instance the predicate admitted (the argument is in `Jiv.Panel.frag`'s header). The
-    // variant is compiled at boot in every arm, so the arms differ by a program bind.
-    {
-      const r = this._renderer;
-      const webgl2 = r instanceof WebGL2Renderer;
-      const gp = ParseGlassPrograms(params.has('glass-programs') ? params.get('glass-programs') : null);
-      this._glassPrograms = webgl2 ? gp : 'off';
-      if (webgl2) (r as WebGL2Renderer).DiagGlassPrograms = this._glassPrograms;
-      JTrace(`jaui:glass-programs armed=${this._glassPrograms} programs=${webgl2 ? PANEL_PROGRAM_COUNT : 0}`
-        + ` default=${!params.has('glass-programs')} pixels=SAME${webgl2 ? '' : ' reason=webgl2-only'}`);
-      const g = globalThis as unknown as { __jauiGlassPrograms?: () => GlassProgramsCensus };
-      g.__jauiGlassPrograms = () => {
-        const rr = this._renderer;
-        const c = rr instanceof WebGL2Renderer ? rr.GlassProgramCensus
-          : { NoGlow: 0, NoSpec: 0, Fallbacks: 0 };
-        return { Arm: this._glassPrograms, Programs: PANEL_PROGRAM_COUNT, ...c };
-      };
-    }
     // `?shadow-snap=off` — THE DIAGNOSTIC ARM, and the fix is DEFAULT ON.
     //
     // Off restores the loop as it parked before this lane: three taus of settle window and no final
@@ -8852,42 +8723,6 @@ export class Canvas implements DirtyTracker {
       };
     }
 
-    // `?glass-adapt=on|off` -- THE GLASS GRADE OPENS WITH ITS BACKDROP. DEFAULT `on`; `off` is the
-    // folded static law byte for byte (every batch uploads slot -1). See `_glassAdapt`.
-    //
-    // COMPOSES with `?glass-group` and both `?shadow-probe` arms (each hands the draw a slot, walked
-    // or captured, and the grade reads whichever texel that slot names), `?blur-phased` (its probe
-    // pass is the same probe), `?shadow-snap=off` (the grade eases with the texel either way; only the
-    // parked frame's exactness is the snap's), and `?blur-cache` (the slot, the far end and the
-    // probe's own moved-declaration are in the record). REFUSED BY NAME where there is no texel:
-    //   `?no-shadow`          zeroes the adaptive shadow, and with it the probe the grade reads;
-    //   a non-WebGL2 backend  keeps no probe state at all (`MeasureShadowBackdrop` returns -1).
-    if (params.has('glass-adapt')) {
-      const raw = (params.get('glass-adapt') ?? '').trim();
-      if (raw !== 'on' && raw !== 'off') {
-        throw new Error(`[Jaui] ?glass-adapt takes 'on' or 'off', got '${raw}'`);
-      }
-      this._glassAdapt = raw;
-    }
-    if (this._glassAdapt === 'on') {
-      const why =
-        params.has('no-shadow') ? 'no-shadow-removes-the-probe-the-grade-reads'
-        : !(this._renderer instanceof WebGL2Renderer) ? 'no-probe-state-off-webgl2'
-        : null;
-      if (why !== null) {
-        this._glassAdapt = 'off';
-        this._glassAdaptRefused = why;
-      }
-    }
-    this._glassAdaptCensus = EmptyGlassAdaptCensus(this._glassAdapt, this._glassAdaptRefused);
-    JTrace(`jaui:glass-adapt armed=${this._glassAdapt} default=${!params.has('glass-adapt')}`
-      + ` pixels=${this._glassAdapt === 'on' ? 'DIFFERENT' : 'SAME'}`
-      + (this._glassAdaptRefused !== '' ? ` reason=${this._glassAdaptRefused}` : ''));
-    {
-      const g = globalThis as unknown as { __jauiGlassAdapt?: () => GlassAdaptCensus };
-      g.__jauiGlassAdapt = () => ({ ...this._glassAdaptCensus, Per: this._glassAdaptCensus.Per.map((s) => ({ ...s })) });
-    }
-
     // `?glass-skip=<stage>[,<stage>...] | all | none | off` -- THE GLASS DRAW, STAGE BY STAGE.
     //
     // DEFAULT OFF, picture-DIFFERENT on every non-zero mask by design: each stage bit removes one
@@ -8912,7 +8747,7 @@ export class Canvas implements DirtyTracker {
         : this._glassGaussian !== 'off' ? 'glass-gaussian-changes-the-source-of-the-sample-not-the-draw'
         : this._diagNoGlassDraw || this._diagNoGlass || this._diagNoUi
           ? 'a-no-star-diagnostic-removes-the-glass-draws-this-arm-prices'
-        : this._glassSkipPreempted();
+        : null;
       if (why !== null) {
         this._glassSkip = null;
         this._glassSkipRefused = why;
@@ -9256,16 +9091,6 @@ export class Canvas implements DirtyTracker {
     // (`Start` runs after this constructor returns), so a program an arm needs is compiled off the
     // frame and a program no arm needs is never compiled at all.
     if (this._renderer instanceof WebGL2Renderer) this._renderer.ArmFlaggedPrograms();
-  };
-
-  /** `?glass-skip`'s refusal beside `?glass-programs`: the stages of the armed mask that the armed
-   *  variants compile away from under their bit (`Glass.Programs.GLASS_PROGRAMS_PREEMPT`), by name,
-   *  or null when every bit still gates code that runs. Mask 0 (`none`) is never refused. */
-  private _glassSkipPreempted = (): string | null => {
-    const mask = this._glassSkip ?? 0;
-    const gone = GLASS_PROGRAMS_PREEMPT[this._glassPrograms].filter((st) => (mask & GLASS_SKIP_STAGES[st]) !== 0);
-    return gone.length === 0 ? null
-      : `glass-programs-${this._glassPrograms}-compiles-away-${gone.join('-and-')}-add-glass-programs=off`;
   };
 
   // ── Debug Layout Overlay ───────────────────────────────────────────────────

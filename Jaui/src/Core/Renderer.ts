@@ -69,47 +69,23 @@ export interface GpuBufferHandle {
 
 // ─── Progressive Blur Params ───────────────────────────────────────────────
 
-/** Time constant of the adaptive shadow's ease, in seconds: about 95% of a change lands within three. */
-export const SHADOW_EASE_SECONDS = 0.09;
+/** Time constant of the glass probe's ease, in seconds. Apple's thin glass settles on a new backdrop over
+ *  about 1 to 8 s (Core/Glass.md); half a second keeps a scroll from flickering the appearance and still
+ *  lands a change within a second or two. Not read from Apple. */
+export const SHADOW_EASE_SECONDS = 0.5;
 
-/** How many time constants the loop keeps rendering after the last adaptive-shadow change before it
- *  snaps the state whole and parks. It does NOT decide the parked pixels -- the snap writes the
- *  converged reading whatever the state held -- it decides how big the STEP at the snap is, and so
- *  whether that step can be seen.
- *
- *  `AdaptiveShadowAlpha` is `authoredAlpha * mix(1, factor, adaptive)`, so the step in 8-bit levels
- *  is `exp(-taus) * dFactor * authoredAlpha * adaptive * |ink - ground|`. The worst case the sheet
- *  authors is a FULL swing of the factor (a surface that moves from over text to over flat white)
- *  under the heaviest adaptive shadow in `Jwift.Glass.jss` -- JwiftThickGlass's 0.34 alpha at the
- *  0.85 adaptive it inherits -- black on white: `exp(-taus) * 0.289 * 255`. Three taus, which is
- *  what the loop used before the snap existed, is 3.7 levels; four is 1.35; five is 0.50. Five is
- *  the smallest whole number of taus whose worst case is under HALF a level, so the snap cannot
- *  round a pixel by more than one and in practice rounds almost none. It costs 0.18 s more of
- *  rendering, once, on a page that has just stopped moving.
- *
- *  The ceiling of the STYLE SYSTEM is higher than the ceiling of the sheet: alpha 1 at adaptive 1
- *  would want 6.5 taus. Nothing authors that -- an opaque black shadow is not a design here -- and
- *  the number is chosen against what is authored, named so a theme that ever does author it knows
- *  which line to move. */
+/** How many time constants the loop keeps rendering after the last probe change before it snaps the
+ *  state whole and parks. Five leaves under 1% of a change to the snap, which no glass shows. */
 export const SHADOW_SETTLE_TAUS = 5;
 
 /** The window `?shadow-snap=off` restores: the un-snapped loop's 3 taus, whose 5% residual is the
  *  thing this lane removes. Both arms live in one binary so the comparison is one build. */
 export const SHADOW_SETTLE_TAUS_UNSNAPPED = 3;
 
-/** The adaptive shadow for a single-surface panel draw: the state slot MeasureShadowBackdrop returned and
- *  how much that measurement drives the shadow (the surface's ShadowAdaptive). */
+/** A glass surface's probe: the state slot MeasureShadowBackdrop returned, whose eased mean backdrop luma
+ *  picks the glass's appearance (Core/Glass.md). */
 export interface ShadowBackdrop {
   Slot: number;
-  Adaptive: number;
-}
-
-/** `?glass-adapt` for a single-surface glass draw: the surface's state slot (the same texel its adaptive
- *  shadow reads; its B channel is the brightest backdrop luma under the footprint) and its resolved
- *  `AdaptiveFar`. The body's grade opens toward that far end as far as the authored ink allows. */
-export interface GlassAdapt {
-  Slot: number;
-  OpenFar: number;
 }
 
 /**
@@ -276,19 +252,16 @@ export interface Renderer {
     canvasHeight: number,
     backdrop: GpuTextureHandle | null,
     baseFrostLod: number,
-    specTiltX: number,
-    specTiltY: number,
     useGlassShader?: boolean,
     scene?: GpuTextureHandle | null,
     bgPaint?: BgPaint,
-    shadowBackdrop?: ShadowBackdrop,
-    glassAdapt?: GlassAdapt,
+    appearance?: ShadowBackdrop,
   ): void;
 
-  /** Measure the backdrop under an adaptive-shadow surface (`ShadowAdaptive > 0`) into that surface's eased
-   *  state, after its backdrop pyramid is built and before its draw. `key` identifies the surface across
-   *  frames; `dtSeconds` sets how far this frame eases toward the new reading. Returns the state slot to
-   *  hand PanelDrawBatch, or -1 when the backend keeps no state (the shadow then stays at its authored alpha).
+  /** Measure the backdrop under a glass surface into that surface's eased state, after its backdrop pyramid
+   *  is built and before its draw. `key` identifies the surface across frames; `dtSeconds` sets how far this
+   *  frame eases toward the new reading. Returns the state slot to hand PanelDrawBatch, or -1 when the
+   *  backend keeps no state (the glass then takes the theme's appearance).
    *  Leaves the scene target bound. `inputsSame` says the reading is provably last frame's (the blur
    *  cache called the fill clean and the rect did not move), which is what lets the probe declare its
    *  texel still (`Shadow.Texel`); omitted, the reading is unknown and the texel is declared moved. */

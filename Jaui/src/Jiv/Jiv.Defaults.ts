@@ -26,17 +26,10 @@ export const DefaultJivStyle: JivStyle = {
   Frost: '0',
   Thickness: '0',
   Refraction: '0',
+  GlassVariant: 'Regular',
   Tint: '0',
   TintTone: 'Ground',
-  AdaptiveFar: '0',
-  LightAngle: '-45',
-  LightIntensity: '1',
-  SpecularIntensity: '0',
-  SpecularGlow: '0',
-  FresnelStrength: '0',
   ChromaticAberration: '0',
-  EdgeLightTop: '0',
-  EdgeLightBottom: '0',
   RimWidth: '0',
   RimStrength: '0',
   Transform: '',                         // empty = identity
@@ -60,7 +53,6 @@ export const DefaultJivStyle: JivStyle = {
   ShadowBlur: '0',
   ShadowOffsetX: '0',
   ShadowOffsetY: '0',
-  ShadowAdaptive: '0',
   InnerShadow: false,
   // Implicit fade: resolving `Presence` at style-resolution time yields the
   // Jiv's current PresenceSpring value (0 on mount, springing to 1). Authors
