@@ -5179,6 +5179,7 @@ export class Canvas implements DirtyTracker {
         // fade-in tracker so the next Ready transition starts a fresh
         // cross-fade from the placeholder color.
         node.BgImageFadeUrl = null;
+        node.BgImageWaitUrl = bg.Url;
         return undefined;
       }
       // Cover/Contain UV transform — panelLocal [0..1] × scale + offset → image UV.
@@ -5194,15 +5195,21 @@ export class Canvas implements DirtyTracker {
         if (imgAspect > panelAspect) scaleY = imgAspect / panelAspect;
         else                          scaleX = panelAspect / imgAspect;
       }
-      // Cross-fade alpha. First sight of a Ready entry for this URL kicks
-      // off a fresh fade window; subsequent frames ramp `alpha` toward 1
-      // and request another frame if the fade hasn't settled. URL swap
-      // (Card `[image]` change) resets the fade start so the new image
-      // also fades in over the previous one's placeholder color.
+      // Fade-in alpha. First sight of a Ready entry for this URL kicks off a fresh fade window ONLY
+      // when this node painted the placeholder while it waited; subsequent frames ramp `alpha`
+      // toward 1 and request another frame if the fade hasn't settled.
+      //
+      // A texture that was ALREADY resident shows at alpha 1 on the frame it is asked for. The fade
+      // is there to hide a network wait, and a node that never waited never showed a placeholder:
+      // fading it in anyway takes whatever was on screen to the flat placeholder color in one frame
+      // and climbs back over 260ms. That was the home hero's "doesn't crossfade" on the phone -- a
+      // dissolve revealing a layer whose picture had just been handed to it measured 101 -> 0.3 luma
+      // in one frame -- and every card that swaps `[image]` to a cached picture flashed the same way.
       const now = performance.now();
       if (node.BgImageFadeUrl !== bg.Url) {
         node.BgImageFadeUrl = bg.Url;
-        node.BgImageFadeStartMs = now;
+        node.BgImageFadeStartMs = node.BgImageWaitUrl === bg.Url ? now : now - Canvas._BG_IMAGE_FADE_MS;
+        node.BgImageWaitUrl = null;
       }
       const elapsed = now - node.BgImageFadeStartMs;
       const alpha = Math.min(1, elapsed / Canvas._BG_IMAGE_FADE_MS);

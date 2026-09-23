@@ -225,15 +225,16 @@ export class Jiv extends Element {
    *  properties use the global default. */
   Springs: Record<string, Partial<SpringConfig>> | null = null;
 
-  /** Background-image cross-fade state. When a Jiv's Background is an
-   *  Image kind and its texture first becomes Ready (or its Url swaps),
-   *  the engine seeds `BgImageFadeStartMs` to `performance.now()`.
-   *  Each frame the renderer computes `alpha = min(1, elapsed / 240ms)`
-   *  and the shader mixes `placeholder color → texture` over that alpha,
-   *  so loading images don't pop in. Tracking the URL alongside lets us
-   *  reset the fade when a `[src]` swap lands a new texture in cache. */
+  /** Background-image fade-in state. When a Jiv's Background is an Image kind and its texture
+   *  arrives AFTER this node started showing its placeholder, the engine seeds `BgImageFadeStartMs`
+   *  to `performance.now()`, and the shader mixes `placeholder color -> texture` over the next
+   *  260ms so a loading image does not pop in. Tracking the URL alongside is what re-arms it on a
+   *  `[src]` swap. A texture already resident when the node asks for it shows at once: the node
+   *  never showed a placeholder, so there is nothing to fade from (`BgImageWaitUrl`). */
   BgImageFadeStartMs: number = 0;
   BgImageFadeUrl: string | null = null;
+  /** The URL this node painted its placeholder for while the texture was in flight, or null. */
+  BgImageWaitUrl: string | null = null;
 
   /** Animations applied to this Jiv (authored via `@Animation Name` or
    *  `@Animation Property { From, To, ... }` in JSS). The style animator
