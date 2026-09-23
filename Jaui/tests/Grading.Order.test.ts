@@ -16,7 +16,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  readGlsl, readProgressiveGlsl, readProgressiveWgsl,
+  readGlsl, readProgressiveGlsl,
   glslGradeSteps, glslTintBody, TINT_BODY,
   grade, tint, display, hue, greyFloor, luma, STEPS_BEFORE_FIX,
   type Rgb, type Grade,
@@ -36,15 +36,14 @@ describe('the grade runs contrast, saturation, brightness', () => {
     expect(glslGradeSteps()).toEqual(['Contrast', 'Saturation', 'Brightness']);
   });
 
-  it('the progressive blur grades in the same order (GLSL and WGSL)', () => {
-    for (const src of [readProgressiveGlsl(), readProgressiveWgsl()]) {
-      const c = src.search(/\(rgb\s*-\s*0\.5\)\s*\*\s*contrast\s*\+\s*0\.5/);
-      const s = src.search(/mix\(vec3f?\(luma\),\s*rgb,\s*saturation\)/);
-      const b = src.search(/rgb\s*\*=\s*brightness/);
-      expect(c).toBeGreaterThan(0);
-      expect(c).toBeLessThan(s);
-      expect(s).toBeLessThan(b);
-    }
+  it('the progressive blur grades in the same order', () => {
+    const src = readProgressiveGlsl();
+    const c = src.search(/\(rgb\s*-\s*0\.5\)\s*\*\s*contrast\s*\+\s*0\.5/);
+    const s = src.search(/mix\(vec3\(luma\),\s*rgb,\s*saturation\)/);
+    const b = src.search(/rgb\s*\*=\s*brightness/);
+    expect(c).toBeGreaterThan(0);
+    expect(c).toBeLessThan(s);
+    expect(s).toBeLessThan(b);
   });
 
   it('the tint is a mix toward black or white', () => {

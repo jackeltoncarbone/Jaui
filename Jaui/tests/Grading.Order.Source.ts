@@ -14,7 +14,6 @@ const read = (...parts: string[]): string => readFileSync(join(SRC, ...parts), '
 
 export const readGlsl = (): string => read('Jiv', 'Shaders', 'Jiv.Panel.frag');
 export const readProgressiveGlsl = (): string => read('ProgressiveBlur', 'ProgressiveBlur.Shader.ts');
-export const readProgressiveWgsl = (): string => read('Core', 'Shaders', 'ProgressiveBlur.wgsl');
 
 export type Rgb = [number, number, number];
 export type GradeStep = 'Contrast' | 'Saturation' | 'Brightness';

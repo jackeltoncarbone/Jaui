@@ -355,7 +355,7 @@ void main() {
     // the blur actually delivered at this fragment. Grading against ramp ran the grade far ahead of the
     // softening it belongs to — measured on the hero at Saturate(5), 59% saturated where the radius was
     // 3.1pt of 120, so a sharp picture arrived already colored. The two curves agree at both ends and
-    // diverge in the middle, which is exactly where a progressive blur does its work; see the WGSL port.
+    // diverge in the middle, which is exactly where a progressive blur does its work.
     float graded = ramp * ramp;
     float brightness = mix(1.0, u_Grading.x, graded);
     float saturation = mix(1.0, u_Grading.y, graded);
