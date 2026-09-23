@@ -2,7 +2,8 @@ import { SS_PILL_CURVE, SS_PILL_SEGMENTS } from './Pill.Curve';
 
 /**
  * THE RIM: the light a glass edge catches, drawn as a thin strip along the panel's outline and
- * screened onto what is already there (Shaders/Jiv.Rim.frag). Apple's is a core of constant width in
+ * lifted onto what is already there, a gain that keeps the color's hue and a little white
+ * (Shaders/Jiv.Rim.frag). Apple's is a core of constant width in
  * device pixels whose brightness follows only the angle to the light, easing into the body over about
  * 3% of the panel's short side.
  *

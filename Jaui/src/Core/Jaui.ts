@@ -2000,7 +2000,7 @@ export class Canvas implements DirtyTracker {
 
   /** True if `node`'s subtree contains anything that must re-render every frame
    *  because it samples the live (everplaying) scene: the 3D field (Janvas), a
-   *  glass or progressive-blur surface, a backdrop filter, or a rim screened over
+   *  glass or progressive-blur surface, a backdrop filter, or a rim lifted over
    *  a background that does not hide the scene behind it. Memoized. */
   private _subtreeSamplesLiveScene = (node: Jiv): boolean => {
     const memo = this._subtreeDynamicMemo.get(node);

@@ -265,14 +265,15 @@ export interface JivStyle {
   EdgeLightBottom: string;
 
 
-  /** THE RIM: the light the edge catches, a hairline screened onto whatever is already drawn there
+  /** THE RIM: the light the edge catches, a hairline lifted onto whatever is already drawn there
    *  (Jiv/Jiv.Rim.ts). `RimWidth` is its core, a length in `px`: a HAIRLINE, so it never scales with
    *  PointScale or a Visual transform, and it is never drawn under one device pixel. Apple's core is
    *  about 0.85px. Default 0, no rim. */
   RimWidth: string;
-  /** The rim's peak brightness, 0..1, where it faces `LightAngle` and its bounce opposite; ninety
-   *  degrees off, it keeps 0.15 of this. Screened, so over the Apple dark body (luma 26) 0.25 lifts
-   *  the lit lobes by about 57. Default 0. */
+  /** The rim's peak GAIN, 0..1, where it faces `LightAngle` and its bounce opposite; ninety degrees
+   *  off, it keeps 0.15 of this. What is under the rim is multiplied by 1 + this, then screened toward
+   *  white by 0.8 of it, so it keeps its hue: over the Apple dark body (luma 26) 0.25 lifts the lit
+   *  lobes by about 50, over teal it reads as a lighter, still-saturated teal. Default 0. */
   RimStrength: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.

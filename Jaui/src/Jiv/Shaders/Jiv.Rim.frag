@@ -1,9 +1,10 @@
 #version 300 es
 precision highp float;
 
-// THE RIM. A light the edge catches, drawn as a thin strip along the panel's outline and SCREENED
-// onto what is already there (ONE, ONE_MINUS_SRC_COLOR): the destination's hue survives, darks lift
-// the most and whites stay white. No backdrop tap, no snapshot, no render target.
+// THE RIM. A light the edge catches, drawn as a thin strip along the panel's outline, twice, over what
+// is already there: a GAIN (the destination times 1 + this), which keeps its hue and most of its
+// saturation, then a small SCREEN toward white (WebGL2.Renderer `RimDraw`). No backdrop tap, no
+// snapshot, no render target.
 //
 // Apple's measured rim: a core a constant 2 to 3 device px wide all the way round, its brightness set
 // only by the angle to the light, easing into the body over about 3% of the panel's short side.
@@ -14,7 +15,7 @@ in vec2 v_Normal;
 
 uniform sampler2D u_ClipTex;
 uniform ivec2 u_Clip;
-// Core width and shoulder (device px), strength, opacity.
+// Core width and shoulder (device px), this pass's amount, opacity.
 uniform vec4 u_Rim;
 uniform vec2 u_LightDirection;
 

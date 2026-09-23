@@ -182,6 +182,11 @@ interface _RimOutline {
   Vertices: number;
 }
 
+/** The rim's white term as a share of its gain. Fitted to Apple's rim peaks over the body just inside
+ *  them (speaker button over teal, Control Center Wi-Fi pill over blue, the Safari more button over
+ *  lavender): gain 0.23 and white 0.19 of the remaining headroom, so white is 0.8 of the gain. */
+const RIM_WHITE_SHARE = 0.8;
+
 /** How many distinct rim shapes stay resident. A page has a few dozen; a spring re-walks its one. */
 const RIM_OUTLINE_CACHE = 96;
 
@@ -4893,8 +4898,10 @@ export class WebGL2Renderer implements Renderer {
     return outline;
   };
 
-  /** Draw one rim: its strip, screened (`ONE, ONE_MINUS_SRC_COLOR`) onto the bound target with the
-   *  target's alpha left alone, then the walk's own blend back. */
+  /** Draw one rim: its strip twice over the bound target, the target's alpha left alone. First a GAIN
+   *  (`DST_COLOR, ONE`: dst x (1 + g)), which lifts what is below and keeps its hue and most of its
+   *  saturation, then a small SCREEN toward white (`ONE, ONE_MINUS_SRC_COLOR`), which is what still
+   *  reads over black, where a gain has nothing to lift. Then the walk's own blend back. */
   RimDraw = (canvasWidth: number, canvasHeight: number, p: RimDrawParams): void => {
     const outline = this._rimOutline(p.Shape);
     if (outline === null) return;
@@ -4919,9 +4926,12 @@ export class WebGL2Renderer implements Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this._xformTex);
     gl.enable(gl.BLEND);
     gl.blendEquation(gl.FUNC_ADD);
-    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ZERO, gl.ONE);
     gl.bindVertexArray(outline.Vao);
     this._noteSceneDraw();
+    gl.blendFuncSeparate(gl.DST_COLOR, gl.ONE, gl.ZERO, gl.ONE);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, outline.Vertices);
+    gl.uniform4f(l.rim, p.CoreWidth, p.Shoulder, p.Strength * RIM_WHITE_SHARE, p.Opacity);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_COLOR, gl.ZERO, gl.ONE);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, outline.Vertices);
     this.EnableBlend();
   };
