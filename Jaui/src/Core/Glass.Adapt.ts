@@ -42,17 +42,16 @@ export interface GlassGrade {
 /** The smallest peak the grade divides by: one LSB of the 10-bit state texel. */
 export const GLASS_ADAPT_PEAK_FLOOR = 1 / 1023;
 
-/** Does the vertex stage open this instance at all? Only a body tinted toward black at brightness 1 is
- *  on the ramp the grade inverts; everything else keeps its authored numbers. Mirrors the `if` in
- *  `Jiv.Panel.vert`'s main. */
+/** Does the vertex stage open this instance at all? Only a body tinted toward black is on the ramp the
+ *  grade inverts; everything else keeps its authored numbers. Mirrors the `if` in `Jiv.Panel.vert`'s main. */
 export const GlassAdaptEligible = (g: GlassGrade, openFar: number): boolean =>
-  openFar > 0 && g.Tint < 0 && g.Brightness === 1;
+  openFar > 0 && g.Tint < 0;
 
 /** The two ends of the authored ramp, and the far end this surface opens to. */
 export const GlassAdaptFar = (g: GlassGrade, peak: number, openFar: number): { Ground: number; Far: number; Opened: number } => {
-  const t = -g.Tint;
-  const ground = (1 - t) * (1 - g.Contrast) * 0.5;
-  const far = (1 - t) * (1 + g.Contrast) * 0.5;
+  const scale = g.Brightness * (1 + g.Tint);
+  const ground = scale * (1 - g.Contrast) * 0.5;
+  const far = scale * (1 + g.Contrast) * 0.5;
   const opened = Math.min(openFar, ground + (far - ground) / Math.max(peak, GLASS_ADAPT_PEAK_FLOOR));
   return { Ground: ground, Far: far, Opened: opened };
 };
@@ -62,15 +61,35 @@ export const GlassAdaptFar = (g: GlassGrade, peak: number, openFar: number): { G
 export const GlassAdaptGrade = (g: GlassGrade, peak: number, openFar: number): GlassGrade => {
   const { Ground: ground, Far: far, Opened: opened } = GlassAdaptFar(g, peak, openFar);
   if (!(opened > far)) return g;
-  const range = opened - ground;
-  const keep = ground + opened;
-  const carry = g.Contrast * g.Saturation * (1 + g.Tint);
-  return {
-    Brightness: Math.max(keep, 1),
-    Saturation: carry / range,
-    Contrast: range / keep,
-    Tint: -Math.max(1 - keep, 0),
-  };
+  return GlassGradeOfEnds(ground, opened, g);
+};
+
+/** The grade whose ramp runs from `lo` over black to `hi` over white, carrying what `g` carried.
+ *  `GlassGradeOfEnds` in `Jiv.Panel.vert`, statement for statement. */
+export const GlassGradeOfEnds = (lo: number, hi: number, g: GlassGrade): GlassGrade => {
+  const range = hi - lo;
+  const keep = lo + hi;
+  const carry = g.Contrast * g.Saturation * g.Brightness * (1 + g.Tint);
+  return { Brightness: Math.max(keep, 1), Saturation: carry / range, Contrast: range / keep, Tint: -Math.max(1 - keep, 0) };
+};
+
+/** `AdaptiveLift`, Apple's bar: the body `lift` above the backdrop's mean, on the authored slope, never
+ *  below the authored law and never past `ceiling`. `GlassLiftGrade` in `Jiv.Panel.vert`. */
+export const GlassLiftGrade = (g: GlassGrade, mean: number, lift: number, ceiling: number): GlassGrade => {
+  const scale = g.Brightness * (1 + g.Tint);
+  const slope = scale * g.Contrast;
+  const authored = scale * (1 - g.Contrast) * 0.5 + slope * mean;
+  const level = Math.max(Math.min(mean + lift, ceiling), authored);
+  const lo = level - slope * mean;
+  return GlassGradeOfEnds(lo, lo + slope, g);
+};
+
+/** The flip's weight at a backdrop mean: `GlassFlipFactor` in `Jiv/Shaders/Glass.Flip.glsl`. */
+export const GLASS_FLIP_LOW = 0.45;
+export const GLASS_FLIP_HIGH = 0.55;
+export const GlassFlipFactor = (mean: number): number => {
+  const t = Math.max(0, Math.min(1, (mean - GLASS_FLIP_LOW) / (GLASS_FLIP_HIGH - GLASS_FLIP_LOW)));
+  return t * t * (3 - 2 * t);
 };
 
 /** The body's luma over a backdrop of luma `y` under a grade (brightness, contrast, tint; saturate
@@ -87,6 +106,9 @@ export const GlassBodyLuma = (g: GlassGrade, y: number): number => {
 export interface GlassAdaptDraw {
   Slot: number;
   OpenFar: number;
+  /** `AdaptiveLift` (a fraction, 0 off) and whether `AdaptiveFlip` is armed. */
+  Lift: number;
+  Flip: boolean;
   Grade: GlassGrade;
 }
 
@@ -120,7 +142,7 @@ export interface GlassAdaptCensus {
   Surfaces: number;
   /** Glass draws with an `AdaptiveFar` and NO probe: nothing to read, so they keep the authored grade. */
   Unprobed: number;
-  /** Surfaces off the ramp the grade inverts (tint toward white, or brightness not 1): authored grade. */
+  /** Surfaces off the ramp the grade inverts (tint toward white): authored grade. */
   Ineligible: number;
   MeanMin: number;
   MeanMax: number;
@@ -132,7 +154,7 @@ export interface GlassAdaptCensus {
   Open: number;
   /** Resolved to exactly the static law. */
   Static: number;
-  /** Labels whose ink flipped. Always 0: this lane caps and does not flip (see the report). */
+  /** Flipping surfaces past the flip's midpoint: on their light plate, their labels on the flipped ink. */
   Flipped: number;
   TintMin: number;
   TintMax: number;
@@ -168,10 +190,11 @@ export const GlassAdaptCensusOf = (
   census.MeanMin = Infinity; census.MeanMax = -Infinity; census.PeakMax = 0;
   census.TintMin = Infinity; census.TintMax = -Infinity; census.RangeMin = Infinity; census.RangeMax = -Infinity;
   for (const d of draws) {
-    if (!GlassAdaptEligible(d.Grade, d.OpenFar)) { census.Ineligible++; continue; }
+    if (!(d.Grade.Tint < 0) || (!(d.OpenFar > 0) && !d.Flip)) { census.Ineligible++; continue; }
     const { Mean: mean, Peak: peak } = ReadStateTexel(row, d.Slot);
+    if (d.Flip && GlassFlipFactor(mean) > 0.5) census.Flipped++;
     const ends = GlassAdaptFar(d.Grade, peak, d.OpenFar);
-    const g = GlassAdaptGrade(d.Grade, peak, d.OpenFar);
+    const g = d.Lift > 0 ? GlassLiftGrade(d.Grade, mean, d.Lift, d.OpenFar) : GlassAdaptGrade(d.Grade, peak, d.OpenFar);
     const lifted = g !== d.Grade;
     const opened = lifted ? ends.Opened : ends.Far;
     const capped = lifted && ends.Opened < d.OpenFar;

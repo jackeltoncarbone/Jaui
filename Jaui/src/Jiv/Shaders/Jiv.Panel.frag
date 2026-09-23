@@ -508,7 +508,12 @@ float BandFalloff(float dist, float depth) {
 uniform float u_RimPass;
 const float RIM_SIDE_SHARE = 0.45;
 const float RIM_REACH = 1.1;
-const float RIM_FACING = 0.66;
+// The lit lobe, its bounce and the facing term, fitted by angle to Apple's round buttons (the iPhone
+// Photos and App Store search buttons): about +32 at the lit corner, +32 to +48 at the bounce and +25 to
+// +30 at the top, where the bounce at 0.95 of the lit lobe ran +78 to +85.
+const float RIM_LIT = 0.7;
+const float RIM_BOUNCE = 0.35;
+const float RIM_FACING = 0.3;
 const float RIM_TAIL = 0.15;
 
 // Weight of the lobe where the outline faces `light`: the lit point is that corner's arc at the
@@ -551,7 +556,7 @@ void main() {
     float cornerRadius = max(max(max(v_Radii.x, v_Radii.y), max(v_Radii.z, v_Radii.w)), 1.0);
     float facing = dot(RefractionNormal(p, halfSize, min(cornerRadius, min(halfSize.x, halfSize.y))), light);
     facing = max(facing, -0.95 * facing);
-    float lobe = max(max(RimLobe(p, halfSize, v_Radii, light), 0.95 * RimLobe(p, halfSize, v_Radii, -light)),
+    float lobe = max(max(RIM_LIT * RimLobe(p, halfSize, v_Radii, light), RIM_BOUNCE * RimLobe(p, halfSize, v_Radii, -light)),
                      RIM_FACING * facing * facing);
 
     // Never narrower than a device pixel: a thinner core draws at one pixel and carries the rest as gain.

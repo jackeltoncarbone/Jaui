@@ -56,6 +56,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   // Signed, so a theme flip springs dark tint → clear → light tint and never passes through grey.
   ['Tint',                   s => s.Tint,                         (s, v) => { s.Tint = v; }],
   ['AdaptiveFar',            s => s.AdaptiveFar,                  (s, v) => { s.AdaptiveFar = v; }],
+  ['AdaptiveLift',           s => s.AdaptiveLift,                 (s, v) => { s.AdaptiveLift = v; }],
 
   // Backdrop filter — every channel springs under the `BackdropFilter`
   // bucket, so `@Transition BackdropFilter { ... }` tunes them together.
@@ -178,6 +179,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   // Vibrancy's declaration and zone COLORS snap: a hue is not a spring, and the declaration is a
   // tagged value, not a number.
   render.VibrancyDeclaration = target.VibrancyDeclaration;
+  render.AdaptiveFlip = target.AdaptiveFlip;
   render.ForegroundVibrancyColor = target.ForegroundVibrancyColor;
   render.BackdropVibrancyColor = target.BackdropVibrancyColor;
   render.ContainBorder = target.ContainBorder;

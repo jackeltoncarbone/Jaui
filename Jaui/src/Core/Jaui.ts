@@ -493,7 +493,8 @@ interface GlassBlurPlan {
    *  Not clamped to the canvas here: the admission test does that, because a fragment outside the
    *  canvas is never rasterized and a reach that leaves it is therefore not a reach at all. */
   TapReach: number;
-  /** Whether the adaptive-shadow probe will run for this surface (it deepens `MaxLod`). */
+  /** Whether the backdrop probe runs for this surface: an adaptive shadow or adaptive glass reads it
+   *  (it deepens `MaxLod`). */
   AdaptiveShadow: boolean;
   /** `JivFrostCssPx` floored at one device pixel — what the margin and the radius are built from. */
   FrostCssPx: number;
@@ -1006,25 +1007,13 @@ export class Canvas implements DirtyTracker {
    *  room. `off` hands none: every batch uploads slot -1 and the vertex stage takes the authored grade
    *  untouched, today's engine byte for byte. The probe writes its luma channels on BOTH arms (they
    *  cost it one `max` and nothing reads them on `off`), so the arms differ in the draw and nowhere else. */
-  // DEFAULT OFF, and this is a retreat, not a decision about the idea.
-  //
-  // The adaptive far end is right and it measurably works: on the drill page it probes, opens the far
-  // end to 1.015 and reports Lifted, which is what stops dark glass sitting at half its backdrop's luma.
-  // But it makes the glass grade ride the adaptive SHADOW probe's texel, and that texel has a park snap
-  // -- the last render before the loop parks takes the whole reading again so the parked frame carries
-  // no history. Right for a shadow. Wrong for a material, because the grade divides by that reading, so
-  // the material steps whenever the page parks.
-  //
-  // Jack, using it: "Immediately upon hover, there's more saturation. It snaps, not animates. When I
-  // unhover, it stays saturated throughout the duration of the unhover animations. But then it instantly,
-  // at the end, just cuts out." `?glass-adapt=off` removed it; `=on` brought it back. That is the whole
-  // attribution and it took one flag to get.
-  //
-  // Splitting the park write per channel (R whole, G and B still easing, WebGL2.Renderer) did not settle
-  // it, so the lane goes back to off until it does. A feature that is known-wrong stays off while it is
-  // being fixed rather than shipping its artefact to the person using the app. `?glass-adapt=on` still
-  // arms it for whoever is working on it.
-  private _glassAdapt: 'on' | 'off' = 'off';
+  // DEFAULT ON. The hover snap Jack saw ("immediately upon hover, there's more saturation. It snaps, not
+  // animates ... then it instantly, at the end, just cuts out") was the grade's ELIGIBILITY, not the
+  // texel: a glass press stated a Brightness above 1, and only a body at brightness 1 was adapted, so a
+  // hover dropped the surface off the adaptive grade in one frame and the release put it back in one.
+  // The grade now adapts at any brightness (the press is a folded fill) and the probe's G and B keep easing
+  // through a park, so the material moves with its inputs and never steps.
+  private _glassAdapt: 'on' | 'off' = 'on';
   private _glassAdaptRefused = '';
   /** This frame's adapted draws, for the census; and draws that wanted to adapt but had no probe. */
   private _glassAdaptDraws: GlassAdaptDraw[] = [];
@@ -2889,6 +2878,8 @@ export class Canvas implements DirtyTracker {
     // scene. So the bar reads brighter than the dimmed surround it sits on, as Apple's does, and costs no
     // build of its own. Scoped to the strip's subtree; null everywhere else.
     let edgeBackdrop: EdgeBackdrop | null = null;
+    // The flipping glass the walk is inside, whose slot the text drawn now reads (`SetInkFlip`).
+    let inkFlip: GlassAdapt | null = null;
     // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
     // contract means the scene is different every frame; caching snapshots
     // across surfaces was already unsafe. Each glass/pblur now builds its
@@ -3245,6 +3236,8 @@ export class Canvas implements DirtyTracker {
       // draw never reaches the element's ink. `shapeBuilds0` brackets the node's own paint: an
       // under-drawn element that still caused a pyramid build is this lane failing.
       let shapeBuilds0 = -1;
+      // A flipping glass surface this node draws, whose slot its subtree's labels read.
+      let flipHere: GlassAdapt | null = null;
       const zones: VibrancyZones = phasedPaints
         ? this._vibrancyZonesOf(node)
         : { Shape: null, Ink: null, TextInk: null, TextScale: 1 };
@@ -3790,7 +3783,14 @@ export class Canvas implements DirtyTracker {
         // `?glass-adapt`: the grade reads the SAME texel the shadow does, so it rides the probe's slot,
         // its snap and its declaration, and costs the draw one uniform.
         const glassAdapt = this._glassAdaptFor(node, shadowBackdrop);
-        if (glassAdapt !== undefined && this._bcOn) this._bc.Sig.Number(glassAdapt.OpenFar);
+        if (glassAdapt !== undefined && this._bcOn) {
+          this._bc.Sig.Number(glassAdapt.OpenFar);
+          this._bc.Sig.Number(glassAdapt.Lift);
+          this._bc.Sig.Word(glassAdapt.Flip !== null ? 1 : 0);
+        }
+        // THE FLIP: this surface's labels read the same texel as its plate, so its subtree's text is
+        // drawn in batches of its own with that slot (`SetInkFlip`, restored after the children).
+        if (glassAdapt !== undefined && glassAdapt.Flip !== null) flipHere = glassAdapt;
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
           r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, undefined, glassAdapt);
@@ -3996,7 +3996,14 @@ export class Canvas implements DirtyTracker {
       // to its subtree's glass for the length of the subtree.
       const outerEdge = edgeBackdrop;
       if (edgeHere !== null) edgeBackdrop = edgeHere;
+      const outerFlip = inkFlip;
+      if (flipHere !== null) { flushText(); inkFlip = flipHere; r2.SetInkFlip(flipHere.Slot, flipHere.Flip); }
       descendChildren(node, eff, stack, scope, effH, childPersp);
+      if (flipHere !== null) {
+        flushText();
+        inkFlip = outerFlip;
+        r2.SetInkFlip(outerFlip?.Slot ?? -1, outerFlip?.Flip ?? null);
+      }
       edgeBackdrop = outerEdge;
 
       // Close the card composite. The pending batches drain FIRST: anything still buffered belongs
@@ -5528,7 +5535,8 @@ export class Canvas implements DirtyTracker {
     const ab = this._nodeAabb(node, eff, effH);
     const px = ab.minX * d, py = ab.minY * d;
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
-    const adaptiveShadow = rs.ShadowAdaptive > 0 && rs.ShadowColor.A > 0.001
+    const adaptiveShadow = ((rs.ShadowAdaptive > 0 && rs.ShadowColor.A > 0.001)
+      || rs.AdaptiveFar > 0 || rs.AdaptiveLift > 0 || rs.AdaptiveFlip !== null)
       && !JivInstanceBuffer.DiagNoShadow;
     const instFrostLod = _instanceFrostLod(frost, d);
     const baseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
@@ -6459,11 +6467,11 @@ export class Canvas implements DirtyTracker {
   private _glassAdaptFor = (node: Jiv, shadow: ShadowBackdrop | undefined): GlassAdapt | undefined => {
     if (this._glassAdapt !== 'on') return undefined;
     const rs = node.RenderStyle;
-    if (!(rs.AdaptiveFar > 0)) return undefined;
+    if (!(rs.AdaptiveFar > 0) && !(rs.AdaptiveLift > 0) && rs.AdaptiveFlip === null) return undefined;
     if (shadow === undefined || shadow.Slot < 0) { this._glassAdaptUnprobed++; return undefined; }
-    const adapt: GlassAdapt = { Slot: shadow.Slot, OpenFar: rs.AdaptiveFar };
+    const adapt: GlassAdapt = { Slot: shadow.Slot, OpenFar: rs.AdaptiveFar, Lift: rs.AdaptiveLift, Flip: rs.AdaptiveFlip };
     this._glassAdaptDraws.push({
-      Slot: shadow.Slot, OpenFar: rs.AdaptiveFar,
+      Slot: shadow.Slot, OpenFar: rs.AdaptiveFar, Lift: rs.AdaptiveLift, Flip: rs.AdaptiveFlip !== null,
       Grade: { Brightness: rs.BackdropBrightness, Saturation: rs.BackdropSaturation, Contrast: rs.BackdropContrast, Tint: rs.Tint },
     });
     return adapt;

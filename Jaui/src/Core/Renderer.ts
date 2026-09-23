@@ -110,6 +110,18 @@ export interface ShadowBackdrop {
 export interface GlassAdapt {
   Slot: number;
   OpenFar: number;
+  /** `AdaptiveLift`, a fraction: the body rides this far above its backdrop's mean, capped at OpenFar. */
+  Lift: number;
+  /** `AdaptiveFlip`'s light plate, or null. */
+  Flip: GlassFlip | null;
+}
+
+/** The light plate small glass turns to over light content (`AdaptiveFlip`), and its label's ink. */
+export interface GlassFlip {
+  Tint: number;
+  Contrast: number;
+  Saturate: number;
+  Ink: { R: number; G: number; B: number };
 }
 
 /**

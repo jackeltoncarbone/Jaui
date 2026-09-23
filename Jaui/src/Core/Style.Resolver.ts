@@ -177,6 +177,21 @@ const _resolveVibrancyProperty = (raw: string, ctx: ResolveContext): VibrancyDec
   return { R: color.R, G: color.G, B: color.B, Amount: n / 255, Cover: cover };
 };
 
+/** `AdaptiveFlip: <tint> <contrast> <saturate> <ink>`, or null for `None` or a contrast of 0 (the theme's
+ *  way to switch it off). The numbers are length expressions over vars; the ink is a color. */
+const _resolveAdaptiveFlip = (raw: string, ctx: ResolveContext): JivRenderStyle['AdaptiveFlip'] => {
+  const t = raw.trim();
+  if (t === '' || t.toLowerCase() === 'none') return null;
+  const w = _splitTopLevelWords(t);
+  if (w.length !== 4) {
+    throw new Error(`[Jaui] AdaptiveFlip: "${raw}" — expected "<tint> <contrast> <saturate> <ink>" or "None".`);
+  }
+  const contrast = Resolve(w[1], ctx, 'W');
+  if (!(contrast > 0)) return null;
+  const ink = ParseColor(ResolveVars(w[3], ctx));
+  return { Tint: Resolve(w[0], ctx, 'W'), Contrast: contrast, Saturate: Resolve(w[2], ctx, 'W'), Ink: { R: ink.R, G: ink.G, B: ink.B } };
+};
+
 /** Split at depth-0 whitespace, so a color function's own spaces (`rgb(255 220 180)`) stay whole. */
 const _splitTopLevelWords = (t: string): string[] => {
   const out: string[] = [];
@@ -294,6 +309,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     Refraction: Resolve(s.Refraction, ctx, 'W'),
     Tint: _resolveTint(s, ctx),
     AdaptiveFar: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.AdaptiveFar, ctx), ctx, 'W'))),
+    AdaptiveLift: Math.max(0, Math.min(255, Resolve(ResolveTernary(s.AdaptiveLift, ctx), ctx, 'W'))) / 255,
+    AdaptiveFlip: _resolveAdaptiveFlip(ResolveTernary(s.AdaptiveFlip, ctx), ctx),
     BackdropBrightness: backdrop.Brightness,
     BackdropSaturation: backdrop.Saturation,
     BackdropContrast: backdrop.Contrast,
