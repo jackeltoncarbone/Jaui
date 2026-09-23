@@ -165,14 +165,20 @@ export class JivInstanceBuffer {
    *                      every channel at alpha 1, and nothing else — no border, no shadow, no
    *                      grade of any kind, no glass. The walk draws it alone, under the element,
    *                      with an additive or reverse-subtract blend, so the fragment's alpha is
-   *                      exactly the coverage the element's own fill would have had. */
+   *                      exactly the coverage the element's own fill would have had.
+   *
+   *  `shadow` splits a glass fill from its drop shadow. 'Only' is the shadow alone (no fill, no
+   *  border, no backdrop, no glass), which the flat program draws; 'Excluded' is the panel without
+   *  it, its quad shrunk to the face and a pixel of antialiasing, so the glass program shades only
+   *  the fragments it can light. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
           borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'LiftOnly' = 'Normal',
           /** `'LiftOnly'` only: the additive color to fill with, when it is NOT the backdrop zone's.
            *  The FOREGROUND zone and the inherited `Lift:` property carry their own color+amount and
            *  share this one push, because the additive draw is the same draw (Core/Lift.ts). */
-          liftOverride: LiftValue | null = null): void => {
+          liftOverride: LiftValue | null = null,
+          shadow: 'Included' | 'Excluded' | 'Only' = 'Included'): void => {
     if (this._count >= this._capacity) this._grow();
 
     const style = jiv.RenderStyle;
@@ -187,14 +193,14 @@ export class JivInstanceBuffer {
     const avgScale = (matScaleX(m) + matScaleY(m)) * 0.5;
     const borderWidth = style.BorderWidth * avgScale * d;
     const borderEdgeAa = style.BorderBlur * avgScale * d;
-    const _ns = JivInstanceBuffer.DiagNoShadow;
+    const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded';
     const shadowBlur = _ns ? 0 : style.ShadowBlur * avgScale * d;
     const shadowOffX = _ns ? 0 : style.ShadowOffsetX * avgScale * d;
     const shadowOffY = _ns ? 0 : style.ShadowOffsetY * avgScale * d;
 
     const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
     const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
-    const borderMargin = borderWidth + borderEdgeAa;
+    const borderMargin = borderWidth + borderEdgeAa + (shadow === 'Excluded' ? 1 : 0);
     const marginX = Math.max(shadowMarginX, borderMargin);
     const marginY = Math.max(shadowMarginY, borderMargin);
 
@@ -311,6 +317,15 @@ export class JivInstanceBuffer {
     // strips everything BUT the stroke: transparent background + no shadow, and
     // Thickness=0 so the frag takes the plain stroke composite regardless of
     // the host material.
+    if (shadow === 'Only') {
+      data[offset + 15] = 0;  // Background alpha → no fill
+      data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0; // BorderColor
+      data[offset + 27] = 0;  // borderWidth
+      data[offset + 32] = 1; data[offset + 33] = 1; data[offset + 34] = 1; data[offset + 35] = 0; // no backdrop
+      data[offset + 36] = 0;  // Thickness → the flat program
+      data[offset + 41] = 0;  // body Tint
+    }
+
     if (borderMode === 'Suppress') {
       data[offset + 27] = 0;  // borderWidth
       data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0; // BorderColor

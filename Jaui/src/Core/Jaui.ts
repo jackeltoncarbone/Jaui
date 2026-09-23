@@ -482,11 +482,10 @@ interface GlassBlurPlan {
    *  it. `Jiv.Panel.frag` is not this lane's to change, so the region has to CONTAIN every tap
    *  instead, and a member whose region does not is refused and built alone.
    *
-   *  Two reaches, and the bound is their max rather than their sum, because they are reached from
-   *  different fragments. The DRAW QUAD is the node's box expanded by
-   *  `max(ShadowBlur + |ShadowOffset|, BorderWidth + BorderBlur)` (`Jiv.InstanceBuffer`), and
-   *  `sampleBackdrop` runs on every fragment of it including the shadow skirt. The REFRACTION and
-   *  chromatic-aberration displacement points INWARD along the normal, so it never leaves the box.
+   *  The DRAW QUAD is the node's box expanded by `BorderWidth + BorderBlur` and a pixel of
+   *  antialiasing (`Jiv.InstanceBuffer`, shadow excluded: the shadow is its own draw), and
+   *  `sampleBackdrop` runs on every fragment of it. The REFRACTION and chromatic-aberration
+   *  displacement points INWARD along the normal, so it never leaves the box.
    *
    *  Not clamped to the canvas here: the admission test does that, because a fragment outside the
    *  canvas is never rasterized and a reach that leaves it is therefore not a reach at all. */
@@ -3686,12 +3685,24 @@ export class Canvas implements DirtyTracker {
         //
         if (fillBuilt && this._restartRenderer !== null) this._restartRenderer.DiagRestartPoint();
 
+        // THE SHADOW IS ITS OWN DRAW, in the flat program, and the surface's quad stops at its face.
+        // Drawn after the pyramid was built, so the backdrop never holds the surface's own shadow, and
+        // before the surface, which covers the shadow under its face exactly as the one-draw composite
+        // did. The expensive program then shades only the fragments it can light.
         r.EnableBlend();
-        this._panelBuffer.Begin();
-        this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode);
-        r.PanelBeginBatch();
         r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
         r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
+        if (_rs.ShadowColor.A > 0.001 && !JivInstanceBuffer.DiagNoShadow) {
+          this._panelBuffer.Begin();
+          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 'Normal', null, 'Only');
+          r.PanelBeginBatch();
+          r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+          r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, undefined, shadowBackdrop);
+          this._counts.Panels++;
+        }
+        this._panelBuffer.Begin();
+        this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, ownBorderMode, null, 'Excluded');
+        r.PanelBeginBatch();
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         // Always use the MATERIAL_GLASS variant for any standalone panel
         // that needs the pyramid path. Material is *inferred* from Thickness
@@ -3744,7 +3755,7 @@ export class Canvas implements DirtyTracker {
         if (glassAdapt !== undefined && this._bcOn) this._bc.Sig.Number(glassAdapt.OpenFar);
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
-          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop, glassAdapt);
+          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, undefined, glassAdapt);
         }
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
@@ -4663,8 +4674,8 @@ export class Canvas implements DirtyTracker {
   private _bcInstallHooks = (): void => {
     const panel = this._panelBuffer;
     const panelPush = panel.Push;
-    panel.Push = (jiv, dpr, m, clipOffset = 0, clipCount = 0, xformIndex = -1, borderMode) => {
-      panelPush(jiv, dpr, m, clipOffset, clipCount, xformIndex, borderMode);
+    panel.Push = (jiv, dpr, m, clipOffset = 0, clipCount = 0, xformIndex = -1, borderMode, liftOverride, shadow) => {
+      panelPush(jiv, dpr, m, clipOffset, clipCount, xformIndex, borderMode, liftOverride, shadow);
       if (this._bcOn) this._bcNotePanel(clipOffset, clipCount, xformIndex);
     };
     const text = this._textBuffer;
@@ -5567,14 +5578,9 @@ export class Canvas implements DirtyTracker {
     const avgScale = (gsx + gsy) * 0.5;
     const margin = frostCssPx * d + 8 * d;
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
-    // second reading of them: a bound computed off a different rule is a bound that can drift
-    // away from the quad it is supposed to contain. `DiagNoShadow` zeroes the shadow there, so it
-    // zeroes it here.
-    const noShadow = JivInstanceBuffer.DiagNoShadow;
-    const shadowReach = noShadow ? 0 : (rs.ShadowBlur * avgScale * d
-      + Math.max(Math.abs(rs.ShadowOffsetX), Math.abs(rs.ShadowOffsetY)) * avgScale * d);
-    const borderReach = (rs.BorderWidth + rs.BorderBlur) * avgScale * d;
-    const tapReach = Math.max(shadowReach, borderReach);
+    // second reading of them: the surface draws with its shadow excluded, so its quad is the face,
+    // the border and a pixel of antialiasing. The shadow is its own draw and never samples.
+    const tapReach = (rs.BorderWidth + rs.BorderBlur) * avgScale * d + 1;
     const ab = this._nodeAabb(node, eff, effH);
     const px = ab.minX * d, py = ab.minY * d;
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
