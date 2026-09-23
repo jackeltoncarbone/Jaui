@@ -1245,6 +1245,19 @@ export class BlurPass {
    *  pair differs wherever coverage is incomplete, at n=1 instead of n=98. `keep` loads the previous
    *  contents legitimately, so a seam that vanishes under it is a discard-plus-coverage defect. */
   static TempLoad: 'discard' | 'clear' | 'keep' = 'discard';
+  /** `?mip-mrt`: from level 2 down, ONE draw writes each output mip level twice -- into its scratch
+   *  target (the next hop's source) and into its own slot of the output texture -- instead of a
+   *  draw into scratch followed by a NEAREST 1:1 blit across. Same DOWN taps on the same source
+   *  texels, so the same pixels; one render pass per level instead of two. Level 1 still goes the
+   *  old way: its source IS the output's level 0, and writing a level of the texture being sampled
+   *  is the feedback loop WebGL2 forbids (pinning BASE/MAX_LEVEL to escape it leaves the attached
+   *  level outside [BASE, MAX] and the framebuffer INCOMPLETE_ATTACHMENT -- measured, 2026-09-23).
+   *  The phone ablate priced the hero's 9-level Blur(160pt) build at ~12.5 ms against ~4.5 ms for
+   *  a 2-level one over the same area: a fixed cost per pass, not per texel. */
+  static MipMrt = false;
+  /** Output mip levels written by the two-target draw (`MipMrt`) vs scratch + blit. */
+  MipMrtLevels = 0;
+  MipBlitLevels = 0;
   private _gaussDebugClears = 0;
   /** Magenta clears `?gauss-debug` issued on this pass: 2 per Gaussian build, or the arm is vacuous. */
   get GaussDebugClears(): number { return this._gaussDebugClears; }
@@ -2643,6 +2656,8 @@ export class BlurPass {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(this._quad.Vao);
 
+    if (BlurPass.MipMrt && stopLevel >= 2) { this._mipMrt(out, stopLevel); return; }
+
     let srcTex = out.Texture;
     let srcW = out.Width;
     let srcH = out.Height;
@@ -2665,8 +2680,93 @@ export class BlurPass {
     }
 
     if (extendedDepth === 0) return;
+    this.MipBlitLevels += extendedDepth;
     this._blitMips(out, 1, extendedDepth);
   };
+
+  /** `?mip-mrt`'s chain. Level 1 is `_generateOutputMipmap`'s own hop (scratch, then blitted); every
+   *  level after it is one two-target draw that reads the previous SCRATCH level, so the output
+   *  texture is attached and never sampled. Called with the DOWN program, VAO and texture unit 0
+   *  already set up by the caller. */
+  private _mipMrt = (out: Framebuffer, stopLevel: number): void => {
+    const gl = this._gl;
+    let srcW = out.Width, srcH = out.Height;
+    const w1 = Math.max(1, Math.floor(srcW / 2)), h1 = Math.max(1, Math.floor(srcH / 2));
+    if (w1 === srcW && h1 === srcH) return;
+    this._levels[1].Resize(w1, h1);
+    this._bindTarget(this._levels[1], 'mip1');
+    gl.uniform2f(this._downHpLoc, 0.5 / srcW, 0.5 / srcH);
+    gl.bindTexture(gl.TEXTURE_2D, out.Texture);
+    gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+    this._draws++;
+    let srcTex = this._levels[1].Texture;
+    srcW = w1; srcH = h1;
+
+    const m = this._ensureMipMrt();
+    gl.useProgram(m.Program.Program);
+    gl.uniform1i(m.Tex, 0);
+    gl.uniform1f(m.Off, 1.0);
+    this._setSrcRect(m.Src, null, 1, 1);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, m.Fbo);
+    let depth = 1;
+    for (let i = 2; i <= stopLevel; i++) {
+      const newW = Math.max(1, Math.floor(srcW / 2));
+      const newH = Math.max(1, Math.floor(srcH / 2));
+      if (newW === srcW && newH === srcH) break;
+      const dst = this._levels[i];
+      dst.Resize(newW, newH);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, m.Fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dst.Texture, 0);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, out.Texture, i);
+      if (this.Timers !== null) this.Timers.SetTarget(`${this.TimerTag}:mip${i}`);
+      gl.viewport(0, 0, newW, newH);
+      if (BlurPass.TempLoad === 'discard') {
+        gl.invalidateFramebuffer(gl.FRAMEBUFFER, [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+      }
+      gl.uniform2f(m.Hp, 0.5 / srcW, 0.5 / srcH);
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      this._draws++;
+      srcTex = dst.Texture;
+      srcW = newW; srcH = newH;
+      depth = i;
+    }
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, null, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, null, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._target('default');
+    this.MipMrtLevels += depth - 1;
+    this.MipBlitLevels += 1;
+    this._blitMips(out, 1, 1);
+  };
+
+  /** The two-target DOWN program and its framebuffer, compiled on first use: an unflagged page never
+   *  pays for it. */
+  private _ensureMipMrt = (): { Program: ShaderProgram; Fbo: WebGLFramebuffer; Tex: WebGLUniformLocation | null;
+    Hp: WebGLUniformLocation | null; Off: WebGLUniformLocation | null; Src: WebGLUniformLocation | null } => {
+    if (this._mipMrtState !== null) return this._mipMrtState;
+    const gl = this._gl;
+    const b = new ShaderBatch(gl);
+    const frag = DOWN_FRAG(TAP_PLAIN)
+      .replace('out vec4 fragColor;', 'layout(location = 0) out vec4 fragColor;\nlayout(location = 1) out vec4 fragColor1;')
+      .replace('fragColor = vec4(sum / 8.0, 1.0);', 'fragColor = vec4(sum / 8.0, 1.0);\n    fragColor1 = fragColor;');
+    const program = b.Add(VERT, frag);
+    b.Resolve();
+    const fbo = gl.createFramebuffer();
+    if (!fbo) throw new Error('[Jaui] Failed to create mip-mrt FBO');
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const p = program.Program;
+    this._mipMrtState = {
+      Program: program, Fbo: fbo,
+      Tex: gl.getUniformLocation(p, 'u_Tex'), Hp: gl.getUniformLocation(p, 'u_HalfPixel'),
+      Off: gl.getUniformLocation(p, 'u_Offset'), Src: gl.getUniformLocation(p, 'u_SrcRect'),
+    };
+    return this._mipMrtState;
+  };
+  private _mipMrtState: { Program: ShaderProgram; Fbo: WebGLFramebuffer; Tex: WebGLUniformLocation | null;
+    Hp: WebGLUniformLocation | null; Off: WebGLUniformLocation | null; Src: WebGLUniformLocation | null } | null = null;
 
   /** Blit `_levels[from..to]` into the same mip slots of `out`. */
   private _blitMips = (out: Framebuffer, from: number, to: number): void => {

@@ -12,7 +12,7 @@ const JAUI = readFileSync(join(__dirname, '../src/Core/Jaui.ts'), 'utf8').replac
 describe('ablate > arms, the per-frame fields they flip, and the cache refusal', () => {
   it('knows its arms and throws on any other by name', () => {
     expect(JAUI).toContain(`const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui',
-  'snap64', 'snap256', 'no-pblur-draw', 'no-pblur-deep', 'no-pblur-shallow'];`);
+  'snap64', 'snap256', 'no-pblur-draw', 'no-pblur-deep', 'no-pblur-shallow', 'mip-mrt'];`);
     expect(JAUI).toContain('const ABLATE_SNAP: Record<string, number> = { snap64: 64, snap256: 256 };');
     expect(JAUI).toContain("throw new Error(`[Jaui] ?ablate arm '${a}' is not one of ${known.join(',')}`);");
   });

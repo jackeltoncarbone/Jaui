@@ -82,7 +82,7 @@ const SHADOW_DETAIL_MIN_PT = 4;
 /** `?ablate`: the arms it knows, the rendered frames each holds for, and the render-to-render gap
  *  past which the page was idle rather than slow. */
 const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui',
-  'snap64', 'snap256', 'no-pblur-draw', 'no-pblur-deep', 'no-pblur-shallow'];
+  'snap64', 'snap256', 'no-pblur-draw', 'no-pblur-deep', 'no-pblur-shallow', 'mip-mrt'];
 /** `no-pblur-deep` / `no-pblur-shallow`: which progressive blurs they drop, by the pyramid depth the
  *  walk would build (`maxLod`). Home's hero carries a deep one (Blur(160pt) on a phone, 7.3 levels over
  *  the whole canvas) and a shallow one (the 2pt saturation wash, 1 level, also the whole canvas); the
@@ -2139,7 +2139,10 @@ export class Canvas implements DirtyTracker {
     this._occlusion = arm !== 'no-occlusion';
     this._diagNoUi = arm === 'no-ui';
     RegionExtentSnap.Unit = ABLATE_SNAP[arm] ?? this._ablateSnapBase;
+    BlurPass.MipMrt = arm === 'mip-mrt' ? true : this._ablateMipMrtBase;
   };
+  /** The `?mip-mrt` state the URL asked for, which every arm but `mip-mrt` runs at. */
+  private _ablateMipMrtBase = false;
   /** `?ablate`'s depth-selective progressive-blur arms; null draws every one. */
   private _ablatePblur: 'deep' | 'shallow' | null = null;
   /** Does this ProgressiveBlur node take the progressive-blur path this frame? `?no-pblur` says no to
@@ -9700,6 +9703,14 @@ export class Canvas implements DirtyTracker {
       this._blurTemp = raw;
     }
     BlurPass.TempLoad = this._blurTemp;
+    // `?mip-mrt=on|off`: levels 2+ of an output mip chain written to scratch AND their slot in one
+    // two-target draw, instead of a draw and then a blit. See `BlurPass.MipMrt`.
+    if (params.has('mip-mrt')) {
+      const raw = (params.get('mip-mrt') ?? '').trim();
+      if (raw !== 'on' && raw !== 'off') throw new Error(`[Jaui] ?mip-mrt takes 'on' or 'off', got '${raw}'`);
+      BlurPass.MipMrt = raw === 'on';
+    }
+    JTrace(`jaui:mip-mrt armed=${BlurPass.MipMrt ? 'on' : 'off'} pixels=SAME`);
     // `?extent-snap=N`: every blur extent rounds up to a multiple of N (a power of two), so surfaces
     // of nearly-equal size share one level-0 size. Holds the builds and `k`; moves only the page's
     // count of distinct extents (`distinctExtents=` on the plan's gate line). Absent is 1, the engine.
@@ -10327,6 +10338,7 @@ export class Canvas implements DirtyTracker {
       for (const a of tested) arms.push('control', a);
       if (arms.length === 0) arms.push('control');
       this._ablateSnapBase = RegionExtentSnap.Unit;
+      this._ablateMipMrtBase = BlurPass.MipMrt;
       this._ablate = { Arms: arms, I: 0, Count: 0, Last: 0, Skip: true, Cycle: 0, Samples: new Map() };
       this._ablateApply('control');
       JTrace(`jaui:ablate armed arms=${arms.join(',')} frames=${ABLATE_FRAMES} cache=off`);

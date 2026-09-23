@@ -183,6 +183,9 @@ export class Framebuffer {
     gl.bindTexture(gl.TEXTURE_2D, null);
   };
 
+  /** The deepest mip level allocated (and so `TEXTURE_MAX_LEVEL`). */
+  get MipLevels(): number { return this._mipLevels; }
+
   /** Deepest mip level a full chain would have at the current size. */
   private _mipDepth = (): number => {
     let levels = 0;
