@@ -15,7 +15,15 @@ export interface ImageEntry {
   Width: number;       // natural width in pixels
   Height: number;      // natural height in pixels
   Ready: boolean;      // false while loading async
+  /** Every texel is alpha 1: a JPEG (no alpha channel exists), or a one-time scan found no
+   *  transparent pixel. `?occlusion` lets such an image stand as a COVERER -- what is fully under it
+   *  is not drawn. Absent means unknown, which is never opaque. */
+  Opaque?: boolean;
 }
+
+/** Largest image the load path will scan for alpha, in pixels. A scan is one `getImageData` on the
+ *  worker, once per image; past this a non-JPEG is simply left unknown (not a coverer). */
+const OPAQUE_SCAN_MAX_PX = 2_500_000;
 
 const _HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const _FETCHABLE_SCHEME = /^(https?|data|blob|file):/i;
@@ -165,15 +173,16 @@ export class ImageCache {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.blob();
       })
-      .then(b => createImageBitmap(b))
-      .then(bmp => {
+      .then(b => createImageBitmap(b).then(bmp => ({ bmp, jpeg: b.type === 'image/jpeg' })))
+      .then(({ bmp, jpeg }) => {
         this._loading.delete(url);
         const w = bmp.width;
         const h = bmp.height;
+        const opaque = jpeg || this._scanOpaque(bmp);
         const tex = this._renderer.CreateTexture(w, h);
         this._renderer.UploadSubTexture(tex, 0, 0, bmp);
         bmp.close();
-        this._cache.set(url, { Texture: tex, Width: w, Height: h, Ready: true });
+        this._cache.set(url, { Texture: tex, Width: w, Height: h, Ready: true, Opaque: opaque });
         this._inFlight--;
         this._onLoadFinish?.(url);
         this._onLoad?.();
@@ -187,6 +196,25 @@ export class ImageCache {
         this._onLoadFail?.(url);
         this._drainQueue();
       });
+  };
+
+  /** True only if every pixel of `bmp` has alpha 255. Exact, and once per image; an image past
+   *  `OPAQUE_SCAN_MAX_PX` or a canvas that cannot be read answers false (unknown). */
+  private _scanOpaque = (bmp: ImageBitmap): boolean => {
+    const w = bmp.width, h = bmp.height;
+    if (w * h > OPAQUE_SCAN_MAX_PX || w * h === 0) return false;
+    try {
+      const ctx = this._getRasterCtx();
+      ctx.canvas.width = w;
+      ctx.canvas.height = h;
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(bmp, 0, 0);
+      const px = ctx.getImageData(0, 0, w, h).data;
+      for (let i = 3; i < px.length; i += 4) if (px[i] !== 255) return false;
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   /** Load an SVG from a string. Rasterizes at `width*dpr × height*dpr` so

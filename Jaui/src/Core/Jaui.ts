@@ -2090,6 +2090,7 @@ export class Canvas implements DirtyTracker {
   private _awake = {
     Since: 0, Renders: 0, Layout: 0, Anim: new Map<string, number>(),
     Dirty: new Map<string, number>(), Need: new Map<string, number>(), Miss: new Map<string, number>(),
+    Occ: new Map<string, number>(),
   };
 
   private _flushAwake = (now: number, rendered: boolean, layoutDirty: boolean): void => {
@@ -2102,9 +2103,9 @@ export class Canvas implements DirtyTracker {
       const top = (m: Map<string, number>): string => m.size === 0 ? 'none'
         : [...m].sort((x, y) => y[1] - x[1]).slice(0, 6).map(([k, n]) => `${k}:${n}`).join(',');
       JTrace(`jaui:awake renders=${a.Renders} layout=${a.Layout} anim=${top(a.Anim)}`
-        + ` dirty=${top(a.Dirty)} need=${top(a.Need)} blurMiss=${top(a.Miss)}`);
+        + ` dirty=${top(a.Dirty)} need=${top(a.Need)} blurMiss=${top(a.Miss)} occ=${top(a.Occ)}`);
     }
-    a.Since = now; a.Renders = 0; a.Layout = 0; a.Anim.clear(); a.Dirty.clear(); a.Need.clear(); a.Miss.clear();
+    a.Since = now; a.Renders = 0; a.Layout = 0; a.Anim.clear(); a.Dirty.clear(); a.Need.clear(); a.Miss.clear(); a.Occ.clear();
   };
 
   private _pendingCapture: ((b: Blob | null) => void) | null = null;
@@ -4169,8 +4170,17 @@ export class Canvas implements DirtyTracker {
         }
         if (occ !== undefined) {
           this._occlusionStats.Missed--;
+          // A withheld IMAGE still keeps its load and its cross-fade clock: the hero swaps the
+          // hidden photo's URL while the other covers it, and a fade that only started when it was
+          // revealed would flash the placeholder. `_computeBgPaint` is where both live.
+          if (occ.Kind === 'Skip' && node.RenderStyle.Background.Kind === 'Image') this._computeBgPaint(node);
           if (occ.Kind === 'Carve') {
-            this._emitCarvedFill(node, eff, occ.Pieces, clipMeta.Offset, clipMeta.Count, ownBorderMode);
+            if (node.RenderStyle.Background.Kind === 'Image') {
+              flushPanels();
+              this._emitCarvedImage(node, eff, occ.Pieces, clipMeta.Offset, clipMeta.Count, ownBorderMode, w, h);
+            } else {
+              this._emitCarvedFill(node, eff, occ.Pieces, clipMeta.Offset, clipMeta.Count, ownBorderMode);
+            }
           }
         } else if (!this._diagNoPanels) {
         // `?emptypanels`: a panel with a fully transparent background, no painted border and no
@@ -6486,8 +6496,14 @@ export class Canvas implements DirtyTracker {
     // An IMAGE fill's alpha is the texture's, which the CPU cannot read, so it is neither opaque
     // nor reproducible at a sub-rect. A gradient is opaque when every STOP is -- the shader's
     // Hermite over a constant alpha returns that constant to a float ulp (see the report).
+    //
+    // AN IMAGE IS OPAQUE WHEN THE CACHE PROVED IT (a JPEG, or a load-time scan found no alpha < 1),
+    // it is fitted with Cover (so no Contain bar shows the placeholder), and its cross-fade from the
+    // placeholder has finished (the walk's own `_computeBgPaint` will compute the same alpha 1 later
+    // this frame). The hero's two full-screen photos are the reason: the covered one, and the page
+    // under both, were a whole screen of panel fill per frame each.
     const opaqueBg = flat ? bg.Color.A >= 1
-      : bg.Kind === 'Image' ? false
+      : bg.Kind === 'Image' ? this._imageFillOpaque(node)
       : bg.Stops.every((s) => s.Color.A >= 1);
     // `_hasPaintedBorder` rather than a second border predicate: it is the one the rim overlay
     // routes on, and a fill this admitted while that refused would be a fill with a stroke outside
@@ -6552,11 +6568,23 @@ export class Canvas implements DirtyTracker {
     // one of those lanes is an EXACT no-op at `BorderWidth == 0` on a non-glass fill with no shadow
     // (`tests/Borderless.Program.test.ts` is the line-set proof for the border chain), so the
     // difference the transform makes cannot reach a pixel. At a non-zero border width it could.
-    const carvable = flat && skippable && radius === 0 && authored === 0
+    // An opaque IMAGE carves too: each piece is drawn alone with its UV window re-cut to the piece
+    // (`_emitCarvedImage`), so the pixels are the ones the whole quad would have put there.
+    const carvable = (flat || bg.Kind === 'Image') && skippable && radius === 0 && authored === 0
       && rs.BorderWidth === 0 && rs.Thickness === 0;
     if (!covers && !skippable) return;
     scan.Fills.push({ Order: order, Raster: raster, Cover: cover, Covers: covers, Skippable: skippable, Carvable: carvable });
     scan.Nodes.push(node);
+  };
+
+  /** See `_occlusionRecord`: an image fill whose every pixel is alpha 1 this frame. */
+  private _imageFillOpaque = (node: Jiv): boolean => {
+    const bg = node.RenderStyle.Background;
+    if (bg.Kind !== 'Image' || bg.Fit !== 'Cover') return false;
+    const e = this._imageCache.Get(bg.Url);
+    if (e == null || !e.Ready || e.Opaque !== true) return false;
+    if (node.BgImageFadeUrl !== bg.Url) return false;
+    return performance.now() - node.BgImageFadeStartMs >= Canvas._BG_IMAGE_FADE_MS;
   };
 
   /** THE OCCLUSION PRE-PASS. Every fill the coming walk would emit, in the order it would emit
@@ -6605,6 +6633,11 @@ export class Canvas implements DirtyTracker {
       if (twice.has(node)) continue;
       if (scan.Fills[i].Covers) { st.Coverers++; this._occlusionCoverers.add(node); }
       const v = plan.get(scan.Fills[i].Order);
+      if (JauiTracing()) {
+        const f = scan.Fills[i];
+        const k = `${node.Classes.join('.') || '-'}:${v === undefined ? 'draw' : v.Kind}${f.Covers ? '+covers' : ''}${f.Carvable ? '+carvable' : ''}`;
+        this._awake.Occ.set(k, (this._awake.Occ.get(k) ?? 0) + 1);
+      }
       if (v === undefined) continue;
       this._occlusionPlan.set(node, v);
       st.Px += v.Px;
@@ -6642,6 +6675,49 @@ export class Canvas implements DirtyTracker {
       if (clamped.X1 <= clamped.X0 || clamped.Y1 <= clamped.Y0) continue;
       const m = CarvePieceTransform(clamped, node.X, node.Y, node.Width, node.Height, d);
       this._panelBuffer.Push(node, d, m, clipOffset, clipCount, -1, borderMode);
+    }
+  };
+
+  /** `_emitCarvedFill` for an opaque IMAGE fill. The image's UV window is a batch uniform and a
+   *  piece's panelLocal runs 0..1 over the PIECE, so each piece draws alone with the window re-cut
+   *  to the piece's share of the whole rect -- the same texel lands on the same device pixel. */
+  private _emitCarvedImage = (
+    node: Jiv, eff: Mat2x3, pieces: readonly PixelRect[],
+    clipOffset: number, clipCount: number, borderMode: 'Normal' | 'Suppress', w: number, h: number,
+  ): void => {
+    const base = this._computeBgPaint(node);
+    if (base === undefined || base.Mode !== 'Image') return;
+    const r = this._renderer;
+    const d = this._dpr;
+    const full = this._occlusionShapeRect(node, eff);
+    const fw = full.X1 - full.X0, fh = full.Y1 - full.Y0;
+    if (fw <= 0 || fh <= 0) return;
+    for (const p of pieces) {
+      const c = {
+        X0: Math.max(full.X0, p.X0), Y0: Math.max(full.Y0, p.Y0),
+        X1: Math.min(full.X1, p.X1), Y1: Math.min(full.Y1, p.Y1),
+      };
+      if (c.X1 <= c.X0 || c.Y1 <= c.Y0) continue;
+      const sx = (c.X1 - c.X0) / fw, sy = (c.Y1 - c.Y0) / fh;
+      const ox = (c.X0 - full.X0) / fw, oy = (c.Y0 - full.Y0) / fh;
+      const paint: BgPaint = {
+        ...base,
+        UvScaleX: base.UvScaleX * sx, UvScaleY: base.UvScaleY * sy,
+        UvOffsetX: base.UvOffsetX + base.UvScaleX * ox, UvOffsetY: base.UvOffsetY + base.UvScaleY * oy,
+      };
+      this._bcNoteBgPaint(paint);
+      const m = CarvePieceTransform(c, node.X, node.Y, node.Width, node.Height, d);
+      this._panelBuffer.Begin();
+      this._panelBuffer.Push(node, d, m, clipOffset, clipCount, -1, borderMode);
+      r.EnableBlend();
+      r.PanelBeginBatch();
+      r.SetClipBuffer(this._clipBuffer.Data, this._clipBuffer.Floats);
+      r.SetXformBuffer(this._xformBuffer.Data, this._xformBuffer.Floats);
+      r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+      r.PanelDrawBatch(w, h, null, 0, this._specTiltX, this._specTiltY, false, null, paint);
+      this._counts.Panels++;
+      this._counts.Image++;
+      this._panelBuffer.Begin();
     }
   };
 
