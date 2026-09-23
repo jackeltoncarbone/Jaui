@@ -29,7 +29,6 @@ export const DefaultJivStyle: JivStyle = {
   Tint: '0',
   TintTone: 'Ground',
   AdaptiveFar: '0',
-  AdaptiveFlip: 'None',
   LightAngle: '-45',
   LightIntensity: '1',
   SpecularIntensity: '0',

@@ -4,7 +4,7 @@
  * Geometry.Quad) behind the semantic operations Jaui.ts orchestrates.
  */
 
-import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop, type GlassAdapt, type GlassFlip } from './Renderer';
+import { BACKDROP_REGION_FULL, SHADOW_EASE_SECONDS, type BackdropRegion, type Renderer, type GpuTextureHandle, type ProgressiveBlurParams, type BgPaint, type ShadowBackdrop, type GlassAdapt } from './Renderer';
 import { ShaderBatch, ShaderCompiler, type ShaderProgram } from './Shader.Compiler';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
@@ -109,7 +109,6 @@ interface _PanelLocs {
   shadowState:    WebGLUniformLocation | null;
   shadowBackdrop: WebGLUniformLocation | null;
   glassAdapt:     WebGLUniformLocation | null;
-  glassFlip:      WebGLUniformLocation | null;
   // ── `?glass-skip`'s mask. Declared by the glass and non-glass programs, read only by the glass
   // one (`GlassSkips` is a constant false in the other, so it compiles out and this is null there).
   glassSkip:      WebGLUniformLocation | null;
@@ -140,7 +139,6 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   shadowState:    gl.getUniformLocation(p, 'u_ShadowState'),
   shadowBackdrop: gl.getUniformLocation(p, 'u_ShadowBackdrop'),
   glassAdapt:     gl.getUniformLocation(p, 'u_GlassAdapt'),
-  glassFlip:      gl.getUniformLocation(p, 'u_GlassFlip'),
   glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
   vibrancyCover:  gl.getUniformLocation(p, 'u_VibrancyCover'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
@@ -576,12 +574,6 @@ export class WebGL2Renderer implements Renderer {
   private _textInstanceCount = 0;
   private _textResolutionLoc!: WebGLUniformLocation | null;
   private _textVibrancyCoverLoc: WebGLUniformLocation | null = null;
-  private _textShadowStateLoc: WebGLUniformLocation | null = null;
-  private _textInkFlipSlotLoc: WebGLUniformLocation | null = null;
-  private _textInkFlipColorLoc: WebGLUniformLocation | null = null;
-  /** The flipping glass the next text draws sit on (`SetInkFlip`): its state slot and its flipped ink. */
-  private _inkFlipSlot = -1;
-  private _inkFlipColor: { R: number; G: number; B: number } = { R: 0, G: 0, B: 0 };
   /** Vibrancy's cover for the draws under `SetVibrancyBlend`, -1 for every ordinary draw. */
   private _vibrancyCover = -1;
   private _textViewOffsetLoc!: WebGLUniformLocation | null;
@@ -1619,9 +1611,7 @@ export class WebGL2Renderer implements Renderer {
     // `?glass-adapt`: set on EVERY batch, because a uniform outlives the draw that set it and the next
     // batch on this program must not inherit a surface's slot. -1 is the authored grade.
     const adaptSlot = glassAdapt && this._shadowStateTex && glassAdapt.Slot >= 0 ? glassAdapt.Slot : -1;
-    const flip = adaptSlot >= 0 ? glassAdapt!.Flip : null;
     gl.uniform2f(locs.glassAdapt, adaptSlot, adaptSlot >= 0 ? glassAdapt!.OpenFar : 0);
-    gl.uniform4f(locs.glassFlip, flip?.Tint ?? 0, flip?.Contrast ?? 0, flip?.Saturate ?? 0, flip !== null ? 1 : 0);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
 
@@ -1656,7 +1646,6 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(locs.shadowState, 5);
     gl.uniform2f(locs.shadowBackdrop, -1, 0);
     gl.uniform2f(locs.glassAdapt, -1, 0);
-    gl.uniform4f(locs.glassFlip, 0, 0, 0, 0);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
     gl.bindVertexArray(this._panelVao);
@@ -1802,12 +1791,6 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(this._textClipTexLoc, 1);
     gl.uniform1i(this._textXformTexLoc, 2);
     gl.uniform1f(this._textVibrancyCoverLoc, this._vibrancyCover);
-    const flipSlot = this._shadowStateTex ? this._inkFlipSlot : -1;
-    gl.uniform1f(this._textInkFlipSlotLoc, flipSlot);
-    gl.uniform3f(this._textInkFlipColorLoc, this._inkFlipColor.R, this._inkFlipColor.G, this._inkFlipColor.B);
-    gl.uniform1i(this._textShadowStateLoc, 3);
-    gl.activeTexture(gl.TEXTURE3);
-    gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(atlas));
@@ -4560,14 +4543,6 @@ export class WebGL2Renderer implements Renderer {
     this._sceneLedger.BlendSwitches++;
   };
 
-  /** The flipping glass the text drawn next sits on: its state slot, whose mean the text program reads to
-   *  turn the label's ink with the plate (Jiv/Shaders/Glass.Flip.glsl), and the ink it turns to. -1 for
-   *  none. The walk flushes the text batch on both sides of a change, so no label takes another's slot. */
-  SetInkFlip = (slot: number, flip: GlassFlip | null): void => {
-    this._inkFlipSlot = flip !== null ? slot : -1;
-    if (flip !== null) this._inkFlipColor = flip.Ink;
-  };
-
   /** Back to the state every other draw in the walk assumes: `FUNC_ADD` on both halves, `EnableBlend`'s
    *  factors, straight output. */
   RestoreBlend = (): void => {
@@ -4788,9 +4763,6 @@ export class WebGL2Renderer implements Renderer {
 
     this._textResolutionLoc = gl.getUniformLocation(this._textShader.Program, 'u_Resolution');
     this._textVibrancyCoverLoc = gl.getUniformLocation(this._textShader.Program, 'u_VibrancyCover');
-    this._textShadowStateLoc = gl.getUniformLocation(this._textShader.Program, 'u_ShadowState');
-    this._textInkFlipSlotLoc = gl.getUniformLocation(this._textShader.Program, 'u_InkFlipSlot');
-    this._textInkFlipColorLoc = gl.getUniformLocation(this._textShader.Program, 'u_InkFlipColor');
     this._textViewOffsetLoc = gl.getUniformLocation(this._textShader.Program, 'u_ViewOffset');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
     this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');

@@ -500,28 +500,13 @@ interface GlassBlurPlan {
   FrostCssPx: number;
 }
 
-/** A scroll edge's pyramid, handed to the glass in its subtree: the handle, the region it covers, the
- *  deepest level built, and the strip's own blur ramp, so a surface in it can read the level the strip
- *  blurs to where the surface sits. `Start` and `Length` are the ramp's origin and length on its axis in
- *  device px, `Vertical` says which axis, `Easing` is the ramp's exponent. */
+/** A scroll edge's pyramid, handed to the glass in its subtree: the handle, the region it covers and the
+ *  deepest level built. A surface in it reads the content at its own frost, undimmed. */
 interface EdgeBackdrop {
   Handle: GpuTextureHandle;
   Region: { x: number; y: number; w: number; h: number };
   MaxLod: number;
-  Vertical: boolean;
-  Start: number;
-  Length: number;
-  Easing: number;
 }
-
-/** The level a scroll edge blurs to at device coordinate `at` on its axis: the progressive blur's own
- *  ramp, pow(smoothstep(t), Easing), squared, times its deepest level (ProgressiveBlur.Shader). */
-const _edgeLodAt = (e: EdgeBackdrop, at: number): number => {
-  const length = Math.abs(e.Length) < 1 ? (e.Length < 0 ? -1 : 1) : e.Length;
-  const t = Math.max(0, Math.min(1, (at - e.Start) / length));
-  const ramp = Math.pow(t * t * (3 - 2 * t), e.Easing);
-  return ramp * ramp * e.MaxLod;
-};
 
 /** ONE GLASS GROUP: a run of glass siblings under one parent that share a blur class, and the
  *  single pyramid they all sample.
@@ -2878,8 +2863,6 @@ export class Canvas implements DirtyTracker {
     // scene. So the bar reads brighter than the dimmed surround it sits on, as Apple's does, and costs no
     // build of its own. Scoped to the strip's subtree; null everywhere else.
     let edgeBackdrop: EdgeBackdrop | null = null;
-    // The flipping glass the walk is inside, whose slot the text drawn now reads (`SetInkFlip`).
-    let inkFlip: GlassAdapt | null = null;
     // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
     // contract means the scene is different every frame; caching snapshots
     // across surfaces was already unsafe. Each glass/pblur now builds its
@@ -3236,8 +3219,6 @@ export class Canvas implements DirtyTracker {
       // draw never reaches the element's ink. `shapeBuilds0` brackets the node's own paint: an
       // under-drawn element that still caused a pyramid build is this lane failing.
       let shapeBuilds0 = -1;
-      // A flipping glass surface this node draws, whose slot its subtree's labels read.
-      let flipHere: GlassAdapt | null = null;
       const zones: VibrancyZones = phasedPaints
         ? this._vibrancyZonesOf(node)
         : { Shape: null, Ink: null, TextInk: null, TextScale: 1 };
@@ -3387,17 +3368,7 @@ export class Canvas implements DirtyTracker {
         lastBaseFrostLod = 0;
         // Handed to the subtree's glass only for a plain ramp along the element's own unrotated axis.
         if (lastBackdrop !== null && node.RenderStyle.ProgressiveBlurStops === null && !_rotated) {
-          const vertical = dir === 'ToTop' || dir === 'ToBottom';
-          const lo = vertical ? py : px;
-          const span = feather > 0 ? feather : (vertical ? ph : pw);
-          const toEnd = dir === 'ToBottom' || dir === 'ToRight';
-          edgeHere = {
-            Handle: lastBackdrop, Region: region, MaxLod: maxLod, Vertical: vertical,
-            // t runs from the clear end: the top for ToBottom, the bottom for ToTop.
-            Start: toEnd ? lo : lo + (vertical ? ph : pw),
-            Length: toEnd ? span : -span,
-            Easing: Math.max(0.001, node.RenderStyle.ProgressiveBlurEasing),
-          };
+          edgeHere = { Handle: lastBackdrop, Region: region, MaxLod: maxLod };
         }
         r.RebindSceneTarget();
         r.EnableBlend();
@@ -3598,9 +3569,9 @@ export class Canvas implements DirtyTracker {
           const preFill = this._blurFirst || this._phasedWalk ? this._blurFirstFill.get(node) : undefined;
           // Inside a scroll edge: the strip's own pyramid, when this surface's sample region lies within
           // it. The strip's level n is a Gaussian about 2^n device px wide over a raw level 0, and the
-          // surface reads it at the heavier of its own frost and the strip's blur where the surface's
-          // centre sits: blurred as the strip blurs the content there, but not dimmed. A frost-0 surface
-          // reads the raw scene snapshot, which the strip has since dimmed, so it builds its own.
+          // surface reads it at its OWN frost, undimmed: Apple's bar keeps the content under it as sharp
+          // as its frost (0.4 to 0.9pt), whatever the strip around it blurs to. A frost-0 surface reads
+          // the raw scene snapshot, which the strip has since dimmed, so it builds its own.
           const edgeFill = edgeBackdrop !== null && plan.InstFrostLod >= SCENE_TAP_FROST_LOD
             && _regionContains(edgeBackdrop.Region, region) ? edgeBackdrop : null;
           // `?glass-group`: THE GROUP'S BACKDROP, AND THE POINT IT IS CAPTURED AT.
@@ -3626,9 +3597,7 @@ export class Canvas implements DirtyTracker {
             if (this._bcOn) { this._bc.Fresh('group'); this._bcStats.Grouped++; }
           } else if (edgeFill !== null) {
             lastBackdrop = edgeFill.Handle;
-            const centre = edgeFill.Vertical ? py + ph * 0.5 : px + pw * 0.5;
-            const level = Math.min(edgeFill.MaxLod,
-              Math.max(Math.log2(Math.max(1, frostCssPx * d)), _edgeLodAt(edgeFill, centre)));
+            const level = Math.min(edgeFill.MaxLod, Math.log2(Math.max(1, frostCssPx * d)));
             // The shader reads `frostLod - u_BaseFrostLod`, so the base is what lands it on `level`.
             lastBaseFrostLod = plan.InstFrostLod - level;
             backdropLodCap = edgeFill.MaxLod;
@@ -3785,11 +3754,7 @@ export class Canvas implements DirtyTracker {
         const glassAdapt = this._glassAdaptFor(node, shadowBackdrop);
         if (glassAdapt !== undefined && this._bcOn) {
           this._bc.Sig.Number(glassAdapt.OpenFar);
-          this._bc.Sig.Word(glassAdapt.Flip !== null ? 1 : 0);
         }
-        // THE FLIP: this surface's labels read the same texel as its plate, so its subtree's text is
-        // drawn in batches of its own with that slot (`SetInkFlip`, restored after the children).
-        if (glassAdapt !== undefined && glassAdapt.Flip !== null) flipHere = glassAdapt;
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
           r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, this._specTiltX, this._specTiltY, _isGlass(material), sceneSnap, glassBgPaint, undefined, glassAdapt);
@@ -3995,14 +3960,7 @@ export class Canvas implements DirtyTracker {
       // to its subtree's glass for the length of the subtree.
       const outerEdge = edgeBackdrop;
       if (edgeHere !== null) edgeBackdrop = edgeHere;
-      const outerFlip = inkFlip;
-      if (flipHere !== null) { flushText(); inkFlip = flipHere; r2.SetInkFlip(flipHere.Slot, flipHere.Flip); }
       descendChildren(node, eff, stack, scope, effH, childPersp);
-      if (flipHere !== null) {
-        flushText();
-        inkFlip = outerFlip;
-        r2.SetInkFlip(outerFlip?.Slot ?? -1, outerFlip?.Flip ?? null);
-      }
       edgeBackdrop = outerEdge;
 
       // Close the card composite. The pending batches drain FIRST: anything still buffered belongs
@@ -5535,7 +5493,7 @@ export class Canvas implements DirtyTracker {
     const px = ab.minX * d, py = ab.minY * d;
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
     const adaptiveShadow = ((rs.ShadowAdaptive > 0 && rs.ShadowColor.A > 0.001)
-      || rs.AdaptiveFar > 0 || rs.AdaptiveFlip !== null)
+      || rs.AdaptiveFar > 0)
       && !JivInstanceBuffer.DiagNoShadow;
     const instFrostLod = _instanceFrostLod(frost, d);
     const baseFrostLod = Math.log2(Math.max(1, frostCssPx * d));
@@ -6466,11 +6424,11 @@ export class Canvas implements DirtyTracker {
   private _glassAdaptFor = (node: Jiv, shadow: ShadowBackdrop | undefined): GlassAdapt | undefined => {
     if (this._glassAdapt !== 'on') return undefined;
     const rs = node.RenderStyle;
-    if (!(rs.AdaptiveFar > 0) && rs.AdaptiveFlip === null) return undefined;
+    if (!(rs.AdaptiveFar > 0)) return undefined;
     if (shadow === undefined || shadow.Slot < 0) { this._glassAdaptUnprobed++; return undefined; }
-    const adapt: GlassAdapt = { Slot: shadow.Slot, OpenFar: rs.AdaptiveFar, Flip: rs.AdaptiveFlip };
+    const adapt: GlassAdapt = { Slot: shadow.Slot, OpenFar: rs.AdaptiveFar };
     this._glassAdaptDraws.push({
-      Slot: shadow.Slot, OpenFar: rs.AdaptiveFar, Flip: rs.AdaptiveFlip !== null,
+      Slot: shadow.Slot, OpenFar: rs.AdaptiveFar,
       Grade: { Brightness: rs.BackdropBrightness, Saturation: rs.BackdropSaturation, Contrast: rs.BackdropContrast, Tint: rs.Tint },
     });
     return adapt;

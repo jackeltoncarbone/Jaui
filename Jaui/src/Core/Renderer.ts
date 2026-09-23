@@ -110,16 +110,6 @@ export interface ShadowBackdrop {
 export interface GlassAdapt {
   Slot: number;
   OpenFar: number;
-  /** `AdaptiveFlip`'s light plate, or null. */
-  Flip: GlassFlip | null;
-}
-
-/** The light plate small glass turns to over light content (`AdaptiveFlip`), and its label's ink. */
-export interface GlassFlip {
-  Tint: number;
-  Contrast: number;
-  Saturate: number;
-  Ink: { R: number; G: number; B: number };
 }
 
 /**

@@ -73,14 +73,6 @@ export const GlassGradeOfEnds = (lo: number, hi: number, g: GlassGrade): GlassGr
   return { Brightness: Math.max(keep, 1), Saturation: carry / range, Contrast: range / keep, Tint: -Math.max(1 - keep, 0) };
 };
 
-/** The flip's weight at a backdrop mean: `GlassFlipFactor` in `Jiv/Shaders/Glass.Flip.glsl`. */
-export const GLASS_FLIP_LOW = 0.45;
-export const GLASS_FLIP_HIGH = 0.55;
-export const GlassFlipFactor = (mean: number): number => {
-  const t = Math.max(0, Math.min(1, (mean - GLASS_FLIP_LOW) / (GLASS_FLIP_HIGH - GLASS_FLIP_LOW)));
-  return t * t * (3 - 2 * t);
-};
-
 /** The body's luma over a backdrop of luma `y` under a grade (brightness, contrast, tint; saturate
  *  preserves luma). For the tests and the census, never the shader. */
 export const GlassBodyLuma = (g: GlassGrade, y: number): number => {
@@ -95,8 +87,6 @@ export const GlassBodyLuma = (g: GlassGrade, y: number): number => {
 export interface GlassAdaptDraw {
   Slot: number;
   OpenFar: number;
-  /** Whether `AdaptiveFlip` is armed. */
-  Flip: boolean;
   Grade: GlassGrade;
 }
 
@@ -142,8 +132,6 @@ export interface GlassAdaptCensus {
   Open: number;
   /** Resolved to exactly the static law. */
   Static: number;
-  /** Flipping surfaces past the flip's midpoint: on their light plate, their labels on the flipped ink. */
-  Flipped: number;
   TintMin: number;
   TintMax: number;
   RangeMin: number;
@@ -155,7 +143,7 @@ export interface GlassAdaptCensus {
 
 export const EmptyGlassAdaptCensus = (arm: 'on' | 'off', refused: string): GlassAdaptCensus => ({
   Arm: arm, Refused: refused, Frame: -1, Reads: 0, Surfaces: 0, Unprobed: 0, Ineligible: 0,
-  MeanMin: 0, MeanMax: 0, MeanAvg: 0, PeakMax: 0, Lifted: 0, Capped: 0, Open: 0, Static: 0, Flipped: 0,
+  MeanMin: 0, MeanMax: 0, MeanAvg: 0, PeakMax: 0, Lifted: 0, Capped: 0, Open: 0, Static: 0,
   TintMin: 0, TintMax: 0, RangeMin: 0, RangeMax: 0, Vacuous: 'no-read-yet', Per: [],
 });
 
@@ -172,15 +160,14 @@ export const GlassAdaptCensusOf = (
   census: GlassAdaptCensus, draws: readonly GlassAdaptDraw[], unprobed: number, row: Uint8Array,
 ): void => {
   census.Surfaces = 0; census.Ineligible = 0; census.Unprobed = unprobed;
-  census.Lifted = 0; census.Capped = 0; census.Open = 0; census.Static = 0; census.Flipped = 0;
+  census.Lifted = 0; census.Capped = 0; census.Open = 0; census.Static = 0;
   census.Per = [];
   let meanSum = 0;
   census.MeanMin = Infinity; census.MeanMax = -Infinity; census.PeakMax = 0;
   census.TintMin = Infinity; census.TintMax = -Infinity; census.RangeMin = Infinity; census.RangeMax = -Infinity;
   for (const d of draws) {
-    if (!(d.Grade.Tint < 0) || (!(d.OpenFar > 0) && !d.Flip)) { census.Ineligible++; continue; }
+    if (!(d.Grade.Tint < 0) || !(d.OpenFar > 0)) { census.Ineligible++; continue; }
     const { Mean: mean, Peak: peak } = ReadStateTexel(row, d.Slot);
-    if (d.Flip && GlassFlipFactor(mean) > 0.5) census.Flipped++;
     const ends = GlassAdaptFar(d.Grade, peak, d.OpenFar);
     const g = GlassAdaptGrade(d.Grade, peak, d.OpenFar);
     const lifted = g !== d.Grade;
@@ -221,7 +208,7 @@ export const GlassAdaptLine = (c: GlassAdaptCensus): string => {
   const f = (v: number): string => (v * 255).toFixed(1);
   return `jaui:glass-adapt arm=${c.Arm} surfaces=${c.Surfaces} unprobed=${c.Unprobed} ineligible=${c.Ineligible}`
     + ` luma=${f(c.MeanMin)}/${f(c.MeanAvg)}/${f(c.MeanMax)} peak=${f(c.PeakMax)}`
-    + ` lifted=${c.Lifted} capped=${c.Capped} open=${c.Open} static=${c.Static} flipped=${c.Flipped} ink=cap`
+    + ` lifted=${c.Lifted} capped=${c.Capped} open=${c.Open} static=${c.Static} ink=cap`
     + ` tint=${c.TintMin.toFixed(3)}..${c.TintMax.toFixed(3)} range=${f(c.RangeMin)}..${f(c.RangeMax)}`
     + ` reads=${c.Reads}`
     + (c.Vacuous !== '' ? ` vacuous=${c.Vacuous}` : '')

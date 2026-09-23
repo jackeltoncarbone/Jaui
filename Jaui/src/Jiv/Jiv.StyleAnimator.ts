@@ -178,7 +178,6 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   // Vibrancy's declaration and zone COLORS snap: a hue is not a spring, and the declaration is a
   // tagged value, not a number.
   render.VibrancyDeclaration = target.VibrancyDeclaration;
-  render.AdaptiveFlip = target.AdaptiveFlip;
   render.ForegroundVibrancyColor = target.ForegroundVibrancyColor;
   render.BackdropVibrancyColor = target.BackdropVibrancyColor;
   render.ContainBorder = target.ContainBorder;

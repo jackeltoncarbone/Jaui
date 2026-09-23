@@ -166,7 +166,6 @@ describe('the census names what it saw, and names a vacuous arm', () => {
     expect(c.Capped).toBe(1);
     expect(c.Open).toBe(1);
     expect(c.Static).toBe(1);
-    expect(c.Flipped).toBe(0);
     expect(c.Vacuous).toBe('');
     expect(c.MeanMin * 255).toBeCloseTo(10, 9);
     expect(c.MeanMax * 255).toBeCloseTo(255, 9);

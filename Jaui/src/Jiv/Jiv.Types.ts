@@ -215,10 +215,6 @@ export interface JivStyle {
    *  the authored grade already reaches over white, so the ink is never less legible than the static
    *  grade made it. Only a body tinted toward black opens. Default 0, the authored grade. */
   AdaptiveFar: string;
-  /** THE FLIP: `<tint> <contrast> <saturate> <ink>`, the light plate this small glass turns to over
-   *  light content (backdrop mean past 0.5) and the ink its labels turn to with it (Jiv/Shaders/
-   *  Glass.Flip.glsl). A contrast of 0 is no flip, so a theme can switch it off. Default `None`. */
-  AdaptiveFlip: string;
 
 
   // Lighting
@@ -374,8 +370,6 @@ export interface JivRenderStyle {
   Tint: number;
   /** The resolved `AdaptiveFar`, 0 when the grade stays as authored. */
   AdaptiveFar: number;
-  /** The resolved `AdaptiveFlip`, or null. */
-  AdaptiveFlip: { Tint: number; Contrast: number; Saturate: number; Ink: { R: number; G: number; B: number } } | null;
   BackdropBrightness: number;
   BackdropSaturation: number;
   BackdropContrast: number;

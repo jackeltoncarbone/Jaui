@@ -41,12 +41,8 @@ float AdaptiveShadowAlpha(float authoredAlpha, float backdropFactor, float adapt
 
 // Adaptive glass (`?glass-adapt`). u_GlassAdapt = (slot, far): the surface's texel in the same state row
 // (G its mean backdrop luma, B its brightest local luma) and its AdaptiveFar. Slot -1 leaves the authored
-// grade untouched. u_GlassFlip is the light plate (tint toward white, contrast, saturate) with w = 1 when
-// AdaptiveFlip is armed.
+// grade untouched.
 uniform vec2 u_GlassAdapt;
-uniform vec4 u_GlassFlip;
-
-#include "Glass.Flip.glsl"
 
 // A grade (brightness, saturation, contrast, signed tint) whose ramp runs from `lo` over black to `hi`
 // over white, carrying the colour `g` carried. Past a tint of zero the body is lifted by a brightness above
@@ -117,7 +113,6 @@ void main() {
         vec4 state = texelFetch(u_ShadowState, ivec2(int(u_GlassAdapt.x), 0), 0);
         vec4 grade = vec4(a_Grading.xyz, a_Lighting.y);
         if (u_GlassAdapt.y > 0.0) grade = GlassAdaptGrade(grade, state.b, u_GlassAdapt.y);
-        if (u_GlassFlip.w > 0.0) grade = mix(grade, vec4(1.0, u_GlassFlip.z, u_GlassFlip.y, u_GlassFlip.x), GlassFlipFactor(state.g));
         v_Grading.xyz = grade.xyz;
         v_Lighting.y = grade.w;
     }
