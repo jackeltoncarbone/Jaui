@@ -1166,6 +1166,17 @@ export class Canvas implements DirtyTracker {
   private _lensTrace = false;
   private _lensTraceLast = '';
   private _lensTraceCount = 0;
+  /** `?lens-trace`: an id per texture the twin target has used, and the generation it is on. */
+  private _lensTraceTexIds = new WeakMap<object, number>();
+  private _lensTraceTexNext = 1;
+  private _lensTraceTex: object | null = null;
+  private _lensTraceGen = 0;
+  private _lensTraceTexId = (tex: object | null): number => {
+    if (tex === null) return 0;
+    let id = this._lensTraceTexIds.get(tex);
+    if (id === undefined) { id = this._lensTraceTexNext++; this._lensTraceTexIds.set(tex, id); }
+    return id;
+  };
   private _sharedPyramid: GpuTextureHandle | null = null;
   private _sharedPyramidValid: boolean = false;
   /** Footprints (device px, flat [x0,y0,x1,y1,…]) drawn into the scene FBO since
@@ -3783,6 +3794,10 @@ export class Canvas implements DirtyTracker {
         }
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
+          if (this._lensTrace && GlassIsLens(node.RenderStyle.Lens) && this._lensTraceCount % 30 === 0) {
+            const lensTex = lensItems !== null ? (lensItems as unknown as { _glTex: object })._glTex : null;
+            console.info(`[lens-trace] #${this._lensTraceCount} lens draw: twin tex ${this._lensTraceTexId(lensTex as object | null)}, below ${below !== null}, card ${r2 instanceof WebGL2Renderer ? r2.CardActive : 'n/a'}, draw ${w} x ${h}, lens box ${node.X.toFixed(1)}, ${node.Y.toFixed(1)} ${node.Width.toFixed(1)} x ${node.Height.toFixed(1)}`);
+          }
           r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop, lensItems);
         }
         this._opMs.Draw += performance.now() - _tDraw;
@@ -4078,7 +4093,8 @@ export class Canvas implements DirtyTracker {
       flushPanels();
       flushText();
       this._capturing = false;
-      trace(`twins: ${drawn} drawn at scale ${scale.toFixed(3)} under lens layer ${lens.RenderStyle.Layer}, swell ${sx.toFixed(3)} x ${sy.toFixed(3)}${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}`);
+      if (fbo.Texture !== this._lensTraceTex) { this._lensTraceTex = fbo.Texture; this._lensTraceGen++; }
+      trace(`twins: ${drawn} drawn at scale ${scale.toFixed(3)} under lens layer ${lens.RenderStyle.Layer}, swell ${sx.toFixed(3)} x ${sy.toFixed(3)}; target tex ${this._lensTraceTexId(fbo.Texture)} gen ${this._lensTraceGen} ${w} x ${h}${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}`);
       flushW = savedW; flushH = savedH;
       this._renderer.RebindSceneTarget();
       return this._renderer.WrapTexture(fbo.Texture);
