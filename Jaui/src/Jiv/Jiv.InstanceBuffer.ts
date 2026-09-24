@@ -133,6 +133,16 @@ export const JivFrostCssPx = (jiv: Jiv, dpr: number = 1): number => {
 /** A glass surface's span, Apple's S: its minor dimension in points. */
 export const JivGlassSpan = (jiv: Jiv): number => Math.max(1, Math.min(jiv.Width, jiv.Height));
 
+/** A glass surface's span as drawn under the cascaded matrix `m`, less its own VisualScale: a swell or a press
+ *  squeeze is a transform, and Apple's glass takes its material from its bounds, never its transform (the flex
+ *  lift is a presentation modifier). The active lens keeps its own scale, which stands in for Apple's growing
+ *  it by bounds. */
+export const JivGlassSpanOf = (jiv: Jiv, m: Mat2x3): number => {
+  const style = jiv.RenderStyle;
+  const own = GlassIsLens(style.Lens) ? 1 : (style.VisualScaleX + style.VisualScaleY) * 0.5;
+  return JivGlassSpan(jiv) * (matScaleX(m) + matScaleY(m)) * 0.5 / Math.max(own, 1e-3);
+};
+
 /**
  * CPU-side instance data packer for Jiv panels. Reads from Jiv.RenderStyle
  * and packs 56 floats per instance into a Float32Array. Backend-agnostic —
@@ -217,7 +227,7 @@ export class JivInstanceBuffer {
     const borderEdgeAa = style.BorderBlur * avgScale * d;
     const rimOnly = borderMode === 'RimOnly';
     const glass = style.Material === 'LiquidGlass';
-    const span = JivGlassSpan(jiv) * avgScale;
+    const span = JivGlassSpanOf(jiv, m);
     const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly;
     // Glass casts Apple's shadow: offset (0, 8) pt, reaching two radii (Glass.Pipeline), its alpha by size.
     const lens = GlassIsLens(style.Lens);

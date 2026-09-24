@@ -14,7 +14,7 @@ import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
-import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
+import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassIsLens } from './Glass.Pipeline';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
@@ -3787,7 +3787,7 @@ export class Canvas implements DirtyTracker {
         closesEdge = true;
         // Only glass that tracks its backdrop can take an appearance its theme does not have.
         if (_isGlass(material) && shadowBackdrop !== undefined
-            && JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5 <= GLASS_TRACKS_LUMA_SPAN) glassInkHere = shadowBackdrop.Slot;
+            && JivGlassSpanOf(node, eff) <= GLASS_TRACKS_LUMA_SPAN) glassInkHere = shadowBackdrop.Slot;
         else this._counts.Panels++;
         if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
         // Reset the shared panel buffer so this glass instance isn't picked
@@ -5594,7 +5594,7 @@ export class Canvas implements DirtyTracker {
 
   /** A glass surface's shadow peak at its rendered size (Core/Glass.Pipeline.ts); 0 on clear glass. */
   private _glassShadowPeak = (node: Jiv, eff: Mat2x3): number =>
-    GlassShadowPeak(JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5, node.RenderStyle.GlassClear, GlassIsLens(node.RenderStyle.Lens));
+    GlassShadowPeak(JivGlassSpanOf(node, eff), node.RenderStyle.GlassClear, GlassIsLens(node.RenderStyle.Lens));
 
   /** The glass FILL pyramid's plan: the region it is built over, the sigma it is built at, and how
    *  deep a chain the surface can read.
@@ -5624,7 +5624,7 @@ export class Canvas implements DirtyTracker {
     // Glass reads past its face (the outer lens sample, and on large glass the edge bleed and the colored
     // shadow) and deeper than its base (the body at full radius): Core/Glass.Pipeline.ts says how far.
     const glass = _isGlass(rs.Material)
-      ? GlassBlurNeedsOf(JivGlassSpan(node) * avgScale, d, rs.GlassVariant, GlassIsLens(rs.Lens)) : null;
+      ? GlassBlurNeedsOf(JivGlassSpanOf(node, eff), d, rs.GlassVariant, GlassIsLens(rs.Lens)) : null;
     const margin = Math.max(frostCssPx * d + 8 * d, glass !== null ? glass.ReachPt * avgScale * d : 0);
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
     // second reading of them: the surface draws with its shadow excluded, so its quad is the face,
