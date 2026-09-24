@@ -1165,6 +1165,7 @@ export class Canvas implements DirtyTracker {
   /** `?lens-trace`: log, when it changes, whether an active lens's lifted twins were drawn and why not. */
   private _lensTrace = false;
   private _lensTraceLast = '';
+  private _lensTraceCount = 0;
   private _sharedPyramid: GpuTextureHandle | null = null;
   private _sharedPyramidValid: boolean = false;
   /** Footprints (device px, flat [x0,y0,x1,y1,…]) drawn into the scene FBO since
@@ -4024,10 +4025,13 @@ export class Canvas implements DirtyTracker {
     // canvas-sized layer, transparent elsewhere, which the lens reads through its SDF warp. The originals still draw
     // in the bar; the lens covers them, as Apple's DestOutView erases them.
     const liftLensItems = (bar: Jiv, lens: Jiv, stack: ClipStack, boxClip: ClipShape, m: Mat2x3, mh: Mat3x3 | null, persp: PerspCtx | null): GpuTextureHandle | null => {
+      // Logged when the line changes, and every 30th pass regardless, so silence means the pass did not run.
       const trace = (line: string): void => {
-        if (!this._lensTrace || line === this._lensTraceLast) return;
+        if (!this._lensTrace) return;
+        this._lensTraceCount++;
+        if (line === this._lensTraceLast && this._lensTraceCount % 30 !== 0) return;
         this._lensTraceLast = line;
-        console.info('[lens-trace] ' + line);
+        console.info(`[lens-trace] #${this._lensTraceCount} ` + line);
       };
       if (this._capturing) { trace('no twins: inside a layer-cache capture'); return null; }
       if (!(this._renderer instanceof WebGL2Renderer)) { trace('no twins: renderer is not WebGL2'); return null; }
