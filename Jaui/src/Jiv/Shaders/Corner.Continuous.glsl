@@ -1,34 +1,20 @@
 // ── THE CONTINUOUS CORNER: the one corner model every rounded shape in Jaui draws with ───────────────
 //
-// Apple has one corner model, the continuous-corner rounded rectangle (UIKit's cornerCurve
-// .continuous, SwiftUI's RoundedRectangle(style: .continuous)); a capsule is the same model at radius
-// half the short side. This is it, as figma-squircle builds it: each corner is a circular arc of
-// radius r, eased into each of its two edges by a cubic that starts (1 + s) r from the corner, s the
-// corner smoothing. iOS is 0.6; the per-side model below fits the measured pill at 0.595 and Apple's
-// Safari URL pill (native 3x) to a fifth of a pixel.
+// Apple's, exactly: the continuous corner as SwiftUI's renderer builds it (RenderBox
+// `RB::Path::Mapper::add_rounded_rect`), which at full room is QuartzCore's and CoreGraphics' continuous
+// corner (Jwift/Apple/LiquidGlass.md 10). Each corner is three cubics, in multiples of r from its vertex:
+//   the lead-in along one edge: (lead, 0), (cp1, 0), (cp2, 0) to (0.631494, 0.0749114);
+//   the fixed middle: (0.372824, 0.16906), (0.16906, 0.372824) to (0.0749114, 0.631494);
+//   the lead-in along the other edge, mirrored.
+// Each edge's lead-in follows that edge's room, t = sat((side - (ra + rb)) / ((ra + rb) 0.52866)), ra and rb
+// its two corner radii: lead = 1 + 0.528665 t, cp1 = 0.96 + 0.12849 t, cp2 = 0.82 + 0.048407 t. With full
+// room the curve leaves the edge 1.528665 r from the vertex; a capsule's short edge (t = 0) leaves at r.
+// A radius never exceeds the short half side. Smoothing 0 is Apple's other curve, the circular corner.
 //
-// When an edge is too short for the easing, the easing on THAT side gives way: its smoothing falls to
-// what the side allows, (half its length / r) - 1, down to 0, a plain arc. So a capsule keeps its
-// long-side easing and loses its short-side one, and a square at r = side / 2 is a circle. It is
-// figma-squircle's limited-space rule applied per side rather than once per shape, because that is
-// what Apple's measured capsule is. A radius never exceeds the short half side.
-//
-// Distance: the straight edges and the arc are exact; each easing cubic is walked as a polyline of
-// CORNER_EASE_STEPS segments. The corner is convex, so the nearest feature's inward side is the sign.
+// Distance: the straight edges are exact; each cubic is walked as a polyline of CORNER_EASE_STEPS segments.
+// The corner is convex, so the nearest feature's inward side is the sign.
 
-const int CORNER_EASE_STEPS = 8;
-
-// One side's easing into the arc, for radius r and that side's smoothing s, in the corner's inward
-// frame measured along the side: it leaves the edge `extent` from the corner and meets the arc at
-// angle `alpha`, through the control points `a` and `a + b` along the edge.
-void CornerEase(float r, float s, float extent, out float alpha, out float a, out float b, out vec2 meet) {
-    alpha = radians(45.0 * s);
-    float c = r * tan(alpha * 0.5) * cos(alpha);
-    float d = r * (1.0 - cos(alpha));
-    b = (extent - r * (1.0 - sin(alpha)) - c) / 3.0;
-    a = 2.0 * b;
-    meet = vec2(r * (1.0 - sin(alpha)), d);
-}
+const int CORNER_EASE_STEPS = 12;
 
 // A unit vector along `v`.
 vec2 CornerUnit(vec2 v) {
@@ -47,27 +33,50 @@ void CornerNearest(vec2 w, vec2 from, vec2 to, vec2 inward, inout float best, in
     if (d2 < best) { best = d2; bestPoint = point; bestInward = inward; }
 }
 
+// One edge's room for the continuous lead-in (RenderBox): 0 at a capsule, 1 with the full 1.528665 r.
+float CornerRoom(float side, float rSum) {
+    return rSum > 1e-3 ? clamp((side - rSum) / (rSum * 0.52866), 0.0, 1.0) : 1.0;
+}
+
+// Walk one cubic, in the corner's inward frame, keeping the nearest segment.
+void CornerCubic(vec2 w, vec2 a, vec2 b, vec2 c, vec2 d, inout float best, inout vec2 bestPoint, inout vec2 bestInward) {
+    vec2 prev = a;
+    for (int i = 1; i <= CORNER_EASE_STEPS; i++) {
+        float t = float(i) / float(CORNER_EASE_STEPS);
+        float u = 1.0 - t;
+        vec2 next = u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d;
+        vec2 span = next - prev;
+        CornerNearest(w, prev, next, CornerUnit(vec2(span.y, -span.x)), best, bestPoint, bestInward);
+        prev = next;
+    }
+}
+
 // Signed distance (negative inside, device px) from `p`, taken from the shape's centre, to the
-// continuous-cornered box of half size `halfSize`, per-corner radii (tl, tr, br, bl) and smoothing
-// `smoothing`; `outward` is the outward unit vector there.
+// continuous-cornered box of half size `halfSize` and per-corner radii (tl, tr, br, bl); `outward` is the
+// outward unit vector there. `smoothing` 0 draws Apple's circular corner instead.
 float ContinuousCorner(vec2 p, vec2 halfSize, vec4 radii, float smoothing, out vec2 outward) {
     vec2 q = abs(p);
     vec2 facing = vec2(p.x < 0.0 ? -1.0 : 1.0, p.y < 0.0 ? -1.0 : 1.0);
+    float cap = min(halfSize.x, halfSize.y);
+    radii = clamp(radii, vec4(0.0), vec4(cap));
     float r = p.x >= 0.0 ? (p.y <= 0.0 ? radii.y : radii.z) : (p.y <= 0.0 ? radii.x : radii.w);
-    r = clamp(r, 0.0, min(halfSize.x, halfSize.y));
+    // This corner's neighbours along its horizontal and its vertical edge.
+    float rAcross = p.x >= 0.0 ? (p.y <= 0.0 ? radii.x : radii.w) : (p.y <= 0.0 ? radii.y : radii.z);
+    float rDown = p.x >= 0.0 ? (p.y <= 0.0 ? radii.z : radii.y) : (p.y <= 0.0 ? radii.w : radii.x);
     // Inward from the side edge (x) and from the top or bottom edge (y).
     vec2 w = halfSize - q;
-    if (r < 1e-3) {
-        vec2 outside = max(-w, vec2(0.0));
-        float d = length(outside) + min(max(-w.x, -w.y), 0.0);
+    if (r < 1e-3 || smoothing <= 0.0) {
+        vec2 v = vec2(r) - w;
+        vec2 outside = max(v, vec2(0.0));
+        float d = length(outside) + min(max(v.x, v.y), 0.0) - r;
         outward = (w.x < w.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0)) * facing;
-        if (d > 0.0 && length(outside) > 0.0) outward = CornerUnit(outside) * facing;
+        if (length(outside) > 0.0) outward = CornerUnit(outside) * facing;
         return d;
     }
-    float s = clamp(smoothing, 0.0, 1.0);
-    // Each side's easing, limited by its own half edge: the top edge's runs along x, the side's along y.
-    vec2 extent = min(vec2((1.0 + s) * r), halfSize);
-    vec2 sides = max(extent / r - 1.0, vec2(0.0));
+    // x runs along the top edge (its room from the width), y down the side (its room from the height).
+    vec3 alongTop = vec3(1.0, 0.96, 0.82) + vec3(0.528665, 0.12849003, 0.048407) * CornerRoom(2.0 * halfSize.x, r + rAcross);
+    vec3 alongSide = vec3(1.0, 0.96, 0.82) + vec3(0.528665, 0.12849003, 0.048407) * CornerRoom(2.0 * halfSize.y, r + rDown);
+    vec2 extent = vec2(alongTop.x, alongSide.x) * r;
     if (w.x >= extent.x && w.y >= extent.y) {
         outward = (w.x < w.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0)) * facing;
         return -min(w.x, w.y);
@@ -76,44 +85,15 @@ float ContinuousCorner(vec2 p, vec2 halfSize, vec4 radii, float smoothing, out v
     float best = 1e20;
     vec2 bestPoint = w;
     vec2 bestInward = vec2(0.0, 1.0);
-    // The straight edges, from where each easing leaves them.
+    // The straight edges, from where each lead-in leaves them.
     CornerNearest(w, vec2(extent.x, 0.0), vec2(extent.x + 1e5, 0.0), vec2(0.0, 1.0), best, bestPoint, bestInward);
     CornerNearest(w, vec2(0.0, extent.y), vec2(0.0, extent.y + 1e5), vec2(1.0, 0.0), best, bestPoint, bestInward);
-
-    float alphaX, aX, bX; vec2 meetX;
-    CornerEase(r, sides.x, extent.x, alphaX, aX, bX, meetX);
-    float alphaY, aY, bY; vec2 meetY;
-    CornerEase(r, sides.y, extent.y, alphaY, aY, bY, meetY);
-
-    // The arc between the two easings, exact.
-    vec2 centre = vec2(r);
-    vec2 fromCentre = w - centre;
-    float reach = length(fromCentre);
-    float angle = atan(-fromCentre.x, -fromCentre.y);
-    if (reach > 1e-5 && angle >= alphaX && angle <= radians(90.0) - alphaY) {
-        vec2 point = centre + fromCentre / reach * r;
-        vec2 off = w - point;
-        float d2 = dot(off, off);
-        if (d2 < best) { best = d2; bestPoint = point; bestInward = -fromCentre / reach; }
-    }
-
-    // The top edge's easing: from (extent.x, 0) through the two control points on the edge to the arc.
-    vec2 x0 = vec2(extent.x, 0.0), x1 = vec2(extent.x - aX, 0.0), x2 = vec2(extent.x - aX - bX, 0.0);
-    vec2 x3 = meetX;
-    // The side's easing, mirrored across the diagonal.
-    vec2 y0 = vec2(0.0, extent.y), y1 = vec2(0.0, extent.y - aY), y2 = vec2(0.0, extent.y - aY - bY);
-    vec2 y3 = meetY.yx;
-    vec2 prevX = x0, prevY = y0;
-    for (int i = 1; i <= CORNER_EASE_STEPS; i++) {
-        float t = float(i) / float(CORNER_EASE_STEPS);
-        float u = 1.0 - t;
-        vec2 nextX = u * u * u * x0 + 3.0 * u * u * t * x1 + 3.0 * u * t * t * x2 + t * t * t * x3;
-        vec2 nextY = u * u * u * y0 + 3.0 * u * u * t * y1 + 3.0 * u * t * t * y2 + t * t * t * y3;
-        vec2 spanX = nextX - prevX, spanY = nextY - prevY;
-        CornerNearest(w, prevX, nextX, CornerUnit(vec2(spanX.y, -spanX.x)), best, bestPoint, bestInward);
-        CornerNearest(w, prevY, nextY, CornerUnit(vec2(-spanY.y, spanY.x)), best, bestPoint, bestInward);
-        prevX = nextX; prevY = nextY;
-    }
+    // From the top edge round to the side: lead-in, the fixed middle, lead-in.
+    vec2 m0 = vec2(0.631493986, 0.0749114007) * r, m1 = vec2(0.372824013, 0.169060007) * r;
+    vec2 m2 = vec2(0.169060007, 0.372824013) * r, m3 = vec2(0.0749114007, 0.631493986) * r;
+    CornerCubic(w, vec2(extent.x, 0.0), vec2(alongTop.y * r, 0.0), vec2(alongTop.z * r, 0.0), m0, best, bestPoint, bestInward);
+    CornerCubic(w, m0, m1, m2, m3, best, bestPoint, bestInward);
+    CornerCubic(w, m3, vec2(0.0, alongSide.z * r), vec2(0.0, alongSide.y * r), vec2(0.0, extent.y), best, bestPoint, bestInward);
 
     float d = sqrt(best);
     bool inside = dot(w - bestPoint, bestInward) >= 0.0;

@@ -143,8 +143,8 @@ export interface JivStyle {
   BorderRadius: string;
   /** Space-separated tokens; same 1/2/4 shorthand as BorderRadius. */
   CornerShape: string;
-  /** The continuous corner's smoothing, 0..1 (Jiv/Shaders/Corner.Continuous.glsl): how far the corner
-   *  eases into its edges, (1 + s) x the radius. 0 is a plain circular arc; 0.6, the default, is iOS. */
+  /** Apple's corner curve (Jiv/Shaders/Corner.Continuous.glsl): 0 is the circular corner, anything above 0
+   *  the continuous corner, Apple's exact construction (the default). */
   BorderRadiusSmoothness: string;
   // Fill
   Background: string;
