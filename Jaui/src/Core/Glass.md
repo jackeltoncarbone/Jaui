@@ -83,13 +83,19 @@ The band recolors what is under it: `out = mix(D, sat(M D), alpha)`, `alpha = Ri
 - light: `Y -> 0.90 + 0.10 Y`, chroma x 1.5;
 - dark: `Y -> 0.15 + 1.35 Y`, chroma x 3.
 
+M is picked by the glass's appearance, as Apple's is: its backdrop's luminance on glass 56 pt and under (the probe), its theme above that. A solid surface's rim takes its theme.
+
 Fitted 2026-09-24 to Apple's iOS 26 dark rims (LiquidGlassGallery `Dark/`: the Games tab bar, its search button, the Play hero pill):
-- M is the matrices mixed 0.6 light to 0.4 dark, whatever the appearance. The Games bar's and search button's lit lobes, (66, 215, 223) and (97, 230, 229) over teal, are that mix; either matrix alone misses them.
+- On dark glass, M is the matrices mixed 0.6 light to 0.4 dark. The Games bar's and search button's lit lobes, (66, 215, 223) and (97, 230, 229) over teal, are that mix; either matrix alone misses them. Light glass takes the light rows.
 - The shaping `c = 3`, not read from the dumps. Apple's lobe is sharper than the plain cosine: the lit lobe stands +100 over the body, the straight top 45 degrees off it +40.
 - `RimStrength` 2, the lobe's alpha at the clamp. Apple's confirmed macOS 0.5 lit iOS rims at a third of their brightness.
-- A hero's action rims quieter, `RimStrength` 0.25: Apple's Games Play pills stand +11 to +20.
+- Every surface wears the one rim, a hero's action included (Jack's call); Apple's Games Play pills stand quieter, +11 to +20.
 
-Glass draws the highlight in its own fragment, over its face, so there are no extra reads. A surface that is not glass (a solid card's edge) draws it in the `RIM_ONLY` program over a snapshot of the scene under its box.
+The rim rides `BorderLayer`: it lights what is drawn under it at that slot, so it lies over the glass's own content (a photo, a pill, a glyph). Both paths below compute one layer, `GlassRim` in Glass.Pipeline.glsl:
+- Glass whose content below the slot stays clear of the band (the common case) lights the band in its own fragment, over its face. No extra reads.
+- Glass whose content reaches the band, and a solid surface's edge, draw it in the `RIM_ONLY` program over a snapshot of the scene under the box, at the slot (`Jaui.ts`, `_glassRimInPass`).
+
+The two give the same pixels where they both apply; the parity check renders both.
 
 ## Labels [C]
 
@@ -104,8 +110,10 @@ Extra texture reads per fragment:
 | Face | 1 read (3 with dispersion), plus 1 in the outer point of regular glass |
 | Edge bleed | 1 per face fragment, regular glass 64 pt and up |
 | Colored shadow | 1 per shadow fragment, glass 64 pt and up; smaller glass's shadow reads nothing |
-| Highlight on glass | 0 |
-| Highlight on a solid surface | 1 per rim-quad fragment, plus one snapshot copy of its box |
+| Highlight on glass, content clear of the band | 0 |
+| Highlight on glass with content at the band, or on a solid surface | 1 per rim-quad fragment, plus one snapshot copy of its box |
+
+The rim pass is not free where it runs: on SwiftShader a library page's 12 glass surfaces at 3x cost 10 ms a frame more through it (24 to 34 ms), about nothing on a desktop GPU. Hence the in-fragment path wherever the content allows it.
 | Probe | 96 taps, one 1x1 draw per glass surface |
 
 ## Verification

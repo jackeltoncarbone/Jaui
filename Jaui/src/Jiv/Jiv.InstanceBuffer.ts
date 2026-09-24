@@ -175,9 +175,9 @@ export class JivInstanceBuffer {
   /** `borderMode` controls how this instance treats its border stroke, used
    *  by the `BorderLayer` paint-ordering feature:
    *    • 'Normal'      — border painted with the panel (default).
-   *    • 'Suppress'    — panel drawn with NO border; the border is emitted
-   *                      separately as a 'BorderOnly' instance interleaved
-   *                      among children at the node's BorderLayer position.
+   *    • 'Suppress'    — panel drawn with NO border and no highlight; the border is
+   *                      emitted separately as a 'BorderOnly' instance, the rim as a
+   *                      'RimOnly' one, among children at the node's BorderLayer position.
    *    • 'BorderOnly'  — only the border stroke paints: background, shadow,
    *                      and fill are zeroed so the instance is a
    *                      transparent quad carrying just the stroke.
@@ -186,7 +186,7 @@ export class JivInstanceBuffer {
    *                      and nothing else: no border, no shadow, no grade, no glass. The walk draws
    *                      it alone, under the element, under the vibrancy blend, so the fragment's
    *                      alpha is exactly the coverage the element's own fill would have had.
-   *    • 'RimOnly'     — the RIM of a surface that is not glass, for the RIM_ONLY program at the
+   *    • 'RimOnly'     — the RIM, for the RIM_ONLY program at the
    *                      BorderLayer slot: the shape, the clip, the opacity and the rim's height and
    *                      amount. Its quad is the face and a pixel past it.
    *
@@ -326,9 +326,8 @@ export class JivInstanceBuffer {
     data[offset + 42] = style.SchemeDark ? 1 : 0;
     data[offset + 43] = style.GlassVariant === 'Clear' ? 1 : 0;
 
-    // The highlight: each light's amount and the band's depth in points. Glass whose rim rides a BorderLayer
-    // draws it in the rim pass over its content instead, so its own face leaves the band to that pass.
-    data[offset + 44] = glass && !rimOnly && style.BorderLayer !== 0 ? 0 : style.RimStrength;
+    // The highlight: each light's amount and the band's depth in points.
+    data[offset + 44] = style.RimStrength;
     data[offset + 45] = style.RimWidth;
     data[offset + 46] = style.ChromaticAberration;
     data[offset + 47] = style.BorderFade * avgScale * d;
@@ -361,6 +360,7 @@ export class JivInstanceBuffer {
     }
 
     if (borderMode === 'Suppress') {
+      data[offset + 44] = 0;  // the rim rides the pass at the BorderLayer slot
       data[offset + 27] = 0;  // borderWidth
       data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0; // BorderColor
     } else if (borderMode === 'BorderOnly') {

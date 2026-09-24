@@ -457,12 +457,12 @@ float cornerQueries(vec2 pixel, int offset, int count, bool wantShadow, vec2 sha
 
 
 #if defined(RIM_ONLY)
-// ── THE RIM OF A SURFACE THAT IS NOT GLASS (a solid card's edge) ──
+// ── THE RIM PASS ──
 //
 // Apple's highlight pass (Glass.Pipeline.glsl GlassRim): a 1 pt band lit by the key and fill lights,
-// recoloring what is already drawn under it by vibrantColorMatrix. Glass computes it in its own fragment
-// over its face; this program does the same over whatever lies under a solid surface's edge, which it reads
-// from the scene snapshot the walk takes for it (u_RimScene), because the recolor is a matrix of that pixel.
+// recoloring what is already drawn under it by vibrantColorMatrix. Glass lights it in its own fragment unless
+// its content reaches the band; then, and for a solid surface's edge, this program draws the same layer over
+// the scene snapshot the walk takes for it (u_RimScene), at the node's BorderLayer slot.
 uniform sampler2D u_RimScene;
 
 void main() {
@@ -491,8 +491,8 @@ void main() {
     vec2 uv = v_PixelPos / u_Resolution;
     uv.y = 1.0 - uv.y;
     vec3 under = texture(u_RimScene, uv).rgb;
-    float alpha = GlassRimAlpha(d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, height, 0.0);
-    fragColor = vec4(GlassRimMatrix(under), alpha * v_StyleParams.z * clipAlpha);
+    vec4 rim = GlassRim(under, d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, height, v_Lighting.w, v_RimEdge.x);
+    fragColor = vec4(rim.rgb, rim.a * v_StyleParams.z * clipAlpha);
 }
 #else
 void main() {
@@ -715,8 +715,15 @@ void main() {
             if (v_Tint.a > 0.001) face = mix(face, GlassTint(face, v_Tint.rgb), v_Tint.a);
             // The holding tone: the interior at 97%, the outer one to two points at full.
             face = clamp(face * mix(1.0, 0.97, clamp(-1.0 - d, 0.0, 1.0)), 0.0, 1.0);
-            if (!GlassSkips(GLASS_SKIP_RIM))
-            face = GlassRim(face, d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, v_Specular.y, glassClear);
+            if (!GlassSkips(GLASS_SKIP_RIM)) {
+                // The highlight recolors what the pixel will show, as the rim pass does: where the face covers
+                // it only partly (the silhouette's antialiasing, a translucent surface), that is the face over
+                // the backdrop, so the face carries the difference the layer makes there, over its coverage.
+                float cover = fillAlpha * opacity;
+                vec3 shown = cover < 0.999 ? mix(sampleBackdrop(baseUv, frostLod), face, cover) : face;
+                vec4 rim = GlassRim(shown, d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, v_Specular.y, glassClear, glassLight);
+                face = clamp(face + rim.a / max(cover, 1e-3) * (rim.rgb - shown), 0.0, 1.0);
+            }
             backdrop = face;
         }
     } else if (hasBackdropFilter) {

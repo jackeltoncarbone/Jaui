@@ -1588,8 +1588,9 @@ export class WebGL2Renderer implements Renderer {
 
   /** Draw the pending batch as RIMS ('RimOnly' instances): Apple's highlight over what `under` holds of
    *  the scene beneath them (a snapshot the walk takes), the recolored pixel at the band's alpha, source
-   *  over. The target's alpha is left alone. Then the walk's own blend back. */
-  PanelRimDraw = (canvasWidth: number, canvasHeight: number, under: GpuTextureHandle): void => {
+   *  over. The target's alpha is left alone. Then the walk's own blend back. `appearanceSlot` is the glass's
+   *  probe slot, so its matrix follows its backdrop as its face does; -1 takes the theme. */
+  PanelRimDraw = (canvasWidth: number, canvasHeight: number, under: GpuTextureHandle, appearanceSlot: number): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
     const locs = this._panelLocsRim;
@@ -1609,6 +1610,10 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(locs.rimScene, 2);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, _unwrap(under));
+    gl.uniform1i(locs.shadowState, 5);
+    gl.uniform1f(locs.glassAppearance, this._shadowStateTex && appearanceSlot >= 0 ? appearanceSlot : -1);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
     gl.bindVertexArray(this._panelVao);
     this._noteSceneDraw();
     gl.enable(gl.BLEND);

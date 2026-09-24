@@ -510,6 +510,27 @@ interface GlassGroup {
   Plan: BackdropUnionPlan;
 }
 
+/** How many nodes the rim pass decision looks at under one glass before it takes the pass. */
+const RIM_REACH_SCAN_BUDGET = 256;
+
+/** Is the box inside `glass`'s shape shrunk by `inset`, in the glass's own frame? The shape is convex, so the four
+ *  corners decide; each rounded corner is taken as a circle of 1.53 radii, which a continuous corner lies outside of. */
+const _insideInsetShape = (x0: number, y0: number, x1: number, y1: number, glass: Jiv, inset: number): boolean => {
+  const bx = glass.X, by = glass.Y, bw = glass.Width, bh = glass.Height;
+  if (x0 < bx + inset || y0 < by + inset || x1 > bx + bw - inset || y1 > by + bh - inset) return false;
+  const radii = glass.RenderStyle.BorderRadius;
+  const half = Math.min(bw, bh) * 0.5;
+  for (let i = 0; i < 4; i++) {
+    const r = Math.min(1.53 * radii[i], half);
+    if (r <= inset) continue;
+    const left = i === 0 || i === 3, top = i < 2;
+    const cx = left ? bx + r : bx + bw - r, cy = top ? by + r : by + bh - r;
+    const px = left ? x0 : x1, py = top ? y0 : y1;
+    if ((left ? px < cx : px > cx) && (top ? py < cy : py > cy) && Math.hypot(px - cx, py - cy) > r - inset) return false;
+  }
+  return true;
+};
+
 /** Does `outer` contain `inner`? Both are device-px screen rects with y down, as
  *  `GlassBlurPlan.Region` is. Closed on both edges: a region is a texel span, and an inner rect
  *  whose right edge is the outer's right edge is fully inside it. */
@@ -1935,6 +1956,8 @@ export class Canvas implements DirtyTracker {
    *  at the top of every _render; real structural/material changes happen under
    *  !_uiStatic (which drops the whole cache), so it can't go stale mid-static. */
   private _subtreeDynamicMemo = new Map<Jiv, boolean>();
+  /** Per-render memo of `_glassRimInPass`: the fill and the edge slot must give the same answer. */
+  private _rimPassMemo = new Map<Jiv, boolean>();
   /** True when no UI animation/relayout is pending, so the static caches are
    *  safe to build + reuse. The everplaying field keeps the loop alive via
    *  _needsRender (NOT IsRunning), so this stays true in steady state. */
@@ -2685,6 +2708,7 @@ export class Canvas implements DirtyTracker {
     // WebGL2 context (the capture binds FBOs + needs GetGL()).
     this._subtreeDynamicMemo.clear();
     this._subtreeUnretargetableMemo.clear();
+    this._rimPassMemo.clear();
     // [damage] Phase A proof: a small field-only dirty rect; everything outside is culled.
     this._damageRectCss = this._damageTest
       ? { x: this._width * 0.10, y: this._height * 0.40, w: this._width * 0.30, h: this._height * 0.25 }
@@ -2816,6 +2840,8 @@ export class Canvas implements DirtyTracker {
     let edgeBackdrop: EdgeBackdrop | null = null;
     // The glass whose labels the text drawn now sits on (`SetGlassInk`): its probe slot and theme, or -1.
     let glassInk = { Slot: -1, Dark: false };
+    // The probe slot of the glass whose children are being walked, for its rim pass's appearance; -1 elsewhere.
+    let rimSlot = -1;
     // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
     // contract means the scene is different every frame; caching snapshots
     // across surfaces was already unsafe. Each glass/pblur now builds its
@@ -2993,7 +3019,7 @@ export class Canvas implements DirtyTracker {
           r2.RebindSceneTarget();
           r2.PanelBeginBatch();
           r2.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
-          r2.PanelRimDraw(flushW, flushH, under);
+          r2.PanelRimDraw(flushW, flushH, under, rimSlot);
           this._panelBuffer.Begin();
           this._counts.Rims++;
         }
@@ -3153,6 +3179,7 @@ export class Canvas implements DirtyTracker {
       let edgeHere: typeof edgeBackdrop = null;
       // A probed glass surface this node draws: its subtree's labels follow its appearance.
       let glassInkHere = -1;
+      let rimSlotHere = -1;
 
       // BorderLayer: when this Jiv asks for its border to paint at a non-zero
       // position in its children's Layer space, suppress the border on the
@@ -3161,8 +3188,9 @@ export class Canvas implements DirtyTracker {
       // (BorderLayer 0, or no visible border) keeps the border fused — today's
       // paint order, zero cost. Nothing else suppresses it: the rim's gather is the
       // reason the second pass exists (see descendChildren), not just paint order.
+      // A glass rim that rides the pass (its content reaches the band) leaves the face the same way.
       const ownBorderMode: 'Normal' | 'Suppress' =
-        (node.RenderStyle.BorderLayer !== 0 && this._hasPaintedBorder(node)) ? 'Suppress' : 'Normal';
+        (node.RenderStyle.BorderLayer !== 0 && (this._hasPaintedBorder(node) || this._glassRimInPass(node))) ? 'Suppress' : 'Normal';
 
       // `?blur-phased`: does this node paint its OWN content in the pass that is running? Asked
       // exactly once per node and only under the flag, because the ANSWER is also what detects the
@@ -3724,6 +3752,7 @@ export class Canvas implements DirtyTracker {
         }
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
+        if (_isGlass(material) && shadowBackdrop !== undefined) rimSlotHere = shadowBackdrop.Slot;
         // Only glass that tracks its backdrop can take an appearance its theme does not have.
         if (_isGlass(material) && shadowBackdrop !== undefined
             && JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5 <= GLASS_TRACKS_LUMA_SPAN) glassInkHere = shadowBackdrop.Slot;
@@ -3927,6 +3956,8 @@ export class Canvas implements DirtyTracker {
       const outerEdge = edgeBackdrop;
       if (edgeHere !== null) edgeBackdrop = edgeHere;
       const outerInk = glassInk;
+      const outerRimSlot = rimSlot;
+      rimSlot = rimSlotHere;
       if (glassInkHere >= 0) {
         flushText();
         glassInk = { Slot: glassInkHere, Dark: node.RenderStyle.SchemeDark };
@@ -3939,6 +3970,7 @@ export class Canvas implements DirtyTracker {
         r2.SetGlassInk(outerInk.Slot, outerInk.Dark);
       }
       edgeBackdrop = outerEdge;
+      rimSlot = outerRimSlot;
 
       // Close the card composite. The pending batches drain FIRST: anything still buffered belongs
       // to this subtree and would otherwise be flushed into the scene by the next category
@@ -5417,10 +5449,62 @@ export class Canvas implements DirtyTracker {
     const s = node.RenderStyle;
     if (!(s.RimWidth > 0 && s.RimStrength > 0 && node.EffectiveOpacity > 0.001
           && node.Visible && node.Width > 0 && node.Height > 0)) return false;
-    // Glass draws its highlight in its own fragment, over its face, unless its rim rides a BorderLayer
-    // above its content (an avatar over its photo), where the rim pass draws it at that slot.
-    if (_isGlass(s.Material) && this._glassFillTakesPyramid(node) && s.BorderLayer === 0) return false;
+    // Glass lights its band in its own fragment unless content drawn before its BorderLayer slot reaches it.
+    if (_isGlass(s.Material) && this._glassFillTakesPyramid(node) && !this._glassRimInPass(node)) return false;
     return !(ownPanelCulled && this._edgeOutsidePaintedArea(node, eff, stack, effH));
+  };
+
+  /** Does this glass's highlight ride the rim pass? Only when its BorderLayer puts the rim over content and some of
+   *  that content (descendants below the slot) reaches the band: a photo, a pill or a glyph at the edge. Otherwise the
+   *  fragment lights the band over the face, the same pixels without the pass's scene snapshot. */
+  private _glassRimInPass = (node: Jiv): boolean => {
+    const memo = this._rimPassMemo.get(node);
+    if (memo !== undefined) return memo;
+    const s = node.RenderStyle;
+    let inPass = false;
+    if (s.BorderLayer !== 0 && s.RimWidth > 0 && s.RimStrength > 0 && _isGlass(s.Material) && this._glassFillTakesPyramid(node)) {
+      const inset = s.RimWidth + 1;
+      const budget = { Left: RIM_REACH_SCAN_BUDGET };
+      const start: Mat2x3 = node.Overflow === 'Scroll' ? [1, 0, 0, 1, -node.ScrollX, -node.ScrollY] : MAT_IDENTITY;
+      for (const child of node.Children as Jiv[]) {
+        if (child.RenderStyle.Layer >= s.BorderLayer || child.TeleportSeq !== 0) continue;
+        const m = child.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll' ? MAT_IDENTITY : start;
+        if (this._reachesRimBand(node, child, m, inset, budget)) { inPass = true; break; }
+      }
+    }
+    this._rimPassMemo.set(node, inPass);
+    return inPass;
+  };
+
+  /** Whether `n` or anything under it paints over `glass`'s band, `inset` deep: its painted box, in the glass's own
+   *  frame through `m` and each node's own transform, leaves the glass's shape shrunk by the inset. The corner is
+   *  taken as a circle of 1.53 radii, which a continuous corner lies outside of. Past the budget, or under 3D, it
+   *  answers yes: the pass is always right, only dearer. */
+  private _reachesRimBand = (glass: Jiv, n: Jiv, m: Mat2x3, inset: number, budget: { Left: number }): boolean => {
+    if (!n.Visible || n.EffectiveOpacity <= 0.001) return false;
+    if (--budget.Left < 0) return true;
+    const rs = n.RenderStyle;
+    if (rs.Transform.RotateX !== 0 || rs.Transform.RotateY !== 0 || rs.Transform.TranslateZ !== 0) return true;
+    const own = this._composeTransform(n, m, null, null);
+    const bg = rs.Background;
+    const paints = n.Width > 0 && n.Height > 0 && ((bg.Kind !== 'Color' || bg.Color.A > 0.001)
+      || rs.ShadowColor.A > 0.001 || this._hasPaintedBorder(n) || rs.Material !== 'None' || _hasBackdropFilter(n)
+      || (n.Text !== null && n.Text !== '') || !!n.SvgVector);
+    const b = this._nodeAabb(n, own);
+    const inside = _insideInsetShape(b.minX, b.minY, b.maxX, b.maxY, glass, inset);
+    if (paints) {
+      const pad = Math.max(rs.ShadowColor.A > 0.001 ? rs.ShadowBlur + Math.max(Math.abs(rs.ShadowOffsetX), Math.abs(rs.ShadowOffsetY)) : 0, rs.BorderWidth);
+      if (!(pad === 0 ? inside : _insideInsetShape(b.minX - pad, b.minY - pad, b.maxX + pad, b.maxY + pad, glass, inset))) return true;
+    }
+    // A clipping box clear of the band keeps its whole subtree clear of it too.
+    if (n.Overflow !== 'Visible' && inside) return false;
+    const childM = this._descendOffset(n, own);
+    for (const c of n.Children as Jiv[]) {
+      if (c.TeleportSeq !== 0) continue;
+      const cm = c.ChildLayout.Position === 'Pinned' && n.Overflow === 'Scroll' ? own : childM;
+      if (this._reachesRimBand(glass, c, cm, inset, budget)) return true;
+    }
+    return false;
   };
 
   /** True when this node takes the glass FILL pipeline — the branch that builds a pyramid.

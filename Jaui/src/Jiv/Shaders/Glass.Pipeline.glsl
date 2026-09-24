@@ -91,15 +91,16 @@ float GlassRimBand(float s, float fw, float height, vec2 n, vec2 light, float co
 }
 
 // vibrantColorMatrix over what is already drawn, Apple's exact rows: light pushes it to 0.9 + 0.1 Y with 1.5x
-// chroma, dark to 0.15 + 1.35 Y with 3x chroma. Apple's iOS 26 dark rims are neither alone: the Games bar's and
+// chroma, dark to 0.15 + 1.35 Y with 3x chroma, picked by the glass's appearance (its backdrop's luminance, or its
+// theme when it is large), `light` 0..1. Apple's iOS 26 dark rims are not the dark rows alone: the Games bar's and
 // its search button's lit lobes over teal, (66, 215, 223) and (97, 230, 229), are the rows mixed 0.6 light to
-// 0.4 dark, whatever the appearance (fitted, Core/Glass.md).
-vec3 GlassRimMatrix(vec3 c) {
+// 0.4 dark (fitted, Core/Glass.md). Light glass takes the light rows.
+vec3 GlassRimMatrix(vec3 c, float light) {
     vec3 lit = vec3(dot(c, vec3(1.2024, -1.0014, -0.1010)), dot(c, vec3(-0.2976, 0.4987, -0.1011)),
                     dot(c, vec3(-0.2977, -1.0012, 1.3989))) + 0.90;
     vec3 dim = vec3(dot(c, vec3(2.6492, -1.1803, -0.1189)), dot(c, vec3(-0.3507, 1.8199, -0.1192)),
                     dot(c, vec3(-0.3509, -1.1799, 2.8809))) + 0.15;
-    return clamp(mix(dim, lit, 0.6), 0.0, 1.0);
+    return clamp(mix(mix(dim, lit, 0.6), lit, light), 0.0, 1.0);
 }
 
 // The key light upper left in y-down screen space (its fill is the opposite corner), in the panel's frame.
@@ -124,8 +125,10 @@ float GlassRimAlpha(float d, vec2 n, vec2 key, float amount, float height, float
                          + GlassRimWeight(GlassRimBand(s, fw, height, n, -key, cosSpread))), 0.0, 1.0);
 }
 
-vec3 GlassRim(vec3 c, float d, vec2 n, vec2 key, float amount, float height, float clear) {
-    return mix(c, GlassRimMatrix(c), GlassRimAlpha(d, n, key, amount, height, clear));
+// The highlight as a layer over `under`: its recolor and its alpha. The glass fragment mixes it over its own face;
+// the rim pass draws it over the scene, where content reaches the band.
+vec4 GlassRim(vec3 under, float d, vec2 n, vec2 key, float amount, float height, float clear, float light) {
+    return vec4(GlassRimMatrix(under, light), GlassRimAlpha(d, n, key, amount, height, clear));
 }
 
 // .tint(color): a line in the glassed pixel's luma, the seed at full luma and at none the seed's own luma at
