@@ -67,17 +67,16 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
 }
 
 // THE ACTIVE LENS, measured on Apple's iOS 26 pressed tab (MacStories native capture, 3x, 60 fps; Core/Glass.md).
-// Its refraction, fitted from Apple's own frames (the drag frames' interiors against the resting frame): the source
-// of a pixel at depth t inside the outline is centre + (p - centre) k(t), with
-//   k = 1 / m over the body (m, the Magnification, is 1.21 at the centre),
-//   k = mix(GLASS_LENS_EDGE_READ, 1 / m, (t / bezel)^GLASS_LENS_BEZEL_CURVE) across the bezel, which is
-//       GLASS_LENS_BEZEL of the span (13 pt on the 72 pt lens): toward the rim it compresses what lies past the
-//       outline into the band, reading 1.15 of the way out at the rim itself, so the bar's own edge shows there.
+// Its interior is a flat plate: a pixel reads centre + (p - centre) / m, the same in x and y (m, the Magnification,
+// 1.21: Apple's straight labels read 1.21 x wider). Only the bezel, GLASS_LENS_BEZEL of the span (7 pt on the 74 pt
+// lens, the band Apple's rim bends), folds: across it the read runs linearly from 1 / m back to 1 at the outline.
+// The lens stands GLASS_LENS_OVER_BAR bar heights tall, so it reads only inside the bar it stands on: past the bar
+// it continues the bar's own body, never the page above or below it.
 // The body is a screen curve 1 - (1 - c)^g that keeps the ink's depth: light lifts Apple's 177 bar body to its 238;
 // dark lifts OUR dark bar (44) to Apple's dark lens interior (73).
-const float GLASS_LENS_BEZEL = 0.18;
-const float GLASS_LENS_EDGE_READ = 1.15;
-const float GLASS_LENS_BEZEL_CURVE = 3.0;
+const float GLASS_LENS_BEZEL = 0.095;
+const float GLASS_LENS_OVER_BAR = 1.173;
+const float GLASS_LENS_BAR_INSET = 1.5;
 const float GLASS_LENS_SCREEN_LIGHT = 2.3;
 const float GLASS_LENS_SCREEN_DARK = 1.8;
 vec3 GlassLensBody(vec3 c, float light) {
