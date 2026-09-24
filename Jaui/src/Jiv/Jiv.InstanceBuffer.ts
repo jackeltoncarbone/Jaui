@@ -35,8 +35,8 @@ import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadow
 //          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
 //          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularGlow, chromaticAberration, borderFade in device px)
-//   loc 13: a_RimEdge      (edgeLightTop, edgeLightBottom, rim lobe width, rim strength)
-//   loc 14: a_Outline      (free, free, clipOffset, clipCount)
+//   loc 13: a_RimEdge      (free, free, lens magnification, lens ink)
+//   loc 14: a_Outline      (lens bar top, lens bar bottom, clipOffset, clipCount)
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
 
@@ -343,8 +343,20 @@ export class JivInstanceBuffer {
     data[offset + 51] = ink.A > 0.001
       ? 1 + Math.round(ink.R * 255) * 65536 + Math.round(ink.G * 255) * 256 + Math.round(ink.B * 255) : 0;
 
-    data[offset + 52] = 0;
-    data[offset + 53] = 0;
+    // The lens reads only the bar it stands on: the bar's top and bottom on screen (device px), taken from its
+    // parent's box with the lens's own scale undone, so a drag's stretch never reaches past the bar.
+    const bar = lens ? jiv.Parent : null;
+    if (bar) {
+      const sy = style.VisualScaleY || 1;
+      const pivotY = jiv.Y + jiv.Height * style.VisualOriginY;
+      const x = jiv.X + jiv.Width * 0.5;
+      const unscaled = (y: number): number => pivotY + (y - pivotY - style.VisualTranslateY) / sy;
+      data[offset + 52] = matApplyY(m, x, unscaled(bar.Y)) * d;
+      data[offset + 53] = matApplyY(m, x, unscaled(bar.Y + bar.Height)) * d;
+    } else {
+      data[offset + 52] = 0;
+      data[offset + 53] = 0;
+    }
     data[offset + 54] = clipOffset;
     data[offset + 55] = clipCount;
 

@@ -17,8 +17,8 @@ flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
 flat in vec4 v_Refraction;     // thickness, glass span (pt), glass shadow mode, refraction
 flat in vec4 v_Lighting;       // device px per pt, bodyTint (signed), dark scheme, clear glass
 flat in vec4 v_Specular;       // rim amount, rim height (pt), chromaticAberration, borderFade
-flat in vec4 v_RimEdge;        // glass appearance (1 light), backdrop mean luma, free, free
-flat in vec4 v_Outline;        // free, free, clipOffset, clipCount
+flat in vec4 v_RimEdge;        // glass appearance (1 light), backdrop mean luma, lens magnification, lens ink
+flat in vec4 v_Outline;        // lens bar top, lens bar bottom (device px), clipOffset, clipCount
 
 // ── MATERIAL_FLAT: the backdrop's whole apparatus is excluded, not branched over ──
 //
@@ -393,36 +393,43 @@ vec3 lensSceneSharp(vec2 pixel) {
     c += (texture(u_Scene, vec2(t0.x, t3.y)).rgb * w0.x + texture(u_Scene, vec2(t12.x, t3.y)).rgb * w12.x + texture(u_Scene, vec2(t3.x, t3.y)).rgb * w3.x) * w3.y;
     return clamp(c, 0.0, 1.0);
 }
-vec2 lensSource(vec2 c, float k, float reach) {
-    vec2 source = c + (v_PixelPos - c) * k;
-    source.y = clamp(source.y, c.y - reach, c.y + reach);
-    return source;
+// Where a lens pixel reads, eased in by `amount`. Across, centre + (p - centre) x k. Down, the lens's height maps onto
+// the bar's (v_Outline.xy, a device px inside its outline so no filter tap reaches the page): the flat plate's 1 / m
+// inside, the bar's own outline at the lens's rim, however tall a drag stretches the lens.
+vec2 lensRead(vec2 c, float fold, float zoom, float edge, float amount) {
+    float barMid = 0.5 * (v_Outline.x + v_Outline.y);
+    float barHalf = 0.5 * (v_Outline.y - v_Outline.x) - GLASS_LENS_BAR_INSET;
+    float down = barHalf / max(v_PanelGeom.w, 1.0);
+    vec2 target = vec2(c.x + (v_PixelPos.x - c.x) * mix(1.0 / zoom, edge, fold),
+                       barMid + (v_PixelPos.y - c.y) * mix(min(1.0 / zoom, down), down * edge, fold));
+    vec2 read = v_PixelPos + (target - v_PixelPos) * amount;
+    read.y = clamp(read.y, barMid - barHalf, barMid + barHalf);
+    return read;
 }
 vec3 GlassActiveLens(float d, float span, float dpr, float zoom, float ca, float light, float amount, float inkPacked) {
     float fold = 1.0 - clamp(max(-d, 0.0) / (GLASS_LENS_BEZEL * span), 0.0, 1.0);
     vec2 c = v_Rot.zw;
-    float reach = v_PanelGeom.w / GLASS_LENS_OVER_BAR;
     float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca * mix(GLASS_LENS_SPLIT.x, GLASS_LENS_SPLIT.y, light);
     vec3 seen;
     if (fold <= 0.0 || spread <= 0.0) {
-        vec2 source = lensSource(c, mix(1.0 / zoom, 1.0, fold), reach);
-        seen = fold <= 0.0 ? lensSceneSharp(v_PixelPos + (source - v_PixelPos) * amount)
-                           : lensScene(v_PixelPos + (source - v_PixelPos) * amount);
+        vec2 read = lensRead(c, fold, zoom, 1.0, amount);
+        seen = fold <= 0.0 ? lensSceneSharp(read) : lensScene(read);
     } else {
         // Each channel reads out to its own edge: red a little past the outline, blue a little short of it.
         vec3 edge = 1.0 + spread * vec3(1.0, 0.0, -1.0);
-        seen = vec3(lensScene(v_PixelPos + (lensSource(c, mix(1.0 / zoom, edge.r, fold), reach) - v_PixelPos) * amount).r,
-                    lensScene(v_PixelPos + (lensSource(c, mix(1.0 / zoom, edge.g, fold), reach) - v_PixelPos) * amount).g,
-                    lensScene(v_PixelPos + (lensSource(c, mix(1.0 / zoom, edge.b, fold), reach) - v_PixelPos) * amount).b);
+        seen = vec3(lensScene(lensRead(c, fold, zoom, edge.r, amount)).r,
+                    lensScene(lensRead(c, fold, zoom, edge.g, amount)).g,
+                    lensScene(lensRead(c, fold, zoom, edge.b, amount)).b);
     }
     vec3 lensed = GlassSkips(GLASS_SKIP_GRADE) ? seen : mix(seen, GlassLensBody(seen, light), amount);
     // The ink it magnifies takes the lens's ink colour at full strength, over the lifted body, as Apple's lens shows the
-    // items under it in the selection's tint: ink is what stands off the bar, bright in dark and dark in light.
+    // items under it in the selection's tint: ink is what stands well off the bar, bright in dark and dark in light, so
+    // content frosted through the bar (never near the ink's extremes) keeps its own colour.
     if (inkPacked > 0.5) {
         float packed = inkPacked - 1.0;
         vec3 inkColor = vec3(floor(packed / 65536.0), mod(floor(packed / 256.0), 256.0), mod(packed, 256.0)) / 255.0;
         float l = dot(seen, GLASS_BT709);
-        float ink = mix(smoothstep(0.35, 0.7, l), 1.0 - smoothstep(0.3, 0.6, l), light) * amount;
+        float ink = mix(smoothstep(0.5, 0.8, l), 1.0 - smoothstep(0.2, 0.5, l), light) * amount;
         lensed = mix(lensed, inkColor, ink);
     }
     return lensed;

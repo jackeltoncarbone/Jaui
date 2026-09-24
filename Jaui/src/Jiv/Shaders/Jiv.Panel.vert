@@ -17,7 +17,7 @@ layout(location = 10) in vec4 a_Refraction;   // thickness, glass span (pt), gla
 layout(location = 11) in vec4 a_Lighting;     // device px per pt, bodyTint (signed), dark scheme, clear glass
 layout(location = 12) in vec4 a_Specular;     // rim amount, rim height (pt), chromaticAberration, borderFade
 layout(location = 13) in vec4 a_RimEdge;      // free, free, lens magnification, lens ink (packed rgb + 1)
-layout(location = 14) in vec4 a_Outline;      // free, free, clipOffset, clipCount
+layout(location = 14) in vec4 a_Outline;      // lens bar top, lens bar bottom (device px), clipOffset, clipCount
 
 uniform vec2 u_Resolution;
 // Projection sub-window for retained-mode layer capture. Screen-space device

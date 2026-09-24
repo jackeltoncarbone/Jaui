@@ -34,6 +34,9 @@ interface AtlasShelf {
 }
 
 const ATLAS_SIZE = 2048;
+/** Clear device px kept around every raster, so a label drawn at a fractional position never filters in its
+ *  atlas neighbour's edge (a stray stroke beside the text). */
+const ATLAS_GUTTER = 1;
 
 /** Default entry cap.
  *
@@ -251,10 +254,11 @@ export class TextCache {
 
     const ctx = this._getRasterCtx();
     const canvas = ctx.canvas;
-    canvas.width = pxW;
-    canvas.height = pxH;
+    canvas.width = pxW + 2 * ATLAS_GUTTER;
+    canvas.height = pxH + 2 * ATLAS_GUTTER;
 
-    ctx.clearRect(0, 0, pxW, pxH);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.translate(ATLAS_GUTTER, ATLAS_GUTTER);
     ApplyTextStyle(ctx, style, dpr);
     const lineHeightPx = style.FontSize * style.LineHeight * dpr;
     ctx.fillStyle = _colorToCss(style.Color);
@@ -290,14 +294,14 @@ export class TextCache {
 
     // Upload to atlas via Renderer
     const atlas = this._ensureAtlas();
-    const origin = this._allocate(pxW, pxH);
+    const origin = this._allocate(canvas.width, canvas.height);
     this._renderer.UploadSubTexture(atlas, origin.X, origin.Y, canvas);
 
     const size = this._atlasSize;
     return {
       Uv: {
-        U: origin.X / size,
-        V: origin.Y / size,
+        U: (origin.X + ATLAS_GUTTER) / size,
+        V: (origin.Y + ATLAS_GUTTER) / size,
         UWidth: pxW / size,
         UHeight: pxH / size,
       },

@@ -73,13 +73,13 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
 // it (a denser bar than Apple's puts a neighbour's label at the lens's edge, and a pull would draw a copy of it).
 // Each channel reads a little further than the others at the outline, red past it and blue short of it: that is the
 // fringe, GLASS_LENS_SPLIT x the dispersion, parting the channels by Apple's 0.88 pt in light and 0.11 pt in dark.
-// The lens stands GLASS_LENS_OVER_BAR bar heights tall and reads only inside the bar it stands on, up to the bar's
-// own outline (its darker edge included): past the bar it continues the bar, never the page above or below it.
+// The lens reads only inside the bar it stands on, up to the bar's own outline (its darker edge included), past
+// which it continues the bar, never the page: GLASS_LENS_BAR_INSET device px keeps every filter tap on the bar.
 // The body is a screen curve 1 - (1 - c)^g that keeps the ink's depth: light lifts Apple's 177 bar body to its 238;
 // dark lifts OUR dark bar (44) to Apple's dark lens interior (73).
 const float GLASS_LENS_BEZEL = 0.095;
 const vec2 GLASS_LENS_SPLIT = vec2(0.0047, 0.0374);
-const float GLASS_LENS_OVER_BAR = 1.173;
+const float GLASS_LENS_BAR_INSET = 1.5;
 const float GLASS_LENS_SCREEN_LIGHT = 2.3;
 const float GLASS_LENS_SCREEN_DARK = 1.8;
 // The light body never reaches white: Apple's lens interior sits at 238, under its 250 rim, which is what lets
