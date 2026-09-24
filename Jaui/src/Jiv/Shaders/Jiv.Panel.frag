@@ -393,22 +393,39 @@ vec3 lensSceneSharp(vec2 pixel) {
     c += (texture(u_Scene, vec2(t0.x, t3.y)).rgb * w0.x + texture(u_Scene, vec2(t12.x, t3.y)).rgb * w12.x + texture(u_Scene, vec2(t3.x, t3.y)).rgb * w3.x) * w3.y;
     return clamp(c, 0.0, 1.0);
 }
-vec3 GlassActiveLens(float d, float span, float dpr, float zoom, float ca, float light, float amount) {
-    float bezel = GLASS_LENS_BEZEL * span;
-    float fold = 1.0 - clamp(max(-d, 0.0) / bezel, 0.0, 1.0);
-    float k = mix(1.0 / zoom, 1.0, fold);
-    vec2 c = v_Rot.zw;
+vec2 lensSource(vec2 c, float k, float reach) {
     vec2 source = c + (v_PixelPos - c) * k;
-    float reach = v_PanelGeom.w / GLASS_LENS_OVER_BAR - GLASS_LENS_BAR_INSET * dpr;
     source.y = clamp(source.y, c.y - reach, c.y + reach);
-    vec2 offset = (source - v_PixelPos) * amount;
-    float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca * fold;
-    // The plate reads sharp; the bezel, where the channels part, reads each channel on its own.
-    vec3 seen = spread <= 0.0 ? lensSceneSharp(v_PixelPos + offset)
-        : vec3(lensScene(v_PixelPos + offset * (1.0 + 0.2 * spread)).r,
-               lensScene(v_PixelPos + offset * (1.0 + 0.1 * spread)).g,
-               lensScene(v_PixelPos + offset).b);
-    return GlassSkips(GLASS_SKIP_GRADE) ? seen : mix(seen, GlassLensBody(seen, light), amount);
+    return source;
+}
+vec3 GlassActiveLens(float d, float span, float dpr, float zoom, float ca, float light, float amount, float inkPacked) {
+    float body = pow(clamp(max(-d, 0.0) / GLASS_LENS_BEZEL / span, 0.0, 1.0), GLASS_LENS_BEZEL_CURVE);
+    vec2 c = v_Rot.zw;
+    float reach = v_PanelGeom.w / GLASS_LENS_OVER_BAR - GLASS_LENS_BAR_INSET * dpr;
+    // Each channel folds by its own amount: red furthest, blue least.
+    float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca * mix(GLASS_LENS_SPLIT.x, GLASS_LENS_SPLIT.y, light);
+    vec3 edge = 1.0 + (GLASS_LENS_EDGE_READ - 1.0) * (1.0 + spread * vec3(1.0, 0.0, -1.0));
+    vec3 seen;
+    if (body >= 1.0 || spread <= 0.0) {
+        vec2 source = lensSource(c, mix(GLASS_LENS_EDGE_READ, 1.0 / zoom, body), reach);
+        seen = body >= 1.0 ? lensSceneSharp(v_PixelPos + (source - v_PixelPos) * amount)
+                           : lensScene(v_PixelPos + (source - v_PixelPos) * amount);
+    } else {
+        seen = vec3(lensScene(v_PixelPos + (lensSource(c, mix(edge.r, 1.0 / zoom, body), reach) - v_PixelPos) * amount).r,
+                    lensScene(v_PixelPos + (lensSource(c, mix(edge.g, 1.0 / zoom, body), reach) - v_PixelPos) * amount).g,
+                    lensScene(v_PixelPos + (lensSource(c, mix(edge.b, 1.0 / zoom, body), reach) - v_PixelPos) * amount).b);
+    }
+    vec3 lensed = GlassSkips(GLASS_SKIP_GRADE) ? seen : mix(seen, GlassLensBody(seen, light), amount);
+    // The ink it magnifies takes the lens's ink colour at full strength, over the lifted body, as Apple's lens shows the
+    // items under it in the selection's tint: ink is what stands off the bar, bright in dark and dark in light.
+    if (inkPacked > 0.5) {
+        float packed = inkPacked - 1.0;
+        vec3 inkColor = vec3(floor(packed / 65536.0), mod(floor(packed / 256.0), 256.0), mod(packed, 256.0)) / 255.0;
+        float l = dot(seen, GLASS_BT709);
+        float ink = mix(smoothstep(0.35, 0.7, l), 1.0 - smoothstep(0.3, 0.6, l), light) * amount;
+        lensed = mix(lensed, inkColor, ink);
+    }
+    return lensed;
 }
 
 // Sample the backdrop at this Jiv's frost. A Jiv that authored no frost samples the raw scene
@@ -722,7 +739,7 @@ void main() {
             vec3 face;
             if (v_RimEdge.z > 1.0) {
                 // It comes and goes with the glass itself, so a press and a release never pop.
-                face = GlassActiveLens(d, glassSpan, glassDpr, v_RimEdge.z, chromaticAberration, glassLight, glassiness);
+                face = GlassActiveLens(d, glassSpan, glassDpr, v_RimEdge.z, chromaticAberration, glassLight, glassiness, v_RimEdge.w);
             } else {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassShift(d, max(-0.8 * glassSpan, -60.0), min(0.25 * glassSpan, 20.0)) * lens;

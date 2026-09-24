@@ -336,7 +336,10 @@ export class JivInstanceBuffer {
     data[offset + 49] = 0;
     // The active lens's magnification (1 is none).
     data[offset + 50] = style.Magnification;
-    data[offset + 51] = 0;
+    // The lens's ink colour, packed 8 bits a channel and offset by one so 0 means none (exact in a float).
+    const ink = style.LensInk;
+    data[offset + 51] = ink.A > 0.001
+      ? 1 + Math.round(ink.R * 255) * 65536 + Math.round(ink.G * 255) * 256 + Math.round(ink.B * 255) : 0;
 
     data[offset + 52] = 0;
     data[offset + 53] = 0;

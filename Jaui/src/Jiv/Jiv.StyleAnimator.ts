@@ -172,6 +172,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   // tagged value, not a number.
   render.VibrancyDeclaration = target.VibrancyDeclaration;
   render.GlassVariant = target.GlassVariant;
+  render.LensInk = target.LensInk;
   render.SchemeDark = target.SchemeDark;
   render.ForegroundVibrancyColor = target.ForegroundVibrancyColor;
   render.BackdropVibrancyColor = target.BackdropVibrancyColor;

@@ -225,6 +225,9 @@ export interface JivStyle {
   /** THE ACTIVE LENS (Core/Glass.md): above 1, glass magnifies what is under it by this factor about its centre,
    *  inside a thin bezel that folds the content past its outline back in. Apple's pressed selection is 1.2. */
   Magnification: string;
+  /** The colour the active lens gives the ink it magnifies: Apple's lens shows the items under it in the selection's
+   *  tint. Transparent (the default) leaves the ink as it is. */
+  LensInk: string;
 
   /** THE RIM, Apple's highlight (Core/Glass.md): a band `RimWidth` deep lit by a key light upper left and
    *  a fill lower right, recoloring what is under it by Apple's vibrant color matrix. Apple's is 1 pt.
@@ -368,6 +371,7 @@ export interface JivRenderStyle {
 
   ChromaticAberration: number;
   Magnification: number;
+  LensInk: Color;
 
   /** Resolved `RimWidth`, in points. */
   RimWidth: number;
