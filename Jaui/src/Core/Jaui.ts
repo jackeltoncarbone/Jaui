@@ -3177,6 +3177,8 @@ export class Canvas implements DirtyTracker {
       let cardOpen = false;
       // Set by this node's progressive blur, if it draws one: the pyramid its subtree's glass samples.
       let edgeHere: typeof edgeBackdrop = null;
+      // A surface that sampled its backdrop and drew over it: glass inside it sees it as drawn, not the edge's content.
+      let closesEdge = false;
       // A probed glass surface this node draws: its subtree's labels follow its appearance.
       let glassInkHere = -1;
       let rimSlotHere = -1;
@@ -3753,6 +3755,7 @@ export class Canvas implements DirtyTracker {
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
         if (_isGlass(material) && shadowBackdrop !== undefined) rimSlotHere = shadowBackdrop.Slot;
+        closesEdge = true;
         // Only glass that tracks its backdrop can take an appearance its theme does not have.
         if (_isGlass(material) && shadowBackdrop !== undefined
             && JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5 <= GLASS_TRACKS_LUMA_SPAN) glassInkHere = shadowBackdrop.Slot;
@@ -3955,6 +3958,7 @@ export class Canvas implements DirtyTracker {
       // to its subtree's glass for the length of the subtree.
       const outerEdge = edgeBackdrop;
       if (edgeHere !== null) edgeBackdrop = edgeHere;
+      else if (closesEdge) edgeBackdrop = null;
       const outerInk = glassInk;
       const outerRimSlot = rimSlot;
       rimSlot = rimSlotHere;

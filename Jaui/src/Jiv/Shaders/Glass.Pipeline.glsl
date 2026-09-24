@@ -68,24 +68,24 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
 
 // THE ACTIVE LENS, fitted to Apple's iOS 26 pressed tab (MacStories native capture, Core/Glass.md): the bezel is
 // this share of the span (6.7 pt on the 72 pt lens), reading past the outline this far per point of depth; the
-// body is a screen curve 1 - (1 - c)^g, lifting the bar under it toward white in light and a little in dark while
-// its ink keeps its depth.
+// body is a screen curve 1 - (1 - c)^g that keeps the ink's depth. Light lifts Apple's 177 bar body to its 238;
+// dark lifts OUR dark bar (44) to Apple's dark lens interior (73), measured on our own tab bar.
 const float GLASS_LENS_BEZEL = 0.093;
 // The fold reaches 0.093 S past the outline, inside the 0.2 S the pyramid is built past it (Glass.Pipeline.ts).
 const float GLASS_LENS_FOLD = 1.0;
 const float GLASS_LENS_SCREEN_LIGHT = 2.3;
-const float GLASS_LENS_SCREEN_DARK = 3.2;
+const float GLASS_LENS_SCREEN_DARK = 1.8;
 vec3 GlassLensBody(vec3 c, float light) {
     return 1.0 - pow(clamp(1.0 - c, 0.0, 1.0), vec3(mix(GLASS_LENS_SCREEN_DARK, GLASS_LENS_SCREEN_LIGHT, light)));
 }
 // Its rim is iridescent: each channel's band is deeper by its own share, the three a third of a turn apart around
 // the outline, so the fringe's hue walks round the lens as Apple's does: green down the left, warm along the top,
 // blue toward the lower right. Its channels part by 2.6 device px (the median of its light rim); the dark rim's
-// fringe is fainter, a third of that.
+// fringe is a tenth of that (0.1 pt at its median).
 const float GLASS_LENS_IRIDESCENCE = 4.6;
 vec3 GlassLensRimHeights(vec2 n, float height, float ca, float light) {
     float a = atan(n.y, n.x);
-    float share = GLASS_LENS_IRIDESCENCE * ca * mix(0.35, 1.0, light);
+    float share = GLASS_LENS_IRIDESCENCE * ca * mix(0.1, 1.0, light);
     return height * (1.0 + share * (1.0 + cos(a - vec3(5.2360, 3.1416, 1.0472))));
 }
 
