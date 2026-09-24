@@ -1162,6 +1162,9 @@ export class Canvas implements DirtyTracker {
   //    condition under which the union is still a texel-exact crop
   //    (k_union must equal k_member — BlurPass._baseDownsampleFactor).
   private _sharedBackdrop: boolean = false;
+  /** `?lens-trace`: log, when it changes, whether an active lens's lifted twins were drawn and why not. */
+  private _lensTrace = false;
+  private _lensTraceLast = '';
   private _sharedPyramid: GpuTextureHandle | null = null;
   private _sharedPyramidValid: boolean = false;
   /** Footprints (device px, flat [x0,y0,x1,y1,…]) drawn into the scene FBO since
@@ -4021,9 +4024,15 @@ export class Canvas implements DirtyTracker {
     // canvas-sized layer, transparent elsewhere, which the lens reads through its SDF warp. The originals still draw
     // in the bar; the lens covers them, as Apple's DestOutView erases them.
     const liftLensItems = (bar: Jiv, lens: Jiv, stack: ClipStack, boxClip: ClipShape, m: Mat2x3, mh: Mat3x3 | null, persp: PerspCtx | null): GpuTextureHandle | null => {
-      if (this._capturing || !(this._renderer instanceof WebGL2Renderer)) return null;
+      const trace = (line: string): void => {
+        if (!this._lensTrace || line === this._lensTraceLast) return;
+        this._lensTraceLast = line;
+        console.info('[lens-trace] ' + line);
+      };
+      if (this._capturing) { trace('no twins: inside a layer-cache capture'); return null; }
+      if (!(this._renderer instanceof WebGL2Renderer)) { trace('no twins: renderer is not WebGL2'); return null; }
       const cgl = this._renderer.GetGL();
-      if (!cgl) return null;
+      if (!cgl) { trace('no twins: no GL context'); return null; }
       flushPanels();
       flushText();
       const fbo = this._lensItems ??= new Framebuffer(cgl);
@@ -4046,9 +4055,16 @@ export class Canvas implements DirtyTracker {
       const unswell: Mat2x3 = [1 / sx, 0, 0, 1 / sy, -(px * (1 - sx) + bs.VisualTranslateX) / sx, -(py * (1 - sy) + bs.VisualTranslateY) / sy];
       const mTwin = matMul(m, unswell);
       const mhTwin = mh !== null ? mat3Mul(mh, mat3FromAffine(unswell)) : null;
+      let drawn = 0;
+      const skipped: string[] = [];
       for (const item of this._orderedChildren(bar)) {
         const layer = item.RenderStyle.Layer;
-        if (item === lens || layer < 1 || layer >= lens.RenderStyle.Layer || item.TeleportSeq !== 0) continue;
+        if (item === lens) continue;
+        if (layer < 1 || layer >= lens.RenderStyle.Layer || item.TeleportSeq !== 0) {
+          if (this._lensTrace) skipped.push(`layer ${layer}${item.TeleportSeq !== 0 ? ' teleported' : ''}`);
+          continue;
+        }
+        drawn++;
         const cx = item.X + item.Width * 0.5, cy = item.Y + item.Height * 0.5;
         const lift: Mat2x3 = [scale, 0, 0, scale, cx * (1 - scale), cy * (1 - scale)];
         renderNode(item, matMul(mTwin, lift), this._childClip(bar, stack, boxClip, item), scope,
@@ -4058,6 +4074,7 @@ export class Canvas implements DirtyTracker {
       flushPanels();
       flushText();
       this._capturing = false;
+      trace(`twins: ${drawn} drawn at scale ${scale.toFixed(3)} under lens layer ${lens.RenderStyle.Layer}, swell ${sx.toFixed(3)} x ${sy.toFixed(3)}${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}`);
       flushW = savedW; flushH = savedH;
       this._renderer.RebindSceneTarget();
       return this._renderer.WrapTexture(fbo.Texture);
@@ -8328,6 +8345,7 @@ export class Canvas implements DirtyTracker {
     if (params.has('no-shadow')) { this._diagNoShadow = true; JivInstanceBuffer.DiagNoShadow = true; }
     if (params.has('no-glass-draw')) this._diagNoGlassDraw = true;
     if (params.has('wkr-shared-backdrop') || hash.includes('wkr-shared-backdrop')) this._sharedBackdrop = true;
+    if (params.has('lens-trace') || hash.includes('lens-trace')) this._lensTrace = true;
     if (params.has('no-shared-backdrop') || hash.includes('no-shared-backdrop')) this._sharedBackdrop = false;
     if (params.has('layer-cache') || hash.includes('layer-cache')) this._layerCacheEnabled = true;
     if (params.has('cache-force') || hash.includes('cache-force')) { this._layerCacheEnabled = true; this._cacheForce = true; }
