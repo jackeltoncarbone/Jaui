@@ -16,7 +16,7 @@ layout(location = 9) in vec4 a_Grading;       // brightness, saturation, contras
 layout(location = 10) in vec4 a_Refraction;   // thickness, glass span (pt), glass shadow mode, refraction
 layout(location = 11) in vec4 a_Lighting;     // device px per pt, bodyTint (signed), dark scheme, clear glass
 layout(location = 12) in vec4 a_Specular;     // rim amount, rim height (pt), chromaticAberration, borderFade
-layout(location = 13) in vec4 a_RimEdge;      // free
+layout(location = 13) in vec4 a_RimEdge;      // free, free, lens magnification, free
 layout(location = 14) in vec4 a_Outline;      // free, free, clipOffset, clipCount
 
 uniform vec2 u_Resolution;
@@ -69,7 +69,7 @@ void main() {
     v_Specular = a_Specular;
     v_Outline = a_Outline;
     // Unprobed or larger glass takes the theme's appearance, at a mean that puts thin glass on the table's face.
-    v_RimEdge = a_Lighting.z > 0.5 ? vec4(0.0, 0.45, 0.0, 0.0) : vec4(1.0, 0.5, 0.0, 0.0);
+    v_RimEdge = a_Lighting.z > 0.5 ? vec4(0.0, 0.45, a_RimEdge.zw) : vec4(1.0, 0.5, a_RimEdge.zw);
     if (u_GlassAppearance >= 0.0 && a_Refraction.y <= 56.0) {
         float mean = texelFetch(u_ShadowState, ivec2(int(u_GlassAppearance), 0), 0).g;
         v_RimEdge.xy = vec2(smoothstep(0.45, 0.55, mean), mean);

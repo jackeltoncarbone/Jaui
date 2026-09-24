@@ -363,6 +363,29 @@ vec3 glassSample(vec2 pixel, float lod) {
     return textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, max(0.0, lod - u_BaseFrostLod)).rgb;
 }
 
+// THE ACTIVE LENS (Glass.Pipeline.glsl, Core/Glass.md): Apple's pressed selection. Inside its bezel it magnifies
+// the backdrop about its centre, sharp; the bezel folds the content past its outline back in, dispersed; the body
+// is lifted by the lens's own screen curve.
+vec3 GlassActiveLens(float d, vec2 nScreen, float span, float dpr, float zoom, float ca, float light) {
+    float bezel = GLASS_LENS_BEZEL * span;
+    // The bezel gives way to the body over a point and a half.
+    float body = smoothstep(bezel - 0.75, bezel + 0.75, -d);
+    vec3 seen = vec3(0.0);
+    if (body > 0.0) {
+        vec3 magnified = glassSample(v_Rot.zw + (v_PixelPos - v_Rot.zw) / zoom, 0.0);
+        seen = GlassSkips(GLASS_SKIP_GRADE) ? magnified : GlassLensBody(magnified, light);
+    }
+    if (body < 1.0) {
+        vec2 fold = nScreen * (-d) * (1.0 + GLASS_LENS_FOLD) * dpr;
+        float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca;
+        vec3 folded = vec3(glassSample(v_PixelPos + fold * (1.0 + 0.2 * spread), 0.0).r,
+                           glassSample(v_PixelPos + fold * (1.0 + 0.1 * spread), 0.0).g,
+                           glassSample(v_PixelPos + fold, 0.0).b);
+        seen = mix(folded, seen, body);
+    }
+    return seen;
+}
+
 // Sample the backdrop at this Jiv's frost. A Jiv that authored no frost samples the raw scene
 // snapshot (u_Scene), NOT the pyramid: the pyramid's LOD 0 has a ~1px Gaussian baked in, so a flat
 // panel with just BackdropBrightness would read subtly blurred. `frostLod` is this Jiv's
@@ -671,6 +694,12 @@ void main() {
             glassShadowRgb = clamp(mapped * ramps.y / max(layerAlpha, 1e-3), 0.0, 1.0);
             glassShadowTint = 1.0;
         } else {
+            vec3 face;
+            if (v_RimEdge.z > 1.0) {
+                // It comes and goes with the glass itself, so a press and a release never pop.
+                face = mix(glassSample(v_PixelPos, 0.0),
+                           GlassActiveLens(d, nScreen, glassSpan, glassDpr, v_RimEdge.z, chromaticAberration, glassLight), glassiness);
+            } else {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassShift(d, max(-0.8 * glassSpan, -60.0), min(0.25 * glassSpan, 20.0)) * lens;
             float outerShift = GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;
@@ -695,7 +724,7 @@ void main() {
                 float outerLod = GlassNativeLod(radius * GlassBlurScale(d + outerShift, glassSpan), glassDpr, glassClear);
                 lensed = mix(lensed, glassSample(v_PixelPos + nScreen * outerShift * glassDpr, outerLod), outerMix);
             }
-            vec3 face = lensed;
+            face = lensed;
             if (GlassSkips(GLASS_SKIP_GRADE)) {} else
             face = GlassFace(lensed, glassSpan, glassClear, glassLight, v_RimEdge.y);
             // The edge bleed of regular glass from 64 pt: the backdrop 0.35 S outward, blurred at 0.35 S,
@@ -715,14 +744,24 @@ void main() {
             if (v_Tint.a > 0.001) face = mix(face, GlassTint(face, v_Tint.rgb), v_Tint.a);
             // The holding tone: the interior at 97%, the outer one to two points at full.
             face = clamp(face * mix(1.0, 0.97, clamp(-1.0 - d, 0.0, 1.0)), 0.0, 1.0);
+            }
             if (!GlassSkips(GLASS_SKIP_RIM)) {
                 // The highlight recolors what the pixel will show, as the rim pass does: where the face covers
                 // it only partly (the silhouette's antialiasing, a translucent surface), that is the face over
                 // the backdrop, so the face carries the difference the layer makes there, over its coverage.
                 float cover = fillAlpha * opacity;
                 vec3 shown = cover < 0.999 ? mix(sampleBackdrop(baseUv, frostLod), face, cover) : face;
-                vec4 rim = GlassRim(shown, d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, v_Specular.y, glassClear, glassLight);
-                face = clamp(face + rim.a / max(cover, 1e-3) * (rim.rgb - shown), 0.0, 1.0);
+                vec2 key = GlassKeyLight(v_Rot, v_Is3D);
+                vec4 rim = GlassRim(shown, d, normal, key, v_Specular.x, v_Specular.y, glassClear, glassLight);
+                vec3 alpha = vec3(rim.a);
+                if (v_RimEdge.z > 1.0) {
+                    // The active lens's rim is iridescent: each channel's band runs to its own depth.
+                    vec3 h = GlassLensRimHeights(normal, v_Specular.y, chromaticAberration, glassLight);
+                    alpha = vec3(GlassRim(shown, d, normal, key, v_Specular.x, h.r, glassClear, glassLight).a,
+                                 GlassRim(shown, d, normal, key, v_Specular.x, h.g, glassClear, glassLight).a,
+                                 GlassRim(shown, d, normal, key, v_Specular.x, h.b, glassClear, glassLight).a);
+                }
+                face = clamp(face + alpha / max(cover, 1e-3) * (rim.rgb - shown), 0.0, 1.0);
             }
             backdrop = face;
         }

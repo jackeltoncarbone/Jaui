@@ -101,6 +101,21 @@ The two give the same pixels where they both apply; the parity check renders bot
 
 A label on glass is white at 95% on dark glass and black on light glass, following the glass's appearance, not the theme. Jwift's label level (`@JwiftVibrancyLabel`, Vibrancy.md) is exactly that. Text inside glass that tracks its backdrop turns with it (`Text.Quad.frag`, `u_GlassInk`).
 
+## The active lens [measured, fitted]
+
+A finger on a selection (Jwift's `Jwift_SelectionIndicator_Pressed`) lifts the resting pill into a clear lens. Measured on Apple's iOS 26 tab bar: a MacStories native screen recording (1320 px, 60 fps, light) and a dark Music capture (LiquidGlassGallery `ActiveLens/`).
+
+- Size: 1.18 x the resting pill's width and 1.36 x its height (316 x 217 px over 267 x 160), so it stands about 5 pt past the bar top and bottom. Jwift draws it as the pressed class's `VisualScale`, render-time, so it never chases a layout spring.
+- Magnification: the content under it reads 1.21 x wider. `Magnification: 1.224` samples the backdrop at `centre + (p - centre) / m`, sharp (the pyramid's base level).
+- Bezel: 0.093 of the span (6.7 pt on the 72 pt lens). Inside it the lens folds the content past its outline back in, `p + n depth (1 + fold)` with fold 1, dispersed as the rest of the glass is (red at 1 + 0.2 ca, green at 1 + 0.1 ca). It gives way to the body over a point and a half.
+- Body: a screen curve `1 - (1 - c)^g`, g 2.3 in light and 3.2 in dark. It lifts the bar body under it (177 light, 25 dark) to Apple's 238 and 71 and keeps the ink's depth, where a white fill would wash the glyph out. Fitted.
+- Rim: the clear glass highlight, iridescent. Each channel's band runs deeper by its own share, a third of a turn apart around the outline (green down the left, warm along the top, blue toward the lower right), parting the channels by 2.6 device px at the median of Apple's light rim; the dark fringe is a third of that. Fitted.
+- Timing: it grows on a spring (stiffness 409, damping 25.3: 10 to 90% in about 90 ms, 8% overshoot) and lets go on another (2187, 112: about 90 ms, no overshoot), both fitted to the 60 fps frames. The optics ride the same springs as the size.
+
+Not built: Apple also redraws the tab items under a moving lens, tinted and enlarged nearly in place; a lens can only magnify about its centre. The drag follow has no reference, since the captures do not show the finger.
+
+The parity check renders the lens over Apple's own frames (`ActiveLens/run.sh`, beside the parity check) and scores size, lift, magnification, body, bezel, rim, fringe and both timings.
+
 ## Cost per frame
 
 Extra texture reads per fragment:

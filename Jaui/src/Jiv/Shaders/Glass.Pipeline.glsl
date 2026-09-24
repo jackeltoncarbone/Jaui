@@ -66,6 +66,29 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
     return mix(dim, lit, light);
 }
 
+// THE ACTIVE LENS, fitted to Apple's iOS 26 pressed tab (MacStories native capture, Core/Glass.md): the bezel is
+// this share of the span (6.7 pt on the 72 pt lens), reading past the outline this far per point of depth; the
+// body is a screen curve 1 - (1 - c)^g, lifting the bar under it toward white in light and a little in dark while
+// its ink keeps its depth.
+const float GLASS_LENS_BEZEL = 0.093;
+// The fold reaches 0.093 S past the outline, inside the 0.2 S the pyramid is built past it (Glass.Pipeline.ts).
+const float GLASS_LENS_FOLD = 1.0;
+const float GLASS_LENS_SCREEN_LIGHT = 2.3;
+const float GLASS_LENS_SCREEN_DARK = 3.2;
+vec3 GlassLensBody(vec3 c, float light) {
+    return 1.0 - pow(clamp(1.0 - c, 0.0, 1.0), vec3(mix(GLASS_LENS_SCREEN_DARK, GLASS_LENS_SCREEN_LIGHT, light)));
+}
+// Its rim is iridescent: each channel's band is deeper by its own share, the three a third of a turn apart around
+// the outline, so the fringe's hue walks round the lens as Apple's does: green down the left, warm along the top,
+// blue toward the lower right. Its channels part by 2.6 device px (the median of its light rim); the dark rim's
+// fringe is fainter, a third of that.
+const float GLASS_LENS_IRIDESCENCE = 4.6;
+vec3 GlassLensRimHeights(vec2 n, float height, float ca, float light) {
+    float a = atan(n.y, n.x);
+    float share = GLASS_LENS_IRIDESCENCE * ca * mix(0.35, 1.0, light);
+    return height * (1.0 + share * (1.0 + cos(a - vec3(5.2360, 3.1416, 1.0472))));
+}
+
 // The edge bleed's own matrix: light (1, 0.9, 1.2), dark (0.5, 0, 1).
 vec3 GlassBleed(vec3 c, float light) {
     return mix(GlassYcc(c, 0.5, 0.0, 1.0), GlassYcc(c, 1.0, 0.9, 1.2), light);

@@ -79,6 +79,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
 
   // Lighting
   ['ChromaticAberration',    s => s.ChromaticAberration,          (s, v) => { s.ChromaticAberration = v; }],
+  ['Magnification',          s => s.Magnification,                (s, v) => { s.Magnification = v; }],
   ['RimWidth',               s => s.RimWidth,                     (s, v) => { s.RimWidth = v; }],
   ['RimStrength',            s => s.RimStrength,                  (s, v) => { s.RimStrength = v; }],
 

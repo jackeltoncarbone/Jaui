@@ -31,6 +31,7 @@ export const DefaultJivStyle: JivStyle = {
   Tint: '0',
   TintTone: 'Ground',
   ChromaticAberration: '0',
+  Magnification: '1',
   RimWidth: '0',
   RimStrength: '0',
   Transform: '',                         // empty = identity

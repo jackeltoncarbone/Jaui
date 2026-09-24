@@ -334,7 +334,8 @@ export class JivInstanceBuffer {
 
     data[offset + 48] = 0;
     data[offset + 49] = 0;
-    data[offset + 50] = 0;
+    // The active lens's magnification (1 is none).
+    data[offset + 50] = style.Magnification;
     data[offset + 51] = 0;
 
     data[offset + 52] = 0;
