@@ -399,21 +399,21 @@ vec2 lensSource(vec2 c, float k, float reach) {
     return source;
 }
 vec3 GlassActiveLens(float d, float span, float dpr, float zoom, float ca, float light, float amount, float inkPacked) {
-    float body = pow(clamp(max(-d, 0.0) / GLASS_LENS_BEZEL / span, 0.0, 1.0), GLASS_LENS_BEZEL_CURVE);
+    float fold = 1.0 - clamp(max(-d, 0.0) / (GLASS_LENS_BEZEL * span), 0.0, 1.0);
     vec2 c = v_Rot.zw;
-    float reach = v_PanelGeom.w / GLASS_LENS_OVER_BAR - GLASS_LENS_BAR_INSET * dpr;
-    // Each channel folds by its own amount: red furthest, blue least.
+    float reach = v_PanelGeom.w / GLASS_LENS_OVER_BAR;
     float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca * mix(GLASS_LENS_SPLIT.x, GLASS_LENS_SPLIT.y, light);
-    vec3 edge = 1.0 + (GLASS_LENS_EDGE_READ - 1.0) * (1.0 + spread * vec3(1.0, 0.0, -1.0));
     vec3 seen;
-    if (body >= 1.0 || spread <= 0.0) {
-        vec2 source = lensSource(c, mix(GLASS_LENS_EDGE_READ, 1.0 / zoom, body), reach);
-        seen = body >= 1.0 ? lensSceneSharp(v_PixelPos + (source - v_PixelPos) * amount)
+    if (fold <= 0.0 || spread <= 0.0) {
+        vec2 source = lensSource(c, mix(1.0 / zoom, 1.0, fold), reach);
+        seen = fold <= 0.0 ? lensSceneSharp(v_PixelPos + (source - v_PixelPos) * amount)
                            : lensScene(v_PixelPos + (source - v_PixelPos) * amount);
     } else {
-        seen = vec3(lensScene(v_PixelPos + (lensSource(c, mix(edge.r, 1.0 / zoom, body), reach) - v_PixelPos) * amount).r,
-                    lensScene(v_PixelPos + (lensSource(c, mix(edge.g, 1.0 / zoom, body), reach) - v_PixelPos) * amount).g,
-                    lensScene(v_PixelPos + (lensSource(c, mix(edge.b, 1.0 / zoom, body), reach) - v_PixelPos) * amount).b);
+        // Each channel reads out to its own edge: red a little past the outline, blue a little short of it.
+        vec3 edge = 1.0 + spread * vec3(1.0, 0.0, -1.0);
+        seen = vec3(lensScene(v_PixelPos + (lensSource(c, mix(1.0 / zoom, edge.r, fold), reach) - v_PixelPos) * amount).r,
+                    lensScene(v_PixelPos + (lensSource(c, mix(1.0 / zoom, edge.g, fold), reach) - v_PixelPos) * amount).g,
+                    lensScene(v_PixelPos + (lensSource(c, mix(1.0 / zoom, edge.b, fold), reach) - v_PixelPos) * amount).b);
     }
     vec3 lensed = GlassSkips(GLASS_SKIP_GRADE) ? seen : mix(seen, GlassLensBody(seen, light), amount);
     // The ink it magnifies takes the lens's ink colour at full strength, over the lifted body, as Apple's lens shows the

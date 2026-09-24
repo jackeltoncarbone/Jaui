@@ -220,8 +220,10 @@ export class JivInstanceBuffer {
     const span = JivGlassSpan(jiv) * avgScale;
     const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly;
     // Glass casts Apple's shadow: offset (0, 8) pt, reaching two radii (Glass.Pipeline), its alpha by size.
-    const glassShadowPeak = glass ? GlassShadowPeak(span, style.GlassVariant) : 0;
-    const glassColoredShadow = glass && shadow === 'Only' && GlassSizeRamps(span).V > 0 && glassShadowPeak > 0;
+    const lens = style.Magnification > 1;
+    const glassShadowPeak = glass ? GlassShadowPeak(span, style.GlassVariant, lens) : 0;
+    // The lens's shadow is a plain one, drawn by the flat program.
+    const glassColoredShadow = glass && !lens && shadow === 'Only' && GlassSizeRamps(span).V > 0 && glassShadowPeak > 0;
     const shadowBlur = _ns ? 0 : glass ? 2 * GlassShadowRadius(span) * avgScale * d : style.ShadowBlur * avgScale * d;
     const shadowOffX = _ns || glass ? 0 : style.ShadowOffsetX * avgScale * d;
     const shadowOffY = _ns ? 0 : glass ? GLASS_SHADOW_OFFSET_Y * avgScale * d : style.ShadowOffsetY * avgScale * d;

@@ -68,24 +68,26 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
 
 // THE ACTIVE LENS, measured on Apple's iOS 26 pressed tab (MacStories native capture, 3x, 60 fps; Core/Glass.md).
 // Its interior is a flat plate: a pixel reads centre + (p - centre) / m, the same in x and y (m, the Magnification,
-// 1.21: Apple's straight labels read 1.21 x wider). Only the bezel, GLASS_LENS_BEZEL of the span (10 pt on the
-// 74 pt lens), folds: across it the read runs from 1 / m out to GLASS_LENS_EDGE_READ at the outline on a cubic
-// (Apple's mid-drag frames: what lies past the rim is pulled into the band, "Ho e"). Each channel folds by its own
-// amount, which is the fringe: the channels part by GLASS_LENS_SPLIT x the dispersion at the rim.
-// The lens stands GLASS_LENS_OVER_BAR bar heights tall, so it reads only inside the bar it stands on: past the bar
-// it continues the bar's own body, never the page above or below it.
+// 1.21: Apple's straight labels read 1.21 x wider). Only the bezel, GLASS_LENS_BEZEL of the span (7 pt on the 74 pt
+// lens), folds: across it the read runs linearly back to 1 at the outline, so nothing past the lens is pulled into
+// it (a denser bar than Apple's puts a neighbour's label at the lens's edge, and a pull would draw a copy of it).
+// Each channel reads a little further than the others at the outline, red past it and blue short of it: that is the
+// fringe, GLASS_LENS_SPLIT x the dispersion, parting the channels by Apple's 0.88 pt in light and 0.11 pt in dark.
+// The lens stands GLASS_LENS_OVER_BAR bar heights tall and reads only inside the bar it stands on, up to the bar's
+// own outline (its darker edge included): past the bar it continues the bar, never the page above or below it.
 // The body is a screen curve 1 - (1 - c)^g that keeps the ink's depth: light lifts Apple's 177 bar body to its 238;
 // dark lifts OUR dark bar (44) to Apple's dark lens interior (73).
-const float GLASS_LENS_BEZEL = 0.135;
-const float GLASS_LENS_EDGE_READ = 1.2;
-const float GLASS_LENS_BEZEL_CURVE = 3.0;
-const vec2 GLASS_LENS_SPLIT = vec2(0.02, 0.165);
+const float GLASS_LENS_BEZEL = 0.095;
+const vec2 GLASS_LENS_SPLIT = vec2(0.0047, 0.0374);
 const float GLASS_LENS_OVER_BAR = 1.173;
-const float GLASS_LENS_BAR_INSET = 1.5;
 const float GLASS_LENS_SCREEN_LIGHT = 2.3;
 const float GLASS_LENS_SCREEN_DARK = 1.8;
+// The light body never reaches white: Apple's lens interior sits at 238, under its 250 rim, which is what lets
+// the rim and its fringe read against a white bar.
+const float GLASS_LENS_BODY_CEILING = 0.935;
 vec3 GlassLensBody(vec3 c, float light) {
-    return 1.0 - pow(clamp(1.0 - c, 0.0, 1.0), vec3(mix(GLASS_LENS_SCREEN_DARK, GLASS_LENS_SCREEN_LIGHT, light)));
+    vec3 lifted = 1.0 - pow(clamp(1.0 - c, 0.0, 1.0), vec3(mix(GLASS_LENS_SCREEN_DARK, GLASS_LENS_SCREEN_LIGHT, light)));
+    return min(lifted, vec3(mix(1.0, GLASS_LENS_BODY_CEILING, light)));
 }
 // Its rim is iridescent: each channel's band is deeper by its own share, the three a third of a turn apart around
 // the outline, so the fringe's hue walks round the lens as Apple's does: green down the left, warm along the top,

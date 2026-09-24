@@ -5526,7 +5526,7 @@ export class Canvas implements DirtyTracker {
 
   /** A glass surface's shadow peak at its rendered size (Core/Glass.Pipeline.ts); 0 on clear glass. */
   private _glassShadowPeak = (node: Jiv, eff: Mat2x3): number =>
-    GlassShadowPeak(JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5, node.RenderStyle.GlassVariant);
+    GlassShadowPeak(JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5, node.RenderStyle.GlassVariant, node.RenderStyle.Magnification > 1);
 
   /** The glass FILL pyramid's plan: the region it is built over, the sigma it is built at, and how
    *  deep a chain the surface can read.
