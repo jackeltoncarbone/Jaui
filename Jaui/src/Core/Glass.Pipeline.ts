@@ -6,8 +6,9 @@
 
 export type GlassVariant = 'Regular' | 'Clear';
 
-/** Glass this small tracks its backdrop's luma: its appearance and its face follow what is behind it. */
-export const GLASS_TRACKS_LUMA_SPAN = 56;
+/** Glass this small tracks its backdrop's luma: its appearance and its face follow what is behind it. The shorter side
+ *  at 64 pt or under [C: DesignLibrary GlassMaterialProvider.updateState keeps the adaptive state while min(w, h) <= 64]. */
+export const GLASS_TRACKS_LUMA_SPAN = 64;
 
 /** `u` ramps over S = 48..160 pt and `v` over 64..160 pt, S being the shape's minor dimension. */
 export const GlassSizeRamps = (span: number): { U: number; V: number } => ({
@@ -66,18 +67,19 @@ export const GlassIsLens = (lens: number): boolean => lens > 0;
 export const GLASS_LENS_SHADOW_PEAK = 0.1;
 /** The shadow's peak alpha: opacity (0.5 - 0.25u) times its fill (black 0.12 plus SDR 0.08 + 0.16u), or
  *  times 1 where the colored read takes over (v). Clear glass casts none. */
-export const GlassShadowPeak = (span: number, variant: GlassVariant, lens: boolean = false): number => {
+export const GlassShadowPeak = (span: number, clear: number, lens: boolean = false): number => {
   if (lens) return GLASS_LENS_SHADOW_PEAK;
-  if (variant === 'Clear') return 0;
   const { U, V } = GlassSizeRamps(span);
   const fill = 0.12 + 0.08 + 0.16 * U;
-  return (0.5 - 0.25 * U) * (fill + (1 - fill) * V);
+  // Clear glass casts none; a glass changing kind blends.
+  return (1 - Math.min(Math.max(clear, 0), 1)) * (0.5 - 0.25 * U) * (fill + (1 - fill) * V);
 };
 
 /**
  * The pyramid a glass surface needs, in our LOD units: built at its sharpest read (the outer sample at
- * half radius) and deep enough for its deepest (the body at full radius; the bleed and the colored shadow
- * on large glass). `Reach` is how far past the face, in points, any of its reads can land.
+ * half radius; an active lens's BackdropView, the backdrop layer's capture with no blur [C]) and deep enough
+ * for its deepest (the body at full radius; the bleed and the colored shadow on large glass). `Reach` is how
+ * far past the face, in points, any of its reads can land.
  */
 export interface GlassBlurNeeds {
   BaseLod: number;
@@ -85,8 +87,8 @@ export interface GlassBlurNeeds {
   ReachPt: number;
 }
 
-export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVariant): GlassBlurNeeds => {
-  const base = GlassBodyLod(span, 0.5, dpr, variant);
+export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVariant, lens: boolean): GlassBlurNeeds => {
+  const base = lens ? GlassNativeLod(0, variant) : GlassBodyLod(span, 0.5, dpr, variant);
   let top = GlassBodyLod(span, 1, dpr, variant);
   const sigmaPt = (lod: number): number => Math.pow(2, lod) / dpr;
   // The outer sample looks 0.2 S past the outline.

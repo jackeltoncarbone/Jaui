@@ -51,10 +51,10 @@ void CornerCubic(vec2 w, vec2 a, vec2 b, vec2 c, vec2 d, inout float best, inout
     }
 }
 
-// Signed distance (negative inside, device px) from `p`, taken from the shape's centre, to the
+// Signed distance (negative inside, device px) from `p`, taken from the shape's centre, to Apple's
 // continuous-cornered box of half size `halfSize` and per-corner radii (tl, tr, br, bl); `outward` is the
-// outward unit vector there. `smoothing` 0 draws Apple's circular corner instead.
-float ContinuousCorner(vec2 p, vec2 halfSize, vec4 radii, float smoothing, out vec2 outward) {
+// outward unit vector there.
+float AppleCorner(vec2 p, vec2 halfSize, vec4 radii, bool circular, out vec2 outward) {
     vec2 q = abs(p);
     vec2 facing = vec2(p.x < 0.0 ? -1.0 : 1.0, p.y < 0.0 ? -1.0 : 1.0);
     float cap = min(halfSize.x, halfSize.y);
@@ -65,7 +65,7 @@ float ContinuousCorner(vec2 p, vec2 halfSize, vec4 radii, float smoothing, out v
     float rDown = p.x >= 0.0 ? (p.y <= 0.0 ? radii.z : radii.y) : (p.y <= 0.0 ? radii.w : radii.x);
     // Inward from the side edge (x) and from the top or bottom edge (y).
     vec2 w = halfSize - q;
-    if (r < 1e-3 || smoothing <= 0.0) {
+    if (r < 1e-3 || circular) {
         vec2 v = vec2(r) - w;
         vec2 outside = max(v, vec2(0.0));
         float d = length(outside) + min(max(v.x, v.y), 0.0) - r;
@@ -100,4 +100,17 @@ float ContinuousCorner(vec2 p, vec2 halfSize, vec4 radii, float smoothing, out v
     // Outward in the shape's own frame: the inward side in `w` points out in `q`.
     outward = bestInward * facing;
     return inside ? -d : d;
+}
+
+// The corner curve as a style: 0 is Apple's circular corner, 1 its continuous corner, and between the two
+// fields blend, so the curve springs like any other property.
+float ContinuousCorner(vec2 p, vec2 halfSize, vec4 radii, float smoothing, out vec2 outward) {
+    float s = clamp(smoothing, 0.0, 1.0);
+    if (s >= 1.0) return AppleCorner(p, halfSize, radii, false, outward);
+    if (s <= 0.0) return AppleCorner(p, halfSize, radii, true, outward);
+    vec2 outCircular;
+    float dCircular = AppleCorner(p, halfSize, radii, true, outCircular);
+    float dContinuous = AppleCorner(p, halfSize, radii, false, outward);
+    outward = CornerUnit(mix(outCircular, outward, s));
+    return mix(dCircular, dContinuous, s);
 }

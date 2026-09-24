@@ -114,6 +114,8 @@ interface _PanelLocs {
   glassSkip:      WebGLUniformLocation | null;
   // Vibrancy's cover: -1 on every ordinary draw, else the premultiplied output (Core/Vibrancy.ts).
   vibrancyCover:    WebGLUniformLocation | null;
+  // An active lens's lifted items (Jwift/Apple/LiquidGlass.md 7.1).
+  lensItems:        WebGLUniformLocation | null;
   // ── Background paint (Color | Image | LinearGradient | RadialGradient) ──
   bgMode:           WebGLUniformLocation | null;
   bgTexture:        WebGLUniformLocation | null;
@@ -140,6 +142,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   rimScene:       gl.getUniformLocation(p, 'u_RimScene'),
   glassSkip:      gl.getUniformLocation(p, 'u_GlassSkip'),
   vibrancyCover:  gl.getUniformLocation(p, 'u_VibrancyCover'),
+  lensItems:      gl.getUniformLocation(p, 'u_LensItems'),
   bgMode:           gl.getUniformLocation(p, 'u_BgMode'),
   bgTexture:        gl.getUniformLocation(p, 'u_BgTexture'),
   bgUv:             gl.getUniformLocation(p, 'u_BgUv'),
@@ -155,6 +158,9 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
 });
 
 const _BG_UV_IDENTITY = [1, 1, 0, 0];
+
+/** A canvas-sized copy of the scene: its texture, the framebuffer that writes it, the size it was made at. */
+interface _SceneCopy { Tex: WebGLTexture | null; Fbo: WebGLFramebuffer | null; W: number; H: number; }
 
 
 /** Splice the shared clip-stack chunk into a program that asks for it. */
@@ -1475,6 +1481,7 @@ export class WebGL2Renderer implements Renderer {
     scene: GpuTextureHandle | null = null,
     bgPaint?: BgPaint,
     appearance?: ShadowBackdrop,
+    lensItems: GpuTextureHandle | null = null,
   ): void => {
     if (this._panelInstanceCount === 0) return;
     const gl = this._gl;
@@ -1579,6 +1586,11 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1f(locs.glassAppearance, appearance && this._shadowStateTex && appearance.Slot >= 0 ? appearance.Slot : -1);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
+
+    // An active lens's lifted items (unit 6); the dummy on every other batch.
+    gl.uniform1i(locs.lensItems, 6);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, lensItems ? _unwrap(lensItems) : this._dummyTex);
 
     gl.bindVertexArray(this._panelVao);
     this._noteSceneDraw();
@@ -2107,7 +2119,7 @@ export class WebGL2Renderer implements Renderer {
    *  canvas blit (no scissor - a later surface may sample anywhere); every call after it hands back
    *  the same texture with no GL work at all. */
   private _snapOnceTexture = (): GpuTextureHandle => {
-    if (this._snapOnceTaken && this._snapshotTex) return _wrap(this._snapshotTex);
+    if (this._snapOnceTaken && this._snapshot.Tex) return _wrap(this._snapshot.Tex);
     this._snapOnceTaken = true;
     return this._snapshotBlit(undefined);
   };
@@ -2298,7 +2310,7 @@ export class WebGL2Renderer implements Renderer {
   private _blurSrcFor = (src: WebGLTexture): WebGLTexture => {
     const sub = this._blurSrcSubstitute();
     if (sub === null) return src;
-    if (src !== this._sceneFbo.Texture && src !== this._snapshotTex && src !== this._frameSnapTex) return src;
+    if (src !== this._sceneFbo.Texture && src !== this._snapshot.Tex && src !== this._frameSnapTex) return src;
     return sub;
   };
 
@@ -3763,10 +3775,11 @@ export class WebGL2Renderer implements Renderer {
 
   // ── Snapshot ──
 
-  private _snapshotFbo: WebGLFramebuffer | null = null;
-  private _snapshotTex: WebGLTexture | null = null;
-  private _snapshotW: number = 0;
-  private _snapshotH: number = 0;
+  /** The snapshot every backdrop read copies the scene into. */
+  private _snapshot: _SceneCopy = { Tex: null, Fbo: null, W: 0, H: 0 };
+  /** The scene as it stood under a lens's lifted content (`SnapshotBelow`): its own texture, so the reads
+   *  between it and the lens (the items' own vibrancy, the lens's sharp tap) never overwrite it. */
+  private _below: _SceneCopy = { Tex: null, Fbo: null, W: 0, H: 0 };
 
   /** Copy the scene FBO into the snapshot texture so glass/pblur can sample
    *  it while drawing back into the scene FBO (avoids the read==write feedback
@@ -3778,6 +3791,16 @@ export class WebGL2Renderer implements Renderer {
    *  the dominant per-surface fill cost — full-canvas snapshots scale with
    *  total canvas area × (glass + pblur count); scissoring makes each snapshot
    *  proportional to the surface, not the screen. */
+  /** A canvas-sized texture the engine drew itself (an active lens's lifted items), as a handle screen UV addresses. */
+  WrapTexture = (tex: WebGLTexture): GpuTextureHandle => _wrap(tex);
+
+  /** The scene as it stands now, over `scissor`, into the lens's own copy (`_below`): what lies under a lens's
+   *  lifted content, taken before that content draws (Jwift/Apple/LiquidGlass.md 7.1, the BackdropView's read). */
+  SnapshotBelow = (scissor: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {
+    const card = this._activeCard;
+    return card !== null ? _wrap(this._cardIntoSnapshotTex(card, scissor, this._below)) : this._snapshotBlit(scissor, this._below);
+  };
+
   SnapshotScreen = (scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {
     // `?snap-once`: the frame's FIRST read takes one full-canvas blit and every read after it gets
     // that same texture, scissor ignored. Measurement only; see `DiagSnapOnce`.
@@ -3799,40 +3822,40 @@ export class WebGL2Renderer implements Renderer {
     return sub === null ? snapped : _wrap(sub);
   };
 
-  /** Make `_snapshotTex` exist at the canvas's current size. Split out of `_snapshotBlit` because
-   *  the card composite's own copy-out (`_cardIntoSnapshot`) writes into the same texture and must
+  /** Make a scene copy exist at the canvas's current size. Split out of `_snapshotBlit` because
+   *  the card composite's own copy-out (`_cardIntoSnapshotTex`) writes into the same textures and must
    *  not carry a second, drifting copy of its lifecycle. RGB10_A2 to match the (now 10-bit) scene
    *  FBO -- a blit down to 8-bit here would re-band the progressive blur's input. Same 32 bpp. */
-  private _ensureSnapshotTexture = (): WebGLTexture => {
+  private _ensureCopy = (copy: _SceneCopy): WebGLTexture => {
     const gl = this._gl;
-    if (this._snapshotTex && this._snapshotW === this._width && this._snapshotH === this._height) return this._snapshotTex;
-    if (this._snapshotTex) gl.deleteTexture(this._snapshotTex);
-    if (this._snapshotFbo) gl.deleteFramebuffer(this._snapshotFbo);
-    this._snapshotTex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, this._snapshotTex);
+    if (copy.Tex && copy.W === this._width && copy.H === this._height) return copy.Tex;
+    if (copy.Tex) gl.deleteTexture(copy.Tex);
+    if (copy.Fbo) gl.deleteFramebuffer(copy.Fbo);
+    copy.Tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, copy.Tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB10_A2, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_INT_2_10_10_10_REV, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    this._snapshotFbo = gl.createFramebuffer()!;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this._snapshotFbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._snapshotTex, 0);
+    copy.Fbo = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, copy.Fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, copy.Tex, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._tgt('default');
-    this._snapshotW = this._width;
-    this._snapshotH = this._height;
-    return this._snapshotTex;
+    copy.W = this._width;
+    copy.H = this._height;
+    return copy.Tex;
   };
 
   /** The snapshot blit itself. Split out of `SnapshotScreen` so `?snap-once` can call it exactly
    *  once a frame with no scissor without duplicating the texture lifecycle. */
-  private _snapshotBlit = (scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {
+  private _snapshotBlit = (scissor?: { x: number; y: number; w: number; h: number }, copy: _SceneCopy = this._snapshot): GpuTextureHandle => {
     const gl = this._gl;
     // Same reason as `SceneTexture`: a pending card is not in the scene yet, and a snapshot taken
     // over it would hand a progressive blur a backdrop with the glass missing.
     if (this._cardQueue.length !== 0) this._drainCards(true);
-    const snap = this._ensureSnapshotTexture();
+    const snap = this._ensureCopy(copy);
     // Copy sceneFbo → snapshot texture via blit. The scene FBO is where the
     // tree walk renders now (via BeginScenePass); the default framebuffer
     // stays empty until the final Blit at end-of-frame. Reading from
@@ -3841,7 +3864,7 @@ export class WebGL2Renderer implements Renderer {
     // sample while rendering into sceneFbo itself.
     this._sceneLedger.NoteRead();
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._snapshotFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, copy.Fbo);
     this._tgt('snapshot');
     const timed = this._pass !== null && this._pass.Begin('snapshot');
     if (scissor) {
@@ -3927,7 +3950,7 @@ export class WebGL2Renderer implements Renderer {
   /** Finished targets whose region has not been written back into the scene yet, ascending. */
   private _cardQueue: _CardTarget[] = [];
   private _cardPool: FramebufferPool | null = null;
-  /** The frame snapshot every seed is cut from. Its own texture, NOT `_snapshotTex`: the sharp-tap
+  /** The frame snapshot every seed is cut from. Its own texture, NOT `_snapshot`: the sharp-tap
    *  path writes card pixels into that one, which would corrupt every later card's seed. */
   private _frameSnapTex: WebGLTexture | null = null;
   private _frameSnapFbo: WebGLFramebuffer | null = null;
@@ -4227,10 +4250,10 @@ export class WebGL2Renderer implements Renderer {
    *  consumer that addresses `u_Scene` in screen UV keeps working unchanged. Same size, same
    *  format, integer-aligned: a copy, not a render. */
   private _cardIntoSnapshotTex = (
-    card: _CardTarget, scissor?: { x: number; y: number; w: number; h: number },
+    card: _CardTarget, scissor?: { x: number; y: number; w: number; h: number }, copy: _SceneCopy = this._snapshot,
   ): WebGLTexture => {
     const gl = this._gl;
-    const snap = this._ensureSnapshotTexture();
+    const snap = this._ensureCopy(copy);
     const H = this._height;
     let sx0 = card.X, sy0 = card.Y, sx1 = card.X + card.W, sy1 = card.Y + card.H;
     if (scissor) {
@@ -4243,7 +4266,7 @@ export class WebGL2Renderer implements Renderer {
     const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
     if (scissorOn) gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, card.Fbo.Framebuffer);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._snapshotFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, copy.Fbo);
     this._tgt('snapshot');
     gl.blitFramebuffer(
       sx0 - card.X, card.H - (sy1 - card.Y), sx1 - card.X, card.H - (sy0 - card.Y),

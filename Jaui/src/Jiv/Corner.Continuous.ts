@@ -19,12 +19,30 @@ const unit = (x: number, y: number): [number, number] => {
 const room = (side: number, rSum: number): number =>
   rSum > 1e-3 ? Math.min(Math.max((side - rSum) / (rSum * 0.52866), 0), 1) : 1;
 
-/** Signed distance (negative inside) from (px, py), taken from the shape's centre, to the
- *  continuous-cornered box of half size (halfW, halfH) and per-corner radii (tl, tr, br, bl); smoothing 0
- *  draws Apple's circular corner instead. With `out`, writes [distance, outward x, outward y] into it. */
+/** The corner curve as a style: 0 is Apple's circular corner, 1 its continuous corner, and between the two fields
+ *  blend. Signed distance (negative inside) from (px, py), taken from the shape's centre, to the box of half size
+ *  (halfW, halfH) and per-corner radii (tl, tr, br, bl). With `out`, writes [distance, outward x, outward y]. */
 export const ContinuousCorner = (
   px: number, py: number, halfW: number, halfH: number,
   radii: readonly number[], smoothing: number, out?: Float64Array,
+): number => {
+  const s = Math.min(Math.max(smoothing, 0), 1);
+  if (s >= 1) return appleCorner(px, py, halfW, halfH, radii, false, out);
+  if (s <= 0) return appleCorner(px, py, halfW, halfH, radii, true, out);
+  const a = new Float64Array(3), b = new Float64Array(3);
+  const dc = appleCorner(px, py, halfW, halfH, radii, true, a);
+  const dk = appleCorner(px, py, halfW, halfH, radii, false, b);
+  const d = dc + (dk - dc) * s;
+  if (out !== undefined) {
+    const [ux, uy] = unit(a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s);
+    out[0] = d; out[1] = ux; out[2] = uy;
+  }
+  return d;
+};
+
+const appleCorner = (
+  px: number, py: number, halfW: number, halfH: number,
+  radii: readonly number[], circular: boolean, out?: Float64Array,
 ): number => {
   const facingX = px < 0 ? -1 : 1, facingY = py < 0 ? -1 : 1;
   const done = (d: number, nx: number, ny: number): number => {
@@ -38,7 +56,7 @@ export const ContinuousCorner = (
   const rAcross = px >= 0 ? (py <= 0 ? rad[0] : rad[3]) : (py <= 0 ? rad[1] : rad[2]);
   const rDown = px >= 0 ? (py <= 0 ? rad[2] : rad[1]) : (py <= 0 ? rad[3] : rad[0]);
   const wx = halfW - qx, wy = halfH - qy;
-  if (r < 1e-3 || smoothing <= 0) {
+  if (r < 1e-3 || circular) {
     const vx = r - wx, vy = r - wy;
     const ox = Math.max(vx, 0), oy = Math.max(vy, 0);
     const d = Math.hypot(ox, oy) + Math.min(Math.max(vx, vy), 0) - r;

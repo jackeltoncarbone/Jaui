@@ -51,7 +51,9 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
 
   // Physical material
   ['Frost',                  s => s.Frost,                        (s, v) => { s.Frost = v; }],
-  ['Thickness',              s => s.Thickness,                    (s, v) => { s.Thickness = v; }],
+  // A change of `Glass` kind springs these three together under `@Spring Glass` / `@Transition Glass`.
+  ['Glass',                  s => s.Thickness,                    (s, v) => { s.Thickness = v; }],
+  ['Glass',                  s => s.GlassClear,                   (s, v) => { s.GlassClear = v; }],
   ['Refraction',             s => s.Refraction,                   (s, v) => { s.Refraction = v; }],
   // Signed, so a theme flip springs dark tint → clear → light tint and never passes through grey.
   ['Tint',                   s => s.Tint,                         (s, v) => { s.Tint = v; }],
@@ -79,9 +81,14 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
 
   // Lighting
   ['ChromaticAberration',    s => s.ChromaticAberration,          (s, v) => { s.ChromaticAberration = v; }],
-  ['Lens',                   s => s.Lens,                         (s, v) => { s.Lens = v; }],
+  ['Glass',                  s => s.Lens,                         (s, v) => { s.Lens = v; }],
   ['RimWidth',               s => s.RimWidth,                     (s, v) => { s.RimWidth = v; }],
   ['RimStrength',            s => s.RimStrength,                  (s, v) => { s.RimStrength = v; }],
+  ['LensLiftedScale',        s => s.LensLiftedScale,              (s, v) => { s.LensLiftedScale = v; }],
+  ['GlassDispersion',        s => s.GlassDispersionAmount,        (s, v) => { s.GlassDispersionAmount = v; }],
+  ['GlassDispersion',        s => s.GlassDispersionHeight,        (s, v) => { s.GlassDispersionHeight = v; }],
+  ['GlassDispersion',        s => s.GlassDispersionInset,         (s, v) => { s.GlassDispersionInset = v; }],
+  ['GlassDispersion',        s => s.GlassDispersionAngle,         (s, v) => { s.GlassDispersionAngle = v; }],
 
   // Transform — per-channel (legacy compound; superseded by Visual*).
   ['Transform',              s => s.Transform.TranslateX,         (s, v) => { s.Transform.TranslateX = v; }],
@@ -160,6 +167,11 @@ const DEFAULT_MASS = 1;
  *  cache stays clean and previous render.Background is GC'd.
  */
 const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void => {
+  // A glass fading out to None keeps its own kind and clearness until it is gone, so only its fade moves.
+  if (target.Glass === 'None' && render.Glass !== 'None' && render.Thickness > 0.01) {
+    target.Glass = render.Glass;
+    target.GlassClear = render.GlassClear;
+  }
   render.Material = target.Material;
   render.ProgressiveBlurDirection = target.ProgressiveBlurDirection;
   render.ProgressiveBlurFeather = target.ProgressiveBlurFeather;
@@ -172,7 +184,6 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   // tagged value, not a number.
   render.VibrancyDeclaration = target.VibrancyDeclaration;
   render.Glass = target.Glass;
-  render.GlassVariant = target.GlassVariant;
   render.LensInk = target.LensInk;
   render.SchemeDark = target.SchemeDark;
   render.ForegroundVibrancyColor = target.ForegroundVibrancyColor;
@@ -310,6 +321,7 @@ export class JivStyleAnimator implements Animatable {
       s.Snap();
       set(this._jiv.RenderStyle, s.Value);
     }
+    this._jiv.RenderStyle.GlassVariant = target.GlassVariant;
   };
 
   Tick = (dt: number): boolean => {
@@ -385,9 +397,11 @@ export class JivStyleAnimator implements Animatable {
     // Keep glass pipeline running while the Thickness spring decays past
     // author target=0 (otherwise refraction/bezel/specular snap off).
     if (target.Material !== 'ProgressiveBlur') {
-      const t = Math.max(render.Thickness, target.Thickness);
-      render.Material = t > 0.01 ? 'LiquidGlass' : 'None';
+      const t = Math.max(render.Thickness, target.Glass === 'None' ? 0 : target.Thickness);
+      render.Material = t > 0.01 && render.Glass !== 'None' ? 'LiquidGlass' : 'None';
     }
+    // The CPU plans the backdrop for Regular until the glass is wholly clear.
+    render.GlassVariant = render.GlassClear >= 0.999 ? 'Clear' : 'Regular';
 
     return springActive || driverActive;
   };

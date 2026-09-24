@@ -209,6 +209,24 @@ const _inferMaterial = (glass: GlassKind, thickness: number, direction: Progress
 };
 
 /** Resolve a full JivStyle into a JivRenderStyle under the given context. */
+/** The lens variant's content lensing dispersion (DesignLibrary's GlassMaterialProvider recipe, sub_18AF84454, from
+ *  __TEXT.__const 0x18AFDF150): amount -3 pt, height 3.3 pt, inset 0, angle 90 degrees. */
+const LENS_DISPERSION = { GlassDispersionAmount: -3, GlassDispersionHeight: 3.3, GlassDispersionInset: 0, GlassDispersionAngle: 90 };
+
+/** `GlassDispersion: Auto | None | <amount> <height> <inset> <angle>`. */
+const resolveDispersion = (raw: string, glass: GlassKind, ctx: ResolveContext): typeof LENS_DISPERSION => {
+  const v = (raw ?? 'Auto').trim();
+  if (v === 'Auto') return glass === 'Lens' ? LENS_DISPERSION : { ...LENS_DISPERSION, GlassDispersionAmount: 0 };
+  if (v === 'None') return { ...LENS_DISPERSION, GlassDispersionAmount: 0 };
+  const [amount, height, inset, angle] = v.split(/\s+/);
+  return {
+    GlassDispersionAmount: Resolve(amount ?? '0', ctx, 'W'),
+    GlassDispersionHeight: Math.max(0.01, Resolve(height ?? '3.3pt', ctx, 'W')),
+    GlassDispersionInset: Resolve(inset ?? '0pt', ctx, 'W'),
+    GlassDispersionAngle: parseFloat(angle ?? '90') || 0,
+  };
+};
+
 export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle => {
   const rawRadius = ResolveLengthTuple4(s.BorderRadius, ctx, ['W', 'W', 'W', 'W']);
   const smoothness = Resolve(s.BorderRadiusSmoothness, ctx, 'W');
@@ -216,7 +234,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // as it is Apple's: no compensation, and a child's radius is its parent's less the inset.
   const borderRadius = rawRadius;
   const glassRaw = ResolveTernary(s.Glass, ctx);
-  const glass: GlassKind = glassRaw === 'Regular' || glassRaw === 'Clear' ? glassRaw : 'None';
+  const glass: GlassKind = glassRaw === 'Regular' || glassRaw === 'Clear' || glassRaw === 'Lens' ? glassRaw : 'None';
   // Auto: a glass is fully in, anything else has no glass to fade.
   const thickness = s.Thickness === 'Auto' ? (glass === 'None' ? 0 : 1) : Resolve(s.Thickness, ctx, 'W');
 
@@ -297,7 +315,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     Thickness: thickness,
     Refraction: Resolve(s.Refraction, ctx, 'W'),
     Glass: glass,
-    GlassVariant: glass === 'Clear' ? 'Clear' : 'Regular',
+    GlassClear: glass === 'Clear' || glass === 'Lens' ? 1 : 0,
+    GlassVariant: glass === 'Clear' || glass === 'Lens' ? 'Clear' : 'Regular',
     SchemeDark: parseFloat(ctx.Vars?.get(THEME_DARK_VAR) ?? '1') >= 0.5,
     Tint: _resolveTint(s, ctx),
     BackdropBrightness: backdrop.Brightness,
@@ -316,10 +335,12 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
 
     ChromaticAberration: Resolve(s.ChromaticAberration, ctx, 'W'),
-    Lens: Resolve(s.Lens, ctx, 'W'),
+    Lens: glass === 'Lens' ? 1 : 0,
     LensInk: ParseColor(ResolveVars(ResolveTernary(s.LensInk, ctx), ctx)),
     RimWidth: Math.max(0, Resolve(ResolveTernary(s.RimWidth, ctx), ctx, 'W')),
     RimStrength: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.RimStrength, ctx), ctx, 'W'))),
+    LensLiftedScale: Math.max(0.01, Resolve(s.LensLiftedScale, ctx, 'W')),
+    ...resolveDispersion(s.GlassDispersion, glass, ctx),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
 

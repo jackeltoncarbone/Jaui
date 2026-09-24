@@ -18,7 +18,7 @@ flat in vec4 v_Refraction;     // thickness, glass span (pt), glass shadow mode,
 flat in vec4 v_Lighting;       // device px per pt, bodyTint (signed), dark scheme, clear glass
 flat in vec4 v_Specular;       // rim amount, rim height (pt), chromaticAberration, borderFade
 flat in vec4 v_RimEdge;        // glass appearance (1 light), backdrop mean luma, lens magnification, lens ink
-flat in vec4 v_Outline;        // lens bar top, lens bar bottom (device px), clipOffset, clipCount
+flat in vec4 v_Outline;        // dispersion amount + angle, height + inset (packed), clipOffset, clipCount
 
 // ── MATERIAL_FLAT: the backdrop's whole apparatus is excluded, not branched over ──
 //
@@ -69,6 +69,9 @@ uniform vec4 u_BackdropXf;
 // so screen UV addresses it directly and u_BackdropXf does not apply to it.
 uniform sampler2D u_Scene;
 uniform float u_BaseFrostLod;
+// An active lens's lifted content (Core/Jaui.ts, liftLensItems): the bar's items drawn again, premultiplied over
+// transparent, canvas-sized and screen-addressed like u_Scene.
+uniform sampler2D u_LensItems;
 #endif
 uniform vec2 u_Resolution;
 
@@ -363,89 +366,101 @@ vec3 glassSample(vec2 pixel, float lod) {
     return textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, max(0.0, lod - u_BaseFrostLod)).rgb;
 }
 
-// THE ACTIVE LENS (Glass.Pipeline.glsl, Core/Glass.md): Apple's pressed selection. It reads the scene as drawn under
-// it (u_Scene, a snapshot of its box taken after the bar and its items drew), sharp: a flat magnifying plate, folding
-// only across its bezel, dispersed only there, and never reading past the bar it stands on. `amount` is how far the
-// glass has come in: at 0 the lens reads straight through, so a press and a release never leave a fold behind.
-vec3 lensScene(vec2 pixel) {
-    vec2 uv = pixel / u_Resolution;
-    uv.y = 1.0 - uv.y;
-    return texture(u_Scene, uv).rgb;
-}
-// The same read reconstructed by Catmull-Rom rather than bilinearly, in nine taps (the bilinear-pair form): a
-// magnified edge stays as sharp as the snapshot allows instead of spreading into a linear ramp.
-vec3 lensSceneSharp(vec2 pixel) {
-    vec2 size = vec2(textureSize(u_Scene, 0));
-    vec2 uv = pixel / u_Resolution;
-    uv.y = 1.0 - uv.y;
-    vec2 p = uv * size - 0.5;
-    vec2 f = fract(p);
-    vec2 base = floor(p) + 0.5;
-    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-    vec2 w3 = f * f * (-0.5 + 0.5 * f);
-    vec2 w12 = w1 + w2;
-    vec2 t0 = (base - 1.0) / size, t3 = (base + 2.0) / size, t12 = (base + w2 / w12) / size;
-    vec3 c = vec3(0.0);
-    c += (texture(u_Scene, vec2(t0.x, t0.y)).rgb * w0.x + texture(u_Scene, vec2(t12.x, t0.y)).rgb * w12.x + texture(u_Scene, vec2(t3.x, t0.y)).rgb * w3.x) * w0.y;
-    c += (texture(u_Scene, vec2(t0.x, t12.y)).rgb * w0.x + texture(u_Scene, vec2(t12.x, t12.y)).rgb * w12.x + texture(u_Scene, vec2(t3.x, t12.y)).rgb * w3.x) * w12.y;
-    c += (texture(u_Scene, vec2(t0.x, t3.y)).rgb * w0.x + texture(u_Scene, vec2(t12.x, t3.y)).rgb * w12.x + texture(u_Scene, vec2(t3.x, t3.y)).rgb * w3.x) * w3.y;
-    return clamp(c, 0.0, 1.0);
-}
-// Where a lens pixel reads, eased in by `amount`: centre + (p - centre) x k across; down, the same read eased onto
-// the bar's rows (v_Outline.xy, a device px inside its outline) past the point where it would leave them.
-vec2 lensRead(vec2 c, float k, float amount) {
-    float barMid = 0.5 * (v_Outline.x + v_Outline.y);
-    float barHalf = 0.5 * (v_Outline.y - v_Outline.x) - GLASS_LENS_BAR_INSET;
-    float reach = max(v_PanelGeom.w, 1.0);
-    float down = (v_PixelPos.y - c.y) * k;
-    float ease = 2.0 * barHalf - reach;
-    if (ease < barHalf && abs(down) > ease) {
-        float t = clamp((abs(down) - ease) / (reach - ease), 0.0, 1.0);
-        down = sign(down) * (ease + (barHalf - ease) * (1.0 - (1.0 - t) * (1.0 - t)));
-    }
-    vec2 target = vec2(c.x + (v_PixelPos.x - c.x) * k, barMid + down);
-    vec2 read = v_PixelPos + (target - v_PixelPos) * amount;
-    read.y = clamp(read.y, barMid - barHalf, barMid + barHalf);
-    return read;
-}
-vec3 GlassActiveLens(float d, float span, float lens, float ca, float light, float amount, float inkPacked, out float inkCover) {
-    float depth = max(-d, 0.0) / span;
-    float fold = 1.0 - clamp(depth / GLASS_LENS_BEZEL, 0.0, 1.0);
-    float body = mix(GLASS_LENS_BODY_READ, GLASS_LENS_EDGE_READ, 1.0 - clamp((depth - GLASS_LENS_BEZEL) / (GLASS_LENS_REACH - GLASS_LENS_BEZEL), 0.0, 1.0));
-    vec2 c = v_Rot.zw;
-    float ease = amount * lens;
-    float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca * mix(GLASS_LENS_SPLIT.x, GLASS_LENS_SPLIT.y, light);
-    vec3 seen;
-    if (fold <= 0.0 || spread <= 0.0) {
-        vec2 read = lensRead(c, mix(body, 1.0, fold), ease);
-        seen = fold <= 0.0 ? lensSceneSharp(read) : lensScene(read);
+// The lens's own SDF at a screen pixel, as QuartzCore's compute_sdf_with_mode gives it: the depth in pt (negative
+// inside) and the outward normal on screen, the shape's gradient mixed by `ovalization` toward the direction from
+// the centre with y scaled by the half width over the half height [C].
+void lensField(vec2 pixel, float dpr, float ovalization, out float d, out vec2 n) {
+    vec2 p;
+    if (v_Is3D > 0.5) {
+        p = v_Local + pixel - v_PixelPos;
     } else {
-        // Each channel reads out to its own edge: red a little past the outline, blue a little short of it.
-        vec3 edge = 1.0 + spread * vec3(1.0, 0.0, -1.0);
-        seen = vec3(lensScene(lensRead(c, mix(body, edge.r, fold), ease)).r,
-                    lensScene(lensRead(c, mix(body, edge.g, fold), ease)).g,
-                    lensScene(lensRead(c, mix(body, edge.b, fold), ease)).b);
+        vec2 rel = pixel - v_Rot.zw;
+        p = vec2(rel.x * v_Rot.x + rel.y * v_Rot.y, -rel.x * v_Rot.y + rel.y * v_Rot.x) + v_Rot.zw - v_PanelGeom.xy;
     }
-    vec3 lensed = GlassSkips(GLASS_SKIP_GRADE) ? seen : mix(seen, GlassLensBody(seen, light), amount);
-    // The items it shows lie ABOVE its glass, as Apple's lifted copy lies over its ClearGlassView (Jwift/Apple/
-    // LiquidGlass.md 7.1), so the rim never paints over them: how much of this pixel is item ink, by its contrast
-    // with the bar (dark or bright off the body) or its color (a tinted glyph).
-    float lum = dot(seen, GLASS_BT709);
-    inkCover = max(mix(smoothstep(0.5, 0.8, lum), 1.0 - smoothstep(0.2, 0.5, lum), light),
-                   smoothstep(0.15, 0.3, max(seen.r, max(seen.g, seen.b)) - min(seen.r, min(seen.g, seen.b)))) * amount;
-    // The ink it magnifies takes the lens's ink colour at full strength, over the lifted body, as Apple's lens shows the
-    // items under it in the selection's tint: ink is what stands well off the bar, bright in dark and dark in light, so
-    // content frosted through the bar (never near the ink's extremes) keeps its own colour.
+    vec2 halfSize = v_PanelGeom.zw;
+    vec2 g;
+    CornerEval(p, halfSize, v_Radii, v_StyleParams.y, d, g);
+    vec2 oval = vec2(p.x, halfSize.x * p.y / max(halfSize.y, 1e-4));
+    oval *= inversesqrt(max(dot(oval, oval), 1e-8));
+    g = normalize(mix(g, oval, ovalization));
+    n = v_Is3D > 0.5 ? g : vec2(v_Rot.x * g.x - v_Rot.y * g.y, v_Rot.y * g.x + v_Rot.x * g.y);
+    d /= dpr;
+}
+// What the lens's glass holds at a screen pixel, before its content lensing: the BackdropView (the scene under the
+// lifted items, at the backdrop layer's scale) through its displacementMap, and over it the contentWrapper, the lifted
+// items (u_LensItems, premultiplied) through its own, in the selection's ink when it has one [C: they are the
+// selected twins]. Each warp is taken at that pixel's own depth and normal, as each layer's filter draws it. Opaque,
+// as the glass's background is; `cover` is the items' alpha.
+vec4 lensContent(vec2 pixel, float dpr, float ease, float inkPacked, out float cover) {
+    float d;
+    vec2 n;
+    lensField(pixel, dpr, GLASS_LENS_OVALIZATION, d, n);
+    vec3 backdrop = glassSample(pixel + n * GlassShift(d, GLASS_LENS_BACKDROP_WARP.x, GLASS_LENS_BACKDROP_WARP.y) * dpr * ease,
+                                GlassNativeLod(0.0, dpr, 0.0));
+    vec2 read = pixel + n * GlassShift(d, GLASS_LENS_ITEM_WARP.x, GLASS_LENS_ITEM_WARP.y) * dpr * ease;
+    vec2 uv = read / u_Resolution;
+    uv.y = 1.0 - uv.y;
+    // The portal of the items clips to the capsule [C: liftedContentPortalView], before the warp reads it.
+    float readDepth;
+    vec2 readNormal;
+    lensField(read, dpr, 0.0, readDepth, readNormal);
+    vec4 items = texture(u_LensItems, uv) * clamp(0.5 - readDepth * dpr, 0.0, 1.0);
     if (inkPacked > 0.5) {
         float packed = inkPacked - 1.0;
         vec3 inkColor = vec3(floor(packed / 65536.0), mod(floor(packed / 256.0), 256.0), mod(packed, 256.0)) / 255.0;
-        float l = dot(seen, GLASS_BT709);
-        float ink = mix(smoothstep(0.5, 0.8, l), 1.0 - smoothstep(0.2, 0.5, l), light) * amount;
-        lensed = mix(lensed, inkColor, ink);
+        items.rgb = inkColor * items.a;
     }
-    return lensed;
+    cover = items.a;
+    return vec4(backdrop * (1.0 - items.a) + items.rgb, 1.0);
+}
+// THE ACTIVE LENS, as UIKit's _UILiquidLensView builds it (Glass.Pipeline.glsl, Jwift/Apple/LiquidGlass.md 7).
+// Its glass, the ClearGlassView, holds the warped backdrop (its glass background reads the BackdropView under it) and
+// the warped items (lensContent), and lenses them together through its content lensing, QuartzCore's
+// glass_foreground_sdf: a layer's filter takes its whole subtree [C], and Apple's frames show the fringe on both.
+// glass_foreground_sdf moves the read along the normal by its refraction, spreads six taps (red over the outer three,
+// blue over the inner four, green over all, normalised 0.5, 1/3, 0.5, each unpremultiplied, the sum premultiplied by
+// their mean alpha) along its dispersion's direction, and fades by its edge ramp. That direction is the normal turned
+// by the dispersion angle with its components swapped [C: glass_foreground_base %70 to %72]. `n` is the outward
+// normal on screen, `d` the depth in pt (negative inside), `inkPacked` the selection's ink (0 for none), `amount` how
+// far the glass has come in. `itemCover` is how much of the pixel the lensed items cover.
+vec3 GlassActiveLens(float d, vec2 n, float lens, float light, float amount, float inkPacked, out float itemCover) {
+    float ease = amount * lens;
+    float dpr = max(v_Lighting.x, 1e-3);
+    vec2 base = v_PixelPos + n * GlassShift(d + GLASS_LENS_LENSING_REFRACTION.z, GLASS_LENS_LENSING_REFRACTION.y,
+                                            GLASS_LENS_LENSING_REFRACTION.x) * dpr * ease;
+    // GlassDispersion (v_Outline.xy, packed): amount and angle, height and inset.
+    float amountAngle = v_Outline.x, heightInset = v_Outline.y;
+    float disAmount = mod(amountAngle, 8192.0) / 64.0 - 64.0;
+    float disAngle = radians(floor(amountAngle / 8192.0));
+    float disHeight = mod(heightInset, 4096.0) / 32.0;
+    float disInset = floor(heightInset / 4096.0) / 32.0 - 32.0;
+    vec2 turned = vec2(n.x * cos(disAngle) - n.y * sin(disAngle), n.x * sin(disAngle) + n.y * cos(disAngle));
+    vec2 dir = GlassSkips(GLASS_SKIP_CA) ? vec2(0.0)
+        : turned.yx * GlassShift(d + disInset, disAmount, disHeight) * dpr * ease;
+    vec3 sum = vec3(0.0);
+    float alpha = 0.0;
+    float cover;
+    for (int i = 0; i < 3; i++) {
+        float w = 1.0 - float(i) / 3.0;
+        vec4 a = lensContent(base + w * dir, dpr, ease, inkPacked, cover);
+        sum.r += a.r / max(a.a, 1e-6) * w;
+        sum.g += a.g / max(a.a, 1e-6) * (1.0 - w);
+        alpha += a.a;
+    }
+    for (int i = 0; i < 4; i++) {
+        float t = float(i) / 3.0;
+        vec4 b = lensContent(base - t * dir, dpr, ease, inkPacked, cover);
+        sum.g += b.g / max(b.a, 1e-6) * (1.0 - t);
+        sum.b += b.b / max(b.a, 1e-6) * t;
+        alpha += b.a;
+    }
+    float ramp = GLASS_LENS_LENSING_EDGE.y > GLASS_LENS_LENSING_EDGE.x
+        ? clamp((d - GLASS_LENS_LENSING_EDGE.x) / (GLASS_LENS_LENSING_EDGE.y - GLASS_LENS_LENSING_EDGE.x), 0.0, 1.0) : 0.0;
+    float edge = 1.0 - mix(GLASS_LENS_LENSING_EDGE.z, GLASS_LENS_LENSING_EDGE.w, ramp);
+    vec3 lensed = sum * vec3(0.5, 1.0 / 3.0, 0.5) * (alpha / 7.0);
+    lensContent(base, dpr, ease, inkPacked, itemCover);
+    itemCover *= amount;
+    return mix(lensContent(v_PixelPos, dpr, 0.0, 0.0, cover).rgb, lensed, edge * amount);
 }
 
 // Sample the backdrop at this Jiv's frost. A Jiv that authored no frost samples the raw scene
@@ -760,7 +775,7 @@ void main() {
             float lensInk = 0.0;
             if (v_RimEdge.z > 0.0) {
                 // It comes and goes with the glass itself, so a press and a release never pop.
-                face = GlassActiveLens(d, glassSpan, v_RimEdge.z, chromaticAberration, glassLight, glassiness, v_RimEdge.w, lensInk);
+                face = GlassActiveLens(d, nScreen, v_RimEdge.z, glassLight, glassiness, v_RimEdge.w, lensInk);
             } else {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassInnerShift(d, glassSpan) * lens;
@@ -781,7 +796,7 @@ void main() {
                               glassSample(v_PixelPos + innerOffset, innerLod).b);
             }
             // The outward-looking sample, at 30% across the outermost point of regular glass, at half radius.
-            float outerMix = (glassClear > 0.5 ? 0.0 : 0.3) * clamp(d + 1.0, 0.0, 1.0);
+            float outerMix = 0.3 * (1.0 - glassClear) * clamp(d + 1.0, 0.0, 1.0);
             if (outerMix > 0.0) {
                 float outerLod = GlassNativeLod(radius * GlassBlurScale(d + outerShift, glassSpan), glassDpr, glassClear);
                 lensed = mix(lensed, glassSample(v_PixelPos + nScreen * outerShift * glassDpr, outerLod), outerMix);
@@ -791,14 +806,14 @@ void main() {
             face = GlassFace(lensed, glassSpan, glassClear, glassLight, v_RimEdge.y);
             // The edge bleed of regular glass from 64 pt: the backdrop 0.35 S outward, blurred at 0.35 S,
             // weighted toward the face's own darks on light glass and its lights on dark glass.
-            if (ramps.y > 0.0 && glassClear < 0.5 && !GlassSkips(GLASS_SKIP_BLEED)) {
+            if (ramps.y > 0.0 && glassClear < 1.0 && !GlassSkips(GLASS_SKIP_BLEED)) {
                 float bleedShift = GlassShift(d, 0.35 * glassSpan, 0.35 * glassSpan);
                 vec3 bleed = GlassBleed(glassSample(v_PixelPos + nScreen * bleedShift * glassDpr,
                                                     GlassNativeLod(0.35 * glassSpan, glassDpr, glassClear)), glassLight);
                 float lum = dot(face, GLASS_BLEED_LUMA);
                 float weight = mix(1.0 - lum, lum, glassLight);
                 weight = weight * weight * clamp(1.0 - d, 0.0, 1.0);
-                face = mix(face, bleed, clamp(weight * weight * ramps.y * mix(0.8, 0.5, glassLight), 0.0, 1.0));
+                face = mix(face, bleed, clamp(weight * weight * ramps.y * mix(0.8, 0.5, glassLight), 0.0, 1.0) * (1.0 - glassClear));
             }
             // A vibrancy that could not be drawn under the element (a press fill) rides the grade lanes.
             face = applyGrading(face, brightness, saturation, contrast);
@@ -815,16 +830,15 @@ void main() {
                 vec3 shown = cover < 0.999 ? mix(sampleBackdrop(baseUv, frostLod), face, cover) : face;
                 vec2 key = GlassKeyLight(v_Rot, v_Is3D);
                 vec4 rim = GlassRim(shown, d, normal, key, v_Specular.x, v_Specular.y, glassClear, glassLight);
-                vec3 alpha = vec3(rim.a);
-                if (v_RimEdge.z > 0.0) {
-                    // The active lens's rim is iridescent: each channel's band runs to its own depth.
-                    vec3 h = GlassLensRimHeights(normal, v_Specular.y, chromaticAberration, glassLight);
-                    alpha = vec3(GlassRim(shown, d, normal, key, v_Specular.x, h.r, glassClear, glassLight).a,
-                                 GlassRim(shown, d, normal, key, v_Specular.x, h.g, glassClear, glassLight).a,
-                                 GlassRim(shown, d, normal, key, v_Specular.x, h.b, glassClear, glassLight).a);
-                    alpha *= 1.0 - lensInk;
-                }
+                // The lens's lifted copy lies above its glass, so its rim never paints over an item.
+                float alpha = rim.a * (1.0 - lensInk);
                 face = clamp(face + alpha / max(cover, 1e-3) * (rim.rgb - shown), 0.0, 1.0);
+            }
+            if (v_RimEdge.z > 0.0) {
+                // The lens's inner shadow, inverted: the outside cast GLASS_LENS_INNER_SHADOW.z pt down into it,
+                // its radius and opacity Apple's. The shifted depth to first order along the normal.
+                float shifted = d - dot(nScreen, vec2(0.0, GLASS_LENS_INNER_SHADOW.z));
+                face *= 1.0 - GLASS_LENS_INNER_SHADOW.y * glassiness * (1.0 - GlassShadowFall(shifted, 2.0 * GLASS_LENS_INNER_SHADOW.x));
             }
             backdrop = face;
         }

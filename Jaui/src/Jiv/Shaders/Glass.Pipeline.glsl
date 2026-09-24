@@ -31,10 +31,10 @@ float GlassBlurScale(float t, float span) {
     return mix(1.0, 0.5, clamp((t - from) / max(-1.0 - from, 1e-3), 0.0, 1.0));
 }
 
-float GlassBackdropScale(float clear) { return clear > 0.5 ? 0.5 : 0.25; }
+float GlassBackdropScale(float clear) { return mix(0.25, 0.5, clear); }
 
 float GlassBlurRadius(float span, float clear) {
-    return clear > 0.5 ? 1.0 : 1.3333 + 2.6667 * GlassSizeRamps(span).x;
+    return mix(1.3333 + 2.6667 * GlassSizeRamps(span).x, 1.0, clear);
 }
 
 // A radius in points to the LOD of our native pyramid with the blur Apple's quarter (clear: half) resolution
@@ -43,7 +43,7 @@ float GlassNativeLod(float radiusPt, float dpr, float clear) {
     float scale = GlassBackdropScale(clear);
     float r = radiusPt * scale * dpr * 1.6;
     float appleLod = max(0.0, r < 2.0 ? log2(1.0 + 0.5 * r) : log2(r));
-    return appleLod + log2((clear > 0.5 ? GLASS_TEXEL_SIGMA_CLEAR : GLASS_TEXEL_SIGMA_REGULAR) / scale);
+    return appleLod + log2(mix(GLASS_TEXEL_SIGMA_REGULAR, GLASS_TEXEL_SIGMA_CLEAR, clear) / scale);
 }
 
 // QuartzCore's set_ycc_composite without its fill: BT.709 luma remapped to (white - black) Y + black, chroma
@@ -55,60 +55,53 @@ vec3 GlassYcc(vec3 c, float white, float black, float saturation) {
 
 // The face: (white, black, saturation, fill alpha), light filled white and dark filled black, premultiplied.
 // Apple's structure with its parameters FITTED (Core/Glass.md): light and clear to SwiftUI's own render of the
-// same inputs (macOS 27), dark to Apple's native iOS 26 dark captures. Glass 56 pt and under tracks its
+// same inputs (macOS 27), dark to Apple's native iOS 26 dark captures. Glass 64 pt and under tracks its
 // backdrop: its light face moves between Apple's observed settled values by the mean luma, its dark face is
 // the one fitted to iOS's small controls.
 vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
-    if (clear > 0.5) return GlassYcc(c, 1.1054, 0.1295, 0.885);
+    vec3 clearFace = GlassYcc(c, 1.1054, 0.1295, 0.885);
+    if (clear >= 1.0) return clearFace;
     vec4 l = vec4(1.0054, 0.0829, 1.2246, 0.4);
     vec4 k = vec4(0.9608, 0.2941, 1.4167, 0.4);
-    if (span <= 56.0) {
+    if (span <= 64.0) {
         l = mix(vec4(0.919, 0.319, 1.0, 0.516), vec4(1.03, 0.819, 1.0, 0.266), clamp((mean - 0.45) / 0.5, 0.0, 1.0));
         k = vec4(0.6879, 0.1412, 1.6, 0.25);
     }
     vec3 lit = GlassYcc(c, l.x, l.y, l.z) * (1.0 - l.w) + vec3(l.w);
     vec3 dim = GlassYcc(c, k.x, k.y, k.z) * (1.0 - k.w);
-    return mix(dim, lit, light);
+    // A glass changing kind blends its two faces.
+    return mix(mix(dim, lit, light), clearFace, clear);
 }
 
-// THE ACTIVE LENS: Apple's pressed selection (Core/Glass.md). Two layers, as Apple's are (UIKit _UILiquidLensView: a
-// warped backdrop below, a warped copy of the bar's items above). The items lift on their own layer (Jwift's
-// Jwift_TabItemLensed); the glass reads the scene as drawn under it and takes in a wider area than it covers: a pixel
-// reads centre + (p - centre) x k, k GLASS_LENS_BODY_READ in the body, rising from GLASS_LENS_REACH of the span in to
-// GLASS_LENS_EDGE_READ at GLASS_LENS_BEZEL, then back to 1 at the outline, so nothing past the lens is pulled in.
-// [I] Apple's warp values did not survive decompilation (its warpSDF filter's key paths and lifted amounts), so the
-// profile is fitted to Apple's own frames against the same backdrop (Backdrop/fields.py): 0.97 in the body, 0.96 at
-// 13 to 20 pt in, 0.91 at 8 to 13 pt. The fold back to 1 is as gentle as a label crossing the rim allows: it may
-// stretch a stroke 1.5 x at most (Apple's own glassBackground bezel, GlassInnerShift, at this span would mirror it).
-// Down, the read is eased onto the bar's own rows, so the lens never reads the page above it.
-// Each channel reads out to its own edge, red past green and blue short of it: the fringe, GLASS_LENS_SPLIT x the
-// dispersion.
-const float GLASS_LENS_BODY_READ = 1.031;
-const float GLASS_LENS_BEZEL = 0.124;
-const float GLASS_LENS_REACH = 0.275;
-const float GLASS_LENS_EDGE_READ = 1.06;
-const vec2 GLASS_LENS_SPLIT = vec2(0.0047, 0.0374);
-const float GLASS_LENS_BAR_INSET = 1.5;
-const float GLASS_LENS_SCREEN_LIGHT = 2.3;
-const float GLASS_LENS_SCREEN_DARK = 1.8;
-// The light body never reaches white: Apple's lens interior sits at 238, under its 250 rim, which is what lets
-// the rim and its fringe read against a white bar.
-const float GLASS_LENS_BODY_CEILING = 0.935;
-vec3 GlassLensBody(vec3 c, float light) {
-    vec3 lifted = 1.0 - pow(clamp(1.0 - c, 0.0, 1.0), vec3(mix(GLASS_LENS_SCREEN_DARK, GLASS_LENS_SCREEN_LIGHT, light)));
-    return min(lifted, vec3(mix(1.0, GLASS_LENS_BODY_CEILING, light)));
-}
-// Its rim is iridescent: each channel's band is deeper by its own share, the three a third of a turn apart around
-// the outline, so the fringe's hue walks round the lens as Apple's does: green down the left, warm along the top,
-// blue toward the lower right. Its channels part by 2.6 device px (the median of its light rim); the dark rim's
-// fringe is a tenth of that (0.1 pt at its median).
-const float GLASS_LENS_IRIDESCENCE = 4.6;
-vec3 GlassLensRimHeights(vec2 n, float height, float ca, float light) {
-    float a = atan(n.y, n.x);
-    float share = GLASS_LENS_IRIDESCENCE * ca * mix(0.1, 1.0, light);
-    return height * (1.0 + share * (1.0 + cos(a - vec3(5.2360, 3.1416, 1.0472))));
-}
-
+// THE ACTIVE LENS: Apple's pressed selection, built as UIKit's _UILiquidLensView is (Jwift/Apple/LiquidGlass.md 7),
+// its math QuartzCore's (iOS 26.1 default.metallib). Bottom to top, while lifted:
+//   BackdropView: everything under the bar's lifted content, through a displacementMap filter (inputAmount
+//     GLASS_LENS_BACKDROP_WARP.x [C: the spec's liftedDisplacement 9, UIKitCore sub_1891F47F0]) on an SDF with
+//     CASDFGlassDisplacementEffect height GLASS_LENS_BACKDROP_WARP.y [C 36], curvature 1, angle 0, its capsule's
+//     gradientOvalization 0.5 [C sub_1891F7498], and a gaussianBlur of radius 0 when lifted [C], captured at the backdrop
+//     layer's default scale, 0.25 [C CABackdropLayer defaultValueForKey].
+//   ClearGlassView: its glass face over it (the variant's, not yet decoded); its contentWrapper, the lifted copy
+//     of the items through a displacementMap of inputAmount GLASS_LENS_ITEM_WARP.x [C -17.5, sub_1891F7824] on an SDF of
+//     height GLASS_LENS_ITEM_WARP.y [C 11.2], curvature 1, angle 0; the copy is a portal of the items, where they lie [C];
+//     its inverted inner shadow, GLASS_LENS_INNER_SHADOW [C].
+//   DestOutView: the real items under the lens erased [C] (here: the lens covers them).
+// The displacement is QuartzCore's sdf_glass_displacement (uber shader) read by displacement_map: `amount` x (1 -
+// mix(flat, sqrt(1 - (1 - t)^2), curvature)) along the SDF's normal, t = depth / height, none past `height` [C]. At
+// curvature 1 that is Apple's quarter-circle bezel, GlassShift. The map is the outward gradient and displacement_map
+// adds it, times the amount, to the read point, so a positive amount reads outward and a negative one inward
+// [C: sdf_glass_displacement returns (1 - profile) x the rotated gradient]. SampleMapFilter::render negates its
+// vertical row only to undo a flipped texture's storage [C: QuartzCore 0x183CB6AE4 to 0x183CB6B2C].
+const vec2 GLASS_LENS_BACKDROP_WARP = vec2(9.0, 36.0);
+const vec2 GLASS_LENS_ITEM_WARP = vec2(-17.5, 11.2);
+// Both warp SDFs' capsule, its gradientOvalization [C: sub_1891F7498, 0x1891F7760].
+const float GLASS_LENS_OVALIZATION = 0.5;
+// The lens glass's content lensing, its glassForeground [C: UIKitCore sub_1891F7824 adds the contentLensing option to
+// the lens's _Glass configuration; DesignLibrary sub_18AF84454 sets Parameters.Lensing from __TEXT.__const
+// 0x18AFDF150, 0x18AFDC160]: refraction height 8, amount -16, inset -3.3 (pt); edge distances 0, 0 and opacities 0, 1.
+// Its dispersion is the GlassDispersion setting (Auto: amount -3, height 3.3, inset 0, angle 90 degrees).
+const vec3 GLASS_LENS_LENSING_REFRACTION = vec3(8.0, -16.0, -3.3);
+const vec4 GLASS_LENS_LENSING_EDGE = vec4(0.0, 0.0, 0.0, 1.0);
+const vec3 GLASS_LENS_INNER_SHADOW = vec3(3.0, 0.12, 7.0);
 // The edge bleed's own matrix: light (1, 0.9, 1.2), dark (0.5, 0, 1).
 vec3 GlassBleed(vec3 c, float light) {
     return mix(GlassYcc(c, 0.5, 0.0, 1.0), GlassYcc(c, 1.0, 0.9, 1.2), light);
@@ -163,7 +156,7 @@ float GlassRimWeight(float a) { return a / ((1.0 - a) * GLASS_RIM_SHAPE + 1.0); 
 float GlassRimAlpha(float d, vec2 n, vec2 key, float amount, float height, float clear) {
     float s = -d;
     float fw = max(fwidth(s), 1e-4);
-    float cosSpread = clear > 0.5 ? -0.9397 : 0.0;
+    float cosSpread = mix(0.0, -0.9397, clear);
     return clamp(amount * (GlassRimWeight(GlassRimBand(s, fw, height, n, key, cosSpread))
                          + GlassRimWeight(GlassRimBand(s, fw, height, n, -key, cosSpread))), 0.0, 1.0);
 }

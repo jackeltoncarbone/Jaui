@@ -36,7 +36,7 @@ import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadow
 //          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularGlow, chromaticAberration, borderFade in device px)
 //   loc 13: a_RimEdge      (free, free, lens, lens ink)
-//   loc 14: a_Outline      (lens bar top, lens bar bottom, clipOffset, clipCount)
+//   loc 14: a_Outline      (dispersion amount + angle, height + inset (packed), clipOffset, clipCount)
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
 
@@ -123,7 +123,7 @@ export const JivFrostCssPx = (jiv: Jiv, dpr: number = 1): number => {
   const style = jiv.RenderStyle;
   // Glass's pyramid is built at its sharpest read (Core/Glass.Pipeline.ts): the frost is Apple's, not authored.
   if (style.Material === 'LiquidGlass') {
-    return Math.pow(2, GlassBlurNeedsOf(JivGlassSpan(jiv), dpr, style.GlassVariant).BaseLod) / dpr;
+    return Math.pow(2, GlassBlurNeedsOf(JivGlassSpan(jiv), dpr, style.GlassVariant, GlassIsLens(style.Lens)).BaseLod) / dpr;
   }
   if (!style.BackdropFrostAuto) return style.BackdropFrostBlur;
   const minHalf = Math.min(jiv.Width, jiv.Height) * 0.5;
@@ -221,7 +221,7 @@ export class JivInstanceBuffer {
     const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly;
     // Glass casts Apple's shadow: offset (0, 8) pt, reaching two radii (Glass.Pipeline), its alpha by size.
     const lens = GlassIsLens(style.Lens);
-    const glassShadowPeak = glass ? GlassShadowPeak(span, style.GlassVariant, lens) : 0;
+    const glassShadowPeak = glass ? GlassShadowPeak(span, style.GlassClear, lens) : 0;
     // The lens's shadow is a plain one, drawn by the flat program.
     const glassColoredShadow = glass && !lens && shadow === 'Only' && GlassSizeRamps(span).V > 0 && glassShadowPeak > 0;
     const shadowBlur = _ns ? 0 : glass ? 2 * GlassShadowRadius(span) * avgScale * d : style.ShadowBlur * avgScale * d;
@@ -326,7 +326,7 @@ export class JivInstanceBuffer {
     data[offset + 40] = d * avgScale;
     data[offset + 41] = style.Tint;
     data[offset + 42] = style.SchemeDark ? 1 : 0;
-    data[offset + 43] = style.GlassVariant === 'Clear' ? 1 : 0;
+    data[offset + 43] = style.GlassClear;
 
     // The highlight: each light's amount and the band's depth in points.
     data[offset + 44] = style.RimStrength;
@@ -343,20 +343,11 @@ export class JivInstanceBuffer {
     data[offset + 51] = ink.A > 0.001
       ? 1 + Math.round(ink.R * 255) * 65536 + Math.round(ink.G * 255) * 256 + Math.round(ink.B * 255) : 0;
 
-    // The lens reads only the bar it stands on: the bar's top and bottom on screen (device px), taken from its
-    // parent's box with the lens's own scale undone, so a drag's stretch never reaches past the bar.
-    const bar = lens ? jiv.Parent : null;
-    if (bar) {
-      const sy = style.VisualScaleY || 1;
-      const pivotY = jiv.Y + jiv.Height * style.VisualOriginY;
-      const x = jiv.X + jiv.Width * 0.5;
-      const unscaled = (y: number): number => pivotY + (y - pivotY - style.VisualTranslateY) / sy;
-      data[offset + 52] = matApplyY(m, x, unscaled(bar.Y)) * d;
-      data[offset + 53] = matApplyY(m, x, unscaled(bar.Y + bar.Height)) * d;
-    } else {
-      data[offset + 52] = 0;
-      data[offset + 53] = 0;
-    }
+    // The content lensing's dispersion, two values a lane, each exact in a float's 24 bits: amount (pt, 1/64 steps over
+    // -64..64) and angle (whole degrees, 0..359); height and inset (pt, 1/32 steps over 0..64 and -32..32).
+    const q = (v: number, step: number, lo: number, hi: number): number => Math.round((Math.min(Math.max(v, lo), hi) - lo) / step);
+    data[offset + 52] = q(style.GlassDispersionAmount, 1 / 64, -64, 64) + 8192 * q(((style.GlassDispersionAngle % 360) + 360) % 360, 1, 0, 359);
+    data[offset + 53] = q(style.GlassDispersionHeight, 1 / 32, 0, 64) + 4096 * q(style.GlassDispersionInset, 1 / 32, -32, 32);
     data[offset + 54] = clipOffset;
     data[offset + 55] = clipCount;
 

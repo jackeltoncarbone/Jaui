@@ -13,7 +13,7 @@ export const DefaultJivStyle: JivStyle = {
   PointScale: '1pt',
   BorderRadius: '0',
   CornerShape: 'Round',
-  BorderRadiusSmoothness: '0.6',
+  BorderRadiusSmoothness: '1',
   Background: 'rgba(0, 0, 0, 0)',
   // Vibrancy, inherited (Core/Vibrancy.ts). `Inherit` takes the ancestor's; `None` is the reset.
   Vibrancy: 'Inherit',
@@ -31,10 +31,11 @@ export const DefaultJivStyle: JivStyle = {
   Tint: '0',
   TintTone: 'Ground',
   ChromaticAberration: '0',
-  Lens: '0',
   LensInk: 'rgba(0, 0, 0, 0)',
   RimWidth: '0',
   RimStrength: '0',
+  LensLiftedScale: '1',
+  GlassDispersion: 'Auto',
   Transform: '',                         // empty = identity
   // Visual* — render-time, per-element. `VisualScale: '1'` is identity;
   // `VisualTranslate: '0'` is no offset; `VisualOrigin: '0.5'` is center.

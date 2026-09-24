@@ -75,8 +75,8 @@ export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRigh
  *    • Ink:    the opposite neutral, white in dark and black in light (a selection or highlight).
  *    • Dark / Light: always black / always white, whatever the theme (glass over video or a camera). */
 export type TintTone = 'Ground' | 'Ink' | 'Dark' | 'Light';
-/** Apple's glass (Jwift/Apple/LiquidGlass.md 3.8). None is no glass. */
-export type GlassKind = 'None' | 'Regular' | 'Clear';
+/** Apple's glass (Jwift/Apple/LiquidGlass.md 3.8, 7). None is no glass; Lens the pressed selection's lens. */
+export type GlassKind = 'None' | 'Regular' | 'Clear' | 'Lens';
 export type GlassVariant = 'Regular' | 'Clear';
 /** What a progressive blur is to the glass inside it.
  *    • Surface: the surface's own material. Glass in it sits on it and sees it, blurred as drawn.
@@ -145,8 +145,8 @@ export interface JivStyle {
   BorderRadius: string;
   /** Space-separated tokens; same 1/2/4 shorthand as BorderRadius. */
   CornerShape: string;
-  /** Apple's corner curve (Jiv/Shaders/Corner.Continuous.glsl): 0 is the circular corner, anything above 0
-   *  the continuous corner, Apple's exact construction (the default). */
+  /** Apple's corner curve (Jiv/Shaders/Corner.Continuous.glsl): 0 is the circular corner, 1 the continuous
+   *  corner, Apple's exact construction (the default); between, the shape blends, so the curve can spring. */
   BorderRadiusSmoothness: string;
   // Fill
   Background: string;
@@ -206,8 +206,9 @@ export interface JivStyle {
 
   // Physical material — the Jiv is a slab with measurable properties
   Frost: string;
-  /** `Glass: None | Regular | Clear`: Apple's glass (Jwift/Apple/LiquidGlass.md), every lever at Apple's value
-   *  for the shape's size. None (the default) is no glass. */
+  /** `Glass: None | Regular | Clear | Lens`: Apple's glass (Jwift/Apple/LiquidGlass.md), every lever at Apple's
+   *  value for the shape's size. None (the default) is no glass. A change of kind is continuous: every parameter
+   *  springs between the two kinds on `@Spring Glass` / `@Transition Glass`, None being the zero end. */
   Glass: GlassKind;
   /** How far the glass has come in, 0..1; Auto (the default) is 1 on glass. Springs a glass in and out. */
   Thickness: string;
@@ -225,9 +226,6 @@ export interface JivStyle {
   /** Dispersion across the lens, 0 on Apple's standard glass: red at (1 + 0.2 ca) of the bend, green at
    *  (1 + 0.1 ca). The moving selection lens uses it. */
   ChromaticAberration: string;
-  /** THE ACTIVE LENS (Core/Glass.md): 0 is ordinary glass, 1 the pressed selection's lens, which refracts the
-   *  scene as drawn under it with Apple's own bezel (Glass.Pipeline.glsl, GlassActiveLens). Springs between. */
-  Lens: string;
   /** The colour the active lens gives the ink it magnifies: Apple's lens shows the items under it in the selection's
    *  tint. Transparent (the default) leaves the ink as it is. */
   LensInk: string;
@@ -238,6 +236,14 @@ export interface JivStyle {
   RimWidth: string;
   /** Each light's amount, 0..2 (the band's alpha is clamped to 1). Default 0, no rim. */
   RimStrength: string;
+  /** An active lens's lifted items, each scaled about its own centre as the lens lifts: UIKit scales the iPhone tab
+   *  bar's selected twins by its metric 1.16 (Jwift/Apple/LiquidGlass.md 7.1). Default 1. */
+  LensLiftedScale: string;
+  /** `GlassDispersion: Auto | None | <amount> <height> <inset> <angle>`: the dispersion of the glass's content lensing,
+   *  QuartzCore's glassForeground (Jwift/Apple/LiquidGlass.md 3.7): `amount` pt of spread at the outline, easing over
+   *  `height` pt from `inset` pt in, along the normal turned by `angle`. Auto is Apple's for the glass: the lens
+   *  variant's content lensing (-3pt 3.3pt 0pt 90deg, DesignLibrary's recipe) on `Glass: Lens`, none otherwise. */
+  GlassDispersion: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.
   // Internal/legacy. Author-facing visual transform lives on the
@@ -358,7 +364,9 @@ export interface JivRenderStyle {
   Thickness: number;
   Refraction: number;
   Glass: GlassKind;
-  /** The glass's variant, for the pipeline's laws: Clear or Regular. */
+  /** How clear the glass is, 0 (Regular) to 1 (Clear and Lens): springs, so a change of kind blends. */
+  GlassClear: number;
+  /** The variant the CPU plans the backdrop for: Regular until the glass is wholly clear. */
   GlassVariant: GlassVariant;
   /** The theme the element resolved under: glass without a probe takes its appearance. */
   SchemeDark: boolean;
@@ -377,6 +385,12 @@ export interface JivRenderStyle {
   ChromaticAberration: number;
   Lens: number;
   LensInk: Color;
+  LensLiftedScale: number;
+  /** Resolved `GlassDispersion`: amount (pt), height (pt), inset (pt), angle (degrees). Each springs. */
+  GlassDispersionAmount: number;
+  GlassDispersionHeight: number;
+  GlassDispersionInset: number;
+  GlassDispersionAngle: number;
 
   /** Resolved `RimWidth`, in points. */
   RimWidth: number;

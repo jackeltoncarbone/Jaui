@@ -103,6 +103,9 @@ const _instanceFrostLod = (frostCssPx: number, dpr: number): number =>
  *  to the u_Scene sampler with no snapshot bound would paint the dummy texture. Every real class is
  *  either 0 frost or a whole point of it, so the widened band costs nothing. */
 const SCENE_TAP_FROST_LOD = 0.05;
+/** How far past its parent's box an active lens's backdrop copy reaches (pt): the lens stands up to 12 pt past the
+ *  resting pill and its backdrop warp reads further out still (Glass.Pipeline.glsl, GLASS_LENS_BACKDROP_WARP). */
+const LENS_BELOW_REACH_PT = 32;
 
 /** How many pyramid chains per level-0 size `?blur-phased` asks the pool to rotate through.
  *
@@ -1951,6 +1954,8 @@ export class Canvas implements DirtyTracker {
   private _cacheForce = false;
   private _damageTest = false; // [damage] Phase A: gated ?damage-test — cull nodes outside a hardcoded dirty rect to prove the mechanism
   private _damageRectCss: { x: number; y: number; w: number; h: number } | null = null;
+  /** An active lens's lifted content, the bar's items drawn again (liftLensItems in the walk). */
+  private _lensItems: Framebuffer | null = null;
   private _layerCache = new Map<Jiv, { Fbo: Framebuffer; Valid: boolean; DX: number; DY: number; DW: number; DH: number }>();
   /** Per-render memo of "subtree samples the live scene → uncacheable". Cleared
    *  at the top of every _render; real structural/material changes happen under
@@ -2838,6 +2843,12 @@ export class Canvas implements DirtyTracker {
     // build of its own. A `Surface` blur is the surface's own material: glass in it builds from the scene
     // as drawn, blur included. Scoped to the strip's subtree; null everywhere else.
     let edgeBackdrop: EdgeBackdrop | null = null;
+    // AN ACTIVE LENS'S BACKDROP (Jwift/Apple/LiquidGlass.md 7.1): Apple's lens is a BackdropView over everything
+    // under the bar's lifted content (the bar's glass and, past its edges, the page), the real items erased under
+    // it, and a lifted copy of those items above its glass. So its parent takes a copy of the scene just before the
+    // first child of the lifted content draws (Layer 1 and up: a lens's resting pill is Layer 0), and the lens
+    // warps that copy and lifts the items from the scene as drawn over it.
+    let lensBelow: { Lens: Jiv; Handle: GpuTextureHandle; Items: GpuTextureHandle | null } | null = null;
     // The glass whose labels the text drawn now sits on (`SetGlassInk`): its probe slot and theme, or -1.
     let glassInk = { Slot: -1, Dark: false };
     // The probe slot of the glass whose children are being walked, for its rim pass's appearance; -1 elsewhere.
@@ -3026,10 +3037,23 @@ export class Canvas implements DirtyTracker {
         if (this._bcOn) this._bc.Close();
       };
 
+      const lens = this._activeLensChild(node);
       for (const child of this._orderedChildren(node)) {
         // The edge drops in at its layer slot, just before the first child at or above BorderLayer
         // (children are Layer-sorted ascending).
         if (!edgeEmitted && child.RenderStyle.Layer >= borderLayer) emitEdge();
+        if (lens !== null && child.RenderStyle.Layer >= 1 && lensBelow?.Lens !== lens) {
+          flushPanels();
+          flushText();
+          const box = this._nodeAabb(node, eff, effH);
+          const d = this._dpr, reach = LENS_BELOW_REACH_PT * d;
+          const handle = r.SnapshotBelow({
+            x: Math.max(0, Math.floor(box.minX * d - reach)), y: Math.max(0, Math.floor(box.minY * d - reach)),
+            w: Math.ceil((box.maxX - box.minX) * d + 2 * reach), h: Math.ceil((box.maxY - box.minY) * d + 2 * reach),
+          });
+          r.RebindSceneTarget();
+          lensBelow = { Lens: lens, Handle: handle, Items: liftLensItems(node, lens, stack, boxClip, childM, childMH, persp) };
+        }
         const clip = this._childClip(node, stack, boxClip, child);
         // A Pinned child belongs to the scroller's FRAME, not its content:
         // it renders in the un-scrolled matrix, which is what a scrollbar, a
@@ -3502,6 +3526,9 @@ export class Canvas implements DirtyTracker {
         // line rather than taking a pre-built one. The insertion point below needs to know, and
         // the build sits inside a branch whose locals do not survive it.
         let fillBuilt = false;
+        // An active lens builds from the scene under the lifted content its parent copied, never a shared one.
+        const below = lensBelow !== null && lensBelow.Lens === node ? lensBelow.Handle : null;
+        const lensItems = lensBelow !== null && lensBelow.Lens === node ? lensBelow.Items : null;
         if (this._sharedBackdrop) {
           // ── Shared backdrop (fire once, sample many) ──
           // Build ONE sharp-root pyramid per frame and let every glass surface
@@ -3567,7 +3594,7 @@ export class Canvas implements DirtyTracker {
           // surface reads it at its OWN frost, undimmed: Apple's bar keeps the content under it as sharp
           // as its frost (0.4 to 0.9pt), whatever the strip around it blurs to. A frost-0 surface reads
           // the raw scene snapshot, which the strip has since dimmed, so it builds its own.
-          const edgeFill = edgeBackdrop !== null && plan.InstFrostLod >= SCENE_TAP_FROST_LOD
+          const edgeFill = below === null && edgeBackdrop !== null && plan.InstFrostLod >= SCENE_TAP_FROST_LOD
             && _regionContains(edgeBackdrop.Region, region) ? edgeBackdrop : null;
           // `?glass-group`: THE GROUP'S BACKDROP, AND THE POINT IT IS CAPTURED AT.
           //
@@ -3582,7 +3609,7 @@ export class Canvas implements DirtyTracker {
           //
           // It is asked BEFORE `preFill` rather than after, and the flag parse refuses
           // `?blur-first` and `?blur-phased` by name, so the two can never both answer.
-          const groupFill = this._glassGroup ? this._glassGroupTake(node, region, w, h, dt) : null;
+          const groupFill = below === null && this._glassGroup ? this._glassGroupTake(node, region, w, h, dt) : null;
           if (groupFill !== null) {
             lastBackdrop = groupFill;
             // `?blur-cache`: a group's pyramid is built over the union of its members at the first
@@ -3599,7 +3626,7 @@ export class Canvas implements DirtyTracker {
             // `?blur-cache`: the strip's pyramid is keyed to the strip, not to this surface, so this
             // surface's pixels are called changed every frame, as a glass group's members are.
             if (this._bcOn) this._bc.Fresh('edge');
-          } else if (preFill !== undefined) {
+          } else if (below === null && preFill !== undefined) {
             lastBackdrop = preFill;
             this._blurFirstStats.Used++;
           } else {
@@ -3608,7 +3635,7 @@ export class Canvas implements DirtyTracker {
             const separable = this._maySeparable(plan);
             lastBackdrop = this._bcBuild(node, READER_FILL, region, plan.Radius, plan.MaxLod, presample, separable, w, h, () => {
               const _tBlur = performance.now();
-              const built = r.ComputeBlur(r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
+              const built = r.ComputeBlur(below ?? r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
               const _tMip = performance.now();
               this._opMs.Blur += _tMip - _tBlur;
               r.GenerateBlurMipmap(plan.MaxLod);
@@ -3751,7 +3778,7 @@ export class Canvas implements DirtyTracker {
         }
         const _tDraw = performance.now();
         if (!(this._diagNoGlassDraw && _isGlass(material))) {
-          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop);
+          r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, _isGlass(material), sceneSnap, glassBgPaint, shadowBackdrop, lensItems);
         }
         this._opMs.Draw += performance.now() - _tDraw;
         if (_isGlass(material)) this._counts.Glass++;
@@ -3985,6 +4012,46 @@ export class Canvas implements DirtyTracker {
         flushText();
         (r2 as WebGL2Renderer).EndCardComposite();
       }
+    };
+
+    // THE LENS'S LIFTED CONTENT (Jwift/Apple/LiquidGlass.md 7.1): UIKit's liftedContentPortalView, a portal of the
+    // bar's items -- the same layers drawn a second time, where they lie (matches position and transform), into the
+    // lens's glass. Here the items (the lens's siblings from Layer 1 up to the lens's own) are drawn into their own
+    // canvas-sized layer, transparent elsewhere, which the lens reads through its SDF warp. The originals still draw
+    // in the bar; the lens covers them, as Apple's DestOutView erases them.
+    const liftLensItems = (bar: Jiv, lens: Jiv, stack: ClipStack, boxClip: ClipShape, m: Mat2x3, mh: Mat3x3 | null, persp: PerspCtx | null): GpuTextureHandle | null => {
+      if (this._capturing || !(this._renderer instanceof WebGL2Renderer)) return null;
+      const cgl = this._renderer.GetGL();
+      if (!cgl) return null;
+      flushPanels();
+      flushText();
+      const fbo = this._lensItems ??= new Framebuffer(cgl);
+      fbo.Resize(w, h);
+      fbo.Bind();
+      cgl.viewport(0, 0, w, h);
+      cgl.clearColor(0, 0, 0, 0);
+      cgl.clear(cgl.COLOR_BUFFER_BIT);
+      const savedW = flushW, savedH = flushH;
+      flushW = w; flushH = h;
+      const scope: TeleportScope = { Deferred: [], Stack: stack };
+      this._capturing = true;
+      // Each item scaled about its own centre as the lens lifts (UIKit's selected twins, LensLiftedScale).
+      const scale = 1 + (lens.RenderStyle.LensLiftedScale - 1) * lens.RenderStyle.Lens;
+      for (const item of this._orderedChildren(bar)) {
+        const layer = item.RenderStyle.Layer;
+        if (item === lens || layer < 1 || layer >= lens.RenderStyle.Layer || item.TeleportSeq !== 0) continue;
+        const cx = item.X + item.Width * 0.5, cy = item.Y + item.Height * 0.5;
+        const lift: Mat2x3 = [scale, 0, 0, scale, cx * (1 - scale), cy * (1 - scale)];
+        renderNode(item, matMul(m, lift), this._childClip(bar, stack, boxClip, item), scope,
+          mh !== null ? mat3Mul(mh, mat3FromAffine(lift)) : null, persp);
+      }
+      replayScope(scope);
+      flushPanels();
+      flushText();
+      this._capturing = false;
+      flushW = savedW; flushH = savedH;
+      this._renderer.RebindSceneTarget();
+      return this._renderer.WrapTexture(fbo.Texture);
     };
 
     // Retained-mode layer cache. Capture a stable subtree into its own FBO once,
@@ -5526,7 +5593,7 @@ export class Canvas implements DirtyTracker {
 
   /** A glass surface's shadow peak at its rendered size (Core/Glass.Pipeline.ts); 0 on clear glass. */
   private _glassShadowPeak = (node: Jiv, eff: Mat2x3): number =>
-    GlassShadowPeak(JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5, node.RenderStyle.GlassVariant, GlassIsLens(node.RenderStyle.Lens));
+    GlassShadowPeak(JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5, node.RenderStyle.GlassClear, GlassIsLens(node.RenderStyle.Lens));
 
   /** The glass FILL pyramid's plan: the region it is built over, the sigma it is built at, and how
    *  deep a chain the surface can read.
@@ -5535,6 +5602,15 @@ export class Canvas implements DirtyTracker {
    *  INWARD along the normal (Jiv.Panel.frag, the refraction band), chromatic spread included, so no
    *  tap ever leaves the panel's own box. The region is canvas-clamped, so a heavy panel just falls
    *  back toward a full-canvas pyramid, which resolves to the identity map. */
+  /** The child of `node` that is an active lens (Jwift/Apple/LiquidGlass.md 7), or null. */
+  private _activeLensChild = (node: Jiv): Jiv | null => {
+    for (const child of node.Children as Jiv[]) {
+      const rs = child.RenderStyle;
+      if (child.Visible && GlassIsLens(rs.Lens) && _isGlass(rs.Material)) return child;
+    }
+    return null;
+  };
+
   private _glassFillBlurPlan = (
     node: Jiv, eff: Mat2x3, effH: Mat3x3 | null, w: number, h: number,
   ): GlassBlurPlan => {
@@ -5547,7 +5623,7 @@ export class Canvas implements DirtyTracker {
     // Glass reads past its face (the outer lens sample, and on large glass the edge bleed and the colored
     // shadow) and deeper than its base (the body at full radius): Core/Glass.Pipeline.ts says how far.
     const glass = _isGlass(rs.Material)
-      ? GlassBlurNeedsOf(JivGlassSpan(node) * avgScale, d, rs.GlassVariant) : null;
+      ? GlassBlurNeedsOf(JivGlassSpan(node) * avgScale, d, rs.GlassVariant, GlassIsLens(rs.Lens)) : null;
     const margin = Math.max(frostCssPx * d + 8 * d, glass !== null ? glass.ReachPt * avgScale * d : 0);
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
     // second reading of them: the surface draws with its shadow excluded, so its quad is the face,

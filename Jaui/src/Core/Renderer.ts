@@ -246,7 +246,9 @@ export interface Renderer {
    *
    *  Image / gradient batches typically contain a SINGLE panel (one texture
    *  or one stop set per draw call); the renderer batches Color panels
-   *  together as before. */
+   *  together as before.
+   *
+   *  `lensItems` is an active lens's lifted content: the bar's items drawn again into their own canvas-sized layer. */
   PanelDrawBatch(
     canvasWidth: number,
     canvasHeight: number,
@@ -256,6 +258,7 @@ export interface Renderer {
     scene?: GpuTextureHandle | null,
     bgPaint?: BgPaint,
     appearance?: ShadowBackdrop,
+    below?: GpuTextureHandle | null,
   ): void;
 
   /** Measure the backdrop under a glass surface into that surface's eased state, after its backdrop pyramid
@@ -385,6 +388,10 @@ export interface Renderer {
    *  blit cost scales with the surface, not the whole canvas. Returns a handle
    *  to the snapshot. */
   SnapshotScreen(scissor?: { x: number; y: number; w: number; h: number }): GpuTextureHandle;
+
+  /** Copy the scene as it stands now, over `scissor`, into the lens's own texture: what lies under a lens's
+   *  lifted content, taken before that content draws. Survives every later `SnapshotScreen`. */
+  SnapshotBelow(scissor: { x: number; y: number; w: number; h: number }): GpuTextureHandle;
 
   // ── Texture Management ──
 
