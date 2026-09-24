@@ -4036,15 +4036,23 @@ export class Canvas implements DirtyTracker {
       flushW = w; flushH = h;
       const scope: TeleportScope = { Deferred: [], Stack: stack };
       this._capturing = true;
-      // Each item scaled about its own centre as the lens lifts (UIKit's selected twins, LensLiftedScale).
+      // Each item scaled about its own centre as the lens lifts (UIKit's selected twins, LensLiftedScale). The twins
+      // are the lens's portal, which takes the bar's model transform and not its flex swell (a presentation
+      // modifier), so the bar's own VisualScale is taken back out of their matrix.
       const scale = 1 + (lens.RenderStyle.LensLiftedScale - 1) * lens.RenderStyle.Lens;
+      const bs = bar.RenderStyle;
+      const sx = bs.VisualScaleX, sy = bs.VisualScaleY;
+      const px = bar.X + bar.Width * bs.VisualOriginX, py = bar.Y + bar.Height * bs.VisualOriginY;
+      const unswell: Mat2x3 = [1 / sx, 0, 0, 1 / sy, -(px * (1 - sx) + bs.VisualTranslateX) / sx, -(py * (1 - sy) + bs.VisualTranslateY) / sy];
+      const mTwin = matMul(m, unswell);
+      const mhTwin = mh !== null ? mat3Mul(mh, mat3FromAffine(unswell)) : null;
       for (const item of this._orderedChildren(bar)) {
         const layer = item.RenderStyle.Layer;
         if (item === lens || layer < 1 || layer >= lens.RenderStyle.Layer || item.TeleportSeq !== 0) continue;
         const cx = item.X + item.Width * 0.5, cy = item.Y + item.Height * 0.5;
         const lift: Mat2x3 = [scale, 0, 0, scale, cx * (1 - scale), cy * (1 - scale)];
-        renderNode(item, matMul(m, lift), this._childClip(bar, stack, boxClip, item), scope,
-          mh !== null ? mat3Mul(mh, mat3FromAffine(lift)) : null, persp);
+        renderNode(item, matMul(mTwin, lift), this._childClip(bar, stack, boxClip, item), scope,
+          mhTwin !== null ? mat3Mul(mhTwin, mat3FromAffine(lift)) : null, persp);
       }
       replayScope(scope);
       flushPanels();
