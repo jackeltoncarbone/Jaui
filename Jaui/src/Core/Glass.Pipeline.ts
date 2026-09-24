@@ -8,6 +8,9 @@ export type GlassVariant = 'Regular' | 'Clear';
 
 /** Glass this small tracks its backdrop's luma: its appearance and its face follow what is behind it. */
 export const GLASS_TRACKS_LUMA_SPAN = 56;
+/** The active lens reads the bar's body this many levels above its pyramid's base (GLASS_LENS_FROST_LOD in
+ *  Glass.Pipeline.glsl), so its plan builds that deep. */
+export const GLASS_LENS_FROST_LOD = 2;
 
 /** `u` ramps over S = 48..160 pt and `v` over 64..160 pt, S being the shape's minor dimension. */
 export const GlassSizeRamps = (span: number): { U: number; V: number } => ({

@@ -363,27 +363,32 @@ vec3 glassSample(vec2 pixel, float lod) {
     return textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, max(0.0, lod - u_BaseFrostLod)).rgb;
 }
 
-// THE ACTIVE LENS (Glass.Pipeline.glsl, Core/Glass.md): Apple's pressed selection. Inside its bezel it magnifies
-// the backdrop about its centre, sharp; the bezel folds the content past its outline back in, dispersed; the body
-// is lifted by the lens's own screen curve.
+// THE ACTIVE LENS (Glass.Pipeline.glsl, Core/Glass.md): Apple's pressed selection, over the bar as drawn. Inside its
+// bezel it magnifies what is under it about its centre: the bar's ink (its glyphs and labels) sharp, the bar's own
+// body frosted, so what shows through a translucent bar stays frosted as the bar draws it. The bezel runs on from
+// the magnified body out to the bar's own edge, which it shows at the lens's outline, dispersed; the body is
+// lifted by the lens's screen curve.
 vec3 GlassActiveLens(float d, vec2 nScreen, float span, float dpr, float zoom, float ca, float light) {
     float bezel = GLASS_LENS_BEZEL * span;
-    // The bezel gives way to the body over a point and a half.
-    float body = smoothstep(bezel - 0.75, bezel + 0.75, -d);
-    vec3 seen = vec3(0.0);
-    if (body > 0.0) {
-        vec3 magnified = glassSample(v_Rot.zw + (v_PixelPos - v_Rot.zw) / zoom, 0.0);
-        seen = GlassSkips(GLASS_SKIP_GRADE) ? magnified : GlassLensBody(magnified, light);
+    float t = max(-d, 0.0);
+    vec2 c = v_Rot.zw;
+    vec2 source;
+    if (t >= bezel) {
+        source = c + (v_PixelPos - c) / zoom;
+    } else {
+        vec2 inner = v_PixelPos - nScreen * (bezel - t) * dpr;
+        vec2 edge = v_PixelPos + nScreen * t * dpr - nScreen * GLASS_LENS_LIFT * dpr;
+        source = mix(edge, c + (inner - c) / zoom, t / bezel);
     }
-    if (body < 1.0) {
-        vec2 fold = nScreen * (-d) * (1.0 + GLASS_LENS_FOLD) * dpr;
-        float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca;
-        vec3 folded = vec3(glassSample(v_PixelPos + fold * (1.0 + 0.2 * spread), 0.0).r,
-                           glassSample(v_PixelPos + fold * (1.0 + 0.1 * spread), 0.0).g,
-                           glassSample(v_PixelPos + fold, 0.0).b);
-        seen = mix(folded, seen, body);
-    }
-    return seen;
+    vec2 offset = source - v_PixelPos;
+    float spread = (GlassSkips(GLASS_SKIP_CA) || t >= bezel) ? 0.0 : ca;
+    vec3 sharp = vec3(glassSample(v_PixelPos + offset * (1.0 + 0.2 * spread), 0.0).r,
+                      glassSample(v_PixelPos + offset * (1.0 + 0.1 * spread), 0.0).g,
+                      glassSample(source, 0.0).b);
+    vec3 frosted = glassSample(source, u_BaseFrostLod + GLASS_LENS_FROST_LOD);
+    float ink = smoothstep(GLASS_LENS_INK.x, GLASS_LENS_INK.y, abs(dot(sharp - frosted, GLASS_BT709)));
+    vec3 seen = mix(frosted, sharp, ink);
+    return GlassSkips(GLASS_SKIP_GRADE) ? seen : GlassLensBody(seen, light);
 }
 
 // Sample the backdrop at this Jiv's frost. A Jiv that authored no frost samples the raw scene

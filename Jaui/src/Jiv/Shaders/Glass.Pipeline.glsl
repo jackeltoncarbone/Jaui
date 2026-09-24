@@ -71,8 +71,12 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
 // body is a screen curve 1 - (1 - c)^g that keeps the ink's depth. Light lifts Apple's 177 bar body to its 238;
 // dark lifts OUR dark bar (44) to Apple's dark lens interior (73), measured on our own tab bar.
 const float GLASS_LENS_BEZEL = 0.093;
-// The fold reaches 0.093 S past the outline, inside the 0.2 S the pyramid is built past it (Glass.Pipeline.ts).
-const float GLASS_LENS_FOLD = 1.0;
+// The lens stands this far past the bar top and bottom (Apple's 5.3 pt), so its outline shows the bar's own edge.
+const float GLASS_LENS_LIFT = 5.3;
+// Under the lens the bar's ink (a glyph against the bar, a local contrast above these) is read sharp and the bar's
+// own body frosted, two levels above the pyramid's base.
+const vec2 GLASS_LENS_INK = vec2(0.06, 0.2);
+const float GLASS_LENS_FROST_LOD = 2.0;
 const float GLASS_LENS_SCREEN_LIGHT = 2.3;
 const float GLASS_LENS_SCREEN_DARK = 1.8;
 vec3 GlassLensBody(vec3 c, float light) {
