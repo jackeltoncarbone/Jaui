@@ -395,7 +395,7 @@ vec4 lensContent(vec2 pixel, float dpr, float ease, float inkPacked, out float c
     float d;
     vec2 n;
     lensField(pixel, dpr, GLASS_LENS_OVALIZATION, d, n);
-    vec3 backdrop = glassSample(pixel + n * GlassShift(d, GLASS_LENS_BACKDROP_WARP.x, GLASS_LENS_BACKDROP_WARP.y) * dpr * ease,
+    vec3 backdrop = glassSample(pixel + n * GlassShift(d, GLASS_LENS_BACKDROP_WARP.x * dpr * GLASS_LENS_BACKDROP_CAPTURE, GLASS_LENS_BACKDROP_WARP.y) * dpr * ease,
                                 GlassNativeLod(0.0, dpr, 0.0));
     vec2 read = pixel + n * GlassShift(d, GLASS_LENS_ITEM_WARP.x, GLASS_LENS_ITEM_WARP.y) * dpr * ease;
     vec2 uv = read / u_Resolution;

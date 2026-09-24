@@ -92,6 +92,11 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
 // [C: sdf_glass_displacement returns (1 - profile) x the rotated gradient]. SampleMapFilter::render negates its
 // vertical row only to undo a flipped texture's storage [C: QuartzCore 0x183CB6AE4 to 0x183CB6B2C].
 const vec2 GLASS_LENS_BACKDROP_WARP = vec2(9.0, 36.0);
+// The BackdropView's displacement runs in its capture's texels, at the backdrop layer's scale 0.25 of the device
+// pixel, so its amount lands as points times device scale times 0.25 [I: SampleMapFilter::render builds its matrix
+// from the transform and the source texture's texels (QuartzCore 0x183CB6B80); which of the two carries the capture
+// scale is not settled; measured, both of Apple's inner band edges within 0.25 pt]. The items' portal is at full scale.
+const float GLASS_LENS_BACKDROP_CAPTURE = 0.25;
 const vec2 GLASS_LENS_ITEM_WARP = vec2(-17.5, 11.2);
 // Both warp SDFs' capsule, its gradientOvalization [C: sub_1891F7498, 0x1891F7760].
 const float GLASS_LENS_OVALIZATION = 0.5;
