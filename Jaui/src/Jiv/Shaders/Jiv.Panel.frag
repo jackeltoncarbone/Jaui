@@ -366,6 +366,29 @@ vec3 glassSample(vec2 pixel, float lod) {
     return textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, max(0.0, lod - u_BaseFrostLod)).rgb;
 }
 
+// The BackdropView's read: the scene under the lifted items (u_Scene) as a CABackdropLayer captures it, at
+// GLASS_LENS_BACKDROP_CAPTURE of the device pixel with no blur (its gaussianBlur is 0 lifted [C]), read bilinearly.
+// Each capture texel is the mean of its device pixels, four bilinear fetches over a 4 x 4 block; the texel grid
+// is anchored at the screen's origin [I: Apple's is the backdrop layer's].
+vec3 lensCaptureTexel(vec2 texel) {
+    float span = 1.0 / GLASS_LENS_BACKDROP_CAPTURE;
+    vec2 origin = texel * span;
+    vec3 c = vec3(0.0);
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < 2; j++) {
+            vec2 uv = (origin + span * (0.25 + 0.5 * vec2(float(i), float(j)))) / u_Resolution;
+            uv.y = 1.0 - uv.y;
+            c += texture(u_Scene, uv).rgb;
+        }
+    }
+    return c * 0.25;
+}
+vec3 lensCapture(vec2 pixel) {
+    vec2 q = pixel * GLASS_LENS_BACKDROP_CAPTURE - 0.5;
+    vec2 i = floor(q), f = q - i;
+    return mix(mix(lensCaptureTexel(i), lensCaptureTexel(i + vec2(1.0, 0.0)), f.x),
+               mix(lensCaptureTexel(i + vec2(0.0, 1.0)), lensCaptureTexel(i + vec2(1.0, 1.0)), f.x), f.y);
+}
 // The lens's own SDF at a screen pixel, as QuartzCore's compute_sdf_with_mode gives it: the depth in pt (negative
 // inside) and the outward normal on screen, the shape's gradient mixed by `ovalization` toward the direction from
 // the centre with y scaled by the half width over the half height [C].
@@ -395,8 +418,8 @@ vec4 lensContent(vec2 pixel, float dpr, float ease, float inkPacked, out float c
     float d;
     vec2 n;
     lensField(pixel, dpr, GLASS_LENS_OVALIZATION, d, n);
-    vec3 backdrop = glassSample(pixel + n * GlassShift(d, GLASS_LENS_BACKDROP_WARP.x * dpr * GLASS_LENS_BACKDROP_CAPTURE, GLASS_LENS_BACKDROP_WARP.y) * dpr * ease,
-                                GlassNativeLod(0.0, dpr, 0.0));
+    vec3 backdrop = lensCapture(pixel + n * GlassShift(d, GLASS_LENS_BACKDROP_WARP.x * dpr * GLASS_LENS_BACKDROP_CAPTURE,
+                                                      GLASS_LENS_BACKDROP_WARP.y) * dpr * ease);
     vec2 read = pixel + n * GlassShift(d, GLASS_LENS_ITEM_WARP.x, GLASS_LENS_ITEM_WARP.y) * dpr * ease;
     vec2 uv = read / u_Resolution;
     uv.y = 1.0 - uv.y;

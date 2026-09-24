@@ -95,7 +95,9 @@ const vec2 GLASS_LENS_BACKDROP_WARP = vec2(9.0, 36.0);
 // The BackdropView's displacement runs in its capture's texels, at the backdrop layer's scale 0.25 of the device
 // pixel, so its amount lands as points times device scale times 0.25 [I: SampleMapFilter::render builds its matrix
 // from the transform and the source texture's texels (QuartzCore 0x183CB6B80); which of the two carries the capture
-// scale is not settled; measured, both of Apple's inner band edges within 0.25 pt]. The items' portal is at full scale.
+// scale is not settled. Read through the blurred pyramid it put Apple's inner band edges within 0.25 pt; read
+// through the capture itself (lensCapture) they sit 0.7 to 0.8 pt deeper than Apple's, so the warp's strength is open].
+// The items' portal is at full scale.
 const float GLASS_LENS_BACKDROP_CAPTURE = 0.25;
 const vec2 GLASS_LENS_ITEM_WARP = vec2(-17.5, 11.2);
 // Both warp SDFs' capsule, its gradientOvalization [C: sub_1891F7498, 0x1891F7760].

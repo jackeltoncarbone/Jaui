@@ -3572,8 +3572,9 @@ export class Canvas implements DirtyTracker {
           // so it can sample the live scene texture directly — same pixels, no copy.
           const instFrostLod = plan.InstFrostLod;
           const _tSnap = performance.now();
-          // The active lens reads the scene as drawn under it, sharp: its box's snapshot, after the bar and its items.
-          sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD || GlassIsLens(node.RenderStyle.Lens) ? r.SnapshotScreen(region) : null;
+          // The active lens reads the scene as it stood under its lifted items (`below`), unblurred, at its
+          // BackdropView's capture scale (Jiv.Panel.frag, lensCapture).
+          sceneSnap = below !== null ? below : instFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
           this._opMs.Snap += performance.now() - _tSnap;
           // See the rim site: a snapshot is a scene READ and stays in the walk, so under
           // `?blur-phased` it is an extra encoder end AND a different scene state than this
