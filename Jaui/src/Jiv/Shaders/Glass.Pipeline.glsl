@@ -47,15 +47,17 @@ vec3 GlassYcc(vec3 c, float white, float black, float saturation) {
 }
 
 // The face: (white, black, saturation, fill alpha), light filled white and dark filled black, premultiplied.
-// Thick regular glass takes the table; glass 56 pt and under tracks the backdrop's mean luma toward Apple's
-// observed settled values; clear glass has no fill and one face for both appearances.
+// Apple's structure with its parameters FITTED (Core/Glass.md): light and clear to SwiftUI's own render of the
+// same inputs (macOS 27), dark to Apple's native iOS 26 dark captures. Glass 56 pt and under tracks its
+// backdrop: its light face moves between Apple's observed settled values by the mean luma, its dark face is
+// the one fitted to iOS's small controls.
 vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
-    if (clear > 0.5) return GlassYcc(c, 1.15, 0.075, 1.06);
-    vec4 l = vec4(1.03, 0.5, 1.0, 0.4);
-    vec4 k = vec4(0.6, 0.2, 1.0, 0.4);
+    if (clear > 0.5) return GlassYcc(c, 1.1054, 0.1295, 0.885);
+    vec4 l = vec4(1.0054, 0.0829, 1.2246, 0.4);
+    vec4 k = vec4(0.9608, 0.2941, 1.4167, 0.4);
     if (span <= 56.0) {
         l = mix(vec4(0.919, 0.319, 1.0, 0.516), vec4(1.03, 0.819, 1.0, 0.266), clamp((mean - 0.45) / 0.5, 0.0, 1.0));
-        k = mix(vec4(0.45, 0.1, 1.0, 0.25), vec4(0.6, 0.2, 1.0, 0.4), clamp(mean / 0.45, 0.0, 1.0));
+        k = vec4(0.6879, 0.1412, 1.6, 0.25);
     }
     vec3 lit = GlassYcc(c, l.x, l.y, l.z) * (1.0 - l.w) + vec3(l.w);
     vec3 dim = GlassYcc(c, k.x, k.y, k.z) * (1.0 - k.w);
@@ -115,7 +117,8 @@ vec3 GlassRim(vec3 c, float d, vec2 n, vec2 key, float amount, float height, flo
     return mix(c, GlassRimMatrix(c, light), GlassRimAlpha(d, n, key, amount, height, clear));
 }
 
-// .tint(color): the seed at full backdrop luma, a darker shade of it at none.
+// .tint(color): a line in the glassed pixel's luma, the seed at full luma and at none the seed's own luma at
+// 0.35 with its chroma at 1.10, fitted to SwiftUI's own render (Core/Glass.md).
 vec3 GlassTint(vec3 face, vec3 seed) {
-    return mix(0.6 * seed, seed, dot(face, GLASS_BT709));
+    return mix(GlassYcc(seed, 0.35, 0.0, 1.10), seed, dot(face, GLASS_BT709));
 }

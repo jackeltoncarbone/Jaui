@@ -33,23 +33,18 @@ Status: **[C]** is confirmed, read from Apple's binaries, shader IR or live laye
 - `GLASS_TEXEL_SIGMA = 0.35` is fitted to SwiftUI's own render: the detail left in the body matches to within 0.3 levels on regular and clear glass.
 - The pyramid is built at the sharpest read (the edge ramp's half radius), with mips up to the deepest.
 
-**Face** [C]
+**Face** [C structure, fitted parameters]
 - QuartzCore's `set_ycc_composite`: BT.709 `Y' = (W - B) Y + B`, chroma scaled by `Sat`, then `* (1 - fill.a) + fill.rgb` (premultiplied).
+- The macOS 26 dump values (light 1.03 / 0.5 / 1 / white 0.4, dark 0.6 / 0.2 / 1 / black 0.4, clear 1.15 / 0.075 / 1.06) do not reproduce current Apple. The parameters are therefore FITTED, 2026-09-23:
+  - light and clear: to SwiftUI's own render of the same inputs (gpui-liquid-glass `validation/`, macOS 27), least squares on the label-free body over our own lensed read;
+  - dark: to Apple's native iOS 26 dark captures (LiquidGlassGallery `Dark/`: the Photos, App Store and Games bars and small controls), body against the backdrop beside it.
 
-| glass | W | B | Sat | fill |
-|---|---|---|---|---|
-| regular, light | 1.03 | 0.5 | 1 | white 0.4 |
-| regular, dark | 0.6 | 0.2 | 1 | black 0.4 |
-| clear, both | 1.15 | 0.075 | 1.06 | none |
-
-**Appearance and thin glass**
-- Glass 56 pt and under tracks its backdrop's luma through the probe's eased mean (`Jiv.ShadowBackdrop.frag`). [C]
-- Its appearance is light over bright content and dark over dim. The 0.45 to 0.55 band is [I].
-- Its face moves between Apple's observed settled values [C values, I law]:
-  - light: photo `0.319 / 0.919 / fill 0.516`, up to light solid `0.819 / 1.03 / fill 0.266` over mean 0.45 to 0.95;
-  - dark: dark solid `0.1 / 0.45 / black 0.25`, up to the table's dark over mean 0 to 0.45.
-- Larger glass takes the theme's appearance.
-- The probe eases at 0.5 s [I]. Apple settles over about 1 to 8 s.
+| glass | W | B | Sat | fill | as a line | fitted to |
+|---|---|---|---|---|---|---|
+| regular, light | 1.0054 | 0.0829 | 1.2246 | white 0.4 | Y -> 0.554 Y + 0.450, chroma x 0.735 | SwiftUI regular, macOS 27 |
+| regular, dark | 0.9608 | 0.2941 | 1.4167 | black 0.4 | Y -> 0.40 Y + 0.176, chroma x 0.85 | iOS bars |
+| regular, dark, 56 pt and under | 0.6879 | 0.1412 | 1.6 | black 0.25 | Y -> 0.41 Y + 0.106, chroma x 1.2 | iOS small controls |
+| clear, both | 1.1054 | 0.1295 | 0.885 | none | Y -> 0.976 Y + 0.130, chroma x 0.885 | SwiftUI clear, macOS 27 |
 
 **Edge bleed** [C] (regular glass, S of 64 pt and up)
 - Samples the backdrop `shift(d, 0.35 S, 0.35 S)` outward, blurred at `0.35 S`.
@@ -67,9 +62,13 @@ Status: **[C]** is confirmed, read from Apple's binaries, shader IR or live laye
 - The interior is dimmed to 97%, easing to 100% over the outer one to two points.
 - Output is clamped. Apple's clamp ceilings (1.0 to 1.376) are above white on an SDR target, so the clamp is `[0, 1]`.
 
-## Tint [C structure, I shade]
+## Tint [C structure, fitted shade]
 
-A glass Background is the seed of Apple's `.tint(color)`. The face is replaced by `mix(darkShade, seed, luma(face))`, reaching the seed at full brightness. `darkShade = 0.6 * seed` [I]: Apple's orange matrix has exactly that red row, and blue's rows are within 0.04 of it.
+A glass Background is the seed of Apple's `.tint(color)`. The face is replaced by a line in the glassed pixel's luma L, reaching the seed at full brightness [C]:
+
+`tint = mix(darkShade, seed, L)`
+
+The shade at L = 0 is the seed's own luma at 0.35 with its chroma at 1.10: `darkShade = ycc(seed, 0.35, 0, 1.10)`. It is fitted 2026-09-23 to SwiftUI's regular and clear tint of the same inputs (coral, macOS 27). Both variants share the one line; free per-channel lines fit to within 1.3 levels. Apple's iOS 26 orange and blue tint rows sit nearer 0.6 of the seed, so the shade is macOS 27's.
 
 ## The highlight (the rim) [C]
 
@@ -105,17 +104,23 @@ Extra texture reads per fragment:
 
 ## Verification
 
-Same inputs as SwiftUI's own render (the gpui-liquid-glass validation set: `harbour.png`, a 440 x 96 pt capsule, radius 34, 2x, macOS 27 reference). Mean absolute error over the label-free body, 0 to 255:
+**SwiftUI reference.** Same inputs as SwiftUI's own render (gpui-liquid-glass `validation/`: `harbour.png`, a 440 x 96 pt capsule, radius 34, 2x, macOS 27). Mean absolute error over the label-free body, 0 to 255:
 
-| variant | error |
-|---|---|
-| clear | 11 |
-| regular | 58 |
-| regular tint | 21 |
-| clear tint | 37 |
+| variant | dump values | fitted |
+|---|---|---|
+| regular | 58 | 6.2 |
+| clear | 11 | 1.8 |
+| regular tint | 21 | 3.6 |
+| clear tint | 37 | 4.7 |
 
-- Blur and lens match. The regular face's gap is the table: macOS 27's regular light body reads 127 over a dark hull where the table gives 185.
-- On iOS dark captures, Apple's bars read 65 to 97 where the dark table gives about 44.
+**iOS dark captures.** Mean absolute body-luma residual in levels:
+
+| | dump value (0.24 Y + 0.12) | fitted |
+|---|---|---|
+| bars (5 captures) | 25.7 | 11.7 |
+| small controls, Lock Screen excluded | about 21 | about 10 |
+
+The Mac hero pills carry a larger lift than iOS's and sit 26 to 47 over the fit.
 
 ## Sources
 
