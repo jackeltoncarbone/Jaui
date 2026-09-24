@@ -1971,6 +1971,8 @@ export class Canvas implements DirtyTracker {
   private _damageRectCss: { x: number; y: number; w: number; h: number } | null = null;
   /** An active lens's lifted content, the bar's items drawn again (liftLensItems in the walk). */
   private _lensItems: Framebuffer | null = null;
+  /** True while the lens's lifted twins draw (liftLensItems): their text draws as ordinary ink at full coverage. */
+  private _liftingTwins = false;
   private _layerCache = new Map<Jiv, { Fbo: Framebuffer; Valid: boolean; DX: number; DY: number; DW: number; DH: number }>();
   /** Per-render memo of "subtree samples the live scene → uncacheable". Cleared
    *  at the top of every _render; real structural/material changes happen under
@@ -3917,7 +3919,10 @@ export class Canvas implements DirtyTracker {
         flushPanels();
         // The INK's blend, which is NOT the panel's: `TextFilter: Vibrancy()` moves this one and leaves
         // `zones.Ink` null, so the fill keeps covering.
-        const inkBlend = zones.TextInk;
+        // A lifted twin is UIKit's selected twin, always at its selected state (overrideItemState 2): its text draws
+        // as ordinary ink, never through vibrancy, whose blend over the twins' empty target would drop its alpha
+        // while the item crosses from resting to selected. The lens inks the twins itself.
+        const inkBlend = this._liftingTwins ? null : zones.TextInk;
         if (inkBlend === null) {
           this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 1);
         } else {
@@ -4064,6 +4069,7 @@ export class Canvas implements DirtyTracker {
       flushW = w; flushH = h;
       const scope: TeleportScope = { Deferred: [], Stack: stack };
       this._capturing = true;
+      this._liftingTwins = true;
       // Each item scaled about its own centre as the lens lifts (UIKit's selected twins, LensLiftedScale). The twins
       // are the lens's portal, which takes the bar's model transform and not its flex swell (a presentation
       // modifier), so the bar's own VisualScale is taken back out of their matrix.
@@ -4094,6 +4100,7 @@ export class Canvas implements DirtyTracker {
       replayScope(scope);
       flushPanels();
       flushText();
+      this._liftingTwins = false;
       this._capturing = false;
       if (fbo.Texture !== this._lensTraceTex) { this._lensTraceTex = fbo.Texture; this._lensTraceGen++; }
       // On the heartbeat, read the twin target back at each twin's icon and label: whether it holds their ink.
