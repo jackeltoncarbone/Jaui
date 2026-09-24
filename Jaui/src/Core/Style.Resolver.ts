@@ -268,6 +268,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     ProgressiveBlurFeather: fgFeather !== null ? fgFeather : Resolve(s.ProgressiveBlurFeather, ctx, 'H'),
     ProgressiveBlurEasing: fgBlur && !fgBlur.Uniform ? fgBlur.Easing : Resolve(s.ProgressiveBlurEasing, ctx, 'W'),
     ProgressiveBlurStops: blurSpec?.Stops ?? fgStops,
+    ProgressiveBlurKind: ResolveTernary(s.ProgressiveBlurKind, ctx) === 'ScrollEdge' ? 'ScrollEdge' : 'Surface',
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 
     BorderRadius: borderRadius,

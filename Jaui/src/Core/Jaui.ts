@@ -486,8 +486,8 @@ interface GlassBlurPlan {
   FrostCssPx: number;
 }
 
-/** A scroll edge's pyramid, handed to the glass in its subtree: the handle, the region it covers and the
- *  deepest level built. A surface in it reads the content at its own frost, undimmed. */
+/** A scroll edge's pyramid (`ProgressiveBlurKind: ScrollEdge`), handed to the glass in its subtree: the handle,
+ *  the region it covers and the deepest level built. A surface in it reads the content at its own frost, undimmed. */
 interface EdgeBackdrop {
   Handle: GpuTextureHandle;
   Region: { x: number; y: number; w: number; h: number };
@@ -2807,11 +2807,12 @@ export class Canvas implements DirtyTracker {
     // Track whether we've built a blur for the current snapshot
     let lastBackdrop: GpuTextureHandle | null = null;
     let lastBaseFrostLod: number = 0;
-    // THE SCROLL EDGE'S BACKDROP, for the glass inside it. A progressive blur (a scroll edge strip)
-    // builds a sharp-rooted pyramid of the scene as it was BEFORE the strip dims and blurs it, and a bar
-    // floating in the strip samples that pyramid at its own frost instead of building one from the dimmed
-    // scene. So the bar reads brighter than the dimmed surround it sits on, as Apple's does, and costs no
-    // build of its own. Scoped to the strip's subtree; null everywhere else.
+    // THE SCROLL EDGE'S BACKDROP, for the glass inside it. A scroll edge strip (`ProgressiveBlurKind:
+    // ScrollEdge`) builds a sharp-rooted pyramid of the scene as it was BEFORE the strip dims and blurs it,
+    // and a bar floating in the strip samples that pyramid at its own frost instead of building one from
+    // the dimmed scene. So the bar reads brighter than the dimmed surround, as Apple's does, and costs no
+    // build of its own. A `Surface` blur is the surface's own material: glass in it builds from the scene
+    // as drawn, blur included. Scoped to the strip's subtree; null everywhere else.
     let edgeBackdrop: EdgeBackdrop | null = null;
     // The glass whose labels the text drawn now sits on (`SetGlassInk`): its probe slot and theme, or -1.
     let glassInk = { Slot: -1, Dark: false };
@@ -3328,8 +3329,9 @@ export class Canvas implements DirtyTracker {
           return built;
         });
         lastBaseFrostLod = 0;
-        // Handed to the subtree's glass only for a plain ramp along the element's own unrotated axis.
-        if (lastBackdrop !== null && node.RenderStyle.ProgressiveBlurStops === null && !_rotated) {
+        // Handed to the subtree's glass only by a scroll edge, and only for a plain ramp along its own unrotated axis.
+        if (lastBackdrop !== null && node.RenderStyle.ProgressiveBlurKind === 'ScrollEdge'
+            && node.RenderStyle.ProgressiveBlurStops === null && !_rotated) {
           edgeHere = { Handle: lastBackdrop, Region: region, MaxLod: maxLod };
         }
         r.RebindSceneTarget();
@@ -3920,7 +3922,7 @@ export class Canvas implements DirtyTracker {
 
       if (this._bcOn) this._bc.Close();
 
-      // Walk children in Layer order (ties break by tree order). A progressive blur hands its pyramid
+      // Walk children in Layer order (ties break by tree order). A scroll edge hands its pyramid
       // to its subtree's glass for the length of the subtree.
       const outerEdge = edgeBackdrop;
       if (edgeHere !== null) edgeBackdrop = edgeHere;

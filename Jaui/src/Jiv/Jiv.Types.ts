@@ -76,6 +76,10 @@ export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRigh
  *    • Dark / Light: always black / always white, whatever the theme (glass over video or a camera). */
 export type TintTone = 'Ground' | 'Ink' | 'Dark' | 'Light';
 export type GlassVariant = 'Regular' | 'Clear';
+/** What a progressive blur is to the glass inside it.
+ *    • Surface: the surface's own material. Glass in it sits on it and sees it, blurred as drawn.
+ *    • ScrollEdge: chrome's strip over content. Glass in it reads the content before the strip, undimmed. */
+export type ProgressiveBlurKind = 'Surface' | 'ScrollEdge';
 
 /**
  * Authorable style — every numeric / dimensional / color / transform field is
@@ -124,6 +128,9 @@ export interface JivStyle {
    *  gradient. The angle picks the axis; it also implies the material, so
    *  `ProgressiveBlurDirection` need not be set. `null` = use the linear feather. */
   ProgressiveBlur: string | null;
+
+  /** `Surface` (the default) or `ScrollEdge`: see `ProgressiveBlurKind`. */
+  ProgressiveBlurKind: ProgressiveBlurKind;
 
   /** Cascading base unit. `1pt` anywhere in this Jiv's subtree resolves to
    *  `N × PointScale`. When resolving PointScale itself, `pt` refers to
@@ -312,6 +319,7 @@ export interface JivRenderStyle {
   /** Parsed gradient-driven blur spectrum (overrides the linear feather when
    *  non-null). Stops are sorted ascending by Position, normalized to [0,1]. */
   ProgressiveBlurStops: BlurStop[] | null;
+  ProgressiveBlurKind: ProgressiveBlurKind;
   PointScale: number;
 
   BorderRadius: [number, number, number, number];          // tl, tr, br, bl

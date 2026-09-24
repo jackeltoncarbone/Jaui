@@ -5,6 +5,7 @@ export const DefaultJivStyle: JivStyle = {
   ProgressiveBlurFeather: '0',
   ProgressiveBlurEasing: '1',
   ProgressiveBlur: null,
+  ProgressiveBlurKind: 'Surface',
   // PointScale defaults to "1pt" — "inherit from parent's PointScale".
   // Root Jiv has no parent, so its `pt` refers to a hardcoded fallback (16)
   // inside the layout solver. Set PointScale to an absolute like "16" at
