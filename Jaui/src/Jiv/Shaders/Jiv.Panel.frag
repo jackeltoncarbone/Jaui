@@ -614,7 +614,7 @@ void main() {
     vec2 uv = v_PixelPos / u_Resolution;
     uv.y = 1.0 - uv.y;
     vec3 under = texture(u_RimScene, uv).rgb;
-    vec4 rim = GlassRim(under, d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, height, v_Lighting.w, v_RimEdge.x);
+    vec4 rim = GlassRim(under, d, normal, GlassKeyLight(v_Rot, v_Is3D), v_Specular.x, height, GlassLaneClear(v_Lighting.w), v_RimEdge.x);
     fragColor = vec4(rim.rgb, rim.a * v_StyleParams.z * clipAlpha);
 }
 #else
@@ -775,7 +775,8 @@ void main() {
     // all over this fragment's own face. Mode 2 is the surface's colored drop shadow, drawn before it.
     float glassDpr = max(v_Lighting.x, 1e-3);
     float glassSpan = v_Refraction.y;
-    float glassClear = v_Lighting.w;
+    float glassClear = GlassLaneClear(v_Lighting.w);
+    float glassGlow = GlassLaneGlow(v_Lighting.w);
     float glassLight = v_RimEdge.x;
     float glassShadowTint = 0.0;
     vec3 glassShadowRgb = vec3(0.0);
@@ -857,6 +858,7 @@ void main() {
                 float alpha = rim.a * (1.0 - lensInk);
                 face = clamp(face + alpha / max(cover, 1e-3) * (rim.rgb - shown), 0.0, 1.0);
             }
+            if (glassGlow > 0.0) face = GlassPressGlow(face, glassGlow);
             if (v_RimEdge.z > 0.0) {
                 // The lens's inner shadow, inverted: the outside cast GLASS_LENS_INNER_SHADOW.z pt down into it,
                 // its radius and opacity Apple's. The shifted depth to first order along the normal.

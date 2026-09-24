@@ -109,6 +109,15 @@ const float GLASS_LENS_OVALIZATION = 0.5;
 const vec3 GLASS_LENS_LENSING_REFRACTION = vec3(8.0, -16.0, -3.3);
 const vec4 GLASS_LENS_LENSING_EDGE = vec4(0.0, 0.0, 0.0, 1.0);
 const vec3 GLASS_LENS_INNER_SHADOW = vec3(3.0, 0.12, 7.0);
+// Lane 43 carries the glass's clear amount (0..1) and its pressed glow in thousandths above it.
+float GlassLaneClear(float lane) { return mod(lane, 4.0); }
+float GlassLaneGlow(float lane) { return floor(lane / 4.0) / 1000.0; }
+// UIKit's flex big glow over a pressed glass: a white layer with a backdrop-aware vibrant colour matrix, YCC black
+// 0.05, white 1.05, saturation 1.2, at `glow` (the spec's bigGlowOpacity) [C: _UIFlexInteraction.BigGlow,
+// UIKitCore 0x188B0F3D0]. It lies over the glass and its rim; here it recolours both (the items draw over it).
+vec3 GlassPressGlow(vec3 c, float glow) {
+    return mix(c, clamp(GlassYcc(c, 1.05, 0.05, 1.2), 0.0, 1.0), glow);
+}
 // The edge bleed's own matrix: light (1, 0.9, 1.2), dark (0.5, 0, 1).
 vec3 GlassBleed(vec3 c, float light) {
     return mix(GlassYcc(c, 0.5, 0.0, 1.0), GlassYcc(c, 1.0, 0.9, 1.2), light);

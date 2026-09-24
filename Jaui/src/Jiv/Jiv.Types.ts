@@ -239,6 +239,9 @@ export interface JivStyle {
   /** An active lens's lifted items, each scaled about its own centre as the lens lifts: UIKit scales the iPhone tab
    *  bar's selected twins by its metric 1.16 (Jwift/Apple/LiquidGlass.md 7.1). Default 1. */
   LensLiftedScale: string;
+  /** The glass's pressed glow, 0..1: UIKit's flex big glow, a white layer over the glass with a backdrop-aware vibrant
+   *  colour matrix, YCC black 0.05, white 1.05, saturation 1.2 (_UIFlexInteraction.BigGlow). Default 0, none. */
+  GlassGlow: string;
   /** `GlassDispersion: Auto | None | <amount> <height> <inset> <angle>`: the dispersion of the glass's content lensing,
    *  QuartzCore's glassForeground (Jwift/Apple/LiquidGlass.md 3.7): `amount` pt of spread at the outline, easing over
    *  `height` pt from `inset` pt in, along the normal turned by `angle`. Auto is Apple's for the glass: the lens
@@ -386,6 +389,7 @@ export interface JivRenderStyle {
   Lens: number;
   LensInk: Color;
   LensLiftedScale: number;
+  GlassGlow: number;
   /** Resolved `GlassDispersion`: amount (pt), height (pt), inset (pt), angle (degrees). Each springs. */
   GlassDispersionAmount: number;
   GlassDispersionHeight: number;

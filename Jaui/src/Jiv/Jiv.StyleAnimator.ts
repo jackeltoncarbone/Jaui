@@ -85,6 +85,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['RimWidth',               s => s.RimWidth,                     (s, v) => { s.RimWidth = v; }],
   ['RimStrength',            s => s.RimStrength,                  (s, v) => { s.RimStrength = v; }],
   ['LensLiftedScale',        s => s.LensLiftedScale,              (s, v) => { s.LensLiftedScale = v; }],
+  ['GlassGlow',              s => s.GlassGlow,                    (s, v) => { s.GlassGlow = v; }],
   ['GlassDispersion',        s => s.GlassDispersionAmount,        (s, v) => { s.GlassDispersionAmount = v; }],
   ['GlassDispersion',        s => s.GlassDispersionHeight,        (s, v) => { s.GlassDispersionHeight = v; }],
   ['GlassDispersion',        s => s.GlassDispersionInset,         (s, v) => { s.GlassDispersionInset = v; }],

@@ -336,7 +336,8 @@ export class JivInstanceBuffer {
     data[offset + 40] = d * avgScale;
     data[offset + 41] = style.Tint;
     data[offset + 42] = style.SchemeDark ? 1 : 0;
-    data[offset + 43] = style.GlassClear;
+    // GlassClear (0..1) with the pressed glow in thousandths above it (Jiv.Panel.frag, GlassLaneClear / GlassLaneGlow).
+    data[offset + 43] = style.GlassClear + 4 * Math.round(Math.min(1, Math.max(0, style.GlassGlow)) * 1000);
 
     // The highlight: each light's amount and the band's depth in points.
     data[offset + 44] = style.RimStrength;

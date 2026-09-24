@@ -340,6 +340,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     RimWidth: Math.max(0, Resolve(ResolveTernary(s.RimWidth, ctx), ctx, 'W')),
     RimStrength: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.RimStrength, ctx), ctx, 'W'))),
     LensLiftedScale: Math.max(0.01, Resolve(s.LensLiftedScale, ctx, 'W')),
+    GlassGlow: Math.min(1, Math.max(0, Resolve(s.GlassGlow, ctx, 'W'))),
     ...resolveDispersion(s.GlassDispersion, glass, ctx),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),

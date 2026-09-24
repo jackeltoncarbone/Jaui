@@ -35,6 +35,7 @@ export const DefaultJivStyle: JivStyle = {
   RimWidth: '0',
   RimStrength: '0',
   LensLiftedScale: '1',
+  GlassGlow: '0',
   GlassDispersion: 'Auto',
   Transform: '',                         // empty = identity
   // Visual* — render-time, per-element. `VisualScale: '1'` is identity;
