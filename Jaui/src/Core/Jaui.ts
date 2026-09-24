@@ -4076,6 +4076,7 @@ export class Canvas implements DirtyTracker {
       const mhTwin = mh !== null ? mat3Mul(mh, mat3FromAffine(unswell)) : null;
       let drawn = 0;
       const skipped: string[] = [];
+      const twins: Jiv[] = [];
       for (const item of this._orderedChildren(bar)) {
         const layer = item.RenderStyle.Layer;
         if (item === lens) continue;
@@ -4084,6 +4085,7 @@ export class Canvas implements DirtyTracker {
           continue;
         }
         drawn++;
+        if (this._lensTrace) twins.push(item);
         const cx = item.X + item.Width * 0.5, cy = item.Y + item.Height * 0.5;
         const lift: Mat2x3 = [scale, 0, 0, scale, cx * (1 - scale), cy * (1 - scale)];
         renderNode(item, matMul(mTwin, lift), this._childClip(bar, stack, boxClip, item), scope,
@@ -4094,6 +4096,27 @@ export class Canvas implements DirtyTracker {
       flushText();
       this._capturing = false;
       if (fbo.Texture !== this._lensTraceTex) { this._lensTraceTex = fbo.Texture; this._lensTraceGen++; }
+      // On the heartbeat, read the twin target back at each twin's icon and label: whether it holds their ink.
+      if (this._lensTrace && (this._lensTraceCount + 1) % 30 === 0) {
+        const px = new Uint8Array(12 * 12 * 4);
+        const texts = (n: Jiv): string[] => [...(n.Text ? [n.Text] : []), ...(n.Children as Jiv[]).flatMap(texts)];
+        cgl.bindFramebuffer(cgl.FRAMEBUFFER, fbo.Framebuffer);
+        const rows = twins.map((item) => {
+          const cx = item.X + item.Width * 0.5, cy = item.Y + item.Height * 0.5;
+          const read = (dy: number): string => {
+            const X = Math.round(matApplyX(mTwin, cx, cy + dy) * this._dpr);
+            const Y = Math.round(matApplyY(mTwin, cx, cy + dy) * this._dpr);
+            cgl.readPixels(X - 6, h - 1 - Y - 6, 12, 12, cgl.RGBA, cgl.UNSIGNED_BYTE, px);
+            let peak = 0;
+            for (let i = 3; i < px.length; i += 4) peak = Math.max(peak, px[i]);
+            return `(${X},${Y}) max a${peak}`;
+          };
+          const clip = this._childClip(bar, stack, boxClip, item);
+          return `${texts(item).at(-1) ?? '?'} box ${item.X.toFixed(1)},${item.Y.toFixed(1)} ${item.Width.toFixed(1)}x${item.Height.toFixed(1)}`
+            + ` icon ${read(-item.Height * 0.15)} label ${read(item.Height * 0.25)} clip ${clip === null ? 'none' : 'set'}`;
+        });
+        console.info(`[lens-trace] #${this._lensTraceCount + 1} twin readback: ${rows.join(' | ')}`);
+      }
       trace(`twins: ${drawn} drawn at scale ${scale.toFixed(3)} under lens layer ${lens.RenderStyle.Layer}, swell ${sx.toFixed(3)} x ${sy.toFixed(3)}; target tex ${this._lensTraceTexId(fbo.Texture)} gen ${this._lensTraceGen} ${w} x ${h}${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}`);
       flushW = savedW; flushH = savedH;
       this._renderer.RebindSceneTarget();
