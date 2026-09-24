@@ -312,7 +312,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
     ChromaticAberration: Resolve(s.ChromaticAberration, ctx, 'W'),
     RimWidth: Math.max(0, Resolve(ResolveTernary(s.RimWidth, ctx), ctx, 'W')),
-    RimStrength: Math.max(0, Math.min(1, Resolve(ResolveTernary(s.RimStrength, ctx), ctx, 'W'))),
+    RimStrength: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.RimStrength, ctx), ctx, 'W'))),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
 

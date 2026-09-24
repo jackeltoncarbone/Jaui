@@ -32,13 +32,14 @@ export const GlassAppleLod = (radiusPt: number, dpr: number, variant: GlassVaria
  * THE MAPPING TO OUR NATIVE PYRAMID. Apple samples a quarter (clear: half) resolution texture at a mip
  * LOD; we never render below native, so we sample our own native pyramid at the LOD with the same blur.
  * Apple's level L holds texels 2^L / backdropScale device px wide; a texel reads as a Gaussian of
- * GLASS_TEXEL_SIGMA of its width. Our LOD n is a Gaussian of 2^n device px, so
- * n = L + log2(GLASS_TEXEL_SIGMA / backdropScale). 0.35 is fitted to SwiftUI's own render of the same
- * inputs (the detail left in the body, regular and clear), not read from Apple.
+ * a share of its width. Our LOD n is a Gaussian of 2^n device px, so n = L + log2(share / backdropScale). The
+ * shares are fitted per backdrop scale to SwiftUI's own render of the same inputs (the detail left in the body:
+ * 0.62 for the quarter-scale regular backdrop, 0.28 for clear's half scale), not read from Apple.
  */
-export const GLASS_TEXEL_SIGMA = 0.35;
+export const GLASS_TEXEL_SIGMA_REGULAR = 0.62;
+export const GLASS_TEXEL_SIGMA_CLEAR = 0.28;
 export const GlassNativeLod = (appleLod: number, variant: GlassVariant): number =>
-  appleLod + Math.log2(GLASS_TEXEL_SIGMA / GlassBackdropScale(variant));
+  appleLod + Math.log2((variant === 'Clear' ? GLASS_TEXEL_SIGMA_CLEAR : GLASS_TEXEL_SIGMA_REGULAR) / GlassBackdropScale(variant));
 
 /** The body's LOD at blur scale `k` (0.5 at the edge ramp's floor, 1 in the body), on our pyramid. */
 export const GlassBodyLod = (span: number, k: number, dpr: number, variant: GlassVariant): number =>
@@ -48,9 +49,11 @@ export const GlassBodyLod = (span: number, k: number, dpr: number, variant: Glas
 export const GlassBleedLod = (span: number, dpr: number, variant: GlassVariant): number =>
   GlassNativeLod(GlassAppleLod(0.7 * span * 0.5, dpr, variant), variant);
 
-/** The drop shadow: offset (0, 8) pt, radius 24 pt, reaching 2 radii; its colored read blurs at 40 pt. */
+/** The drop shadow: offset (0, 8) pt, reaching 2 radii; its colored read blurs at 40 pt. The radius is 24 pt
+ *  on large glass (Apple's), 10 pt at 48 pt, fitted to Apple's iPhone Edit button over white (23 levels deep at
+ *  the edge, gone by 18 pt), ramping over u. */
 export const GLASS_SHADOW_OFFSET_Y = 8;
-export const GLASS_SHADOW_RADIUS = 24;
+export const GlassShadowRadius = (span: number): number => 10 + 14 * GlassSizeRamps(span).U;
 export const GLASS_SHADOW_BLUR = 40;
 export const GlassShadowLod = (dpr: number, variant: GlassVariant): number =>
   GlassNativeLod(GlassAppleLod(GLASS_SHADOW_BLUR, dpr, variant), variant);
@@ -89,7 +92,7 @@ export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVarian
     const shadow = GlassShadowLod(dpr, variant);
     top = Math.max(top, bleed, shadow);
     reach = Math.max(reach, 0.35 * span + 3 * sigmaPt(bleed),
-      2 * GLASS_SHADOW_RADIUS + GLASS_SHADOW_OFFSET_Y + GlassShadowAmount(span) + 3 * sigmaPt(shadow));
+      2 * GlassShadowRadius(span) + GLASS_SHADOW_OFFSET_Y + GlassShadowAmount(span) + 3 * sigmaPt(shadow));
   }
   return { BaseLod: base, MaxLod: Math.max(1, Math.ceil(top - base)), ReachPt: reach };
 };

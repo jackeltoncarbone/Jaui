@@ -3,7 +3,7 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 import { FoldVibrancy, VibrancyGraded } from '../Core/Vibrancy';
 import type { VibrancyValue } from '../Core/Vibrancy';
 import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
-import { GLASS_SHADOW_OFFSET_Y, GLASS_SHADOW_RADIUS, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps } from '../Core/Glass.Pipeline';
+import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps } from '../Core/Glass.Pipeline';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -219,10 +219,10 @@ export class JivInstanceBuffer {
     const glass = style.Material === 'LiquidGlass';
     const span = JivGlassSpan(jiv) * avgScale;
     const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly;
-    // Glass casts Apple's shadow: offset (0, 8) pt, reaching two radii of 24 pt, its alpha by size.
+    // Glass casts Apple's shadow: offset (0, 8) pt, reaching two radii (Glass.Pipeline), its alpha by size.
     const glassShadowPeak = glass ? GlassShadowPeak(span, style.GlassVariant) : 0;
     const glassColoredShadow = glass && shadow === 'Only' && GlassSizeRamps(span).V > 0 && glassShadowPeak > 0;
-    const shadowBlur = _ns ? 0 : glass ? 2 * GLASS_SHADOW_RADIUS * avgScale * d : style.ShadowBlur * avgScale * d;
+    const shadowBlur = _ns ? 0 : glass ? 2 * GlassShadowRadius(span) * avgScale * d : style.ShadowBlur * avgScale * d;
     const shadowOffX = _ns || glass ? 0 : style.ShadowOffsetX * avgScale * d;
     const shadowOffY = _ns ? 0 : glass ? GLASS_SHADOW_OFFSET_Y * avgScale * d : style.ShadowOffsetY * avgScale * d;
 

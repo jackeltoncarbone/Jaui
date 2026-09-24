@@ -4,8 +4,10 @@
 
 const vec3 GLASS_BT709 = vec3(0.2126, 0.7152, 0.0722);
 const vec3 GLASS_BLEED_LUMA = vec3(0.2125, 0.7154, 0.0721);
-// Our native pyramid's LOD n is a Gaussian 2^n device px wide; Apple's texel reads as this share of its width.
-const float GLASS_TEXEL_SIGMA = 0.35;
+// Our native pyramid's LOD n is a Gaussian 2^n device px wide; Apple's texel reads as this share of its width,
+// fitted per backdrop scale to SwiftUI's own render (Core/Glass.Pipeline.ts states the same two).
+const float GLASS_TEXEL_SIGMA_REGULAR = 0.62;
+const float GLASS_TEXEL_SIGMA_CLEAR = 0.28;
 
 vec2 GlassSizeRamps(float span) {
     return vec2(clamp((span - 48.0) / 112.0, 0.0, 1.0), clamp((span - 64.0) / 96.0, 0.0, 1.0));
@@ -36,7 +38,7 @@ float GlassNativeLod(float radiusPt, float dpr, float clear) {
     float scale = GlassBackdropScale(clear);
     float r = radiusPt * scale * dpr * 1.6;
     float appleLod = max(0.0, r < 2.0 ? log2(1.0 + 0.5 * r) : log2(r));
-    return appleLod + log2(GLASS_TEXEL_SIGMA / scale);
+    return appleLod + log2((clear > 0.5 ? GLASS_TEXEL_SIGMA_CLEAR : GLASS_TEXEL_SIGMA_REGULAR) / scale);
 }
 
 // QuartzCore's set_ycc_composite without its fill: BT.709 luma remapped to (white - black) Y + black, chroma
@@ -88,14 +90,16 @@ float GlassRimBand(float s, float fw, float height, vec2 n, vec2 light, float co
     return cov * dir;
 }
 
-// vibrantColorMatrix over what is already drawn: light pushes it to 0.9 + 0.1 Y with 1.5x chroma, dark to
-// 0.15 + 1.35 Y with 3x chroma. Apple's exact rows.
-vec3 GlassRimMatrix(vec3 c, float light) {
+// vibrantColorMatrix over what is already drawn, Apple's exact rows: light pushes it to 0.9 + 0.1 Y with 1.5x
+// chroma, dark to 0.15 + 1.35 Y with 3x chroma. Apple's iOS 26 dark rims are neither alone: the Games bar's and
+// its search button's lit lobes over teal, (66, 215, 223) and (97, 230, 229), are the rows mixed 0.6 light to
+// 0.4 dark, whatever the appearance (fitted, Core/Glass.md).
+vec3 GlassRimMatrix(vec3 c) {
     vec3 lit = vec3(dot(c, vec3(1.2024, -1.0014, -0.1010)), dot(c, vec3(-0.2976, 0.4987, -0.1011)),
                     dot(c, vec3(-0.2977, -1.0012, 1.3989))) + 0.90;
     vec3 dim = vec3(dot(c, vec3(2.6492, -1.1803, -0.1189)), dot(c, vec3(-0.3507, 1.8199, -0.1192)),
                     dot(c, vec3(-0.3509, -1.1799, 2.8809))) + 0.15;
-    return clamp(mix(dim, lit, light), 0.0, 1.0);
+    return clamp(mix(dim, lit, 0.6), 0.0, 1.0);
 }
 
 // The key light upper left in y-down screen space (its fill is the opposite corner), in the panel's frame.
@@ -104,17 +108,24 @@ vec2 GlassKeyLight(vec4 rot, float is3D) {
     return is3D > 0.5 ? key : vec2(key.x * rot.x + key.y * rot.y, -key.x * rot.y + key.y * rot.x);
 }
 
+// Each light's weight is Apple's `w = a / ((1 - a) c + 1)` of its band alpha `a`. The shaping `c` is not in the
+// dumps; 3 is fitted to Apple's iOS 26 dark rims, whose lit lobe stands +100 over the body while the straight top,
+// 45 degrees off it, stands +40: a lobe sharper than the plain cosine (Core/Glass.md).
+const float GLASS_RIM_SHAPE = 3.0;
+float GlassRimWeight(float a) { return a / ((1.0 - a) * GLASS_RIM_SHAPE + 1.0); }
+
 // The highlight's alpha: `amount` per light, key and fill, over a band `height` points deep; the spread is a
 // cosine lobe on regular glass and 160 degrees on clear.
 float GlassRimAlpha(float d, vec2 n, vec2 key, float amount, float height, float clear) {
     float s = -d;
     float fw = max(fwidth(s), 1e-4);
     float cosSpread = clear > 0.5 ? -0.9397 : 0.0;
-    return clamp(amount * (GlassRimBand(s, fw, height, n, key, cosSpread) + GlassRimBand(s, fw, height, n, -key, cosSpread)), 0.0, 1.0);
+    return clamp(amount * (GlassRimWeight(GlassRimBand(s, fw, height, n, key, cosSpread))
+                         + GlassRimWeight(GlassRimBand(s, fw, height, n, -key, cosSpread))), 0.0, 1.0);
 }
 
-vec3 GlassRim(vec3 c, float d, vec2 n, vec2 key, float amount, float height, float clear, float light) {
-    return mix(c, GlassRimMatrix(c, light), GlassRimAlpha(d, n, key, amount, height, clear));
+vec3 GlassRim(vec3 c, float d, vec2 n, vec2 key, float amount, float height, float clear) {
+    return mix(c, GlassRimMatrix(c), GlassRimAlpha(d, n, key, amount, height, clear));
 }
 
 // .tint(color): a line in the glassed pixel's luma, the seed at full luma and at none the seed's own luma at

@@ -220,7 +220,7 @@ export interface JivStyle {
    *  a fill lower right, recoloring what is under it by Apple's vibrant color matrix. Apple's is 1 pt.
    *  Glass draws it over its own face; any other surface over what is drawn under its edge. Default 0. */
   RimWidth: string;
-  /** Each light's amount, 0..1. Apple's is 0.5. Default 0, no rim. */
+  /** Each light's amount, 0..2 (the band's alpha is clamped to 1). Default 0, no rim. */
   RimStrength: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.

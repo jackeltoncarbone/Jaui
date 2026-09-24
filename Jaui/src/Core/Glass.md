@@ -29,8 +29,8 @@ Status: **[C]** is confirmed, read from Apple's binaries, shader IR or live laye
 **Blur, our mapping** [I]
 - Apple samples a quarter (clear: half) resolution backdrop. We never render below native, so we sample our own native pyramid at the LOD with the same blur.
 - Apple's level L has texels `2^L / backdropScale` device px wide. Our LOD n is a Gaussian `2^n` device px wide.
-- So `n = L + log2(GLASS_TEXEL_SIGMA / backdropScale)`.
-- `GLASS_TEXEL_SIGMA = 0.35` is fitted to SwiftUI's own render: the detail left in the body matches to within 0.3 levels on regular and clear glass.
+- So `n = L + log2(share / backdropScale)`.
+- The share is fitted per backdrop scale to SwiftUI's own render, so the detail left in the body matches: 0.62 for regular's quarter-scale backdrop, 0.28 for clear's half scale (2026-09-24).
 - The pyramid is built at the sharpest read (the edge ramp's half radius), with mips up to the deepest.
 
 **Face** [C structure, fitted parameters]
@@ -51,8 +51,9 @@ Status: **[C]** is confirmed, read from Apple's binaries, shader IR or live laye
 - Maps it by light `(1, 0.9, 1.2)` or dark `(0.5, 0, 1)`.
 - Mixes it in by `(lum^2 * sat(1 - d))^2 * v * (0.5 light, 0.8 dark)`, where `lum` is the face's luma on light glass and `1 - lum` on dark.
 
-**Shadow** [C]
-- Offset `(0, 8)` pt, radius 24 pt. The erf-like fall runs over plus and minus two radii.
+**Shadow** [C structure; small-glass radius fitted]
+- Offset `(0, 8)` pt. The erf-like fall runs over plus and minus two radii.
+- Radius 24 pt on large glass (Apple's dumps), 10 pt at 48 pt, ramping over `u`. The 10 is fitted 2026-09-24 to Apple's iPhone Edit button over white: 23 levels deep at the edge, gone by 18 pt. At 24 pt the shadow reached 34 pt.
 - Opacity `0.5 - 0.25 u`. Clear glass casts none.
 - Small glass casts black at the fill `0.12 + SDR (0.08 + 0.16 u)`. The black fill's 0.12 in dark is [I].
 - From 64 pt, `v` carries a colored read: the backdrop `min(0.625 S, 75)` pt past the outline, blurred at 40 pt, mapped light `(1, 0, 1.8)` or dark `(0.5, 0, 1)`.
@@ -70,20 +71,25 @@ A glass Background is the seed of Apple's `.tint(color)`. The face is replaced b
 
 The shade at L = 0 is the seed's own luma at 0.35 with its chroma at 1.10: `darkShade = ycc(seed, 0.35, 0, 1.10)`. It is fitted 2026-09-23 to SwiftUI's regular and clear tint of the same inputs (coral, macOS 27). Both variants share the one line; free per-channel lines fit to within 1.3 levels. Apple's iOS 26 orange and blue tint rows sit nearer 0.6 of the seed, so the shade is macOS 27's.
 
-## The highlight (the rim) [C]
+## The highlight (the rim) [C structure, fitted amounts]
 
-Two lights, 0.5 each (`RimStrength`), over a band `RimWidth` deep (1 pt):
+Two lights over a band `RimWidth` deep (1 pt):
 - the key upper left, the fill lower right (the handedness is [I]);
 - a spread of 90 degrees on regular glass, 160 on clear;
-- a fade of `1 - 0.7 depth`.
+- a fade of `1 - 0.7 depth`;
+- each light weighted `w = a / ((1 - a) c + 1)` of its band alpha `a`.
 
-The band recolors what is under it: `out = mix(D, sat(M D), alpha)`. M is Apple's vibrant color matrix:
+The band recolors what is under it: `out = mix(D, sat(M D), alpha)`, `alpha = RimStrength * (w_key + w_fill)`, clamped to 1. Apple's two vibrant color matrices:
 - light: `Y -> 0.90 + 0.10 Y`, chroma x 1.5;
 - dark: `Y -> 0.15 + 1.35 Y`, chroma x 3.
 
-M is picked by the glass's appearance. Each light's shaping parameter `c` in `w = a / ((1 - a) c + 1)` is [I] 0.
+Fitted 2026-09-24 to Apple's iOS 26 dark rims (LiquidGlassGallery `Dark/`: the Games tab bar, its search button, the Play hero pill):
+- M is the matrices mixed 0.6 light to 0.4 dark, whatever the appearance. The Games bar's and search button's lit lobes, (66, 215, 223) and (97, 230, 229) over teal, are that mix; either matrix alone misses them.
+- The shaping `c = 3`, not read from the dumps. Apple's lobe is sharper than the plain cosine: the lit lobe stands +100 over the body, the straight top 45 degrees off it +40.
+- `RimStrength` 2, the lobe's alpha at the clamp. Apple's confirmed macOS 0.5 lit iOS rims at a third of their brightness.
+- A hero's action rims quieter, `RimStrength` 0.25: Apple's Games Play pills stand +11 to +20.
 
-Glass draws the highlight in its own fragment, over its face, so there are no extra reads. A surface that is not glass (a solid card's edge) draws it in the `RIM_ONLY` program over a snapshot of the scene under its box. Its matrix follows the pixel's own luma [I].
+Glass draws the highlight in its own fragment, over its face, so there are no extra reads. A surface that is not glass (a solid card's edge) draws it in the `RIM_ONLY` program over a snapshot of the scene under its box.
 
 ## Labels [C]
 
@@ -121,6 +127,16 @@ Extra texture reads per fragment:
 | small controls, Lock Screen excluded | about 21 | about 10 |
 
 The Mac hero pills carry a larger lift than iOS's and sit 26 to 47 over the fit.
+
+## The parity check
+
+Every property above has an isolated test against its Apple reference, and a live-path check that it is wired in the real resolve, pack and draw path. One command runs them all and prints `property | Apple | ours | metric | PASS/FAIL`, exiting non-zero on a FAIL:
+
+```
+sh C:/Users/jackc/AppData/Local/Temp/claude/C--Users-jackc/09ee8d5e-80fe-47d9-9f89-c18df11719be/scratchpad/Parity/run.sh
+```
+
+Run it after any change to glass: the engine (`Glass.Pipeline.*`, `Jiv.Panel.*`, the instance packer, the walk's glass path) or the Jwift glass sheet. It is outside the repository, in the session scratchpad; its table lists what is NOT BUILT as well.
 
 ## Sources
 
