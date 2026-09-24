@@ -66,17 +66,18 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
     return mix(dim, lit, light);
 }
 
-// THE ACTIVE LENS, fitted to Apple's iOS 26 pressed tab (MacStories native capture, Core/Glass.md): the bezel is
-// this share of the span (6.7 pt on the 72 pt lens), reading past the outline this far per point of depth; the
-// body is a screen curve 1 - (1 - c)^g that keeps the ink's depth. Light lifts Apple's 177 bar body to its 238;
-// dark lifts OUR dark bar (44) to Apple's dark lens interior (73), measured on our own tab bar.
-const float GLASS_LENS_BEZEL = 0.093;
-// The lens stands this far past the bar top and bottom (Apple's 5.3 pt), so its outline shows the bar's own edge.
-const float GLASS_LENS_LIFT = 5.3;
-// Under the lens the bar's ink (a glyph against the bar, a local contrast above these) is read sharp and the bar's
-// own body frosted, two levels above the pyramid's base.
-const vec2 GLASS_LENS_INK = vec2(0.06, 0.2);
-const float GLASS_LENS_FROST_LOD = 2.0;
+// THE ACTIVE LENS, measured on Apple's iOS 26 pressed tab (MacStories native capture, 3x, 60 fps; Core/Glass.md).
+// Its refraction, fitted from Apple's own frames (the drag frames' interiors against the resting frame): the source
+// of a pixel at depth t inside the outline is centre + (p - centre) k(t), with
+//   k = 1 / m over the body (m, the Magnification, is 1.21 at the centre),
+//   k = mix(GLASS_LENS_EDGE_READ, 1 / m, (t / bezel)^GLASS_LENS_BEZEL_CURVE) across the bezel, which is
+//       GLASS_LENS_BEZEL of the span (13 pt on the 72 pt lens): toward the rim it compresses what lies past the
+//       outline into the band, reading 1.15 of the way out at the rim itself, so the bar's own edge shows there.
+// The body is a screen curve 1 - (1 - c)^g that keeps the ink's depth: light lifts Apple's 177 bar body to its 238;
+// dark lifts OUR dark bar (44) to Apple's dark lens interior (73).
+const float GLASS_LENS_BEZEL = 0.18;
+const float GLASS_LENS_EDGE_READ = 1.15;
+const float GLASS_LENS_BEZEL_CURVE = 3.0;
 const float GLASS_LENS_SCREEN_LIGHT = 2.3;
 const float GLASS_LENS_SCREEN_DARK = 1.8;
 vec3 GlassLensBody(vec3 c, float light) {

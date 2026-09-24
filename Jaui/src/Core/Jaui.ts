@@ -15,7 +15,7 @@ import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
-import { GLASS_TRACKS_LUMA_SPAN, GLASS_LENS_FROST_LOD, GlassBlurNeedsOf, GlassShadowPeak } from './Glass.Pipeline';
+import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak } from './Glass.Pipeline';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
   Vibrancy, VibrancyBlendOf, VibrancyGateLine, VibrancyGraded, VibrancyInkScale, VibrancyIsActive,
@@ -3545,7 +3545,8 @@ export class Canvas implements DirtyTracker {
           // so it can sample the live scene texture directly — same pixels, no copy.
           const instFrostLod = plan.InstFrostLod;
           const _tSnap = performance.now();
-          sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
+          // The active lens reads the scene as drawn under it, sharp: its box's snapshot, after the bar and its items.
+          sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD || node.RenderStyle.Magnification > 1 ? r.SnapshotScreen(region) : null;
           this._opMs.Snap += performance.now() - _tSnap;
           // See the rim site: a snapshot is a scene READ and stays in the walk, so under
           // `?blur-phased` it is an extra encoder end AND a different scene state than this
@@ -5574,8 +5575,6 @@ export class Canvas implements DirtyTracker {
         _backdropMaxLod(instFrostLod, baseFrostLod),
         glass !== null ? glass.MaxLod : 0,
         adaptiveShadow ? Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - baseFrostLod : 0,
-        // The active lens reads the bar's body frosted, this many levels up.
-        rs.Magnification > 1 ? GLASS_LENS_FROST_LOD : 0,
       ),
       BaseFrostLod: baseFrostLod,
       InstFrostLod: instFrostLod,

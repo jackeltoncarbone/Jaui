@@ -363,31 +363,25 @@ vec3 glassSample(vec2 pixel, float lod) {
     return textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, max(0.0, lod - u_BaseFrostLod)).rgb;
 }
 
-// THE ACTIVE LENS (Glass.Pipeline.glsl, Core/Glass.md): Apple's pressed selection, over the bar as drawn. Inside its
-// bezel it magnifies what is under it about its centre: the bar's ink (its glyphs and labels) sharp, the bar's own
-// body frosted, so what shows through a translucent bar stays frosted as the bar draws it. The bezel runs on from
-// the magnified body out to the bar's own edge, which it shows at the lens's outline, dispersed; the body is
-// lifted by the lens's screen curve.
-vec3 GlassActiveLens(float d, vec2 nScreen, float span, float dpr, float zoom, float ca, float light) {
+// THE ACTIVE LENS (Glass.Pipeline.glsl, Core/Glass.md): Apple's pressed selection. It reads the scene as drawn under
+// it (u_Scene, a snapshot of its box taken after the bar and its items drew) through Apple's measured refraction,
+// sharp: magnified at the centre, compressed toward the rim across the bezel, dispersed only there.
+vec3 lensScene(vec2 pixel) {
+    vec2 uv = pixel / u_Resolution;
+    uv.y = 1.0 - uv.y;
+    return texture(u_Scene, uv).rgb;
+}
+vec3 GlassActiveLens(float d, float span, float zoom, float ca, float light) {
     float bezel = GLASS_LENS_BEZEL * span;
     float t = max(-d, 0.0);
-    vec2 c = v_Rot.zw;
-    vec2 source;
-    if (t >= bezel) {
-        source = c + (v_PixelPos - c) / zoom;
-    } else {
-        vec2 inner = v_PixelPos - nScreen * (bezel - t) * dpr;
-        vec2 edge = v_PixelPos + nScreen * t * dpr - nScreen * GLASS_LENS_LIFT * dpr;
-        source = mix(edge, c + (inner - c) / zoom, t / bezel);
-    }
-    vec2 offset = source - v_PixelPos;
-    float spread = (GlassSkips(GLASS_SKIP_CA) || t >= bezel) ? 0.0 : ca;
-    vec3 sharp = vec3(glassSample(v_PixelPos + offset * (1.0 + 0.2 * spread), 0.0).r,
-                      glassSample(v_PixelPos + offset * (1.0 + 0.1 * spread), 0.0).g,
-                      glassSample(source, 0.0).b);
-    vec3 frosted = glassSample(source, u_BaseFrostLod + GLASS_LENS_FROST_LOD);
-    float ink = smoothstep(GLASS_LENS_INK.x, GLASS_LENS_INK.y, abs(dot(sharp - frosted, GLASS_BT709)));
-    vec3 seen = mix(frosted, sharp, ink);
+    float body = pow(clamp(t / bezel, 0.0, 1.0), GLASS_LENS_BEZEL_CURVE);
+    float fold = 1.0 - body;
+    float k = mix(GLASS_LENS_EDGE_READ, 1.0 / zoom, body);
+    vec2 offset = (v_Rot.zw + (v_PixelPos - v_Rot.zw) * k) - v_PixelPos;
+    float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca * fold;
+    vec3 seen = vec3(lensScene(v_PixelPos + offset * (1.0 + 0.2 * spread)).r,
+                     lensScene(v_PixelPos + offset * (1.0 + 0.1 * spread)).g,
+                     lensScene(v_PixelPos + offset).b);
     return GlassSkips(GLASS_SKIP_GRADE) ? seen : GlassLensBody(seen, light);
 }
 
@@ -702,8 +696,8 @@ void main() {
             vec3 face;
             if (v_RimEdge.z > 1.0) {
                 // It comes and goes with the glass itself, so a press and a release never pop.
-                face = mix(glassSample(v_PixelPos, 0.0),
-                           GlassActiveLens(d, nScreen, glassSpan, glassDpr, v_RimEdge.z, chromaticAberration, glassLight), glassiness);
+                face = mix(lensScene(v_PixelPos),
+                           GlassActiveLens(d, glassSpan, v_RimEdge.z, chromaticAberration, glassLight), glassiness);
             } else {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassShift(d, max(-0.8 * glassSpan, -60.0), min(0.25 * glassSpan, 20.0)) * lens;
