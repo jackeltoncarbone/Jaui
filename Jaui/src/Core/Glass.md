@@ -60,23 +60,19 @@ The two give the same pixels where they both apply; the parity check renders bot
 
 LiquidGlass.md 6: a label on glass is white at 95% on dark glass and black on light glass, following the glass's appearance, not the theme. Jwift's label level (`@JwiftVibrancyLabel`, Vibrancy.md) is exactly that. Text inside glass that tracks its backdrop turns with it (`Text.Quad.frag`, `u_GlassInk`).
 
-## The active lens [ours: fitted to Apple's frames]
+## The active lens
 
-This is not Apple's lens structure (LiquidGlass.md 7: a warped copy of the items over a warped backdrop). It is our fit of how Apple's lens looks, and every part of it is a deletion candidate in `Glass.Jss.md`.
+Apple's lens is `_UILiquidLensView` (Jwift/Apple/LiquidGlass.md 7): a warped backdrop below, a warped copy of the bar's items above its glass, the real items erased under it. Ours, and what of it is Apple's:
 
-A finger on a selection (Jwift's `Jwift_SelectionIndicator_Pressed`) lifts the resting pill into a clear lens. Apple's reference is its iOS 26 tab bar: a MacStories native screen recording (1320 px, 60 fps, light) and a dark Music capture (LiveBar and LiquidGlassGallery `ActiveLens/`).
+- Size [C]: the resting pill outset 8 pt a side on a tab bar, 12 pt across and 8 pt down on a segmented control (label-only items), never narrower than the pill (`SelectionIndicator.ts`, a `VisualScale` over the pill).
+- Springs [C]: the selection's position and bounds on Apple's (Jwift/Apple/Sizing.md 1): dragging 0.85 over 0.2 s and 0.3 s, released 0.85 over 0.4 s and 0.6 s (`SelectionIndicator.jss`). The lens's own growth and release are fitted to the MacStories 60 fps frames [I]: grow 409 / 25.3 (a 7% overshoot), release 2187 / 112.
+- Two layers [I, measured]: the item under the finger lifts on its own layer (`Jwift_TabItemLensed` 1.2, its label 1.035 more), and the glass takes in a wider area than it covers, `Lens: 1` (Glass.Pipeline.glsl, `GlassActiveLens`): a read of 1 / 0.97 in the body rising to 1.06 at 9 pt in, folding back to 1 at the outline, on Apple's frames against the same backdrop. Apple's warp values were lost to decompilation, so this profile is measured, and the fold is as gentle as a label crossing the rim allows (a stroke stretched 1.5 x at most).
+- It reads only the bar it stands on: down, the read is eased onto the bar's rows (lanes 52 and 53), never the page.
+- The items lie above its glass, as Apple's copy does: the rim never paints over item ink, so a label crossing the outline stays whole.
+- Body, rim and shadow [I, fitted]: the lens body's screen curve, its iridescent rim and its 10% shadow are fitted to Apple's frames; Apple's variant 14 values and its inner shadow (radius 3, opacity 0.12, y 7) are the open items.
+- The items under a moving lens take the selection's tint (`LensInk`), as Apple's frames show [I].
 
-- Size: a capsule sized against the BAR, not scaled from our cell: 1.173 bar heights tall (Apple's 217 px over its 185 px bar, 5.3 pt past the bar top and bottom) and 1.35 item pitches wide (316 px over Apple's 234 px pitch), capped at 1.708 bar heights. A bar denser than Apple's four items keeps the 1.35 pitches, so the lens stops short of the neighbours' labels as Apple's does; Apple ships no five-item iOS 26 bar to measure. `SelectionIndicator.ts` draws it as a `VisualScale` override, render-time, from the bar's height and pitch.
-- Its backdrop is the bar as drawn: the lens draws above the tab items (Layer 2) and reads a snapshot of its box taken there, after the bar's glass and its items, sharp (no pyramid, no blur). What shows through the bar arrives frosted by the bar itself; our glyphs arrive crisp. Glass inside a drawn glass surface samples that surface, never a scroll edge's content (`Jaui.ts`, `closesEdge`).
-- Refraction: a flat magnifying plate with a bezel-only fold. Every pixel of the body reads `centre + (p - centre) / 1.21`, the same in x and y (Apple's Home label reads 1.21 x wider; ours 1.22). Across the bezel, 0.095 of the span (7 pt), the read runs linearly back to 1 at the outline, so nothing past the lens is pulled into it: on a bar denser than Apple's a pull draws a copy of the neighbour's label beside the lensed one. Each channel reads out to its own edge, red past the outline and blue short of it: that is the fringe, 0.88 pt at the median in light and 0.11 pt in dark on Apple's frames. Down, the lens's height maps onto the bar's: the plate's 1 / 1.21 inside, the bar's own outline (its darker edge included) at the lens's rim, from the bar's top and bottom packed per lens (lanes 52/53), so however tall a drag stretches the lens it never reads the page above the bar. The plate is reconstructed by Catmull-Rom, so a magnified glyph stays as sharp as Apple's. The whole refraction fades with the glass, so a release leaves no fold behind.
-- Body: a screen curve `1 - (1 - c)^g` that keeps the ink's depth. Light, g 2.3, lifts Apple's 177 bar body to its 238, capped at 0.935 so the clear rim (Apple: 250 over 238) still reads over a white bar. Dark, g 1.8, lifts our dark bar (44) to Apple's dark lens interior (73). Fitted.
-- Shadow: a plain black shadow, 10% at the edge and gone 13 pt below it (Apple's light frames: 16 levels just below the rim, none above). `GLASS_LENS_SHADOW_PEAK`.
-- Rim: the clear highlight, iridescent: each channel's band deeper by its own share, a third of a turn apart around the outline. 0.9 pt median split in light, a tenth of that in dark. Fitted.
-- Timing: grow on a spring (409, 25.3: 8% overshoot), let go on another (2187, 112: no overshoot), both fitted to the 60 fps frames; the bar lets go the moment the finger lifts. Our engine's lens scale, frame by frame, tracks Apple's frames within 0.05 (grow) and 0.09 (release) rmse.
-
-A tab switch is never cross-faded (App.Config.ts): the app is one canvas, so a route cross-fade blends the old frame over the new and draws the dock twice, the old bar and lens fading over the new ones.
-
-The items under the lens take the selection's tint, as Apple's do: `LensInk` (the bar's accent, set by SelectionIndicator.ts) recolors the ink the lens magnifies, bright ink in dark and dark ink in light, over the lifted body; only ink near those extremes turns, so content frosted through the bar keeps its own color. The drag follow has no reference; the captures do not show the finger.
+A tab switch is never cross-faded (App.Config.ts): the app is one canvas, so a route cross-fade blends the old frame over the new and draws the dock twice.
 
 ### Verify on our own bar, never over Apple's frames
 

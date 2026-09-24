@@ -18,6 +18,11 @@ float GlassShift(float d, float amount, float height) {
     float h = clamp(-d / max(height, 1e-4), 0.0, 1.0);
     return amount * (1.0 - sqrt(h * (2.0 - h)));
 }
+// Apple's inner refraction (QuartzCore GlassBackgroundFilter): max(-0.8 S, -60) pt at the outline, over a bezel
+// min(0.25 S, 20) pt deep. Negative: the rim reads from further in, so the content wraps into the bezel.
+float GlassInnerShift(float d, float span) {
+    return GlassShift(d, max(-0.8 * span, -60.0), min(0.25 * span, 20.0));
+}
 
 // The blur ramp against (d + inner shift): full radius from half the span in, half radius over the last point.
 float GlassBlurScale(float t, float span) {
@@ -66,18 +71,22 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
     return mix(dim, lit, light);
 }
 
-// THE ACTIVE LENS, measured on Apple's iOS 26 pressed tab (MacStories native capture, 3x, 60 fps; Core/Glass.md).
-// Its interior is a flat plate: a pixel reads centre + (p - centre) / m, the same in x and y (m, the Magnification,
-// 1.21: Apple's straight labels read 1.21 x wider). Only the bezel, GLASS_LENS_BEZEL of the span (7 pt on the 74 pt
-// lens), folds: across it the read runs linearly back to 1 at the outline, so nothing past the lens is pulled into
-// it (a denser bar than Apple's puts a neighbour's label at the lens's edge, and a pull would draw a copy of it).
-// Each channel reads a little further than the others at the outline, red past it and blue short of it: that is the
-// fringe, GLASS_LENS_SPLIT x the dispersion, parting the channels by Apple's 0.88 pt in light and 0.11 pt in dark.
-// The lens reads only inside the bar it stands on, up to the bar's own outline (its darker edge included), past
-// which it continues the bar, never the page: GLASS_LENS_BAR_INSET device px keeps every filter tap on the bar.
-// The body is a screen curve 1 - (1 - c)^g that keeps the ink's depth: light lifts Apple's 177 bar body to its 238;
-// dark lifts OUR dark bar (44) to Apple's dark lens interior (73).
-const float GLASS_LENS_BEZEL = 0.095;
+// THE ACTIVE LENS: Apple's pressed selection (Core/Glass.md). Two layers, as Apple's are (UIKit _UILiquidLensView: a
+// warped backdrop below, a warped copy of the bar's items above). The items lift on their own layer (Jwift's
+// Jwift_TabItemLensed); the glass reads the scene as drawn under it and takes in a wider area than it covers: a pixel
+// reads centre + (p - centre) x k, k GLASS_LENS_BODY_READ in the body, rising from GLASS_LENS_REACH of the span in to
+// GLASS_LENS_EDGE_READ at GLASS_LENS_BEZEL, then back to 1 at the outline, so nothing past the lens is pulled in.
+// [I] Apple's warp values did not survive decompilation (its warpSDF filter's key paths and lifted amounts), so the
+// profile is fitted to Apple's own frames against the same backdrop (Backdrop/fields.py): 0.97 in the body, 0.96 at
+// 13 to 20 pt in, 0.91 at 8 to 13 pt. The fold back to 1 is as gentle as a label crossing the rim allows: it may
+// stretch a stroke 1.5 x at most (Apple's own glassBackground bezel, GlassInnerShift, at this span would mirror it).
+// Down, the read is eased onto the bar's own rows, so the lens never reads the page above it.
+// Each channel reads out to its own edge, red past green and blue short of it: the fringe, GLASS_LENS_SPLIT x the
+// dispersion.
+const float GLASS_LENS_BODY_READ = 1.031;
+const float GLASS_LENS_BEZEL = 0.124;
+const float GLASS_LENS_REACH = 0.275;
+const float GLASS_LENS_EDGE_READ = 1.06;
 const vec2 GLASS_LENS_SPLIT = vec2(0.0047, 0.0374);
 const float GLASS_LENS_BAR_INSET = 1.5;
 const float GLASS_LENS_SCREEN_LIGHT = 2.3;

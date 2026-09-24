@@ -31,7 +31,7 @@ export const DefaultJivStyle: JivStyle = {
   Tint: '0',
   TintTone: 'Ground',
   ChromaticAberration: '0',
-  Magnification: '1',
+  Lens: '0',
   LensInk: 'rgba(0, 0, 0, 0)',
   RimWidth: '0',
   RimStrength: '0',

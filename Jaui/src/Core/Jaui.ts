@@ -15,7 +15,7 @@ import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
-import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak } from './Glass.Pipeline';
+import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassIsLens } from './Glass.Pipeline';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
   Vibrancy, VibrancyBlendOf, VibrancyGateLine, VibrancyGraded, VibrancyInkScale, VibrancyIsActive,
@@ -3546,7 +3546,7 @@ export class Canvas implements DirtyTracker {
           const instFrostLod = plan.InstFrostLod;
           const _tSnap = performance.now();
           // The active lens reads the scene as drawn under it, sharp: its box's snapshot, after the bar and its items.
-          sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD || node.RenderStyle.Magnification > 1 ? r.SnapshotScreen(region) : null;
+          sceneSnap = instFrostLod < SCENE_TAP_FROST_LOD || GlassIsLens(node.RenderStyle.Lens) ? r.SnapshotScreen(region) : null;
           this._opMs.Snap += performance.now() - _tSnap;
           // See the rim site: a snapshot is a scene READ and stays in the walk, so under
           // `?blur-phased` it is an extra encoder end AND a different scene state than this
@@ -5526,7 +5526,7 @@ export class Canvas implements DirtyTracker {
 
   /** A glass surface's shadow peak at its rendered size (Core/Glass.Pipeline.ts); 0 on clear glass. */
   private _glassShadowPeak = (node: Jiv, eff: Mat2x3): number =>
-    GlassShadowPeak(JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5, node.RenderStyle.GlassVariant, node.RenderStyle.Magnification > 1);
+    GlassShadowPeak(JivGlassSpan(node) * (matScaleX(eff) + matScaleY(eff)) * 0.5, node.RenderStyle.GlassVariant, GlassIsLens(node.RenderStyle.Lens));
 
   /** The glass FILL pyramid's plan: the region it is built over, the sigma it is built at, and how
    *  deep a chain the surface can read.

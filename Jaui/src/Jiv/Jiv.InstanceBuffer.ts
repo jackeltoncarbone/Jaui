@@ -3,7 +3,7 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 import { FoldVibrancy, VibrancyGraded } from '../Core/Vibrancy';
 import type { VibrancyValue } from '../Core/Vibrancy';
 import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
-import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps } from '../Core/Glass.Pipeline';
+import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps, GlassIsLens } from '../Core/Glass.Pipeline';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -35,7 +35,7 @@ import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadow
 //          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
 //          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularGlow, chromaticAberration, borderFade in device px)
-//   loc 13: a_RimEdge      (free, free, lens magnification, lens ink)
+//   loc 13: a_RimEdge      (free, free, lens, lens ink)
 //   loc 14: a_Outline      (lens bar top, lens bar bottom, clipOffset, clipCount)
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
@@ -220,7 +220,7 @@ export class JivInstanceBuffer {
     const span = JivGlassSpan(jiv) * avgScale;
     const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly;
     // Glass casts Apple's shadow: offset (0, 8) pt, reaching two radii (Glass.Pipeline), its alpha by size.
-    const lens = style.Magnification > 1;
+    const lens = GlassIsLens(style.Lens);
     const glassShadowPeak = glass ? GlassShadowPeak(span, style.GlassVariant, lens) : 0;
     // The lens's shadow is a plain one, drawn by the flat program.
     const glassColoredShadow = glass && !lens && shadow === 'Only' && GlassSizeRamps(span).V > 0 && glassShadowPeak > 0;
@@ -336,8 +336,8 @@ export class JivInstanceBuffer {
 
     data[offset + 48] = 0;
     data[offset + 49] = 0;
-    // The active lens's magnification (1 is none).
-    data[offset + 50] = style.Magnification;
+    // The active lens (0 is none, 1 the pressed lens).
+    data[offset + 50] = style.Lens;
     // The lens's ink colour, packed 8 bits a channel and offset by one so 0 means none (exact in a float).
     const ink = style.LensInk;
     data[offset + 51] = ink.A > 0.001

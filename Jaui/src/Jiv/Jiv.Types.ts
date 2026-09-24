@@ -225,9 +225,9 @@ export interface JivStyle {
   /** Dispersion across the lens, 0 on Apple's standard glass: red at (1 + 0.2 ca) of the bend, green at
    *  (1 + 0.1 ca). The moving selection lens uses it. */
   ChromaticAberration: string;
-  /** THE ACTIVE LENS (Core/Glass.md): above 1, glass magnifies what is under it by this factor about its centre,
-   *  inside a thin bezel that folds the content past its outline back in. Apple's pressed selection is 1.2. */
-  Magnification: string;
+  /** THE ACTIVE LENS (Core/Glass.md): 0 is ordinary glass, 1 the pressed selection's lens, which refracts the
+   *  scene as drawn under it with Apple's own bezel (Glass.Pipeline.glsl, GlassActiveLens). Springs between. */
+  Lens: string;
   /** The colour the active lens gives the ink it magnifies: Apple's lens shows the items under it in the selection's
    *  tint. Transparent (the default) leaves the ink as it is. */
   LensInk: string;
@@ -375,7 +375,7 @@ export interface JivRenderStyle {
 
 
   ChromaticAberration: number;
-  Magnification: number;
+  Lens: number;
   LensInk: Color;
 
   /** Resolved `RimWidth`, in points. */

@@ -60,10 +60,12 @@ export const GlassShadowLod = (dpr: number, variant: GlassVariant): number =>
 /** How far the colored shadow's read reaches outward: min(0.625 S, 75) pt. */
 export const GlassShadowAmount = (span: number): number => Math.min(0.625 * span, 75);
 
-/** The shadow's peak alpha: opacity (0.5 - 0.25u) times its fill (black 0.12 plus SDR 0.08 + 0.16u), or
- *  times 1 where the colored read takes over (v). Clear glass casts none. */
+/** The active lens: a glass whose Lens is above 0 (Glass.Pipeline.glsl, GlassActiveLens). */
+export const GlassIsLens = (lens: number): boolean => lens > 0;
 /** The active lens's shadow peak: Apple's pressed tab darkens what is below it 10% at the edge (MacStories light). */
 export const GLASS_LENS_SHADOW_PEAK = 0.1;
+/** The shadow's peak alpha: opacity (0.5 - 0.25u) times its fill (black 0.12 plus SDR 0.08 + 0.16u), or
+ *  times 1 where the colored read takes over (v). Clear glass casts none. */
 export const GlassShadowPeak = (span: number, variant: GlassVariant, lens: boolean = false): number => {
   if (lens) return GLASS_LENS_SHADOW_PEAK;
   if (variant === 'Clear') return 0;

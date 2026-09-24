@@ -393,35 +393,48 @@ vec3 lensSceneSharp(vec2 pixel) {
     c += (texture(u_Scene, vec2(t0.x, t3.y)).rgb * w0.x + texture(u_Scene, vec2(t12.x, t3.y)).rgb * w12.x + texture(u_Scene, vec2(t3.x, t3.y)).rgb * w3.x) * w3.y;
     return clamp(c, 0.0, 1.0);
 }
-// Where a lens pixel reads, eased in by `amount`. Across, centre + (p - centre) x k. Down, the lens's height maps onto
-// the bar's (v_Outline.xy, a device px inside its outline so no filter tap reaches the page): the flat plate's 1 / m
-// inside, the bar's own outline at the lens's rim, however tall a drag stretches the lens.
-vec2 lensRead(vec2 c, float fold, float zoom, float edge, float amount) {
+// Where a lens pixel reads, eased in by `amount`: centre + (p - centre) x k across; down, the same read eased onto
+// the bar's rows (v_Outline.xy, a device px inside its outline) past the point where it would leave them.
+vec2 lensRead(vec2 c, float k, float amount) {
     float barMid = 0.5 * (v_Outline.x + v_Outline.y);
     float barHalf = 0.5 * (v_Outline.y - v_Outline.x) - GLASS_LENS_BAR_INSET;
-    float down = barHalf / max(v_PanelGeom.w, 1.0);
-    vec2 target = vec2(c.x + (v_PixelPos.x - c.x) * mix(1.0 / zoom, edge, fold),
-                       barMid + (v_PixelPos.y - c.y) * mix(min(1.0 / zoom, down), down * edge, fold));
+    float reach = max(v_PanelGeom.w, 1.0);
+    float down = (v_PixelPos.y - c.y) * k;
+    float ease = 2.0 * barHalf - reach;
+    if (ease < barHalf && abs(down) > ease) {
+        float t = clamp((abs(down) - ease) / (reach - ease), 0.0, 1.0);
+        down = sign(down) * (ease + (barHalf - ease) * (1.0 - (1.0 - t) * (1.0 - t)));
+    }
+    vec2 target = vec2(c.x + (v_PixelPos.x - c.x) * k, barMid + down);
     vec2 read = v_PixelPos + (target - v_PixelPos) * amount;
     read.y = clamp(read.y, barMid - barHalf, barMid + barHalf);
     return read;
 }
-vec3 GlassActiveLens(float d, float span, float dpr, float zoom, float ca, float light, float amount, float inkPacked) {
-    float fold = 1.0 - clamp(max(-d, 0.0) / (GLASS_LENS_BEZEL * span), 0.0, 1.0);
+vec3 GlassActiveLens(float d, float span, float lens, float ca, float light, float amount, float inkPacked, out float inkCover) {
+    float depth = max(-d, 0.0) / span;
+    float fold = 1.0 - clamp(depth / GLASS_LENS_BEZEL, 0.0, 1.0);
+    float body = mix(GLASS_LENS_BODY_READ, GLASS_LENS_EDGE_READ, 1.0 - clamp((depth - GLASS_LENS_BEZEL) / (GLASS_LENS_REACH - GLASS_LENS_BEZEL), 0.0, 1.0));
     vec2 c = v_Rot.zw;
+    float ease = amount * lens;
     float spread = GlassSkips(GLASS_SKIP_CA) ? 0.0 : ca * mix(GLASS_LENS_SPLIT.x, GLASS_LENS_SPLIT.y, light);
     vec3 seen;
     if (fold <= 0.0 || spread <= 0.0) {
-        vec2 read = lensRead(c, fold, zoom, 1.0, amount);
+        vec2 read = lensRead(c, mix(body, 1.0, fold), ease);
         seen = fold <= 0.0 ? lensSceneSharp(read) : lensScene(read);
     } else {
         // Each channel reads out to its own edge: red a little past the outline, blue a little short of it.
         vec3 edge = 1.0 + spread * vec3(1.0, 0.0, -1.0);
-        seen = vec3(lensScene(lensRead(c, fold, zoom, edge.r, amount)).r,
-                    lensScene(lensRead(c, fold, zoom, edge.g, amount)).g,
-                    lensScene(lensRead(c, fold, zoom, edge.b, amount)).b);
+        seen = vec3(lensScene(lensRead(c, mix(body, edge.r, fold), ease)).r,
+                    lensScene(lensRead(c, mix(body, edge.g, fold), ease)).g,
+                    lensScene(lensRead(c, mix(body, edge.b, fold), ease)).b);
     }
     vec3 lensed = GlassSkips(GLASS_SKIP_GRADE) ? seen : mix(seen, GlassLensBody(seen, light), amount);
+    // The items it shows lie ABOVE its glass, as Apple's lifted copy lies over its ClearGlassView (Jwift/Apple/
+    // LiquidGlass.md 7.1), so the rim never paints over them: how much of this pixel is item ink, by its contrast
+    // with the bar (dark or bright off the body) or its color (a tinted glyph).
+    float lum = dot(seen, GLASS_BT709);
+    inkCover = max(mix(smoothstep(0.5, 0.8, lum), 1.0 - smoothstep(0.2, 0.5, lum), light),
+                   smoothstep(0.15, 0.3, max(seen.r, max(seen.g, seen.b)) - min(seen.r, min(seen.g, seen.b)))) * amount;
     // The ink it magnifies takes the lens's ink colour at full strength, over the lifted body, as Apple's lens shows the
     // items under it in the selection's tint: ink is what stands well off the bar, bright in dark and dark in light, so
     // content frosted through the bar (never near the ink's extremes) keeps its own colour.
@@ -744,12 +757,13 @@ void main() {
             glassShadowTint = 1.0;
         } else {
             vec3 face;
-            if (v_RimEdge.z > 1.0) {
+            float lensInk = 0.0;
+            if (v_RimEdge.z > 0.0) {
                 // It comes and goes with the glass itself, so a press and a release never pop.
-                face = GlassActiveLens(d, glassSpan, glassDpr, v_RimEdge.z, chromaticAberration, glassLight, glassiness, v_RimEdge.w);
+                face = GlassActiveLens(d, glassSpan, v_RimEdge.z, chromaticAberration, glassLight, glassiness, v_RimEdge.w, lensInk);
             } else {
             float lens = v_Refraction.w * glassiness;
-            float innerShift = GlassShift(d, max(-0.8 * glassSpan, -60.0), min(0.25 * glassSpan, 20.0)) * lens;
+            float innerShift = GlassInnerShift(d, glassSpan) * lens;
             float outerShift = GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;
             float radius = GlassBlurRadius(glassSpan, glassClear);
             float innerLod = GlassNativeLod(radius * GlassBlurScale(d + innerShift, glassSpan), glassDpr, glassClear);
@@ -802,12 +816,13 @@ void main() {
                 vec2 key = GlassKeyLight(v_Rot, v_Is3D);
                 vec4 rim = GlassRim(shown, d, normal, key, v_Specular.x, v_Specular.y, glassClear, glassLight);
                 vec3 alpha = vec3(rim.a);
-                if (v_RimEdge.z > 1.0) {
+                if (v_RimEdge.z > 0.0) {
                     // The active lens's rim is iridescent: each channel's band runs to its own depth.
                     vec3 h = GlassLensRimHeights(normal, v_Specular.y, chromaticAberration, glassLight);
                     alpha = vec3(GlassRim(shown, d, normal, key, v_Specular.x, h.r, glassClear, glassLight).a,
                                  GlassRim(shown, d, normal, key, v_Specular.x, h.g, glassClear, glassLight).a,
                                  GlassRim(shown, d, normal, key, v_Specular.x, h.b, glassClear, glassLight).a);
+                    alpha *= 1.0 - lensInk;
                 }
                 face = clamp(face + alpha / max(cover, 1e-3) * (rim.rgb - shown), 0.0, 1.0);
             }
