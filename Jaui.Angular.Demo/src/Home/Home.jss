@@ -193,6 +193,7 @@ LiquidGlass {
 
   BackdropFilter: Blur(4pt) Brightness(1.25) Saturate(1.25) Contrast(0.75)
 
+  Glass: Regular
   Thickness: 2
   Refraction: 1
 
@@ -488,8 +489,9 @@ BorderLayerFront {
    stroke. */
 BorderLayerGlass {
   BorderLayer: 10
-  // Material is DERIVED, never authored: Thickness above 0 is what routes this
+  // Material is DERIVED, never authored: `Glass` (with Thickness above 0) is what routes this
   // through the glass pipeline.
+  Glass: Regular
   Thickness: 12pt
   Background: rgba(255, 255, 255, 0.04)
   BorderWidth: 0pt

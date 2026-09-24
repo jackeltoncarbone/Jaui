@@ -35,7 +35,7 @@ beforeEach(() => {
 const Field = (px: number, py: number, halfW: number, halfH: number, r: number, s: number): number =>
   ContinuousCorner(px, py, halfW, halfH, [r, r, r, r], s);
 
-/** The smoothings the sweeps run: a plain arc, iOS, and the most the model eases. */
+/** The corner curves the sweeps run: 0 is Apple's circular corner, anything above 0 its continuous one. */
 const SMOOTHINGS = [0, 0.3, 0.6, 0.8, 1];
 
 /** `1 - smoothstep(-0.5, 0.5, dist)` — the panel shader's `fillAlpha`, verbatim. */

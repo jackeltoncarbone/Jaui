@@ -18,7 +18,7 @@
  *
  * `dist` is not a rect distance — it is the continuous corner's field (Jiv/Shaders/Corner.Continuous.glsl)
  * — so the inset that guarantees `dist <= -0.5` is derived rather than assumed. Its corner reaches
- * `CornerReach(r, s) = (1 + s) r` along each edge, and past that on both axes it returns the FLAT
+ * `CornerReach(r, s)`, 1.528665 r along each edge (r for the circular corner), and past that on both axes it returns the FLAT
  * branch, `-min(inward from the side, inward from the top)`. Inset a point by `max(reach, 0.5)` from
  * every side and the flat branch runs, so `dist = -(distance to the nearest edge) <= -0.5` and the
  * alpha is exactly 1, whatever the smoothing or the aspect. A shape shorter than twice its reach — a
@@ -62,11 +62,11 @@ export interface PixelRect {
  *  tolerance. */
 export const OCCLUSION_AA_INSET = 0.5;
 
-/** How far a continuous corner of radius `radius` and smoothing `smoothing` reaches along each edge from
- *  the corner (Jiv/Shaders/Corner.Continuous.glsl): its easing starts (1 + s) r out. Past it on both
- *  axes the shape's distance is the nearer straight edge's. */
+/** How far a corner of radius `radius` reaches along each edge from its vertex (Jiv/Shaders/Corner.Continuous.glsl):
+ *  Apple's continuous corner at most 1.528665 r (less where an edge has no room), the circular corner
+ *  (smoothing 0) r. Past it on both axes the shape's distance is the nearer straight edge's. */
 export const CornerReach = (radius: number, smoothing: number): number =>
-  (1 + Math.max(0, Math.min(1, smoothing))) * radius;
+  (smoothing > 0 ? 1.528665 : 1) * radius;
 
 export const PixelRectArea = (r: PixelRect): number =>
   Math.max(0, r.X1 - r.X0) * Math.max(0, r.Y1 - r.Y0);

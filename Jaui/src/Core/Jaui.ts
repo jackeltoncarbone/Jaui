@@ -3415,7 +3415,7 @@ export class Canvas implements DirtyTracker {
 
       } else if (((_isGlass(material) && node.RenderStyle.Refraction !== 0) || _hasBackdropFilter(node)) && material !== 'ProgressiveBlur' && !this._diagNoGlass) {
         // ── The glass FILL ──
-        // A glass slab (Thickness > 0 → Material LiquidGlass) only takes the glass FILL
+        // A glass slab (Glass set, Thickness > 0 → Material LiquidGlass) only takes the glass FILL
         // pipeline (refraction + backdrop sampling) when it actually has a glass-fill
         // effect to show: a non-zero Refraction, or a backdrop frost/grade. A slab with
         // Refraction 0 and no backdrop has nothing to refract or frost, so its FILL renders
@@ -3706,7 +3706,7 @@ export class Canvas implements DirtyTracker {
         r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
         // Always use the MATERIAL_GLASS variant for any standalone panel
         // that needs the pyramid path. Material is *inferred* from Thickness
-        // (Thickness > 0 → 'LiquidGlass', else 'None'), so during a press →
+        // (Glass set and Thickness > 0 → 'LiquidGlass', else 'None'), so during a press →
         // resting transition the inferred Material flips the moment Thickness
         // crosses zero — and every effect gated by `materialType == 1.0`
         // (rim glow, hemispherical light, catchlight, rim spec) vanishes in
@@ -5514,7 +5514,7 @@ export class Canvas implements DirtyTracker {
 
   /** True when this node takes the glass FILL pipeline — the branch that builds a pyramid.
    *
-   *  A glass slab (Thickness > 0 → Material LiquidGlass) only takes it when it actually has a
+   *  A glass slab (Glass set, Thickness > 0 → Material LiquidGlass) only takes it when it actually has a
    *  glass-fill effect to show: a non-zero Refraction, or a backdrop frost/grade. A slab with
    *  Refraction 0 and no backdrop has nothing to refract or frost, so its FILL renders as a plain
    *  panel. The rim is its own draw either way. */
@@ -5857,7 +5857,7 @@ export class Canvas implements DirtyTracker {
     const avgScale = (matScaleX(eff) + matScaleY(eff)) * 0.5;
     let radius = 0;
     for (let i = 0; i < 4; i++) radius = Math.max(radius, rs.BorderRadius[i] * avgScale * d);
-    // How far the corner reaches along each edge: the continuous corner's easing runs (1 + s) r.
+    // How far the corner reaches along each edge: Apple's continuous corner, 1.528665 r at most.
     const reach = CornerReach(radius, rs.BorderRadiusSmoothness);
 
     let cover: readonly PixelRect[] = EMPTY_COVER;

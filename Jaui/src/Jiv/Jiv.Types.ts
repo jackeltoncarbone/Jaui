@@ -61,7 +61,7 @@ export const MAX_BLUR_STOPS = 12;
 
 /** Derived at resolve time from which props the author set. Not authorable —
  *  Jiv infers the render pipeline from what you're actually using:
- *    • Thickness > 0                   → 'LiquidGlass' (glass pipeline, refraction)
+ *    • Glass not None, Thickness > 0    → 'LiquidGlass' (glass pipeline, refraction)
  *    • ProgressiveBlurDirection != null → 'ProgressiveBlur' (compositing overlay)
  *    • otherwise                       → 'None' (plain panel) */
 export type MaterialType = 'None' | 'LiquidGlass' | 'ProgressiveBlur';
@@ -75,6 +75,8 @@ export type ProgressiveBlurDirection = 'ToTop' | 'ToBottom' | 'ToLeft' | 'ToRigh
  *    • Ink:    the opposite neutral, white in dark and black in light (a selection or highlight).
  *    • Dark / Light: always black / always white, whatever the theme (glass over video or a camera). */
 export type TintTone = 'Ground' | 'Ink' | 'Dark' | 'Light';
+/** Apple's glass (Jwift/Apple/LiquidGlass.md 3.8). None is no glass. */
+export type GlassKind = 'None' | 'Regular' | 'Clear';
 export type GlassVariant = 'Regular' | 'Clear';
 /** What a progressive blur is to the glass inside it.
  *    • Surface: the surface's own material. Glass in it sits on it and sees it, blurred as drawn.
@@ -204,13 +206,14 @@ export interface JivStyle {
 
   // Physical material — the Jiv is a slab with measurable properties
   Frost: string;
+  /** `Glass: None | Regular | Clear`: Apple's glass (Jwift/Apple/LiquidGlass.md), every lever at Apple's value
+   *  for the shape's size. None (the default) is no glass. */
+  Glass: GlassKind;
+  /** How far the glass has come in, 0..1; Auto (the default) is 1 on glass. Springs a glass in and out. */
   Thickness: string;
   /** How far the glass bends what is behind it, as a multiple of Apple's quarter-circle bezel
    *  (Core/Glass.md): 1 is Apple's, 0 a flat pane. */
   Refraction: string;
-  /** Apple's glass variant (Core/Glass.md): `Regular` (the default) or `Clear`. Everything else about a
-   *  glass surface, its blur, face, bleed, shadow and highlight, follows from its size and its backdrop. */
-  GlassVariant: GlassVariant;
   /** The body's neutral pigment, 0..1: how far the graded backdrop is pulled toward the `TintTone`
    *  neutral. Applied after the BackdropFilter grade and before the Background fill, so it is the
    *  dimming (or lightening) layer of the material, not a colour. A length expression, so
@@ -354,6 +357,8 @@ export interface JivRenderStyle {
   BackdropFrostAuto: boolean;
   Thickness: number;
   Refraction: number;
+  Glass: GlassKind;
+  /** The glass's variant, for the pipeline's laws: Clear or Regular. */
   GlassVariant: GlassVariant;
   /** The theme the element resolved under: glass without a probe takes its appearance. */
   SchemeDark: boolean;

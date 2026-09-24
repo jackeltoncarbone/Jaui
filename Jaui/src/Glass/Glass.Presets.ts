@@ -4,14 +4,13 @@ import type { JivStyle } from '../Jiv/Jiv.Types';
 export const LiquidGlass: Partial<JivStyle> = {
   Background: 'rgba(255, 255, 255, 0)',
   BorderRadius: '32',
-  Thickness: '1',
+  Glass: 'Regular',
   Refraction: '1',
-  GlassVariant: 'Regular',
   RimWidth: '1',
   RimStrength: '0.5',
 };
 
 export const ClearGlass: Partial<JivStyle> = {
   ...LiquidGlass,
-  GlassVariant: 'Clear',
+  Glass: 'Clear',
 };

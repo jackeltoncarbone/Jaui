@@ -171,6 +171,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   // Vibrancy's declaration and zone COLORS snap: a hue is not a spring, and the declaration is a
   // tagged value, not a number.
   render.VibrancyDeclaration = target.VibrancyDeclaration;
+  render.Glass = target.Glass;
   render.GlassVariant = target.GlassVariant;
   render.LensInk = target.LensInk;
   render.SchemeDark = target.SchemeDark;

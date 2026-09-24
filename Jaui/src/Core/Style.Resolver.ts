@@ -1,4 +1,4 @@
-import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop } from '../Jiv/Jiv.Types';
+import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop, GlassKind } from '../Jiv/Jiv.Types';
 import { ParseProgressiveBlur } from '../ProgressiveBlur/ProgressiveBlur.Stops';
 import type { ResolveContext } from './Length';
 import { Resolve, ResolveTernary, ResolveVars } from './Length';
@@ -202,9 +202,9 @@ const _resolveVibrancyColor = (raw: string | null, ctx: ResolveContext): Color =
   return { R: c.R, G: c.G, B: c.B, A: 1 };
 };
 
-const _inferMaterial = (thickness: number, direction: ProgressiveBlurDirection | null): MaterialType => {
+const _inferMaterial = (glass: GlassKind, thickness: number, direction: ProgressiveBlurDirection | null): MaterialType => {
   if (direction !== null) return 'ProgressiveBlur';
-  if (thickness > 0) return 'LiquidGlass';
+  if (glass !== 'None' && thickness > 0) return 'LiquidGlass';
   return 'None';
 };
 
@@ -215,7 +215,10 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // The authored radius is the continuous corner's own radius (Jiv/Shaders/Corner.Continuous.glsl),
   // as it is Apple's: no compensation, and a child's radius is its parent's less the inset.
   const borderRadius = rawRadius;
-  const thickness = Resolve(s.Thickness, ctx, 'W');
+  const glassRaw = ResolveTernary(s.Glass, ctx);
+  const glass: GlassKind = glassRaw === 'Regular' || glassRaw === 'Clear' ? glassRaw : 'None';
+  // Auto: a glass is fully in, anything else has no glass to fade.
+  const thickness = s.Thickness === 'Auto' ? (glass === 'None' ? 0 : 1) : Resolve(s.Thickness, ctx, 'W');
 
   // Filters — each authored as a CSS-shaped function list, normalized into
   // the per-zone scalar render fields the shader already consumes. Blur()'s
@@ -263,7 +266,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   const effDirection = blurSpec?.Direction ?? s.ProgressiveBlurDirection ?? fgDir ?? null;
 
   return {
-    Material: _inferMaterial(thickness, effDirection),
+    Material: _inferMaterial(glass, thickness, effDirection),
     ProgressiveBlurDirection: effDirection ?? 'ToTop',
     ProgressiveBlurFeather: fgFeather !== null ? fgFeather : Resolve(s.ProgressiveBlurFeather, ctx, 'H'),
     ProgressiveBlurEasing: fgBlur && !fgBlur.Uniform ? fgBlur.Easing : Resolve(s.ProgressiveBlurEasing, ctx, 'W'),
@@ -293,7 +296,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BackdropFrostAuto: !fgBlur && frostAuto,
     Thickness: thickness,
     Refraction: Resolve(s.Refraction, ctx, 'W'),
-    GlassVariant: ResolveTernary(s.GlassVariant, ctx) === 'Clear' ? 'Clear' : 'Regular',
+    Glass: glass,
+    GlassVariant: glass === 'Clear' ? 'Clear' : 'Regular',
     SchemeDark: parseFloat(ctx.Vars?.get(THEME_DARK_VAR) ?? '1') >= 0.5,
     Tint: _resolveTint(s, ctx),
     BackdropBrightness: backdrop.Brightness,
