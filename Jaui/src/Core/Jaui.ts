@@ -5417,8 +5417,9 @@ export class Canvas implements DirtyTracker {
     const s = node.RenderStyle;
     if (!(s.RimWidth > 0 && s.RimStrength > 0 && node.EffectiveOpacity > 0.001
           && node.Visible && node.Width > 0 && node.Height > 0)) return false;
-    // Glass draws its highlight in its own fragment, over its face.
-    if (_isGlass(s.Material) && this._glassFillTakesPyramid(node)) return false;
+    // Glass draws its highlight in its own fragment, over its face, unless its rim rides a BorderLayer
+    // above its content (an avatar over its photo), where the rim pass draws it at that slot.
+    if (_isGlass(s.Material) && this._glassFillTakesPyramid(node) && s.BorderLayer === 0) return false;
     return !(ownPanelCulled && this._edgeOutsidePaintedArea(node, eff, stack, effH));
   };
 

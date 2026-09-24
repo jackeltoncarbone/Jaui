@@ -326,8 +326,9 @@ export class JivInstanceBuffer {
     data[offset + 42] = style.SchemeDark ? 1 : 0;
     data[offset + 43] = style.GlassVariant === 'Clear' ? 1 : 0;
 
-    // The highlight: each light's amount and the band's depth in points.
-    data[offset + 44] = style.RimStrength;
+    // The highlight: each light's amount and the band's depth in points. Glass whose rim rides a BorderLayer
+    // draws it in the rim pass over its content instead, so its own face leaves the band to that pass.
+    data[offset + 44] = glass && !rimOnly && style.BorderLayer !== 0 ? 0 : style.RimStrength;
     data[offset + 45] = style.RimWidth;
     data[offset + 46] = style.ChromaticAberration;
     data[offset + 47] = style.BorderFade * avgScale * d;
