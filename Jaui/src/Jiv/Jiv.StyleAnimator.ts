@@ -195,6 +195,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.Layer = target.Layer;
   render.BorderLayer = target.BorderLayer;
   render.Background = target.Background;
+  render.Flex = target.Flex;
 };
 
 export class JivStyleAnimator implements Animatable {
@@ -325,6 +326,31 @@ export class JivStyleAnimator implements Animatable {
     this._jiv.RenderStyle.GlassVariant = target.GlassVariant;
   };
 
+  /** Lays the running flex (Core/Flex.ts) over the resolved springs: its scale and translation compose with
+   *  VisualScale / VisualTranslate, its big glow adds to GlassGlow, its little glow rides the FlexTouch fields.
+   *  Once it settles it is dropped, and the node is exactly its resting self. */
+  private _composeFlex = (dt: number): boolean => {
+    const flex = this._jiv.Flex;
+    if (flex === null) return false;
+    const moving = flex.Step(dt);
+    const render = this._jiv.RenderStyle;
+    if (!moving) {
+      this._jiv.Flex = null;
+      render.FlexTouchX = render.FlexTouchY = render.FlexTouchDiameter = render.FlexTouchAlpha = 0;
+      return false;
+    }
+    render.VisualScaleX *= flex.ScaleX.Value;
+    render.VisualScaleY *= flex.ScaleY.Value;
+    render.VisualTranslateX += flex.TranslateX.Value;
+    render.VisualTranslateY += flex.TranslateY.Value;
+    render.GlassGlow = Math.min(1, render.GlassGlow + Math.max(0, flex.BigGlow.Value));
+    render.FlexTouchX = flex.LittleX.Value;
+    render.FlexTouchY = flex.LittleY.Value;
+    render.FlexTouchDiameter = flex.LittleDiameter * flex.LittleScale.Value;
+    render.FlexTouchAlpha = Math.min(1, Math.max(0, flex.LittleAlpha.Value));
+    return true;
+  };
+
   Tick = (dt: number): boolean => {
     const hasAnims = this._animDriver.HasAnimations;
 
@@ -337,7 +363,7 @@ export class JivStyleAnimator implements Animatable {
     // spring already parked. In that case skip the whole body. The Backstop
     // re-resolves at most once/sec WHILE the loop is awake, so a missed wake
     // self-heals within ~60 frames instead of freezing.
-    if (!this._dirty && !hasAnims && !(this._jiv.PresenceSpring && !this._jiv.PresenceSpring.IsSettled)) {
+    if (!this._dirty && !hasAnims && this._jiv.Flex === null && !(this._jiv.PresenceSpring && !this._jiv.PresenceSpring.IsSettled)) {
       let allSettled = true;
       for (let i = 0; i < this._springs.length; i++) {
         if (!this._springs[i].IsSettled) { allSettled = false; break; }
@@ -404,7 +430,8 @@ export class JivStyleAnimator implements Animatable {
     // The CPU plans the backdrop for Regular until the glass is wholly clear.
     render.GlassVariant = render.GlassClear >= 0.999 ? 'Clear' : 'Regular';
 
-    return springActive || driverActive;
+    const flexActive = this._composeFlex(dt);
+    return springActive || driverActive || flexActive;
   };
 }
 

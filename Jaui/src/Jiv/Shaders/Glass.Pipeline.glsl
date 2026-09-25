@@ -122,6 +122,13 @@ float GlassLaneGlow(float lane) { return floor(lane / 4.0) / 1000.0; }
 vec3 GlassPressGlow(vec3 c, float glow) {
     return mix(c, clamp(GlassYcc(c, 1.05, 0.05, 1.2), 0.0, 1.0), glow);
 }
+// UIKit's flex little glow under the finger: a white disc of `diameter` casting a white shadow of radius half the
+// diameter (shadowPathIsBounds, opacity 1), shown only through that shadow [C: _UIFlexInteractionLittleGlowView,
+// UIKitCore sub_188F4C4CC]. CA's shadow radius read as two sigma, and the disc's blur as a logistic edge [I].
+float GlassTouchGlow(float r, float diameter) {
+    float sigma = max(diameter * 0.25, 1e-3);
+    return 1.0 / (1.0 + exp(1.702 * (r - diameter * 0.5) / sigma));
+}
 // The edge bleed's own matrix: light (1, 0.9, 1.2), dark (0.5, 0, 1).
 vec3 GlassBleed(vec3 c, float light) {
     return mix(GlassYcc(c, 0.5, 0.0, 1.0), GlassYcc(c, 1.0, 0.9, 1.2), light);

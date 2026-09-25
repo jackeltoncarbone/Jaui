@@ -35,7 +35,7 @@ import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadow
 //          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
 //          signed glass body Tint: negative toward black, positive toward white.
 //   loc 12: a_Specular     (specularIntensity, specularGlow, chromaticAberration, borderFade in device px)
-//   loc 13: a_RimEdge      (free, free, lens, lens ink)
+//   loc 13: a_RimEdge      (flex touch centre, flex touch diameter + alpha, lens, lens ink)
 //   loc 14: a_Outline      (dispersion amount + angle, height + inset (packed), clipOffset, clipCount)
 //          clipOffset/clipCount index into the per-frame clip-stack buffer.
 //          count=0 means no clipping — shader short-circuits.
@@ -345,8 +345,17 @@ export class JivInstanceBuffer {
     data[offset + 46] = style.ChromaticAberration;
     data[offset + 47] = style.BorderFade * avgScale * d;
 
-    data[offset + 48] = 0;
-    data[offset + 49] = 0;
+    // The flex's little glow (Core/Flex.ts): its centre as a fraction of the box, 10 bits an axis, then its
+    // diameter in quarter CSS px with its alpha in thousandths above it. Both 0 when there is none.
+    if (style.FlexTouchAlpha > 0 && jiv.Width > 0 && jiv.Height > 0) {
+      const u = Math.round(Math.min(1, Math.max(0, style.FlexTouchX / jiv.Width)) * 1023);
+      const v = Math.round(Math.min(1, Math.max(0, style.FlexTouchY / jiv.Height)) * 1023);
+      data[offset + 48] = u + 1024 * v;
+      data[offset + 49] = Math.min(16383, Math.round(style.FlexTouchDiameter * 4)) + 16384 * Math.round(style.FlexTouchAlpha * 1000);
+    } else {
+      data[offset + 48] = 0;
+      data[offset + 49] = 0;
+    }
     // The active lens (0 is none, 1 the pressed lens).
     data[offset + 50] = style.Lens;
     // The lens's ink colour, packed 8 bits a channel and offset by one so 0 means none (exact in a float).

@@ -16,7 +16,7 @@ layout(location = 9) in vec4 a_Grading;       // brightness, saturation, contras
 layout(location = 10) in vec4 a_Refraction;   // thickness, glass span (pt), glass shadow mode, refraction
 layout(location = 11) in vec4 a_Lighting;     // device px per pt, bodyTint (signed), dark scheme, clear glass
 layout(location = 12) in vec4 a_Specular;     // rim amount, rim height (pt), chromaticAberration, borderFade
-layout(location = 13) in vec4 a_RimEdge;      // free, free, lens (0 none, 1 pressed), lens ink (packed rgb + 1)
+layout(location = 13) in vec4 a_RimEdge;      // flex touch centre, flex touch diameter + alpha, lens (0 none, 1 pressed), lens ink (packed rgb + 1)
 layout(location = 14) in vec4 a_Outline;      // dispersion amount + angle, height + inset (packed), clipOffset, clipCount
 
 uniform vec2 u_Resolution;
@@ -54,6 +54,7 @@ flat out vec4 v_Lighting;
 flat out vec4 v_Specular;
 flat out vec4 v_RimEdge;
 flat out vec4 v_Outline;
+flat out vec4 v_TouchGlow;     // the flex's little glow: centre (fraction of the box), diameter (CSS px), alpha
 
 void main() {
     // Style varyings — identical for 2D and 3D.
@@ -68,6 +69,8 @@ void main() {
     v_Lighting = a_Lighting;
     v_Specular = a_Specular;
     v_Outline = a_Outline;
+    v_TouchGlow = vec4(mod(a_RimEdge.x, 1024.0), floor(a_RimEdge.x / 1024.0), 0.0, 0.0) / 1023.0;
+    v_TouchGlow.zw = vec2(mod(a_RimEdge.y, 16384.0) * 0.25, floor(a_RimEdge.y / 16384.0) / 1000.0);
     // Unprobed or larger glass takes the theme's appearance, at a mean that puts thin glass on the table's face.
     v_RimEdge = a_Lighting.z > 0.5 ? vec4(0.0, 0.45, a_RimEdge.zw) : vec4(1.0, 0.5, a_RimEdge.zw);
     if (u_GlassAppearance >= 0.0 && a_Refraction.y <= 56.0) {

@@ -9,6 +9,7 @@ import { ParseFilter, SplitTopLevelArgs } from './Filter.Parse';
 import type { VibrancyDeclaration } from './Vibrancy';
 import type { Color } from './Types';
 import { ResolveTransform } from '../Transform/Transform.Parse';
+import type { FlexKind, FlexSettings } from './Flex';
 
 /** The most frost `BackdropFilter: Blur(Auto)` draws, in CSS px. The field resolves to it, so every
  *  reader that sizes for the largest frost is right; the panel's own is `JivFrostCssPx`. */
@@ -227,6 +228,27 @@ const resolveDispersion = (raw: string, glass: GlassKind, ctx: ResolveContext): 
   };
 };
 
+const _FLEX_KINDS = new Set<FlexKind>(['None', 'Auto', 'Small', 'UltraSmall', 'Large', 'Menu']);
+const _FLEX_NONE: FlexSettings = { Kind: 'None', Lift: NaN, BigGlow: NaN, LittleGlow: NaN, Movement: true };
+
+/** `Flex`, `FlexLift`, `FlexBigGlow`, `FlexLittleGlow`, `FlexMovement` (Core/Flex.ts). Auto resolves to NaN. */
+const _resolveFlex = (s: JivStyle, ctx: ResolveContext): FlexSettings => {
+  const kind = ResolveTernary(s.Flex ?? 'None', ctx).trim() as FlexKind;
+  if (kind === 'None') return _FLEX_NONE;
+  if (!_FLEX_KINDS.has(kind)) throw new Error(`[Jaui] Flex: "${kind}" -- expected None, Auto, Small, UltraSmall, Large or Menu.`);
+  const auto = (raw: string | undefined): number => {
+    const v = ResolveTernary(raw ?? 'Auto', ctx).trim();
+    return v === 'Auto' ? NaN : Resolve(v, ctx, 'W');
+  };
+  return {
+    Kind: kind,
+    Lift: auto(s.FlexLift),
+    BigGlow: auto(s.FlexBigGlow),
+    LittleGlow: auto(s.FlexLittleGlow),
+    Movement: ResolveTernary(s.FlexMovement ?? 'Auto', ctx).trim() !== 'None',
+  };
+};
+
 export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle => {
   const rawRadius = ResolveLengthTuple4(s.BorderRadius, ctx, ['W', 'W', 'W', 'W']);
   const smoothness = Resolve(s.BorderRadiusSmoothness, ctx, 'W');
@@ -341,6 +363,11 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     RimStrength: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.RimStrength, ctx), ctx, 'W'))),
     LensLiftedScale: Math.max(0.01, Resolve(s.LensLiftedScale, ctx, 'W')),
     GlassGlow: Math.min(1, Math.max(0, Resolve(s.GlassGlow, ctx, 'W'))),
+    Flex: _resolveFlex(s, ctx),
+    FlexTouchX: 0,
+    FlexTouchY: 0,
+    FlexTouchDiameter: 0,
+    FlexTouchAlpha: 0,
     ...resolveDispersion(s.GlassDispersion, glass, ctx),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),

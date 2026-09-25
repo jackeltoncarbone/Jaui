@@ -1,4 +1,5 @@
 import type { JivStyle, JivRenderStyle } from './Jiv.Types';
+import type { FlexMotion } from '../Core/Flex';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { DefaultJivStyle } from './Jiv.Defaults';
 import type { LayoutConfig, ChildLayout, Overflow, Clip } from '../Layout/Layout.Types';
@@ -249,6 +250,9 @@ export class Jiv extends Element {
    *  Jiv is constructed from a JSS class. Inline anonymous animations
    *  carry their definition directly and don't consult this map. */
   AnimationTable: Record<string, AnimationDefinition> | null = null;
+
+  /** The flex running on this node while it is pressed or settling (Core/Flex.ts); null at rest. */
+  Flex: FlexMotion | null = null;
 
   /** Back-ref to the per-Jiv style animator once registered with the
    *  canvas. The worker registry consults this from the class-swap path

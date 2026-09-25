@@ -18,6 +18,7 @@ flat in vec4 v_Refraction;     // thickness, glass span (pt), glass shadow mode,
 flat in vec4 v_Lighting;       // device px per pt, bodyTint (signed), dark scheme, clear glass
 flat in vec4 v_Specular;       // rim amount, rim height (pt), chromaticAberration, borderFade
 flat in vec4 v_RimEdge;        // glass appearance (1 light), backdrop mean luma, lens magnification, lens ink
+flat in vec4 v_TouchGlow;      // the flex's little glow: centre (fraction of the box), diameter (CSS px), alpha
 flat in vec4 v_Outline;        // dispersion amount + angle, height + inset (packed), clipOffset, clipCount
 
 // ── MATERIAL_FLAT: the backdrop's whole apparatus is excluded, not branched over ──
@@ -859,6 +860,10 @@ void main() {
                 face = clamp(face + alpha / max(cover, 1e-3) * (rim.rgb - shown), 0.0, 1.0);
             }
             if (glassGlow > 0.0) face = GlassPressGlow(face, glassGlow);
+            if (v_TouchGlow.w > 0.0) {
+                vec2 touch = (v_TouchGlow.xy * 2.0 - 1.0) * panelHalfSize;
+                face = GlassPressGlow(face, v_TouchGlow.w * GlassTouchGlow(length(p - touch), v_TouchGlow.z * glassDpr));
+            }
             if (v_RimEdge.z > 0.0) {
                 // The lens glass's inner glow, added (plusLighter) inside its outline, under the lifted items as the
                 // glass's own layer is.

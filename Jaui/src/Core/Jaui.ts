@@ -3,6 +3,7 @@
  * Entry point. Creates a WebGL2 context and runs the render loop.
  */
 
+import { FlexMotion } from './Flex';
 import { JivAnimator } from '../Jiv/Jiv.Animator';
 import { JivStyleAnimator } from '../Jiv/Jiv.StyleAnimator';
 import { AnimationManager } from '../Animation/Animation.Manager';
@@ -7371,6 +7372,56 @@ export class Canvas implements DirtyTracker {
     return this._scrollManager.HitTopmost(clientX - rect.left, clientY - rect.top);
   };
 
+  // ── Flex: UIKit's press on a `Flex:` node (Core/Flex.ts) ──
+  private _flexNode: Jiv | null = null;
+  private _flexPointer = -1;
+
+  /** The pointer in `node`'s own box, CSS px, through its scrolling ancestors (rotation is not undone). */
+  private _flexLocal = (node: Jiv, clientX: number, clientY: number): [number, number] => {
+    const rect = this._pageRect();
+    let x = clientX - rect.left;
+    let y = clientY - rect.top;
+    for (let p = node.Parent as Jiv | null; p; p = p.Parent as Jiv | null) {
+      if (p.Overflow === 'Scroll') { x += p.ScrollX; y += p.ScrollY; }
+    }
+    return [x - node.X, y - node.Y];
+  };
+
+  /** A press lands: the nearest interactive `Flex:` node on the hit's chain takes it. */
+  private _flexBegin = (hit: Jiv, e: PointerEvent): void => {
+    this._flexEnd();
+    let node: Jiv | null = hit;
+    while (node && (node.RenderStyle.Flex?.Kind ?? 'None') === 'None') node = node.Parent as Jiv | null;
+    if (!node || !node.Interactive) return;
+    const [x, y] = this._flexLocal(node, e.clientX, e.clientY);
+    const motion = node.Flex ?? new FlexMotion();
+    if (!motion.Begin(x, y, node.Width, node.Height, node.ResolveCtx?.PointScale ?? 1, node.RenderStyle.Flex, e.timeStamp)) return;
+    node.Flex = motion;
+    this._flexNode = node;
+    this._flexPointer = e.pointerId;
+    node.StyleAnimator?.Wake();
+    this._animationManager.Kick();
+  };
+
+  private _flexMove = (e: PointerEvent): void => {
+    const node = this._flexNode;
+    if (node === null || e.pointerId !== this._flexPointer || node.Flex === null) return;
+    const [x, y] = this._flexLocal(node, e.clientX, e.clientY);
+    node.Flex.Move(x, y, e.timeStamp);
+    this._animationManager.Kick();
+  };
+
+  /** The press ends, or a scroll takes the finger: the flex settles home. */
+  private _flexEnd = (): void => {
+    const node = this._flexNode;
+    this._flexNode = null;
+    this._flexPointer = -1;
+    if (node === null || node.Flex === null) return;
+    node.Flex.End();
+    node.StyleAnimator?.Wake();
+    this._animationManager.Kick();
+  };
+
   private _listenForInteractionStates = (): void => {
     const topmostAt = this._topmostAt;
 
@@ -7463,6 +7514,7 @@ export class Canvas implements DirtyTracker {
       if (!hit) return;
       setStateChain(hit, this._activeJiv, 'Active');
       this._activeJiv = hit;
+      this._flexBegin(hit, e);
       this._animationManager.Kick();
       if (hit.OnPointerDown) hit.OnPointerDown(e);
     });
@@ -7479,6 +7531,7 @@ export class Canvas implements DirtyTracker {
     // click and release the Active visual so the user doesn't see a
     // stuck press state while scrolling.
     this._on('pointermove', (e: PointerEvent) => {
+      this._flexMove(e);
       if (!_clickDownJiv) return;
       const dx = e.clientX - _clickDownX;
       const dy = e.clientY - _clickDownY;
@@ -7496,6 +7549,7 @@ export class Canvas implements DirtyTracker {
       if (upHit?.OnPointerUp) upHit.OnPointerUp(e);
       _clickDownJiv = null;
       clearActive();
+      this._flexEnd();
     });
     // Contextmenu (right-click / long-press) — hit-test the click point
     // like click does, fire OnContextMenu on the deepest interactive hit,
@@ -7512,6 +7566,7 @@ export class Canvas implements DirtyTracker {
     this._on('pointercancel', () => {
       _clickDownJiv = null;
       clearActive();
+      this._flexEnd();
     });
   };
 
@@ -7806,6 +7861,7 @@ export class Canvas implements DirtyTracker {
       const ty = clientY - ctx.startY;
       if (tx * tx + ty * ty < DRAG_SLOP_CSS_PX * DRAG_SLOP_CSS_PX) return false;
       ctx.target = this._scrollManager.PickDragTarget(ctx.candidates, -tx, -ty);
+      if (ctx.target !== null) this._flexEnd();
       for (const c of ctx.candidates) if (c !== ctx.target) this._scrollManager.DragCancel(c);
       ctx.lastX = ctx.startX;
       ctx.lastY = ctx.startY;
@@ -9780,6 +9836,8 @@ export type {
 export { AnimationManager } from '../Animation/Animation.Manager';
 export { JivAnimator } from '../Jiv/Jiv.Animator';
 export { Spring } from '../Animation/Spring';
+export { FlexLiftScale, FlexBigGlow, FlexSpecFor } from './Flex';
+export type { FlexKind, FlexSpec } from './Flex';
 export { JivAnimationDriver } from '../Animation/Animation.Driver';
 
 // Accessibility

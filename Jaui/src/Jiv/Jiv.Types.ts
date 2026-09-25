@@ -1,6 +1,7 @@
 import type { Color } from '../Core/Types';
 // Type-only, so the Vibrancy <-> Jiv.Types cycle is erased at compile time.
 import type { VibrancyDeclaration } from '../Core/Vibrancy';
+import type { FlexSettings } from '../Core/Flex';
 import type { Transform } from '../Transform/Transform.Types';
 import type { FitMode } from '../Element/Element';
 
@@ -242,6 +243,18 @@ export interface JivStyle {
   /** The glass's pressed glow, 0..1: UIKit's flex big glow, a white layer over the glass with a backdrop-aware vibrant
    *  colour matrix, YCC black 0.05, white 1.05, saturation 1.2 (_UIFlexInteraction.BigGlow). Default 0, none. */
   GlassGlow: string;
+  /** `Flex: None | Auto | Small | UltraSmall | Large | Menu`: UIKit's press on this control (_UIFlexInteraction), the
+   *  lift, the stretch toward a travelling finger, the big glow and the little glow under the finger. Auto is UIKit's
+   *  dynamic variant by size (Core/Flex.ts). Default None. */
+  Flex: string;
+  /** `FlexLift: Auto | <points>`: the pressed swell's liftScalePoints. Auto is the spec's. */
+  FlexLift: string;
+  /** `FlexBigGlow: Auto | <0..1>`: the big glow's opacity while pressed. Auto is the spec's bigGlowOpacity. */
+  FlexBigGlow: string;
+  /** `FlexLittleGlow: Auto | <0..1>`: the little glow's opacity under the finger. Auto is the spec's. */
+  FlexLittleGlow: string;
+  /** `FlexMovement: Auto | None`: None keeps the lift and glows and drops the stretch and the squash. */
+  FlexMovement: string;
   /** `GlassDispersion: Auto | None | <amount> <height> <inset> <angle>`: the dispersion of the glass's content lensing,
    *  QuartzCore's glassForeground (Jwift/Apple/LiquidGlass.md 3.7): `amount` pt of spread at the outline, easing over
    *  `height` pt from `inset` pt in, along the normal turned by `angle`. Auto is Apple's for the glass: the lens
@@ -390,6 +403,14 @@ export interface JivRenderStyle {
   LensInk: Color;
   LensLiftedScale: number;
   GlassGlow: number;
+  /** Resolved `Flex*` (Core/Flex.ts); not animated. */
+  Flex: FlexSettings;
+  /** The flex's little glow this frame (Core/Flex.ts): centre in local CSS px, diameter in CSS px, alpha 0..1.
+   *  Written by the style animator while a flex runs; zero otherwise. */
+  FlexTouchX: number;
+  FlexTouchY: number;
+  FlexTouchDiameter: number;
+  FlexTouchAlpha: number;
   /** Resolved `GlassDispersion`: amount (pt), height (pt), inset (pt), angle (degrees). Each springs. */
   GlassDispersionAmount: number;
   GlassDispersionHeight: number;

@@ -89,7 +89,7 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 | pill | capsule [C]; height not found | 48 pt, 22 pt side padding | [I] |
 | square corner | small 14, medium 17, large 25 [C] | 14 pt at 48 pt | 0 at small |
 | hit region | ≥ 44 pt [C] | 48 pt | ok |
-| press | flex lift `(maxDim + liftScalePts) / maxDim`, dynamic Small to Large [C] | hover 1.06, press 0.92 (`JwiftPressMotion`) | differs: Apple grows on press, ours shrinks |
+| press | `_UIFlexInteraction`, the dynamic variant [C] (LiquidGlass.md 9) | `Flex: Auto` from `JwiftPressGlass` / `JwiftFlex` (Core/Flex.ts) | matches; no hover swell (Apple has none) |
 
 ### Menu (ContextMenu.jss, GlassDropdown.jss)
 
@@ -101,7 +101,7 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 | row side padding | 28 [C] | 10 | −18 |
 | section insets | 10 top and bottom [C] | 4 / 6 | −6 / −4 |
 | highlight | radius 24, insets 10 / 2 [C] | radius 8 | differs |
-| flex | variant 5, Menu [C] | none | missing |
+| flex | variant 5, Menu [C] | `Flex: Menu` exists (glow only, the pulse not ported); the open dropdown wears `Flex: None` (Jack: an open menu is inert) | differs |
 
 ### Search field (TextInput.jss `Jwift_Field_Glass`)
 
@@ -111,6 +111,19 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 | shape | capsule [C] | capsule | 0 |
 | leading inset | 12 (13 floating) to the icon, 7 (8) to the text [C] | 18 pt padding | +5 |
 
+## 3a. The press: `_UIFlexInteraction` (LiquidGlass.md 9), built
+
+| Apple lever | JSS, default | Apple's default | status |
+|---|---|---|---|
+| the variant | `Flex: None \| Auto \| Small \| UltraSmall \| Large \| Menu`, default None | Auto: UltraSmall under a 120 pt longer side, else Small to Large by the shorter side [C] | matches |
+| liftScalePoints | `FlexLift: Auto \| <points>` | 16 small, 4 large; scale `(longer + pts) / longer` [C] | matches |
+| bigGlowOpacity | `FlexBigGlow: Auto \| <0..1>` | 1 small, 0 large [C] | matches; drawn on glass only (`GlassPressGlow`, lane 43 with `GlassGlow`) |
+| littleGlowOpacity | `FlexLittleGlow: Auto \| <0..1>` | 0.3 small, 0.2 large, 0.5 menu [C] | matches in value; the disc's blur law and its colour matrix are [I] (`GlassTouchGlow`, lanes 48 and 49) |
+| translation stretch, acceleration squash | `FlexMovement: Auto \| None` | on (sources 3) [C] | matches the law; the integrator's smoothing is [I] (50 ms) |
+| springs | none (Apple's) | scale, tracking and glow springs [C] | matches |
+
+Worn by: `JwiftPressGlass` (every glass button, the avatar pill, the drill sync button, the item page's glass actions), `JwiftProminent`, `JwiftDangerProminent` (solid plates: the lift and movement, no glow). Not worn: rows, cells and chips (`JwiftPress`, a fill highlight), fields, the open dropdown. The tab bar still sets its swell and glow from `TabBar.ts` through `FlexLiftScale` / `FlexBigGlow`, which now read the same spec.
+
 ## 4. Sizing in JSS
 
 Sizing stays ordinary layout (`Height`, `Padding`, `Gap`, `BorderRadius`); what changes is where the values come from. Each Jwift control's numbers become Apple's, named once as variables in the Jwift sheet (for example `@AppleTabBarHeight`, `@AppleMenuRadius`), each citing `Sizing.md`. Three behaviours become properties, because they are rules rather than numbers:
@@ -118,7 +131,7 @@ Sizing stays ordinary layout (`Height`, `Padding`, `Gap`, `BorderRadius`); what 
 ```
 Lens: None | Tab | Segment                  // outsets (8 / 8, 12 / 8), hang time 0.22 s, its springs
 LensOutset: Auto | <x> <y>                  // override of the outset only
-Flex: Auto | None | Small | Large | Loupe | Menu   // Apple's press lift and drag stretch; Auto is the dynamic variant by size
+Flex: None | Auto | Small | UltraSmall | Large | Menu   // built (section 3a); Loupe stays the tab lens's own
 @Spring X { Damping: 0.85, Response: 0.2s } // Apple's spring form beside Stiffness / Damping / Mass
 ```
 
@@ -141,7 +154,11 @@ Lens: None | Tab | Segment
 LensOutset: Auto | <x> <y>
 LensWarp: Auto | <n>
 LensWarpBelow: Auto | None
-Flex: Auto | None | Small | Large | Loupe | Menu
+Flex: None | Auto | Small | UltraSmall | Large | Menu
+FlexLift: Auto | <points>
+FlexBigGlow: Auto | <0..1>
+FlexLittleGlow: Auto | <0..1>
+FlexMovement: Auto | None
 ```
 
 `Auto` is Apple's law for the shape's S. Plain `Glass: Regular` is Apple's regular glass.
@@ -155,7 +172,7 @@ Jwift_TabBar : JwiftGlass         { Height: @AppleTabBarHeight  Flex: Auto }    
 Jwift_SelectionIndicator          { Background: @JwiftSelectionFill }             // the resting pill: no glass
 Jwift_SelectionIndicator_Pressed  { Glass: Lens  Lens: Tab }
 Jwift_SegmentIndicator_Pressed    { Glass: Lens  Lens: Segment }
-Jwift_GlassBtn : JwiftGlass       { Flex: Auto }                                  // replaces JwiftPressMotion's 1.06 / 0.92
+Jwift_GlassBtn : JwiftGlass       { Flex: Auto }                                  // built: JwiftPressGlass carries it
 Jwift_ContextMenuPanel : JwiftGlass { BorderRadius: @AppleMenuRadius  Width: @AppleMenuWidth  Flex: Menu }
 Jwift_GlassDropdown : JwiftGlass  { GlassGroup: Toolbar }
 Jwift_Field_Glass : JwiftGlass    { Height: @AppleSearchFieldFloating }
@@ -170,7 +187,7 @@ Each step is its own commit, behind the gate.
 3. **Delete the material's extras.** `Thickness` as the switch and `GlassVariant` (replaced by `Glass`), `Tint` / `TintTone` on glass, `Refraction` as a free multiplier, `ChromaticAberration` (replaced by `GlassDispersion`).
 4. **Grouping.** The SDF union at smoothness 8 / 12.
 5. **The liquid lens, Apple's structure.** The warped item copy with the real items erased, the warped backdrop below, the inner shadow, the outset size rule, the springs, the hang time. The warp law stays [I] until read, and it is verified on the same backdrop against Apple's frames. Then delete `Magnification`, `LensInk`, the plate and fold constants, `GlassLensBody`, `GlassLensRimHeights`, the lens shadow peak, the lens sizing and velocity stretch in `SelectionIndicator.ts`, and the lanes that carried them.
-6. **Flex.** Apple's press lift and drag stretch replace the bar swell, `JwiftPressMotion` and the velocity stretch.
+6. **Flex.** Built for buttons (section 3a): the lift, stretch, squash and both glows replace `JwiftPressMotion`'s 1.06 / 0.92. Still to fold in: the bar swell (`TabBar.ts` overrides) and the lens's velocity stretch.
 7. **Sizing.** Each control's values from `Sizing.md`, one control per commit, with the delta table above as its checklist.
 8. **Size classes 1 and 2, variant 15, Apple's 6-tap dispersion.**
 
