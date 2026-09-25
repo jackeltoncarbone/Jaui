@@ -243,6 +243,15 @@ const _resolveGlassSwitch = (name: string, raw: string | undefined, ctx: Resolve
   throw new Error(`[Jaui] ${name}: "${v}" -- expected Auto or None.`);
 };
 
+const _GLASS_FROSTS: Record<string, number> = { Inherit: -1, Automatic: 0, Reduced: 1, None: 2 };
+/** `GlassFrost` (Core/Glass.Pipeline.ts, GlassFrostOf): -1 Inherit, 0 Automatic, 1 Reduced, 2 None. */
+const _resolveGlassFrost = (raw: string | undefined, ctx: ResolveContext): number => {
+  const v = ResolveTernary(raw ?? 'Inherit', ctx).trim();
+  const frost = _GLASS_FROSTS[v];
+  if (frost === undefined) throw new Error(`[Jaui] GlassFrost: "${v}" -- expected Inherit, Automatic, Reduced or None.`);
+  return frost;
+};
+
 const _FLEX_KINDS =new Set<FlexKind>(['None', 'Auto', 'Small', 'UltraSmall', 'Large', 'Menu']);
 const _FLEX_NONE: FlexSettings = { Kind: 'None', Lift: NaN, BigGlow: NaN, LittleGlow: NaN, Movement: true };
 
@@ -388,6 +397,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     GlassBlur: _resolveGlassBlur(s.GlassBlur, ctx),
     GlassOuterRefraction: _resolveGlassSwitch('GlassOuterRefraction', s.GlassOuterRefraction, ctx),
     GlassBleed: _resolveGlassSwitch('GlassBleed', s.GlassBleed, ctx),
+    GlassFrost: _resolveGlassFrost(s.GlassFrost, ctx),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
 

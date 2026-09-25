@@ -700,6 +700,7 @@ void main() {
     float glassExterior = GlassLaneExterior(v_Specular.z);
     bool glassOuterOff = mod(glassExterior, 2.0) > 0.5;
     bool glassBleedOff = glassExterior > 1.5;
+    float glassFrost = GlassLaneFrost(v_Specular.z);
     float borderFade = v_Specular.w;
 
     vec2 p = pLocal - panelCenter;
@@ -800,7 +801,7 @@ void main() {
             // The colored shadow of large glass: the backdrop past the outline, blurred at 40 pt, saturated
             // (light) or dimmed (dark), carried by v. Its alpha is the shared fall above.
             float reach = GlassShift(d, min(0.625 * glassSpan, 75.0), 0.4 * glassSpan);
-            vec3 seen = glassSample(v_PixelPos + nScreen * reach * glassDpr, GlassNativeLod(40.0, glassDpr, glassClear));
+            vec3 seen = glassSample(v_PixelPos + nScreen * reach * glassDpr, GlassNativeLod(40.0, glassDpr, glassClear, glassFrost));
             vec3 mapped = mix(GlassYcc(seen, 0.5, 0.0, 1.0), GlassYcc(seen, 1.0, 0.0, 1.8), glassLight);
             float layerAlpha = mix(0.2 + 0.16 * ramps.x, 1.0, ramps.y);
             glassShadowRgb = clamp(mapped * ramps.y / max(layerAlpha, 1e-3), 0.0, 1.0);
@@ -815,8 +816,8 @@ void main() {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassInnerShift(d, glassSpan) * lens;
             float outerShift = glassOuterOff ? 0.0 : GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;
-            float radius = GlassBlurRadius(glassSpan, glassClear, glassBlur);
-            float innerLod = GlassNativeLod(radius * GlassBlurScale(d + innerShift, glassSpan), glassDpr, glassClear);
+            float radius = GlassBlurRadius(glassSpan, glassClear, glassBlur, glassFrost);
+            float innerLod = GlassNativeLod(radius * GlassBlurScale(d + innerShift, glassSpan), glassDpr, glassClear, glassFrost);
             vec2 innerOffset = nScreen * innerShift * glassDpr;
             // Dispersion, where a class asks for it (the moving selection lens): red at (1 + 0.2 ca) of the
             // inner shift, green at (1 + 0.1 ca), blue at the shift itself.
@@ -833,7 +834,7 @@ void main() {
             // The outward-looking sample, at 30% across the outermost point of regular glass, at half radius.
             float outerMix = 0.3 * (1.0 - glassClear) * clamp(d + 1.0, 0.0, 1.0);
             if (outerMix > 0.0) {
-                float outerLod = GlassNativeLod(radius * GlassBlurScale(d + outerShift, glassSpan), glassDpr, glassClear);
+                float outerLod = GlassNativeLod(radius * GlassBlurScale(d + outerShift, glassSpan), glassDpr, glassClear, glassFrost);
                 lensed = mix(lensed, glassSample(v_PixelPos + nScreen * outerShift * glassDpr, outerLod), outerMix);
             }
             face = lensed;
@@ -844,7 +845,7 @@ void main() {
             if (ramps.y > 0.0 && glassClear < 1.0 && !GlassSkips(GLASS_SKIP_BLEED)) {
                 float bleedShift = glassBleedOff ? 0.0 : GlassShift(d, 0.35 * glassSpan, 0.35 * glassSpan);
                 vec3 bleed = GlassBleed(glassSample(v_PixelPos + nScreen * bleedShift * glassDpr,
-                                                    GlassNativeLod(0.35 * glassSpan, glassDpr, glassClear)), glassLight);
+                                                    GlassNativeLod(0.35 * glassSpan, glassDpr, glassClear, glassFrost)), glassLight);
                 float lum = dot(face, GLASS_BLEED_LUMA);
                 float weight = mix(1.0 - lum, lum, glassLight);
                 weight = weight * weight * clamp(1.0 - d, 0.0, 1.0);

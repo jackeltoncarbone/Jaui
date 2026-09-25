@@ -16,7 +16,7 @@ Status column:
 |---|---|---|---|
 | a glass exists; variant 0 / 1 (3.8) | `Glass: None \| Regular \| Clear \| Lens`, default None | `Thickness > 0` → `Material: LiquidGlass`; `GlassVariant` | differs in form: two properties for one lever; Thickness doubles as a 0..1 fade |
 | variant 14, 15 (3.8, 7) | `Glass: Lens` | none | missing (values [I]) |
-| size class 0 / 1 / 2 (2) | `GlassSize: Auto \| 0 \| 1 \| 2` | size class 0 laws only | missing |
+| frost, the blur class: Automatic / Reduced / None (2, 3.2 Frost) | `GlassFrost: Inherit \| Automatic \| Reduced \| None`, built; Inherit at the root is Automatic | the cascade (`_cascadeGlassFrost`, `EffectiveGlassFrost`), lane 46 above the exterior switches (4 x 16384 a class), `GlassBlurRadius` / `GlassBackdropScale` / `GlassNativeLod` | matches: Apple's `GlassFrostTrait`, set by the scroll pocket; ours is set by `Jwift_PageHeader` and `JwiftScrollEdge` (None, their pockets blur), `Jwift_TabBar` (Automatic, as Apple's frames read [I]), menus and sheets (Automatic). Measured at 44 pt, 3x: 4.21 / 1.22 / 2.38 px; Apple's Photos bar in its pocket 2.5 to 2.7 |
 | S, u, v (2) | derived, not authored | `JivGlassSpan`, `GlassSizeRamps` | matches |
 | inner / outer lens (3.1) | `GlassRefraction: Auto \| Inner(<amount>, <height>) Outer(<amount>, <height>) Opacity(<n>)` | `GlassInnerShift`, the outer shift in `Jiv.Panel.frag`, lane 39 `Refraction` as a multiplier | matches the laws; `Refraction` as a free multiplier is ours only |
 | blur radius and ramp (3.2) | `GlassBlur: Auto \| <pt>`, built | `GlassBlurRadius`, `GlassBodyLod`; an authored value rides lane 46 above the dispersion in sixteenths of a point (0 is Auto) | matches: Apple's LOD names a Gaussian (`GLASS_TEXEL_SIGMA_*` x its texel, fitted 0.62, Apple's own x1.6 read back), and each read finds the level of whatever pyramid it gets that delivers it (`GlassPyramidLevel`, from the level-0 texel and sigma the build records on its region), since we never render below native. Measured: 11.6 px at 3x on large glass (law 11.9, Apple 10.7 to 11.8), 4.9 on a 62 pt bar (Apple 5.0 to 5.3) |
@@ -159,7 +159,7 @@ Flex: None | Auto | Small | UltraSmall | Large | Menu   // built (section 3a); L
 
 ```
 Glass: None | Regular | Clear | Lens
-GlassSize: Auto | 0 | 1 | 2
+GlassFrost: Inherit | Automatic | Reduced | None
 GlassBlur: Auto | <pt>
 GlassRefraction: Auto | Inner(<amount>, <height>) Outer(<amount>, <height>) Opacity(<n>)
 GlassFace: Auto | Ycc(<white>, <black>, <saturation>, <fill>)
@@ -210,7 +210,7 @@ Each step is its own commit, behind the gate.
 5. **The liquid lens, Apple's structure.** The warped item copy with the real items erased, the warped backdrop below, the inner shadow, the outset size rule, the springs, the hang time. The warp law stays [I] until read, and it is verified on the same backdrop against Apple's frames. Then delete `Magnification`, `LensInk`, the plate and fold constants, `GlassLensBody`, `GlassLensRimHeights`, the lens shadow peak, the lens sizing and velocity stretch in `SelectionIndicator.ts`, and the lanes that carried them.
 6. **Flex.** Built for buttons (section 3a): the lift, stretch, squash and both glows replace `JwiftPressMotion`'s 1.06 / 0.92. Still to fold in: the bar swell (`TabBar.ts` overrides) and the lens's velocity stretch.
 7. **Sizing.** Each control's values from `Sizing.md`, one control per commit, with the delta table above as its checklist.
-8. **Size classes 1 and 2, variant 15, Apple's 6-tap dispersion.**
+8. **Variant 15, Apple's 6-tap dispersion.** (Frost, once read as size classes 1 and 2, is built.)
 
 **The gate**, at every step:
 - The resting bar is pixel-identical (rmse 0 against the frozen baseline) unless the step is proven to move toward Apple on the same-backdrop measurement.

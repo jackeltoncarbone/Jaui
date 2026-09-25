@@ -123,7 +123,7 @@ export const JivFrostCssPx = (jiv: Jiv, dpr: number = 1): number => {
   const style = jiv.RenderStyle;
   // Glass's pyramid is built at its sharpest read (Core/Glass.Pipeline.ts): Apple's law, or its authored GlassBlur.
   if (style.Material === 'LiquidGlass') {
-    return Math.pow(2, GlassBlurNeedsOf(JivGlassSpan(jiv), dpr, style.GlassVariant, GlassIsLens(style.Lens), style.GlassBlur).BaseLod) / dpr;
+    return Math.pow(2, GlassBlurNeedsOf(JivGlassSpan(jiv), dpr, style.GlassVariant, GlassIsLens(style.Lens), style.GlassBlur, jiv.EffectiveGlassFrost).BaseLod) / dpr;
   }
   if (!style.BackdropFrostAuto) return style.BackdropFrostBlur;
   const minHalf = Math.min(jiv.Width, jiv.Height) * 0.5;
@@ -343,10 +343,11 @@ export class JivInstanceBuffer {
     data[offset + 44] = style.RimStrength;
     data[offset + 45] = style.RimWidth;
     // The dispersion (0..4), an authored GlassBlur above it in sixteenths of a point (0 for Apple's law), then the
-    // exterior switches: 1 outer refraction off, 2 bleed reach off (Jiv.Panel.frag, GlassLaneCa / Blur / Exterior).
+    // exterior switches: 1 outer refraction off, 2 bleed reach off, then the frost (0..2) times 4 (Jiv.Panel.frag,
+    // GlassLaneCa / Blur / Exterior / Frost).
     data[offset + 46] = Math.min(3.999, Math.max(0, style.ChromaticAberration))
       + 4 * Math.min(4095, Math.round(style.GlassBlur * 16))
-      + 16384 * ((style.GlassOuterRefraction ? 0 : 1) + (style.GlassBleed ? 0 : 2));
+      + 16384 * ((style.GlassOuterRefraction ? 0 : 1) + (style.GlassBleed ? 0 : 2) + 4 * jiv.EffectiveGlassFrost);
     data[offset + 47] = style.BorderFade * avgScale * d;
 
     // The flex's little glow (Core/Flex.ts): its centre as a fraction of the box, 10 bits an axis, then its

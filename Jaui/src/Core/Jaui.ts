@@ -2784,6 +2784,7 @@ export class Canvas implements DirtyTracker {
       this._vibrancyStats.CascadeVisited = 0;
       this._vibrancyStats.CascadeCarried = 0;
       this._cascadeVibrancy(this.Root, null);
+      this._cascadeGlassFrost(this.Root, 0);
     }
 
     r.Resize(w, h, this._dpr);
@@ -4718,6 +4719,14 @@ export class Canvas implements DirtyTracker {
     for (const child of node.Children) this._cascadeVibrancy(child as Jiv, r.ToChildren);
   };
 
+  /** `GlassFrost`'s cascade, UIKit's `GlassFrostTrait`: an Inherit (-1) takes the parent's, the root's is Automatic. */
+  private _cascadeGlassFrost = (node: Jiv, parent: number): void => {
+    const own = node.RenderStyle.GlassFrost;
+    const frost = own >= 0 ? own : parent;
+    node.EffectiveGlassFrost = frost;
+    for (const child of node.Children) this._cascadeGlassFrost(child as Jiv, frost);
+  };
+
   private _cascadeFilterGrade = (
     node: Jiv,
     parentB: number,
@@ -5743,7 +5752,7 @@ export class Canvas implements DirtyTracker {
     // Glass reads past its face (the outer lens sample, and on large glass the edge bleed and the colored
     // shadow) and deeper than its base (the body at full radius): Core/Glass.Pipeline.ts says how far.
     const glass = _isGlass(rs.Material)
-      ? GlassBlurNeedsOf(JivGlassSpanOf(node, eff), d, rs.GlassVariant, GlassIsLens(rs.Lens), rs.GlassBlur) : null;
+      ? GlassBlurNeedsOf(JivGlassSpanOf(node, eff), d, rs.GlassVariant, GlassIsLens(rs.Lens), rs.GlassBlur, node.EffectiveGlassFrost) : null;
     const margin = Math.max(frostCssPx * d + 8 * d, glass !== null ? glass.ReachPt * avgScale * d : 0);
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
     // second reading of them: the surface draws with its shadow excluded, so its quad is the face,

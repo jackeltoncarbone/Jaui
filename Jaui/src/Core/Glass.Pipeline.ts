@@ -19,16 +19,30 @@ export const GlassSizeRamps = (span: number): { U: number; V: number } => ({
   V: Math.max(0, Math.min(1, (span - 64) / 96)),
 });
 
-/** The backdrop's scale in Apple's pipeline: a quarter for regular glass, a half for clear. */
-export const GlassBackdropScale = (variant: GlassVariant): number => (variant === 'Clear' ? 0.5 : 0.25);
+/**
+ * `GlassFrost`, DesignLibrary's `GlassMaterialProvider.Frost` (Jwift/Apple/LiquidGlass.md 3.2): the regular recipe's blur
+ * class. 0 Automatic: BlurRadius 1.33 to 4 pt on a quarter-scale backdrop. 1 Reduced: 0.667 pt on a half-scale one.
+ * 2 None: no blur, the quarter-scale capture alone. UIKit sets it from the scroll pocket a glass sits in. Clear glass
+ * keeps its own recipe.
+ */
+export type GlassFrost = 0 | 1 | 2;
+export const GLASS_FROST_AUTOMATIC = 0;
+export const GLASS_FROST_REDUCED = 1;
+export const GLASS_FROST_NONE = 2;
 
-/** BlurRadius in points: 1.33 to 4 over `u` for regular glass, 1 for clear; an authored `GlassBlur` (above 0) instead. */
-export const GlassBlurRadius = (span: number, variant: GlassVariant, authored: number = 0): number =>
-  authored > 0 ? authored : variant === 'Clear' ? 1 : 1.3333 + 2.6667 * GlassSizeRamps(span).U;
+/** The backdrop's scale in Apple's pipeline: a quarter for regular glass (a half at Reduced frost), a half for clear. */
+export const GlassBackdropScale = (variant: GlassVariant, frost: number = GLASS_FROST_AUTOMATIC): number =>
+  variant === 'Clear' || frost === GLASS_FROST_REDUCED ? 0.5 : 0.25;
+
+/** BlurRadius in points: 1.33 to 4 over `u` for regular glass (0.667 Reduced, 0 None), 1 for clear; an authored
+ *  `GlassBlur` (above 0) instead. */
+export const GlassBlurRadius = (span: number, variant: GlassVariant, authored: number = 0, frost: number = GLASS_FROST_AUTOMATIC): number =>
+  authored > 0 ? authored : variant === 'Clear' ? 1
+    : frost === GLASS_FROST_REDUCED ? 0.66666667 : frost === GLASS_FROST_NONE ? 0 : 1.3333 + 2.6667 * GlassSizeRamps(span).U;
 
 /** A radius in points to Apple's LOD on its backdrop texture: `r` in backdrop texels, then log2. */
-export const GlassAppleLod = (radiusPt: number, dpr: number, variant: GlassVariant): number => {
-  const r = radiusPt * GlassBackdropScale(variant) * dpr * 1.6;
+export const GlassAppleLod = (radiusPt: number, dpr: number, variant: GlassVariant, frost: number = GLASS_FROST_AUTOMATIC): number => {
+  const r = radiusPt * GlassBackdropScale(variant, frost) * dpr * 1.6;
   return Math.max(0, r < 2 ? Math.log2(1 + 0.5 * r) : Math.log2(r));
 };
 
@@ -43,8 +57,11 @@ export const GlassAppleLod = (radiusPt: number, dpr: number, variant: GlassVaria
  */
 export const GLASS_TEXEL_SIGMA_REGULAR = 0.62;
 export const GLASS_TEXEL_SIGMA_CLEAR = 0.28;
-export const GlassNativeLod = (appleLod: number, variant: GlassVariant): number =>
-  appleLod + Math.log2((variant === 'Clear' ? GLASS_TEXEL_SIGMA_CLEAR : GLASS_TEXEL_SIGMA_REGULAR) / GlassBackdropScale(variant));
+/** The shares follow the backdrop's scale, so Reduced frost's half-scale backdrop reads with clear's. */
+export const GlassNativeLod = (appleLod: number, variant: GlassVariant, frost: number = GLASS_FROST_AUTOMATIC): number => {
+  const scale = GlassBackdropScale(variant, frost);
+  return appleLod + Math.log2((scale > 0.25 ? GLASS_TEXEL_SIGMA_CLEAR : GLASS_TEXEL_SIGMA_REGULAR) / scale);
+};
 
 /**
  * The level of a pyramid that delivers a Gaussian of `sigma` device px, fractional as trilinear reads it. Level 0
@@ -61,12 +78,13 @@ export const GlassPyramidLevel = (sigma: number, texel: number, sigma0: number):
 };
 
 /** The body's LOD at blur scale `k` (0.5 at the edge ramp's floor, 1 in the body), on our pyramid. */
-export const GlassBodyLod = (span: number, k: number, dpr: number, variant: GlassVariant, authored: number = 0): number =>
-  GlassNativeLod(GlassAppleLod(GlassBlurRadius(span, variant, authored) * k, dpr, variant), variant);
+export const GlassBodyLod = (span: number, k: number, dpr: number, variant: GlassVariant, authored: number = 0,
+  frost: number = GLASS_FROST_AUTOMATIC): number =>
+  GlassNativeLod(GlassAppleLod(GlassBlurRadius(span, variant, authored, frost) * k, dpr, variant, frost), variant, frost);
 
 /** Edge bleed: opacity over `v` (0 below 64 pt), outward shift and blur, and its LOD. Off on clear glass. */
-export const GlassBleedLod = (span: number, dpr: number, variant: GlassVariant): number =>
-  GlassNativeLod(GlassAppleLod(0.7 * span * 0.5, dpr, variant), variant);
+export const GlassBleedLod = (span: number, dpr: number, variant: GlassVariant, frost: number = GLASS_FROST_AUTOMATIC): number =>
+  GlassNativeLod(GlassAppleLod(0.7 * span * 0.5, dpr, variant, frost), variant, frost);
 
 /** The drop shadow: offset (0, 8) pt, reaching 2 radii; its colored read blurs at 40 pt. The radius is 24 pt
  *  on large glass (Apple's), 10 pt at 48 pt, fitted to Apple's iPhone Edit button over white (23 levels deep at
@@ -74,8 +92,8 @@ export const GlassBleedLod = (span: number, dpr: number, variant: GlassVariant):
 export const GLASS_SHADOW_OFFSET_Y = 8;
 export const GlassShadowRadius = (span: number): number => 10 + 14 * GlassSizeRamps(span).U;
 export const GLASS_SHADOW_BLUR = 40;
-export const GlassShadowLod = (dpr: number, variant: GlassVariant): number =>
-  GlassNativeLod(GlassAppleLod(GLASS_SHADOW_BLUR, dpr, variant), variant);
+export const GlassShadowLod = (dpr: number, variant: GlassVariant, frost: number = GLASS_FROST_AUTOMATIC): number =>
+  GlassNativeLod(GlassAppleLod(GLASS_SHADOW_BLUR, dpr, variant, frost), variant, frost);
 /** How far the colored shadow's read reaches outward: min(0.625 S, 75) pt. */
 export const GlassShadowAmount = (span: number): number => Math.min(0.625 * span, 75);
 
@@ -108,16 +126,17 @@ export interface GlassBlurNeeds {
   ReachPt: number;
 }
 
-export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVariant, lens: boolean, blur: number = 0): GlassBlurNeeds => {
-  const base = lens ? GlassNativeLod(0, variant) : GlassBodyLod(span, 0.5, dpr, variant, blur);
-  let top = GlassBodyLod(span, 1, dpr, variant, blur);
+export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVariant, lens: boolean, blur: number = 0,
+  frost: number = GLASS_FROST_AUTOMATIC): GlassBlurNeeds => {
+  const base = lens ? GlassNativeLod(0, variant) : GlassBodyLod(span, 0.5, dpr, variant, blur, frost);
+  let top = GlassBodyLod(span, 1, dpr, variant, blur, frost);
   const sigmaPt = (lod: number): number => Math.pow(2, lod) / dpr;
   // The outer sample looks 0.2 S past the outline.
   let reach = 0.2 * span + 3 * sigmaPt(base);
   const { V } = GlassSizeRamps(span);
   if (V > 0 && variant === 'Regular') {
-    const bleed = GlassBleedLod(span, dpr, variant);
-    const shadow = GlassShadowLod(dpr, variant);
+    const bleed = GlassBleedLod(span, dpr, variant, frost);
+    const shadow = GlassShadowLod(dpr, variant, frost);
     top = Math.max(top, bleed, shadow);
     reach = Math.max(reach, 0.35 * span + 3 * sigmaPt(bleed),
       2 * GlassShadowRadius(span) + GLASS_SHADOW_OFFSET_Y + GlassShadowAmount(span) + 3 * sigmaPt(shadow));

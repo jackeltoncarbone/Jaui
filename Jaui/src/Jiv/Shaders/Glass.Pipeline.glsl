@@ -31,20 +31,25 @@ float GlassBlurScale(float t, float span) {
     return mix(1.0, 0.5, clamp((t - from) / max(-1.0 - from, 1e-3), 0.0, 1.0));
 }
 
-float GlassBackdropScale(float clear) { return mix(0.25, 0.5, clear); }
+// `frost` is the regular recipe's blur class (Core/Glass.Pipeline.ts, GlassFrost): 0 Automatic, 1 Reduced (a half-scale
+// backdrop, 0.667 pt), 2 None (no blur). Clear glass keeps its own recipe.
+bool GlassFrostReduced(float frost) { return abs(frost - 1.0) < 0.5; }
+float GlassBackdropScale(float clear, float frost) { return mix(GlassFrostReduced(frost) ? 0.5 : 0.25, 0.5, clear); }
 
 // An authored GlassBlur (above 0) replaces the law (Core/Glass.Pipeline.ts, GlassBlurRadius).
-float GlassBlurRadius(float span, float clear, float authored) {
-    return authored > 0.0 ? authored : mix(1.3333 + 2.6667 * GlassSizeRamps(span).x, 1.0, clear);
+float GlassBlurRadius(float span, float clear, float authored, float frost) {
+    float regular = frost > 1.5 ? 0.0 : GlassFrostReduced(frost) ? 0.66666667 : 1.3333 + 2.6667 * GlassSizeRamps(span).x;
+    return authored > 0.0 ? authored : mix(regular, 1.0, clear);
 }
 
 // A radius in points to the LOD of our native pyramid with the blur Apple's quarter (clear: half) resolution
 // mip reads at: Apple's LOD, then log2(texel sigma / backdrop scale).
-float GlassNativeLod(float radiusPt, float dpr, float clear) {
-    float scale = GlassBackdropScale(clear);
+// The texel share follows the backdrop's scale, so Reduced frost's half-scale backdrop reads with clear's.
+float GlassNativeLod(float radiusPt, float dpr, float clear, float frost) {
+    float scale = GlassBackdropScale(clear, frost);
     float r = radiusPt * scale * dpr * 1.6;
     float appleLod = max(0.0, r < 2.0 ? log2(1.0 + 0.5 * r) : log2(r));
-    return appleLod + log2(mix(GLASS_TEXEL_SIGMA_REGULAR, GLASS_TEXEL_SIGMA_CLEAR, clear) / scale);
+    return appleLod + log2(mix(GLASS_TEXEL_SIGMA_REGULAR, GLASS_TEXEL_SIGMA_CLEAR, GlassFrostReduced(frost) ? 1.0 : clear) / scale);
 }
 
 // The pyramid level that delivers a Gaussian of `sigma` device px. Level L of a pyramid whose level 0 has `texel`
@@ -130,10 +135,11 @@ const vec3 GLASS_LENS_INNER_GLOW = vec3(0.8, 0.3, 8.0);
 float GlassLaneClear(float lane) { return mod(lane, 4.0); }
 float GlassLaneGlow(float lane) { return floor(lane / 4.0) / 1000.0; }
 // The dispersion lane: the dispersion (0..4), an authored GlassBlur in sixteenths of a point above it, then the
-// exterior switches (1 outer refraction off, 2 bleed reach off).
+// exterior switches (1 outer refraction off, 2 bleed reach off), then the frost times 4.
 float GlassLaneCa(float lane) { return mod(lane, 4.0); }
 float GlassLaneBlur(float lane) { return floor(mod(lane, 16384.0) / 4.0) / 16.0; }
-float GlassLaneExterior(float lane) { return floor(lane / 16384.0); }
+float GlassLaneExterior(float lane) { return mod(floor(lane / 16384.0), 4.0); }
+float GlassLaneFrost(float lane) { return floor(lane / 65536.0); }
 // UIKit's flex big glow over a pressed glass: a white layer with a backdrop-aware vibrant colour matrix, YCC black
 // 0.05, white 1.05, saturation 1.2, at `glow` (the spec's bigGlowOpacity) [C: _UIFlexInteraction.BigGlow,
 // UIKitCore 0x188B0F3D0]. It lies over the glass and its rim; here it recolours both (the items draw over it).

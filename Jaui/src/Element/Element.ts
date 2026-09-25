@@ -207,6 +207,8 @@ export class Element {
   /** True when THIS element declared its `EffectiveVibrancy`. Only an authored vibrancy emits the
    *  shape draw: a cascaded one would treat the same pixels once per descendant. */
   EffectiveVibrancyAuthored: boolean = false;
+  /** Render-time cascaded `GlassFrost`: 0 Automatic, 1 Reduced, 2 None (Core/Glass.Pipeline.ts). */
+  EffectiveGlassFrost: number = 0;
 
   /** Click handler — fired on pointerup when the release hits the same
    *  Jiv that pointerdown hit (standard click semantics). null = no

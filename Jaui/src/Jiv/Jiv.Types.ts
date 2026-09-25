@@ -270,6 +270,11 @@ export interface JivStyle {
   /** `GlassBleed: Auto | None`: the edge bleed's reach outward, `inputBleedAmount` and `Height` (LiquidGlass.md 3.4).
    *  None zeroes both and keeps its blur and opacity, as DesignLibrary does when Layers lacks 0x40 (Sheets.md). */
   GlassBleed: string;
+  /** `GlassFrost: Inherit | Automatic | Reduced | None`: DesignLibrary's `GlassMaterialProvider.Frost`, the recipe's
+   *  blur class (Jwift/Apple/LiquidGlass.md 3.2): Automatic ramps BlurRadius 1.33 to 4 pt on a quarter-scale backdrop,
+   *  Reduced is 0.667 pt on a half-scale one, None no blur. Inherited, as UIKit's `GlassFrostTrait`: a bar over
+   *  scrolling content (Apple's scroll pocket) sets it for the glass inside. Inherit at the root is Automatic. */
+  GlassFrost: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.
   // Internal/legacy. Author-facing visual transform lives on the
@@ -438,6 +443,9 @@ export interface JivRenderStyle {
   /** Resolved `GlassOuterRefraction` and `GlassBleed`: true for Auto (Apple's reach), false for None. Snap. */
   GlassOuterRefraction: boolean;
   GlassBleed: boolean;
+  /** Resolved `GlassFrost` declaration: -1 Inherit, 0 Automatic, 1 Reduced, 2 None. The cascade's result is
+   *  `EffectiveGlassFrost` on the node. Snaps. */
+  GlassFrost: number;
 
   /** Resolved `RimWidth`, in points. */
   RimWidth: number;
