@@ -6,9 +6,10 @@
 
 export type GlassVariant = 'Regular' | 'Clear';
 
-/** Glass this small tracks its backdrop's luma: its appearance and its face follow what is behind it. The shorter side
- *  at 64 pt or under [C: DesignLibrary GlassMaterialProvider.updateState keeps the adaptive state while min(w, h) <= 64]. */
-export const GLASS_TRACKS_LUMA_SPAN = 64;
+/** Glass this small tracks its backdrop's luma: its appearance and its face follow what is behind it. Apple's line is
+ *  64 pt [C: Jwift/Apple/LiquidGlass.md]; this stays at 56 until the adaptive face's brightness drive is read from
+ *  source, so glass between the two (the 62 pt tab bar) keeps its settled face. */
+export const GLASS_TRACKS_LUMA_SPAN = 56;
 
 /** `u` ramps over S = 48..160 pt and `v` over 64..160 pt, S being the shape's minor dimension. */
 export const GlassSizeRamps = (span: number): { U: number; V: number } => ({

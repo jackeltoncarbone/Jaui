@@ -55,7 +55,7 @@ vec3 GlassYcc(vec3 c, float white, float black, float saturation) {
 
 // The face: (white, black, saturation, fill alpha), light filled white and dark filled black, premultiplied.
 // Apple's structure with its parameters FITTED (Core/Glass.md): light and clear to SwiftUI's own render of the
-// same inputs (macOS 27), dark to Apple's native iOS 26 dark captures. Glass 64 pt and under tracks its
+// same inputs (macOS 27), dark to Apple's native iOS 26 dark captures. Glass 56 pt and under (GLASS_TRACKS_LUMA_SPAN) tracks its
 // backdrop: its light face moves between Apple's observed settled values by the mean luma, its dark face is
 // the one fitted to iOS's small controls.
 vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
@@ -63,7 +63,7 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
     if (clear >= 1.0) return clearFace;
     vec4 l = vec4(1.0054, 0.0829, 1.2246, 0.4);
     vec4 k = vec4(0.9608, 0.2941, 1.4167, 0.4);
-    if (span <= 64.0) {
+    if (span <= 56.0) {
         l = mix(vec4(0.919, 0.319, 1.0, 0.516), vec4(1.03, 0.819, 1.0, 0.266), clamp((mean - 0.45) / 0.5, 0.0, 1.0));
         k = vec4(0.6879, 0.1412, 1.6, 0.25);
     }
