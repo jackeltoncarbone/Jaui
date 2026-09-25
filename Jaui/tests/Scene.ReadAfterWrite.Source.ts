@@ -20,6 +20,19 @@ export const readRenderer = (): string => read(join(SRC, 'Core', 'WebGL2.Rendere
 export const readJaui = (): string => read(join(SRC, 'Core', 'Jaui.ts'));
 export const readJwiftGlass = (): string =>
   read(join(REPO, 'ShowStudio.Libraries', 'Jwift', 'Jwift.Angular', 'src', 'Glass', 'Jwift.Glass.jss'));
+/** The app's outer corner in points, `@JwiftScreenRadius`: the tab bar's radius plus its inset, read off the sheet. */
+export const screenRadiusPt = (): number => {
+  const glass = readJwiftGlass();
+  const pt = (name: string): number => {
+    const m = new RegExp(`@${name}:\\s*([\\d.]+)pt`).exec(glass);
+    if (!m) throw new Error(`no @${name} in Jwift.Glass.jss`);
+    return parseFloat(m[1]);
+  };
+  if (!/@JwiftScreenRadius:\s*@JwiftTabBarHeight \/ 2 \+ @JwiftTabBarInset/.test(glass)) {
+    throw new Error('@JwiftScreenRadius is no longer the tab bar radius plus its inset');
+  }
+  return pt('JwiftTabBarHeight') / 2 + pt('JwiftTabBarInset');
+};
 export const readPerfJss = (): string =>
   read(join(REPO, 'ShowStudio.App', 'src', 'Dev', 'Perf', 'Perf.jss'));
 /** The app shell's own sheet. `Screen` is the rounded, clipping node every page in the app sits

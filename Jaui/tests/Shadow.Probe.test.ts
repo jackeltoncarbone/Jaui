@@ -31,7 +31,7 @@ import { BrowserPlatform } from '@jaui/Core/Platform';
 import { Jiv } from '@jaui/Jiv/Jiv';
 import { JivInstanceBuffer } from '@jaui/Jiv/Jiv.InstanceBuffer';
 import { OnJauiTrace } from '@jaui/Diagnostics/Jaui.Trace';
-import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber } from './Scene.ReadAfterWrite.Source';
+import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber, screenRadiusPt } from './Scene.ReadAfterWrite.Source';
 
 // -- The sheets, read rather than restated. ----------------------------------------------------
 
@@ -42,11 +42,7 @@ const GRID = jssClass(PERF, 'PerfGrid');
 const CARD = jssClass(PERF, 'PerfCard');
 const SCREEN = jssClass(readAppJss(), 'Screen');
 const GLASS = readJwiftGlass();
-const SCREEN_RADIUS_PT = (() => {
-  const m = /@JwiftScreenRadius:\s*([\d.]+)pt/.exec(GLASS);
-  if (!m) throw new Error('no @JwiftScreenRadius in Jwift.Glass.jss');
-  return parseFloat(m[1]);
-})();
+const SCREEN_RADIUS_PT = screenRadiusPt();
 const glassRaw = (prop: string): string => {
   const from = GLASS.indexOf('JwiftGlass {');
   if (from < 0) throw new Error('no JwiftGlass rule in Jwift.Glass.jss');

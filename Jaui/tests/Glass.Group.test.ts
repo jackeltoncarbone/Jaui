@@ -38,7 +38,7 @@ import {
   BaseDownsampleFactor, PyramidDepth, PyramidFill, ResolveRegionRect, PlanBackdropUnion,
   type BackdropRect,
 } from '@jaui/Core/BlurPass';
-import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber } from './Scene.ReadAfterWrite.Source';
+import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber, screenRadiusPt } from './Scene.ReadAfterWrite.Source';
 
 // -- The sheets, read rather than restated. ----------------------------------------------------
 
@@ -49,9 +49,8 @@ const GRID = jssClass(PERF, 'PerfGrid');
 const CARD = jssClass(PERF, 'PerfCard');
 const SCREEN = jssClass(readAppJss(), 'Screen');
 const GLASS = readJwiftGlass();
-// The scene's screen corner: a rounded screen, so the clip's corners are in play. The app's own corner is the
-// display's (@DisplayCornerRadius); this is the fixture's.
-const SCREEN_RADIUS_PT = 52;
+// The scene's screen corner, the app's own (@JwiftScreenRadius): a rounded screen, so the clip's corners are in play.
+const SCREEN_RADIUS_PT = screenRadiusPt();
 /** A number authored in the `JwiftGlass` rule itself, taken from the FIRST occurrence after that
  *  rule opens so a later class overriding it cannot be read as the base's.
  *

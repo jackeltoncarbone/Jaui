@@ -40,7 +40,7 @@ import {
   ParseGlassGates, GLASS_GATE_BARRIERS, GLASS_GATE_OPEN, type GlassGateBarrier,
 } from '@jaui/Core/Glass.Programs';
 import { OnJauiTrace } from '@jaui/Diagnostics/Jaui.Trace';
-import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber } from './Scene.ReadAfterWrite.Source';
+import { readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber, screenRadiusPt } from './Scene.ReadAfterWrite.Source';
 import { preprocess, codeLines, readPanelFrag } from './Flat.Program.Source';
 
 // -- The sheets, read rather than restated. ----------------------------------------------------
@@ -52,9 +52,8 @@ const GRID = jssClass(PERF, 'PerfGrid');
 const CARD = jssClass(PERF, 'PerfCard');
 const SCREEN = jssClass(readAppJss(), 'Screen');
 const GLASS = readJwiftGlass();
-// The scene's screen corner: a rounded screen, so the clip's corners are in play. The app's own corner is the
-// display's (@DisplayCornerRadius); this is the fixture's.
-const SCREEN_RADIUS_PT = 52;
+// The scene's screen corner, the app's own (@JwiftScreenRadius): a rounded screen, so the clip's corners are in play.
+const SCREEN_RADIUS_PT = screenRadiusPt();
 /** The text of a property in the `JwiftGlass` rule itself (first occurrence after it opens). */
 const glassRaw = (prop: string): string => {
   const from = GLASS.indexOf('JwiftGlass {');

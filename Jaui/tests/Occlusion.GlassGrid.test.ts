@@ -30,7 +30,7 @@ import {
   CoveredPixels, CoveredRegion, IntersectPixelRect, PixelRectEmpty, PixelRectArea,
   SubtractPixelRects, CornerReach, DEFAULT_OCCLUSION_LIMITS, type PixelRect,
 } from '@jaui/Core/Occlusion';
-import { readJaui, readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber } from './Scene.ReadAfterWrite.Source';
+import { readJaui, readPerfJss, readAppJss, readJwiftGlass, jssClass, jssValue, jssNumber, screenRadiusPt } from './Scene.ReadAfterWrite.Source';
 
 // ── The sheets, read rather than restated. ─────────────────────────────────────────────────────
 
@@ -40,9 +40,8 @@ const BED = jssClass(PERF, 'PerfBed');
 const GRID = jssClass(PERF, 'PerfGrid');
 const CARD = jssClass(PERF, 'PerfCard');
 const SCREEN = jssClass(readAppJss(), 'Screen');
-// The scene's screen corner: a rounded screen, so the clip's corners are in play. The app's own corner is the
-// display's (@DisplayCornerRadius); this is the fixture's.
-const SCREEN_RADIUS_PT = 52;
+// The scene's screen corner, the app's own (@JwiftScreenRadius): a rounded screen, so the clip's corners are in play.
+const SCREEN_RADIUS_PT = screenRadiusPt();
 
 /** The harness pins 1280 x 800 CSS px at deviceScaleFactor 2. */
 const VIEW_W = 1280;

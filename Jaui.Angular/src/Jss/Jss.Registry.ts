@@ -2,6 +2,7 @@ import { Injectable, InjectionToken, signal } from '@angular/core';
 import {
   ParseJss,
   MergeRulesets,
+  Resolve,
   type ParsedJss,
   type Stylesheet,
   type Ruleset,
@@ -90,6 +91,18 @@ export class JssRegistry {
   get Vars(): Map<string, string> {
     return this._vars;
   }
+
+  /** A var's value in points, its expression resolved against the table at PointScale 1 (0 when unset). Reading it
+   *  tracks `Version`, so a computed that reads a derived length (`@JwiftScreenRadius`) follows live edits. */
+  VarPoints = (name: string): number => {
+    this._version();
+    if (!this._vars.has(name)) return 0;
+    const value = Resolve(`@${name}`, {
+      ParentWidth: 0, ParentHeight: 0, PointScale: 1, ParentPointScale: 1, RootPointScale: 1,
+      ViewportWidth: 0, ViewportHeight: 0, Vars: this._vars,
+    }, 'W');
+    return Number.isFinite(value) ? value : 0;
+  };
 
   /** Animation definition table (name → resolved definition). Handed to
    *  Jiv at construction so its animation driver can resolve named

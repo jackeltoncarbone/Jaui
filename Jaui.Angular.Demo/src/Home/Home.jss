@@ -196,15 +196,7 @@ LiquidGlass {
   Glass: Regular
   Thickness: 2
   Refraction: 1
-
-  LightAngle: 135
-  LightIntensity: 1
-  SpecularIntensity: 0
-  SpecularGlow: 0
-  FresnelStrength: 0.55
   ChromaticAberration: 0
-  EdgeLightTop: 0
-  EdgeLightBottom: 0.03
 }
 
 SectionViewAll : LiquidGlass {

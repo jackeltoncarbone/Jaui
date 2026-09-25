@@ -24,7 +24,6 @@ import {
 import { JssRegistry, JSS_REGISTRY } from '../Jss/Jss.Registry';
 import { SemanticMirror } from '../Seo/Semantic.Mirror';
 import { TeleportRegistry, TELEPORT_REGISTRY } from '../Teleport/Teleport.Registry';
-import { DisplayCornerRadius } from './Jaui.DisplayCorner';
 
 /** DI token for the `<jaui>`-hosted Worker. The consumer must provide a
  *  Worker instance — there's no sane default because the worker is
@@ -253,7 +252,6 @@ export class Jaui implements OnInit, OnDestroy {
       this._registry.SetVar(`Safe${edge}`, '0px');
       this._registry.SetVar(`Safe${edge}Up`, '0');
     }
-    this._registry.SetVar('DisplayCornerRadius', '0px');
     if (typeof window !== 'undefined') {
       const readSafeArea = (): void => {
         const rootStyle = getComputedStyle(document.documentElement);
@@ -262,8 +260,6 @@ export class Jaui implements OnInit, OnDestroy {
           this._registry.SetVar(`Safe${edge}`, `${px}px`);
           this._registry.SetVar(`Safe${edge}Up`, px > 0 ? '1' : '0');
         }
-        // The screen's own corner rides the same reads: a rotation swaps the screen's sides, never its corner.
-        this._registry.SetVar('DisplayCornerRadius', `${DisplayCornerRadius()}px`);
       };
       // The host's latch settles over the first few frames (and re-measures after an orientation
       // flip), so sample across that window rather than once. SetVar no-ops on an unchanged value,
