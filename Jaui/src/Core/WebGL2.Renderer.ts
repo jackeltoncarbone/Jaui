@@ -3076,9 +3076,18 @@ export class WebGL2Renderer implements Renderer {
     // draw re-binds its program correctly.
     this._lastProgram = null;
     if (_unwrap(input) === this._sceneFbo.Texture) {
-      const g = DAMAGE_BLUR_READ_GUARD_PX;
+      // What the build covered, not what was asked: it snaps the region out to its downsample grid. Its
+      // first hop reads a few level-0 texels past that, and a texel can be several device px wide.
+      const map = pass.LastRegion;
       const at = region ?? { x: 0, y: 0, w: width, h: height };
-      this._damageRead(RectClamp(at.x - g, at.y - g, at.x + at.w + g, at.y + at.h + g, this._width, this._height), result);
+      let x0 = at.x, y0 = at.y, x1 = at.x + at.w, y1 = at.y + at.h;
+      if (map.ScaleX > 0 && map.ScaleY > 0) {
+        const rw = width / map.ScaleX, rh = height / map.ScaleY;
+        const rx = -map.OffsetX * rw, ry = height - (-map.OffsetY * rh) - rh;
+        x0 = Math.min(x0, rx); y0 = Math.min(y0, ry); x1 = Math.max(x1, rx + rw); y1 = Math.max(y1, ry + rh);
+      }
+      const g = Math.max(DAMAGE_BLUR_READ_GUARD_PX, 4 * map.Texel);
+      this._damageRead(RectClamp(x0 - g, y0 - g, x1 + g, y1 + g, this._width, this._height), result);
     } else {
       this._damageDerive(_unwrap(input), result);
     }
