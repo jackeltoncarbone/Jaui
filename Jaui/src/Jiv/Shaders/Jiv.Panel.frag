@@ -860,6 +860,10 @@ void main() {
             }
             if (glassGlow > 0.0) face = GlassPressGlow(face, glassGlow);
             if (v_RimEdge.z > 0.0) {
+                // The lens glass's inner glow, added (plusLighter) inside its outline, under the lifted items as the
+                // glass's own layer is.
+                float glow = GLASS_LENS_INNER_GLOW.x * GLASS_LENS_INNER_GLOW.y * (1.0 - GlassShadowFall(d, 2.0 * GLASS_LENS_INNER_GLOW.z));
+                face = min(face + glow * glassiness * (1.0 - lensInk), vec3(1.0));
                 // The lens's inner shadow, inverted: the outside cast GLASS_LENS_INNER_SHADOW.z pt down into it,
                 // its radius and opacity Apple's. The shifted depth to first order along the normal.
                 float shifted = d - dot(nScreen, vec2(0.0, GLASS_LENS_INNER_SHADOW.z));
