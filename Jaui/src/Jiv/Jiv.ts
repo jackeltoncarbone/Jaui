@@ -13,6 +13,7 @@ import {
   type PredicateContext, type PredicateElement,
 } from '../Jss/Jss.Predicate';
 import { AssignStyleWithFilterMerge } from '../Core/Filter.Parse';
+import { PerfLevers } from '../Core/Perf.Levers';
 
 /**
  * Jiv — a visual panel element. Extends Element with material, style,
@@ -580,18 +581,28 @@ const _predicateHasVar = (expr: PredicateExpr): boolean => {
   }
 };
 
-/** Lazy adapter presenting an Element as the evaluator's PredicateElement —
- *  resolved box (LayoutWidth/Height), live ancestry, classes, and states.
- *  Parent is wrapped on access so an ancestor walk only allocates the depth
- *  it actually visits. */
+/** Adapter presenting an Element as the evaluator's PredicateElement — resolved box
+ *  (LayoutWidth/Height), live ancestry, classes, and states. Every field reads through to
+ *  the element, so one view per element serves every evaluation: an ancestor walk that runs
+ *  on each style resolve allocates nothing after the first. */
+const _predicateViews = new WeakMap<Element, PredicateElement>();
+
+const _predicateView = (el: Element): PredicateElement => ({
+  get Width() { return el.LayoutWidth; },
+  get Height() { return el.LayoutHeight; },
+  get Parent() { return _wrapPredicateElement(el.Parent); },
+  get Classes() { return (el as { Classes?: readonly string[] }).Classes ?? []; },
+  get States() { return (el as { StateSet?: ReadonlySet<string> }).StateSet ?? _EMPTY_STATES; },
+  get Vars() { return (el as { VarMap?: ReadonlyMap<string, string | number | boolean> }).VarMap; },
+});
+
 const _wrapPredicateElement = (el: Element | null): PredicateElement | null => {
   if (!el) return null;
-  return {
-    get Width() { return el.LayoutWidth; },
-    get Height() { return el.LayoutHeight; },
-    get Parent() { return _wrapPredicateElement(el.Parent); },
-    Classes: (el as { Classes?: readonly string[] }).Classes ?? [],
-    States: (el as { StateSet?: ReadonlySet<string> }).StateSet ?? _EMPTY_STATES,
-    Vars: (el as { VarMap?: ReadonlyMap<string, string | number | boolean> }).VarMap,
-  };
+  if (!PerfLevers.PredicateViews) return _predicateView(el);
+  let view = _predicateViews.get(el);
+  if (view === undefined) {
+    view = _predicateView(el);
+    _predicateViews.set(el, view);
+  }
+  return view;
 };
