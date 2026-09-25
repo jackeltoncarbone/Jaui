@@ -113,13 +113,6 @@ const vec3 GLASS_LENS_INNER_SHADOW = vec3(3.0, 0.12, 7.0);
 // {hdr 0.8, opacity 0.3, radius 8}; GlassMaterialProvider draws it as SDFLayer.shadow_v2 (inset 0, that grey, the radius,
 // no offset, knockout, inverted), grouped plusLighter at the opacity, DesignLibrary 0x18AE87638 to 0x18AE87740].
 const vec3 GLASS_LENS_INNER_GLOW = vec3(0.8, 0.3, 8.0);
-// The lens glass's contrast edge: grey and opacity, light and dark [C: sub_18AF84454 sets Parameters.contrastEdge
-// {0.1, 0.2, 0.75} light and {0.2, 0.15, 0.75} dark; sub_18AF59778 draws it as an SDFLayer.gradient of that grey, clear at
-// 0.25 pt in and at its opacity from 0.5 to width + 0.5 pt, grouped plusDarker. QuartzCore's sdf_gradient reads its ramp
-// by depth inside the outline through a clamp-to-edge sampler, so the last stop holds to the centre, and the width
-// only places a stop the same as the one before it].
-const vec2 GLASS_LENS_CONTRAST_EDGE_LIGHT = vec2(0.1, 0.2);
-const vec2 GLASS_LENS_CONTRAST_EDGE_DARK = vec2(0.2, 0.15);
 // Lane 43 carries the glass's clear amount (0..1) and its pressed glow in thousandths above it.
 float GlassLaneClear(float lane) { return mod(lane, 4.0); }
 float GlassLaneGlow(float lane) { return floor(lane / 4.0) / 1000.0; }
