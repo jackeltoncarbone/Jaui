@@ -3,12 +3,8 @@ import { HopReach, MIP_TAP_TEXELS, PyramidSampleReach } from '../src/Core/Pyrami
 import { BACKDROP_REGION_FULL, type BackdropRegion } from '../src/Core/Renderer';
 import { GaussianKernelWith } from '../src/Core/Blur.Separable';
 
-/**
- * The reach bound, held to the passes it describes. One axis of each pass is simulated on the CPU the way
- * the GPU runs it (bilinear taps, texel centres at i + 0.5, CLAMP_TO_EDGE), and the scene pixels that can
- * move a sample are found by linearity: a unit impulse at each pixel, and a non-zero response is a pixel
- * the sample depends on. None of them may lie farther from the sample than the bound says.
- */
+// One axis of each pass, run on the CPU as the GPU runs it; a unit impulse at each scene pixel finds what
+// a sample depends on, and none of it may lie past the bound.
 
 type Level = Float64Array;
 

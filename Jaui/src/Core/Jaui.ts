@@ -5073,11 +5073,8 @@ export class Canvas implements DirtyTracker {
     return handle;
   };
 
-  /**
-   * Do the texels a probe of `x, y, pw, ph` samples at `lod` hold last frame's values? True when the pyramid
-   * is the same build and nothing changed this frame within their reach of the scene
-   * (`PyramidSampleReach`): a change elsewhere under a wide pyramid cannot move the probe's reading.
-   */
+  /** Whether the texels a probe samples hold last frame's values: the same build, and no change this frame
+   *  within their reach of the scene, so a change elsewhere under a wide pyramid cannot move the reading. */
   private _probeReadClean = (
     node: Jiv, pyramid: string, x: number, y: number, pw: number, ph: number, lod: number,
     handle: GpuTextureHandle, w: number, h: number,
