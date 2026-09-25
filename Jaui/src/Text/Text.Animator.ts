@@ -97,6 +97,8 @@ export class TextAnimator implements Animatable {
   }
 
   get Content(): string { return this._content; }
+  /** Words still fading out, which the next Update prunes once they settle. */
+  get HasDying(): boolean { return this.Words.some((w) => w.Dying); }
   get Style(): ResolvedTextStyle { return this._style; }
   /** Current FontWeight to render at — the spring's value rounded to the
    *  nearest integer. Renderer uses this for the atlas fetch. Integer is

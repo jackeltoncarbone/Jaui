@@ -2292,6 +2292,7 @@ export class Canvas implements DirtyTracker {
     // sizing), so a separate Text walk is no longer needed.
     const layoutDirty = (this.Root.Dirty & (DirtyFlag.Layout | DirtyFlag.Text)) !== 0;
     if (hud) tDirtyEnd = performance.now();
+    let textScope: JauiElement | null = null;
     if (layoutDirty) {
       // Choose the smallest containing subtree we can re-solve in isolation.
       // Returns Root for multi-dirty / unbounded-ancestor cases, equivalent
@@ -2299,6 +2300,7 @@ export class Canvas implements DirtyTracker {
       // is contained inside a fixed-box ancestor — saves an O(N) full-tree
       // pass on common cases (drawer resize, single-card hover, scrubber).
       const scopedRoot = this._chooseScopedRoot();
+      textScope = scopedRoot;
       // Cascade PointScale first so _measureDirtyText can resolve FontSize
       // against each Jiv's ResolveCtx before layout sizes are known. The
       // tree is all-Jivs (Root is a Jiv, AddChild only mounts Jivs), so the
@@ -2343,9 +2345,7 @@ export class Canvas implements DirtyTracker {
     // continuously). On steady-idle frames neither holds, so the full-tree
     // walk is skipped entirely. AnimationManager.IsRunning covers springs,
     // ScrollManager easings, and PresenceManager — all registered with it.
-    if (layoutDirty || this._animationManager.IsRunning) {
-      this._processTextTransitions(this.Root);
-    }
+    if (layoutDirty || this._animationManager.IsRunning) this._runTextTransitions(textScope as Jiv | null);
     if (hud) tTextEnd = performance.now();
 
     // Reset per-frame counters; _render increments them as it walks.
@@ -6911,6 +6911,38 @@ export class Canvas implements DirtyTracker {
     }
   };
 
+  /** Nodes whose style was marked since the last text walk; their text style may have moved with it. */
+  private _textWoken = new Set<Jiv>();
+  /** Nodes whose text still holds fading words, which the walk prunes the frame they settle. */
+  private _textDying = new Set<Jiv>();
+
+  /** The text-transition walk over only the subtrees whose inputs can have changed: the subtree this
+   *  frame's layout solved, every node whose style was marked, and every node still fading words out.
+   *  Anywhere else each input (text, resolved text style, wrap width) is what the last walk saw, so
+   *  Update would change nothing and a small animating region no longer pays a whole-tree walk. */
+  private _runTextTransitions = (scope: Jiv | null): void => {
+    if (!PerfLevers.ScopedTextTransitions || scope === this.Root) {
+      this._textWoken.clear();
+      this._processTextTransitions(this.Root);
+      return;
+    }
+    const roots = new Set<Jiv>(this._textWoken);
+    this._textWoken.clear();
+    if (scope !== null) roots.add(scope);
+    for (const node of this._textDying) roots.add(node);
+    for (const node of roots) {
+      let attached = false;
+      let covered = false;
+      for (let p = node.Parent as Jiv | null; p !== null; p = p.Parent as Jiv | null) {
+        if (roots.has(p)) covered = true;
+        if (p === this.Root) { attached = true; break; }
+      }
+      if (node === this.Root) attached = true;
+      if (!attached) { this._textDying.delete(node); continue; }
+      if (!covered) this._processTextTransitions(node);
+    }
+  };
+
   private _processTextTransitions = (node: Jiv): void => {
     const ctx = node.ResolveCtx ?? this.Root.ResolveCtx!;
     const [, padR, , padL] = ResolveLengthTuple4(node.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
@@ -6933,6 +6965,7 @@ export class Canvas implements DirtyTracker {
       if (anim.Update(node.Text, resolvedStyle, maxWidth)) {
         this._animationManager.Kick();
       }
+      if (anim.HasDying) this._textDying.add(node); else this._textDying.delete(node);
     } else {
       const anim = this._textAnimators.get(node);
       if (anim && anim.Content !== '') {
@@ -6940,6 +6973,7 @@ export class Canvas implements DirtyTracker {
           this._animationManager.Kick();
         }
       }
+      if (anim?.HasDying) this._textDying.add(node); else this._textDying.delete(node);
     }
     for (const child of node.Children as Jiv[]) this._processTextTransitions(child);
   };
@@ -7122,7 +7156,7 @@ export class Canvas implements DirtyTracker {
           // nothing dirty and Kicks nothing -- Jiv._syncState only wakes the animator. Registered
           // animatables are stepped by StepFrame every tick, so before the park that was enough.
           // Parked there is no tick to be stepped by, so the wake has to travel with the flag.
-          styleAnim.OnWake = this.Wake;
+          styleAnim.OnWake = () => { this._textWoken.add(node); this.Wake(); };
           this._styleAnimators.set(node, styleAnim);
           this._animationManager.Register(styleAnim);
           // Kick the rAF loop if the Jiv carries @Animation declarations

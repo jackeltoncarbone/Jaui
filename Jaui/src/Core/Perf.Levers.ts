@@ -12,6 +12,8 @@ export const PerfLevers = {
   PredicateViews: true,
   /** Step only the animatables that can move; one at exact rest sleeps until something rouses it. */
   SleepingAnimators: true,
+  /** Run text transitions over the subtrees whose inputs changed, not the whole tree. */
+  ScopedTextTransitions: true,
 };
 
 (globalThis as unknown as { __jauiLevers?: typeof PerfLevers }).__jauiLevers = PerfLevers;
