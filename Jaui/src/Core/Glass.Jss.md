@@ -21,7 +21,7 @@ Status column:
 | inner / outer lens (3.1) | `GlassRefraction: Auto \| Inner(<amount>, <height>) Outer(<amount>, <height>) Opacity(<n>)` | `GlassInnerShift`, the outer shift in `Jiv.Panel.frag`, lane 39 `Refraction` as a multiplier | matches the laws; `Refraction` as a free multiplier is ours only |
 | blur radius and ramp (3.2) | `GlassBlur: Auto \| <pt>` | `GlassBlurRadius`, `GlassBodyLod` | matches the radius; we read a native pyramid mapped to Apple's LOD (`GLASS_TEXEL_SIGMA_*`, fitted), since we never render below native |
 | face matrix (3.3) | `GlassFace: Auto \| Ycc(<white>, <black>, <saturation>, <fill>)` | the face table in `Glass.md` (fitted) | differs: fitted to SwiftUI and iOS captures, not the recipe's [C] numbers (the recipe's numbers rendered 58 levels off SwiftUI regular); to settle in phase 2 |
-| thin-glass luma tracking (3.3) | derived | the probe (`u_ShadowState`, 56 pt gate) | matches in structure; the law is [I] on Apple's side too |
+| thin-glass luma tracking (3.3) | derived | the probe (`u_ShadowState`, 56 pt gate) | differs: Apple's law is now [C] (LiquidGlass.md 3.3): a hysteresis switch between the regular light and dark faces, gated at 64 pt; ours blends a fitted face by the mean. No JSS option yet |
 | edge bleed (3.4) | `GlassBleed: Auto \| None` | shader | matches |
 | drop shadow (3.5) | `GlassShadow: Auto \| None` | shader, `GlassShadowRadius` 10 + 14 u | differs: our small-glass radius is 10 pt (fitted to one Edit button) where Apple's is 24 |
 | holding tone, clamp (3.6) | derived | shader, clamp `[0, 1]` | matches (SDR) |
@@ -64,7 +64,9 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 | gap between items | 0 measured [I] | 0 | 0 |
 | selected pill | the item frame [C]; 54 pt tall measured | the cell, 54 pt | 0 |
 | symbol | 18 pt medium, large scale [C]; 24 pt box measured [I] | 21 pt JwiftIcons face (drawn ≈ 24 pt) | matches the box |
-| label | 10 pt [C]; semibold measured [I] | 10 pt, 600 | 0 |
+| label | system 10 pt, medium; semibold when selected [C] | Inter 10 pt, 500; 600 selected (`Jwift_TabLabel`, `_TabLabelActive`) | 0 in weight; Inter's strokes still read heavier than SF's |
+| symbol centre | 20 pt below the item top [C] (`_UITabButton` layoutSubviews) | 19.8 pt when the item `Gap` is 3.8 pt and the label `LineHeight` 1.05 (held, see Sizing.md 1) | 0.2 pt; today 20.8 pt |
+| label baseline | frame bottom 7 pt above the item bottom [C], so 44.6 pt with SF's 2.41 pt descent | 44.67 pt with the same (held) values | 0.1 pt; today 43.0 pt |
 | search circle | the bar's inner height [I] | 62 pt (`Jwift_TabAccessory`) | ≈ 0 |
 | lens size | item + 16 × item + 16 [C]: ≈ 70 pt tall | 72.7 pt tall, 1.35 pitch wide (1.708 bar cap) | +2.7 pt tall; width rule differs |
 | lens width, measured | 105 pt on a 78 pt pitch [I] | 106 pt at that pitch | +1 |
