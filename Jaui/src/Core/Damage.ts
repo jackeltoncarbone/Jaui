@@ -34,6 +34,10 @@ export const DAMAGE_BLUR_READ_GUARD_PX = 64;
  *  a whole frame is the one that can never be wrong. */
 export const DAMAGE_MAX_SHARE = 0.75;
 
+/** Frames a thrown-away partial frame waits before the next attempt, doubling per miss up to the max. */
+export const DAMAGE_BACKOFF_MIN = 2;
+export const DAMAGE_BACKOFF_MAX = 64;
+
 /** One scene read of a frame: the device rect it sampled, the union of the scene draws that consumed
  *  what it produced (null while nothing has), and whether it lay inside the frame's redraw rect. */
 export interface DamageRead {

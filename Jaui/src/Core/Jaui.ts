@@ -13,7 +13,7 @@ import { TextCache } from '../Text/Text.Cache';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { PerfLevers } from './Perf.Levers';
 import { CascadeEpoch } from './Cascade.Epoch';
-import { PredictDamage, DamageHeld, DamageStale, type DamageRead } from './Damage';
+import { PredictDamage, DamageHeld, DamageStale, DAMAGE_BACKOFF_MIN, DAMAGE_BACKOFF_MAX, type DamageRead } from './Damage';
 import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
@@ -2753,6 +2753,12 @@ export class Canvas implements DirtyTracker {
   private _dmgPieces: PixelRect[] = [];
   private _dmgReads: DamageRead[] = [];
   private _dmgSize = '';
+  private _dmgKeep = false;
+  /** Rendered frames left before the next partial attempt, and the wait a thrown-away frame sets. A
+   *  motion the prediction keeps missing (a scroll, a drag) doubles the wait, so it costs a redraw now
+   *  and then rather than every frame; each frame shown partial halves it again. */
+  private _dmgCooldown = 0;
+  private _dmgBackoff = DAMAGE_BACKOFF_MIN;
   /** Whether the tree holds what a partial frame refuses up front, and the cascade epoch it was asked at. */
   private _dmgRefusedEpoch = -1;
   private _dmgRefused = false;
@@ -2787,6 +2793,7 @@ export class Canvas implements DirtyTracker {
     const h = Math.round(this._height * this._dpr);
     if (this._dmgSize !== `${w}x${h}@${this._dpr}#${(this._renderer as WebGL2Renderer).SceneGeneration}`) return null;
     if (this._glassGroupStats.Groups > 0) return null;
+    if (this._dmgCooldown > 0) { this._dmgCooldown--; return null; }
     const rect = PredictDamage(this._dmgPieces, this._dmgReads, w, h);
     if (rect === null) return null;
     // Refused before the walk rather than thrown away after it, so nothing is drawn twice in a tick: a
@@ -4437,12 +4444,15 @@ export class Canvas implements DirtyTracker {
           dmg.DamageEndFrame();
           this._bc.Rollback((slot) => dmg.BlurCacheRelease(slot));
           st.Thrown++;
+          this._dmgCooldown = this._dmgBackoff;
+          this._dmgBackoff = Math.min(DAMAGE_BACKOFF_MAX, this._dmgBackoff * 2);
           st.Why[why] = (st.Why[why] ?? 0) + 1;
           this._dmgRect = null;
           this._dmgRedo = true;
           return;
         }
         st.Partial++;
+        this._dmgBackoff = Math.max(DAMAGE_BACKOFF_MIN, this._dmgBackoff >> 1);
         st.Last = 'partial';
         st.PartialPx += (damageRect.X1 - damageRect.X0) * (damageRect.Y1 - damageRect.Y0);
       } else {
@@ -4453,8 +4463,10 @@ export class Canvas implements DirtyTracker {
       dmg.DamageEndFrame();
       this._dmgPieces = ledgerOn && !region.Full ? region.Pieces.slice() : [];
       this._dmgReads = dmg.DamageReads;
-      // With the lever off the scene is discarded after the present, so nothing can be kept from it.
-      this._dmgSize = PerfLevers.DamageRegions ? `${w}x${h}@${this._dpr}#${dmg.SceneGeneration}` : '';
+      // The scene is kept past the present only while the next frame can be partial; otherwise it is
+      // discarded as it always was, so a page that redraws whole pays exactly what it paid before.
+      this._dmgKeep = PerfLevers.DamageRegions && PredictDamage(this._dmgPieces, this._dmgReads, w, h) !== null;
+      this._dmgSize = this._dmgKeep ? `${w}x${h}@${this._dpr}#${dmg.SceneGeneration}` : '';
     }
 
     // The glass group's fallbacks are a ledger entry the harness reads; the gate lines below are only
@@ -4526,7 +4538,7 @@ export class Canvas implements DirtyTracker {
       // scene FBO's color for the rest of this frame. On tile-based mobile
       // GPUs this discards the tile memory instead of writing it back to
       // main memory — real bandwidth win on iPad / Android.
-      if (dmg !== null) dmg.InvalidateFrameTransients(PerfLevers.DamageRegions);
+      if (dmg !== null) dmg.InvalidateFrameTransients(this._dmgKeep);
       else r.InvalidateFrameTransients();
     }
 
