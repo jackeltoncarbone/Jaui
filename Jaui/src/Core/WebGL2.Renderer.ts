@@ -42,6 +42,8 @@ import type { StrokeStyle } from './Renderer';
 import type { Color } from './Types';
 import type { VibrancyBlend } from './Vibrancy';
 import { PerfLevers } from './Perf.Levers';
+import { DAMAGE_BLUR_READ_GUARD_PX, RectClamp, RectHolds, RectJoin, RectMeets, type DamageRead } from './Damage';
+import type { PixelRect } from './Occlusion';
 
 // ─── Jline (stroke) uniform-location bundle ─────────────────────────────────
 interface _StrokeLocs {
@@ -678,6 +680,7 @@ export class WebGL2Renderer implements Renderer {
    *  ships and is not a diagnostic. */
   private _tgt = (key: string): void => {
     this._boundTarget = key;
+    if (this._damageRect !== null) this._damageScissor(key === 'scene');
     // Binding anything but the scene ENDS the scene's render encoder if the walk has drawn into it
     // since the last time it ended. That, not a read, is what a Metal driver stores and loads back
     // at `RebindSceneTarget`. The ledger decides which binds count; see `NoteTargetBind`.
@@ -694,6 +697,8 @@ export class WebGL2Renderer implements Renderer {
    *  encoder. One string compare per draw CALL (not per instance - the panel and text paths are
    *  instanced, so this is a handful of compares a frame). */
   private _noteSceneDraw = (): void => {
+    // Raw GL elsewhere (BlurPass, a state reset) can drop the scissor; every draw puts it back.
+    if (this._damageRect !== null) this._damageScissor(this._boundTarget === 'scene');
     // A draw is about to land DIRECTLY in the scene, so every card target still waiting to be
     // written back has to land first or this draw would end up underneath a surface that paints
     // before it. The drain is blits, not draws, so it cannot recurse through here; see `_drainCards`.
@@ -1031,6 +1036,7 @@ export class WebGL2Renderer implements Renderer {
     // gradient. NOTE: this trades alpha to 2-bit — fine for an opaque scene
     // (the canvas fills its background); revisit if alpha precision matters.
     this._sceneFbo = new Framebuffer(gl, { depth: !this.DiagNoDepth, highPrecision: true });
+    this.SceneGeneration++;
     JTrace(`jaui:scene-fbo depth=${!this.DiagNoDepth} highPrecision=true`);
     // The flag has to SAY it arrived. The M4 lost `?no-depth` once to an unquoted shell variable and
     // the reading looked perfectly reasonable; a reading taken with this mark absent is a reading of
@@ -1175,8 +1181,12 @@ export class WebGL2Renderer implements Renderer {
     // WebGL context is garbage-collected with the canvas
   };
 
+  /** Bumped whenever the scene target is made or remade: what it held is gone. */
+  SceneGeneration = 0;
+
   Resize = (width: number, height: number, _dpr: number): void => {
     if (width !== this._width || height !== this._height) {
+      this.SceneGeneration++;
       // Every card target is keyed on a region of the OLD canvas and the frame snapshot is the old
       // canvas's whole surface. Both are re-made on demand at the new size.
       this._cardPool?.Dispose();
@@ -1444,6 +1454,143 @@ export class WebGL2Renderer implements Renderer {
     throw new Error('[Jaui WebGL2] Access blur output via ComputeBlur return value');
   }
 
+  // ── Damage regions (`PerfLevers.DamageRegions`, Core/Damage.ts) ──
+
+  /** The one rect this frame redraws, y-down device px; null on a whole frame. */
+  private _damageRect: PixelRect | null = null;
+  /** Whether this frame's scene reads are recorded for the next frame's prediction. */
+  private _damageOn = false;
+  /** Why this partial frame cannot be shown; empty while it can. */
+  DamageFailed = '';
+  /** This frame's scene reads, in walk order. */
+  DamageReads: DamageRead[] = [];
+  /** Texture -> the read that produced it this frame, and the ones produced from last frame's pixels. */
+  private readonly _damageProducer = new Map<WebGLTexture, number>();
+  private readonly _damageTainted = new Set<WebGLTexture>();
+  /** Made this frame from pixels inside the rect: whatever draws with it must land inside the rect too. */
+  private readonly _damageExact = new Set<WebGLTexture>();
+  /** Shadow probes this tick already settled exactly. A frame redrawn whole after a thrown-away partial
+   *  one reuses them, so no texel eases twice in one tick. */
+  private readonly _damageProbed = new Set<object>();
+
+  DamageBeginFrame = (on: boolean, rect: PixelRect | null): void => {
+    this._damageOn = on;
+    this._damageRect = rect;
+    this._damageScissorOn = false;
+    this.DamageFailed = '';
+    this.DamageReads = [];
+    this._damageProducer.clear();
+    this._damageTainted.clear();
+    this._damageExact.clear();
+  };
+
+  DamageEndFrame = (): void => {
+    if (this._damageRect !== null) this._gl.disable(this._gl.SCISSOR_TEST);
+    this._damageRect = null;
+    this._damageScissorOn = false;
+  };
+
+  /** Put the scissor back after a caller reset GL state wholesale (the janvas pre-pass does, every frame). */
+  DamageRestoreScissor = (): void => {
+    if (this._damageRect === null) return;
+    this._damageScissorOn = false;
+    this._damageScissor(this._boundTarget === 'scene');
+  };
+
+  /** The tick's renders are done: the next one probes afresh. */
+  DamageEndTick = (): void => { this._damageProbed.clear(); };
+
+  /** Was this handle made from last frame's pixels, or in a frame already bound for a whole redraw?
+   *  Such a pyramid must not be cached. */
+  DamageTainted = (handle: GpuTextureHandle): boolean =>
+    (this._damageRect !== null && this.DamageFailed !== '') || this._damageTainted.has(_unwrap(handle));
+
+  private _damageFail = (why: string): void => { if (this.DamageFailed === '') this.DamageFailed = why; };
+
+  private get _damageCanvas(): PixelRect { return { X0: 0, Y0: 0, X1: this._width, Y1: this._height }; }
+
+  /** Scene draws are scissored to the damage rect; every other target is drawn whole. */
+  private _damageScissor = (scene: boolean): void => {
+    if (scene === this._damageScissorOn) return;
+    const gl = this._gl;
+    this._damageScissorOn = scene;
+    if (!scene) { gl.disable(gl.SCISSOR_TEST); return; }
+    const p = this._damageRect!;
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(p.X0, this._height - p.Y1, p.X1 - p.X0, p.Y1 - p.Y0);
+  };
+  /** Whether this class last left the scissor on; every raw disable elsewhere follows a call that cleared it. */
+  private _damageScissorOn = false;
+
+  /** BlurPass binds its own targets with raw GL, so it leaves the scissor here rather than in `_tgt`. */
+  private _damageLeaveScene = (): void => {
+    if (this._damageRect !== null) this._damageScissor(false);
+  };
+
+  /** A read this lane cannot bound or cannot make exact in part: it claims the whole canvas, so a partial
+   *  frame holding one is redrawn whole and the next prediction closes over everything. */
+  private _damageRefuse = (kind: string): void => {
+    this._damageLeaveScene();
+    this._damageRead(this._damageCanvas, null);
+    if (this._damageRect !== null) this._damageFail(kind);
+  };
+
+  /** A read of the scene over `read` that produced `out`. Inside the rect it is exact, and what it made
+   *  may only land inside the rect. Anywhere else it read last frame's pixels, so what it made may only
+   *  land outside the rect, and only while nothing it read changed (\`DamageStale\`). */
+  private _damageRead = (read: PixelRect, out: WebGLTexture | null): void => {
+    if (!this._damageOn) return;
+    const p = this._damageRect;
+    const held = p !== null && RectHolds(p, read);
+    const index = this.DamageReads.length;
+    this.DamageReads.push({ Read: read, Uses: null, Held: held });
+    if (out === null) return;
+    this._damageProducer.set(out, index);
+    this._damageTainted.delete(out);
+    this._damageExact.delete(out);
+    if (p === null) return;
+    if (held) this._damageExact.add(out);
+    else this._damageTainted.add(out);
+  };
+
+  /** `out` was made from `input` alone, so it answers to the read that made `input`. */
+  private _damageDerive = (input: WebGLTexture, out: WebGLTexture): void => {
+    if (!this._damageOn) return;
+    const index = this._damageProducer.get(input);
+    this._damageTainted.delete(out);
+    this._damageExact.delete(out);
+    if (index === undefined) { this._damageProducer.delete(out); return; }
+    this._damageProducer.set(out, index);
+    if (this._damageTainted.has(input)) this._damageTainted.add(out);
+    if (this._damageExact.has(input)) this._damageExact.add(out);
+  };
+
+  /** A scene draw over `foot` sampled `handle`. */
+  private _damageUse = (handle: GpuTextureHandle | null | undefined, foot: PixelRect): void => {
+    if (handle === null || handle === undefined) return;
+    const tex = _unwrap(handle);
+    const index = this._damageProducer.get(tex);
+    if (index !== undefined) { const rd = this.DamageReads[index]; rd.Uses = RectJoin(rd.Uses, foot); }
+    const p = this._damageRect;
+    if (p === null) return;
+    if (this._damageTainted.has(tex) && RectMeets(p, foot)) this._damageFail('tainted');
+    // What this read made may differ from last frame's, and outside the rect last frame's output stands.
+    if (this._damageExact.has(tex) && !RectHolds(p, foot)) this._damageFail('spill');
+  };
+
+  /** The device box the pending panel instances can rasterize; the canvas when one is projected. */
+  private _damagePanelFoot = (): PixelRect => {
+    const d = this._panelInstanceData;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < this._panelInstanceCount; i++) {
+      const at = i * PANEL_FLOATS_PER_INSTANCE;
+      if (d[at + 4] === 2.0) return this._damageCanvas;
+      x0 = Math.min(x0, d[at]); y0 = Math.min(y0, d[at + 1]);
+      x1 = Math.max(x1, d[at] + d[at + 2]); y1 = Math.max(y1, d[at + 1] + d[at + 3]);
+    }
+    return RectClamp(x0 - 1, y0 - 1, x1 + 1, y1 + 1, this._width, this._height);
+  };
+
   // ── Scene Pass ──
 
   BeginScenePass = (clearR: number, clearG: number, clearB: number, persist = false): void => {
@@ -1494,6 +1641,12 @@ export class WebGL2Renderer implements Renderer {
     lensItems: GpuTextureHandle | null = null,
   ): void => {
     if (this._panelInstanceCount === 0) return;
+    if (this._damageOn && (backdrop !== null || scene !== null || lensItems !== null)) {
+      const foot = this._damagePanelFoot();
+      this._damageUse(backdrop, foot);
+      this._damageUse(scene, foot);
+      this._damageUse(lensItems, foot);
+    }
     const gl = this._gl;
     // SOFT wherever a panel batch follows another draw into the same scene FBO, which is the
     // common case: see the bracket note in `Pass.Timers`.
@@ -1615,6 +1768,7 @@ export class WebGL2Renderer implements Renderer {
    *  probe slot, so its matrix follows its backdrop as its face does; -1 takes the theme. */
   PanelRimDraw = (canvasWidth: number, canvasHeight: number, under: GpuTextureHandle, appearanceSlot: number): void => {
     if (this._panelInstanceCount === 0) return;
+    if (this._damageOn) this._damageUse(under, this._damagePanelFoot());
     const gl = this._gl;
     const locs = this._panelLocsRim;
     gl.bindBuffer(gl.ARRAY_BUFFER, this._panelInstanceBuffer);
@@ -2845,6 +2999,7 @@ export class WebGL2Renderer implements Renderer {
     // glass draws a feedback loop; returning a foreign texture is what lets every draw land.
     if (this.DiagBlurDummy) return this._blurDummyTexture();
     if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
+    this._damageLeaveScene();
     // Before the pass is picked, and a single boolean on every build after the first frame: the
     // two pool flags are set after `Init` in worker mode, so this is where they take effect.
     this._reconcileBlurPool();
@@ -2901,6 +3056,7 @@ export class WebGL2Renderer implements Renderer {
       this._noteGaussian(pass);
       if (radius > 0) this._noteSurfaceBuild(pass, sepReq !== null, Framebuffer.Allocations - allocsAt);
       this._lastProgram = null;
+      this._damageRefuse('card');
       return _wrap(result, pass.LastRegion);
     }
     // `?blur-src-*`, after `?no-blur` and `?blur-dummy` and after the ledger has booked the read and
@@ -2919,6 +3075,13 @@ export class WebGL2Renderer implements Renderer {
     // bypassing our program cache. Invalidate so the next Panel/Text
     // draw re-binds its program correctly.
     this._lastProgram = null;
+    if (_unwrap(input) === this._sceneFbo.Texture) {
+      const g = DAMAGE_BLUR_READ_GUARD_PX;
+      const at = region ?? { x: 0, y: 0, w: width, h: height };
+      this._damageRead(RectClamp(at.x - g, at.y - g, at.x + at.w + g, at.y + at.h + g, this._width, this._height), result);
+    } else {
+      this._damageDerive(_unwrap(input), result);
+    }
     return _wrap(result, pass.LastRegion);
   };
 
@@ -2949,6 +3112,7 @@ export class WebGL2Renderer implements Renderer {
       return members.map(() => dummy);
     }
     if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
+    this._damageRefuse('group');
     this._reconcileBlurPool();
     const pass = this._blur;
     this._lastBlur = pass;
@@ -3010,6 +3174,7 @@ export class WebGL2Renderer implements Renderer {
       throw new Error('[Jaui] ?glass-group must be refused beside the source diagnostics and the card composite');
     }
     if (_unwrap(input) === this._sceneFbo.Texture) this._sceneLedger.NoteRead();
+    this._damageRefuse('group');
     this._reconcileBlurPool();
     const pass = this._blur;
     this._lastBlur = pass;
@@ -3090,6 +3255,7 @@ export class WebGL2Renderer implements Renderer {
    */
   BlurCacheStore = (src: GpuTextureHandle, slot: BlurCacheSlot | null, frame: number): BlurCacheSlot | null => {
     const gl = this._gl;
+    this._damageLeaveScene();
     const region = src.Region;
     if (region === undefined || region.TexelsX <= 0 || region.TexelsY <= 0) {
       throw new Error('[Jaui] blur-cache: a pyramid handle that does not say its level-0 size');
@@ -3198,6 +3364,7 @@ export class WebGL2Renderer implements Renderer {
    * of level 0 at the same depth, and the depth is in the key.
    */
   BlurCacheCompare = (a: GpuTextureHandle, b: GpuTextureHandle): number => {
+    this._damageLeaveScene();
     const ra = a.Region, rb = b.Region;
     if (ra === undefined || rb === undefined || ra.TexelsX !== rb.TexelsX || ra.TexelsY !== rb.TexelsY) return -1;
     const w = ra.TexelsX, h = ra.TexelsY;
@@ -3436,6 +3603,7 @@ export class WebGL2Renderer implements Renderer {
   GenerateBlurMipmap = (maxLod?: number): void => {
     if (this.DiagNoBlur) return;
     if (this.DiagBlurDummy) return;
+    this._damageLeaveScene();
     // Same reason as `ComputeBlur`: BlurPass binds mip targets this class never sees. In practice
     // this call always follows a `ComputeBlur` with no scene draw between them, so the flag is
     // already clear and it books nothing - which is the correct answer and the reason the column is
@@ -3458,6 +3626,7 @@ export class WebGL2Renderer implements Renderer {
    *  many"). Level 0 is the raw scene, so the same texture doubles as the
    *  no-frost LOD-0 fallback. Restores the scene FBO before returning. */
   BuildSharedBackdrop = (width: number, height: number, maxLod: number): GpuTextureHandle => {
+    this._damageRefuse('shared');
     const pass = this._sharedBlur
       ?? (this._sharedBlur = this._tagBlur(
         new BlurPass(this._gl, undefined, this.DiagBlurChains ?? 1, this.DiagChainLimits ?? undefined), 'shared'));
@@ -3532,6 +3701,11 @@ export class WebGL2Renderer implements Renderer {
     inputsSame = false,
   ): number => {
     const gl = this._gl;
+    // Settled exactly by this tick's thrown-away partial frame: the texel already holds this frame's value.
+    if (this._damageProbed.has(key)) {
+      const settled = this._shadowSlots.get(key);
+      if (settled !== undefined) { settled.Frame = this._shadowFrame; return settled.Slot; }
+    }
     let entry = this._shadowSlots.get(key);
     const fresh = entry === undefined;
     if (!entry) {
@@ -3541,6 +3715,39 @@ export class WebGL2Renderer implements Renderer {
       this._shadowSlots.set(key, entry);
     }
     entry.Frame = this._shadowFrame;
+
+    // A partial frame: a probe whose taps lie inside the redrawn rect reads this frame's pixels and runs
+    // as ever. One outside it would read last frame's, so it draws nothing, which is exact only when the
+    // write would have left its texel where it is; otherwise the frame is redrawn whole.
+    if (this._damageOn) {
+      const read = RectClamp(rect.x - 1, rect.y - 1, rect.x + rect.w + 1, rect.y + rect.h + 1, this._width, this._height);
+      const p = this._damageRect;
+      const exact = p !== null && RectHolds(p, read) && !this._damageTainted.has(_unwrap(backdrop)) && !this._damageTainted.has(_unwrap(scene));
+      this.DamageReads.push({ Read: read, Uses: null, Held: exact });
+      if (p !== null) {
+        // Already bound for a whole redraw, and what this frame drew may be wrong: leave the texel to it.
+        if (this.DamageFailed !== '') {
+          if (fresh) { this._shadowSlots.delete(key); this._shadowFreeSlots.push(entry.Slot); }
+          return -1;
+        }
+        if (!exact) {
+          const easeHere = fresh || this.ShadowSnap ? 1 : 1 - Math.exp(-Math.max(0, dtSeconds) / SHADOW_EASE_SECONDS);
+          const still = ShadowTexelStep(fresh, entry.Gap, entry.Frozen, easeHere, inputsSame);
+          if (still.Moved) {
+            this._damageFail('probe');
+            if (fresh) { this._shadowSlots.delete(key); this._shadowFreeSlots.push(entry.Slot); }
+            return -1;
+          }
+          entry.Gap = still.Gap;
+          entry.Frozen = still.Frozen;
+          entry.Moved = false;
+          this._shadowStill++;
+          if (this.ShadowSnap) this.ShadowSnapped++;
+        }
+        this._damageProbed.add(key);
+        if (!exact) return entry.Slot;
+      }
+    }
 
     // The probe samples `u_Scene` in SCREEN UV over a canvas-sized texture, strictly inside `rect`
     // (its taps are `u_Rect.xy + cell * u_Rect.zw`, cell in [0,1)). A card target is neither
@@ -3721,6 +3928,13 @@ export class WebGL2Renderer implements Renderer {
 
   DrawProgressiveBlur = (params: ProgressiveBlurParams): void => {
     const gl = this._gl;
+    if (this._damageOn) {
+      const rc = params.Rect;
+      const foot = (params.Sin ?? 0) !== 0 ? this._damageCanvas
+        : RectClamp(rc.X - 1, rc.Y - 1, rc.X + rc.W + 1, rc.Y + rc.H + 1, this._width, this._height);
+      this._damageUse(params.Scene, foot);
+      this._damageUse(params.Pyramid, foot);
+    }
     const p = this._progBlurShader.Program;
     // HARD in practice: the pyramid build that precedes it ends on a blur level or the default
     // framebuffer, so the bind back to the scene is a genuine attachment change.
@@ -3896,6 +4110,10 @@ export class WebGL2Renderer implements Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._tgt('default');
     if (timed) this._pass!.End();
+    // The lens's copy is refused: its lifted items draw into targets of their own.
+    if (copy === this._below) this._damageRefuse('lens');
+    else if (scissor) this._damageRead(RectClamp(scissor.x, scissor.y, scissor.x + scissor.w, scissor.y + scissor.h, this._width, this._height), snap);
+    else this._damageRead(this._damageCanvas, snap);
     return _wrap(snap);
   };
 
@@ -4205,6 +4423,7 @@ export class WebGL2Renderer implements Renderer {
   /** Cut the frame snapshot if there is not a usable one. The ONE scene-encoder end of a clean
    *  frame, and the only place this path reads the scene at all. */
   private _ensureFrameSnapshot = (rx: number, ry: number, rw: number, rh: number): boolean => {
+    this._damageRefuse('card');
     const gl = this._gl;
     if (this._frameSnapValid && !this._directRectHit(rx, ry, rx + rw, ry + rh)) return true;
     // A pending write-back is NOT in the scene yet, so a cut taken now would miss it. Land them

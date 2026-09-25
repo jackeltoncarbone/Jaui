@@ -13,6 +13,7 @@ import { TextCache } from '../Text/Text.Cache';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { PerfLevers } from './Perf.Levers';
 import { CascadeEpoch } from './Cascade.Epoch';
+import { PredictDamage, DamageHeld, DamageStale, type DamageRead } from './Damage';
 import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
@@ -502,6 +503,8 @@ interface EdgeBackdrop {
   Handle: GpuTextureHandle;
   Region: { x: number; y: number; w: number; h: number };
   MaxLod: number;
+  /** The strip's `?blur-cache` token: unchanged while its pyramid is. */
+  Token: number;
 }
 
 /** ONE GLASS GROUP: a run of glass siblings under one parent that share a blur class, and the
@@ -2484,7 +2487,7 @@ export class Canvas implements DirtyTracker {
         this._shadowSnapPending = false;
         if (gl2 !== null) { gl2.ShadowSnapped = 0; gl2.ShadowSnap = true; }
       }
-      this._render(dt);
+      this._renderDamaged(dt);
       if (snapNow && gl2 !== null) { gl2.ShadowSnap = false; this._shadowSnapped = gl2.ShadowSnapped; }
       if (wantsCost) this._tickPace.NoteRenderCost(performance.now() - tRender);
       // The renderer's ledger reset in `BeginFrame` and has just been filled by the walk. Read it
@@ -2739,6 +2742,63 @@ export class Canvas implements DirtyTracker {
       && this._pendingCapture === null;
   };
 
+  // ── Damage regions (`PerfLevers.DamageRegions`, Core/Damage.ts) ──
+
+  /** This frame's redraw rect, y-down device px; null for a whole frame. `_render` clears it when it
+   *  throws the partial frame away. */
+  private _dmgRect: PixelRect | null = null;
+  /** The whole redraw of a thrown-away partial frame: the renderer's frame is already open. */
+  private _dmgRedo = false;
+  /** What the last shown frame leaves the next prediction: its damage, its scene reads, its size. */
+  private _dmgPieces: PixelRect[] = [];
+  private _dmgReads: DamageRead[] = [];
+  private _dmgSize = '';
+  /** Whether the tree holds what a partial frame refuses up front, and the cascade epoch it was asked at. */
+  private _dmgRefusedEpoch = -1;
+  private _dmgRefused = false;
+  /** `Last` is what the last shown frame was: 'partial', 'whole', or 'redrawn' after a thrown-away partial one. */
+  private readonly _dmgStats = { Partial: 0, Whole: 0, Thrown: 0, PartialPx: 0, WholePx: 0, Last: '', Why: {} as Record<string, number> };
+
+  /** A rendered tick: a partial frame when the last one predicts it, redrawn whole in the same tick
+   *  when it turns out not to be exact. */
+  private _renderDamaged = (dt: number): void => {
+    const gl2 = this._dmgRenderer();
+    this._dmgRect = gl2 !== null ? this._dmgPredict() : null;
+    if (this._dmgRect !== null) this._bc.Mark();
+    try {
+      this._render(dt);
+      if (this._dmgRect === null && this._dmgRedo) this._render(dt);
+    } finally {
+      this._dmgRect = null;
+      this._dmgRedo = false;
+      gl2?.DamageEndTick();
+    }
+  };
+
+  /** The renderer, when it has a live context: the scene it keeps is what a partial frame draws over. */
+  private _dmgRenderer = (): WebGL2Renderer | null =>
+    this._renderer instanceof WebGL2Renderer && this._renderer.GetGL() ? this._renderer : null;
+
+  private _dmgPredict = (): PixelRect | null => {
+    if (!PerfLevers.DamageRegions || this._blurCache === 'off' || this._headless || this._debugLayout || this._diagNoUi) return null;
+    // The frame before the loop parks writes every shadow texel whole: it is the frame that must be whole.
+    if ((this._renderer as WebGL2Renderer).ShadowSnap) return null;
+    const w = Math.round(this._width * this._dpr);
+    const h = Math.round(this._height * this._dpr);
+    if (this._dmgSize !== `${w}x${h}@${this._dpr}#${(this._renderer as WebGL2Renderer).SceneGeneration}`) return null;
+    if (this._glassGroupStats.Groups > 0) return null;
+    const rect = PredictDamage(this._dmgPieces, this._dmgReads, w, h);
+    if (rect === null) return null;
+    // Refused before the walk rather than thrown away after it, so nothing is drawn twice in a tick: a
+    // janvas (a foreign renderer with its own state and clock), an active lens (its lifted items draw into
+    // targets of their own) and a glass group (one union pyramid the rect cannot bound).
+    if (this._dmgRefusedEpoch !== CascadeEpoch.Value) {
+      this._dmgRefusedEpoch = CascadeEpoch.Value;
+      this._dmgRefused = _refusesDamage(this.Root);
+    }
+    return this._dmgRefused ? null : rect;
+  };
+
   private _render = (dt: number): void => {
     const r = this._renderer;
     this._adaptiveShadowsDrawn = false;
@@ -2787,7 +2847,7 @@ export class Canvas implements DirtyTracker {
     }
 
     r.Resize(w, h, this._dpr);
-    r.BeginFrame();
+    if (!this._dmgRedo) r.BeginFrame();
     this._textCache.BeginFrame();
 
     // Render the scene into the off-screen `_sceneFbo` instead of drawing
@@ -2800,6 +2860,10 @@ export class Canvas implements DirtyTracker {
     // blits per frame: 1 (final present), down from 1+N (one per
     // glass/pblur that used to call SnapshotScreen).
     r.DisableBlend();
+    // The redraw rect scissors every scene draw from the clear on; the reads are recorded either way.
+    const dmg = this._dmgRenderer();
+    const damageRect = this._dmgRect;
+    if (dmg !== null) dmg.DamageBeginFrame(PerfLevers.DamageRegions, damageRect);
     r.BeginScenePass(this._ground.R, this._ground.G, this._ground.B);
     // `?blur-cache`: the paint ledger opens beside the scene it describes, before the first draw
     // into it (the janvas pre-pass below).
@@ -2876,6 +2940,7 @@ export class Canvas implements DirtyTracker {
         gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
         gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
         this._renderer.InvalidateStateCache();
+        this._renderer.DamageRestoreScissor();
       }
     }
 
@@ -3438,7 +3503,7 @@ export class Canvas implements DirtyTracker {
         // Handed to the subtree's glass only by a scroll edge, and only for a plain ramp along its own unrotated axis.
         if (lastBackdrop !== null && node.RenderStyle.ProgressiveBlurKind === 'ScrollEdge'
             && node.RenderStyle.ProgressiveBlurStops === null && !_rotated) {
-          edgeHere = { Handle: lastBackdrop, Region: region, MaxLod: maxLod };
+          edgeHere = { Handle: lastBackdrop, Region: region, MaxLod: maxLod, Token: this._bcOn ? this._bc.TokenOf(node, READER_PBLUR) : 0 };
         }
         r.RebindSceneTarget();
         r.EnableBlend();
@@ -3678,7 +3743,14 @@ export class Canvas implements DirtyTracker {
             backdropLodCap = edgeFill.MaxLod;
             // `?blur-cache`: the strip's pyramid is keyed to the strip, not to this surface, so this
             // surface's pixels are called changed every frame, as a glass group's members are.
-            if (this._bcOn) this._bc.Fresh('edge');
+            if (this._bcOn && PerfLevers.DamageRegions) {
+              // Keyed rather than called changed: the strip's token stands for the pyramid, and the sharp tap
+              // its probe reads is the scene under its own region, so it is a reader of that region.
+              const edgeKey = `edge|${edgeFill.Token}|${region.x},${region.y},${region.w},${region.h}|${lastBaseFrostLod}`;
+              const v = this._bc.Reader(node, READER_FILL, edgeKey, GuardedRect(region.x, region.y, region.w, region.h, BLUR_READ_GUARD_PX));
+              this._bc.Sig.Number(v.Token);
+              this._bcFillClean = v.Why === 'clean' ? node : null;
+            } else if (this._bcOn) this._bc.Fresh('edge');
           } else if (below === null && preFill !== undefined) {
             lastBackdrop = preFill;
             this._blurFirstStats.Used++;
@@ -4348,7 +4420,42 @@ export class Canvas implements DirtyTracker {
     flushText();
     // Every draw that can land in a later surface's backdrop has been recorded: the card write-backs
     // below are blits of what the walk already drew, and the janvas masks run after every reader.
+    const ledgerOn = this._bcOn;
     this._bcEndFrame();
+
+    // A partial frame is shown only when every change landed inside its rect and every read inside it
+    // was exact. Otherwise it is thrown away here, before the present, and the tick redraws it whole.
+    if (dmg !== null) {
+      const region = this._bc.Region;
+      if (damageRect !== null) {
+        const why = dmg.DamageFailed !== '' ? dmg.DamageFailed
+          : !ledgerOn || region.Full ? 'full'
+          : !DamageHeld(damageRect, region.Pieces) ? 'outside'
+          : DamageStale(region.Pieces, dmg.DamageReads);
+        const st = this._dmgStats;
+        if (why !== '') {
+          dmg.DamageEndFrame();
+          this._bc.Rollback((slot) => dmg.BlurCacheRelease(slot));
+          st.Thrown++;
+          st.Why[why] = (st.Why[why] ?? 0) + 1;
+          this._dmgRect = null;
+          this._dmgRedo = true;
+          return;
+        }
+        st.Partial++;
+        st.Last = 'partial';
+        st.PartialPx += (damageRect.X1 - damageRect.X0) * (damageRect.Y1 - damageRect.Y0);
+      } else {
+        this._dmgStats.Whole++;
+        this._dmgStats.Last = this._dmgRedo ? 'redrawn' : 'whole';
+        this._dmgStats.WholePx += w * h;
+      }
+      dmg.DamageEndFrame();
+      this._dmgPieces = ledgerOn && !region.Full ? region.Pieces.slice() : [];
+      this._dmgReads = dmg.DamageReads;
+      // With the lever off the scene is discarded after the present, so nothing can be kept from it.
+      this._dmgSize = PerfLevers.DamageRegions ? `${w}x${h}@${this._dpr}#${dmg.SceneGeneration}` : '';
+    }
 
     // The glass group's fallbacks are a ledger entry the harness reads; the gate lines below are only
     // ever printed, so a frame nobody traces does not build them.
@@ -4419,7 +4526,8 @@ export class Canvas implements DirtyTracker {
       // scene FBO's color for the rest of this frame. On tile-based mobile
       // GPUs this discards the tile memory instead of writing it back to
       // main memory — real bandwidth win on iPad / Android.
-      r.InvalidateFrameTransients();
+      if (dmg !== null) dmg.InvalidateFrameTransients(PerfLevers.DamageRegions);
+      else r.InvalidateFrameTransients();
     }
 
     r.EndShadowBackdropFrame();
@@ -5042,7 +5150,7 @@ export class Canvas implements DirtyTracker {
     } else {
       st.Rect = full;
     }
-    if (v.Why === 'clean') {
+    if (v.Why === 'clean' && !r.DamageTainted(handle)) {
       st.Slot = r.BlurCacheStore(handle, st.Slot, bc.Frame);
       if (st.Slot !== null) stats.Stored++;
     }
@@ -9439,6 +9547,16 @@ export class Canvas implements DirtyTracker {
       JTrace(`jaui:ablate armed arms=${arms.join(',')} frames=${ABLATE_FRAMES} cache=off`);
     }
     {
+      const d = globalThis as unknown as { __jauiDamage?: () => unknown };
+      // The damage census: frames shown partial and whole, frames thrown away and why, and what the next
+      // prediction starts from.
+      d.__jauiDamage = () => ({
+        ...this._dmgStats, Why: { ...this._dmgStats.Why },
+        Pieces: this._dmgPieces.map((p) => ({ ...p })),
+        Reads: this._dmgReads.map((rd) => ({ Read: { ...rd.Read }, Uses: rd.Uses === null ? null : { ...rd.Uses }, Held: rd.Held })),
+      });
+    }
+    {
       const g = globalThis as unknown as { __jauiBlurCache?: () => BlurCacheCensus };
       g.__jauiBlurCache = (): BlurCacheCensus => {
         const r = this._renderer;
@@ -9795,6 +9913,14 @@ export class Canvas implements DirtyTracker {
 /** Nodes in a subtree. First-frame instrumentation only — it says how big the tree the first
  *  layout solved actually was, which is the difference between "layout is slow" and "the page is
  *  big". Never called on a steady-state frame. */
+/** Whether a subtree holds a janvas or an active lens. Asked only when the tree or a style may have changed. */
+const _refusesDamage = (node: JauiElement): boolean => {
+  if (node instanceof Janvas) return true;
+  if (node instanceof Jiv && node.Visible && GlassIsLens(node.RenderStyle.Lens) && _isGlass(node.RenderStyle.Material)) return true;
+  for (const child of node.Children) if (_refusesDamage(child)) return true;
+  return false;
+};
+
 const _countNodes = (node: JauiElement): number => {
   let n = 1;
   for (const child of node.Children) n += _countNodes(child);

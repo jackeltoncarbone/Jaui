@@ -16,6 +16,8 @@ export const PerfLevers = {
   ScopedTextTransitions: true,
   /** Rerun the opacity, grade and vibrancy cascades only after a RenderStyle write or a tree change. */
   CascadeOnChange: true,
+  /** Redraw an awake frame only inside the rect that changed, over the scene kept from the last one. */
+  DamageRegions: true,
 };
 
 (globalThis as unknown as { __jauiLevers?: typeof PerfLevers }).__jauiLevers = PerfLevers;

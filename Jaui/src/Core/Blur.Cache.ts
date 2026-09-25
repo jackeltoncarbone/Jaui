@@ -237,6 +237,10 @@ export class PaintLedger<Slot> {
   private _nextId = 1;
   private _prev: Map<number, PaintRecord>[] = [new Map(), new Map(), new Map(), new Map()];
   private _cur: Map<number, PaintRecord>[] = [new Map(), new Map(), new Map(), new Map()];
+  /** The frame before `_prev`, kept one frame so `Rollback` can undo an `EndFrame`. */
+  private _old: Map<number, PaintRecord>[] = [new Map(), new Map(), new Map(), new Map()];
+  /** What `Mark` saved: every reader's state and the frame's globals. */
+  private _marked: { Frame: number; SeedA: number; SeedB: number; W: number; H: number; Readers: Map<number, ReaderState<Slot>>[] } | null = null;
   private readonly _readers: Map<number, ReaderState<Slot>>[] = [new Map(), new Map(), new Map(), new Map()];
   private readonly _prefix = new Sig();
   private readonly _sig = new Sig();
@@ -291,6 +295,8 @@ export class PaintLedger<Slot> {
   Reset = (): void => {
     for (const m of this._prev) m.clear();
     for (const m of this._cur) m.clear();
+    for (const m of this._old) m.clear();
+    this._marked = null;
     for (const m of this._readers) m.clear();
     this._w = 0;
     this._h = 0;
@@ -427,8 +433,9 @@ export class PaintLedger<Slot> {
       for (const [id, rec] of this._prev[k]) {
         if (!cur.has(id) && rec.Painted) { this.Stats.Gone++; this.Region.Add(rec.X0, rec.Y0, rec.X1, rec.Y1); }
       }
-      const done = this._prev[k];
+      const done = this._old[k];
       done.clear();
+      this._old[k] = this._prev[k];
       this._prev[k] = cur;
       this._cur[k] = done;
     }
@@ -439,6 +446,52 @@ export class PaintLedger<Slot> {
         map.delete(id);
       }
     }
+  };
+
+  /** Save what one frame changes, before `BeginFrame`, so a frame that is thrown away can be undone. */
+  Mark = (): void => {
+    this._marked = {
+      Frame: this.Frame, SeedA: this._seedA, SeedB: this._seedB, W: this._w, H: this._h,
+      Readers: this._readers.map((m) => {
+        const copy = new Map<number, ReaderState<Slot>>();
+        for (const [id, st] of m) copy.set(id, { ...st });
+        return copy;
+      }),
+    };
+  };
+
+  /** Undo the frame since `Mark`, after its `EndFrame`: the next frame compares against the one before
+   *  it again. A cached slot is kept, since it still holds what its build read; a reader the thrown-away
+   *  frame created goes, with its slot. */
+  Rollback = (release: (slot: Slot) => void): void => {
+    const mark = this._marked;
+    if (mark === null) throw new Error('[Jaui] blur-cache: a rollback with no mark');
+    this._marked = null;
+    for (let k = 0; k < this._prev.length; k++) {
+      const frame = this._prev[k];
+      frame.clear();
+      this._prev[k] = this._old[k];
+      this._old[k] = frame;
+    }
+    for (let k = 0; k < this._readers.length; k++) {
+      const live = this._readers[k];
+      const saved = mark.Readers[k];
+      for (const [id, st] of live) {
+        if (saved.has(id)) continue;
+        if (st.Slot !== null) release(st.Slot);
+        live.delete(id);
+      }
+      for (const [id, st] of saved) {
+        const now = live.get(id);
+        if (now !== undefined) Object.assign(now, st, { Slot: now.Slot });
+        else live.set(id, { ...st, Slot: null });
+      }
+    }
+    this.Frame = mark.Frame;
+    this._seedA = mark.SeedA;
+    this._seedB = mark.SeedB;
+    this._w = mark.W;
+    this._h = mark.H;
   };
 }
 

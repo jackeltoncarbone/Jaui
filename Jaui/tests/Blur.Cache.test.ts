@@ -317,6 +317,37 @@ describe('PaintLedger -- what makes a reader clean', () => {
     expect(l.TokenOf(n, READER_PBLUR)).not.toBe(other);
     l.EndFrame(() => undefined);
   });
+
+  it('a rolled-back frame leaves the ledger comparing against the frame before it', () => {
+    const l = new PaintLedger<string>();
+    frame(l, scene());
+    frame(l, scene());
+    l.Mark();
+    expect(frame(l, scene({ near: 2 }))).toEqual(['damage', 'clean']);
+    l.Rollback(() => undefined);
+    // Redrawn: the same change is seen again, against the same frame, with the same verdicts.
+    expect(frame(l, scene({ near: 2 }))).toEqual(['damage', 'clean']);
+    expect(l.Region.Count).toBeGreaterThan(0);
+    expect(frame(l, scene({ near: 2 }))).toEqual(['clean', 'clean']);
+  });
+
+  it('a rollback drops a reader the thrown-away frame created, and releases its slot', () => {
+    const l = new PaintLedger<string>();
+    frame(l, scene());
+    l.Mark();
+    const fresh = {};
+    l.NewSeed().Number(1);
+    l.BeginFrame(1000, 1000);
+    l.Open(fresh, RECORD_NODE);
+    const v = l.Reader(fresh, READER_FILL, 'k', { X0: 0, Y0: 0, X1: 10, Y1: 10 });
+    v.State.Slot = 'slot';
+    l.Close();
+    l.EndFrame(() => undefined);
+    const released: string[] = [];
+    l.Rollback((s) => released.push(s));
+    expect(released).toEqual(['slot']);
+    expect(frame(l, [{ Read: { Owner: fresh, X0: 0, Y0: 0, X1: 10, Y1: 10 } }])).toEqual(['first']);
+  });
 });
 
 describe('PickEvictions', () => {
