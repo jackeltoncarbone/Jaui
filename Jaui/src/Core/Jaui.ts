@@ -7578,7 +7578,7 @@ export class Canvas implements DirtyTracker {
       if (hit?.OnPointerMove) hit.OnPointerMove(e);
     });
 
-    this._on('pointerleave', () => {
+    const clearHover = (): void => {
       if (this._hoveredJiv) {
         setStateChain(null, this._hoveredJiv, 'Hover');
         fanOutGroupHover(null, this._hoveredJiv);
@@ -7586,7 +7586,13 @@ export class Canvas implements DirtyTracker {
         this._setCursor('');
         this._animationManager.Kick();
       }
-    });
+    };
+    this._on('pointerleave', clearHover);
+    // A finger has no hover once it lifts, and the bridge never forwards a touch's pointerleave, so a row
+    // swiped or tapped kept its hover lift until the next touch landed somewhere else.
+    const liftTouch = (e: PointerEvent): void => { if (e.pointerType !== 'mouse') clearHover(); };
+    this._on('pointerup', liftTouch);
+    this._on('pointercancel', liftTouch);
 
     // Click gesture — remember the down-hit Jiv and fire OnClick on
     // pointerup only when the release lands on the SAME Jiv AND the
