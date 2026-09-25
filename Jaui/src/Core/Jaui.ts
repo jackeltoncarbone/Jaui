@@ -11,6 +11,7 @@ import { SolveLayout } from '../Layout/Layout.Solver';
 import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intrinsic';
 import { TextCache } from '../Text/Text.Cache';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
+import { PerfLevers } from './Perf.Levers';
 import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
@@ -4329,6 +4330,84 @@ export class Canvas implements DirtyTracker {
     // below are blits of what the walk already drew, and the janvas masks run after every reader.
     this._bcEndFrame();
 
+    // The glass group's fallbacks are a ledger entry the harness reads; the gate lines below are only
+    // ever printed, so a frame nobody traces does not build them.
+    if (this._glassGroup && !this._diagNoUi && this._renderer instanceof WebGL2Renderer) {
+      this._renderer.NoteGroupFallback(this._glassGroupStats.Fallbacks);
+    }
+    if (JauiTracing() || !PerfLevers.TraceGates) this._traceFrameGates();
+
+    // Every card target still holding a region of the frame lands in the scene now. The drain is
+    // blits, in walk order, each a blend-disabled replace of exactly the bytes the scene would have
+    // held -- see the card-composite section in `WebGL2.Renderer`. Anything that draws directly
+    // into the scene before this point has already triggered it through `_noteSceneDraw`.
+    if (this._renderer instanceof WebGL2Renderer) {
+      this._renderer.FlushCardComposites();
+      this._renderer.RebindSceneTarget();
+    }
+
+    // Apply deferred janvas clip masks. Wiping scene FBO pixels outside the
+    // nearest Overflow:Hidden ancestor's rounded rect — done now, after
+    // every in-tree consumer has read the scene, so pblur/glass blur
+    // pyramids see foreign content (not zeroed corners) while the
+    // presented frame still respects the visual clip.
+    if (this._pendingJanvasMasks.length > 0 && this._renderer instanceof WebGL2Renderer) {
+      const gl = this._renderer.GetGL();
+      if (gl) {
+        const gl2r = this._renderer;
+        gl2r.RebindSceneTarget();
+        gl.viewport(0, 0, w, h);
+        gl.disable(gl.SCISSOR_TEST);
+        gl.disable(gl.DEPTH_TEST);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.STENCIL_TEST);
+        gl.colorMask(true, true, true, true);
+        gl.depthMask(false);
+        gl.disable(gl.BLEND);
+        for (const m of this._pendingJanvasMasks) {
+          gl2r.DrawClipMask(m.drawX, m.drawY, m.drawW, m.drawH, m.clipX, m.clipY, m.clipW, m.clipH, m.radius, m.smoothness, this._ground);
+        }
+        gl2r.InvalidateStateCache();
+      }
+    }
+
+    // Final composite: the whole frame lives in sceneFbo. `PresentScene`
+    // does a hardware `blitFramebuffer` from sceneFbo into the swap chain —
+    // 2-3× faster than the old shader-based Blit(SceneTexture) path on
+    // integrated GPUs, and can fuse with InvalidateFrameTransients on
+    // tile-based mobile renderers (scene never leaves tile memory).
+    // Headless: there is no swap chain — the scene stays in `_sceneFbo` for the caller to sample
+    // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
+    // `?scene-restarts` / `?small-restarts`: close the frame. It EMITS NOTHING here -- it rolls the
+    // spread's denominator, reports the frame's shortfall on the gate and counts the frame for the
+    // census. It used to pay the balance on this line, where the walk has been drawing into the
+    // scene all frame, so the balance probe ENDED a live encoder and booked `restart-probe:1` at an
+    // instant that is not an insertion point. See `WebGL2Renderer.DiagRestartFrameEnd`.
+    if (this._restartRenderer !== null) this._restartRenderer.DiagRestartFrameEnd();
+    if (!this._headless) {
+      r.PresentScene();
+      this._ffPresented = true;
+      if (_firstFrameHook) { const hook = _firstFrameHook; _firstFrameHook = null; hook(); }
+      // Screenshot capture: read the freshly-presented swap chain BEFORE the
+      // transient discard below (the back buffer isn't preserved between frames).
+      if (this._pendingCapture) {
+        const cb = this._pendingCapture;
+        this._pendingCapture = null;
+        void r.CapturePng().then(cb);
+      }
+      // Tell the driver we don't need the default framebuffer's depth or the
+      // scene FBO's color for the rest of this frame. On tile-based mobile
+      // GPUs this discards the tile memory instead of writing it back to
+      // main memory — real bandwidth win on iPad / Android.
+      r.InvalidateFrameTransients();
+    }
+
+    r.EndShadowBackdropFrame();
+    r.EndFrame();
+  };
+
+  /** The per-frame gate lines, each printed on a change of SHAPE. Built only while a trace sink listens. */
+  private _traceFrameGates = (): void => {
     // `?blur-first`'s gate, on the trace channel. Printed when the SHAPE changes rather than every
     // frame: a line per frame would drown the channel, and a line only on the first frame would
     // miss a walk that starts disagreeing with the pre-pass once something animates. `missed` is
@@ -4411,7 +4490,6 @@ export class Canvas implements DirtyTracker {
     if (this._glassGroup && !this._diagNoUi) {
       const st = this._glassGroupStats;
       const gl2 = this._renderer instanceof WebGL2Renderer ? this._renderer : null;
-      if (gl2 !== null) gl2.NoteGroupFallback(st.Fallbacks);
       const seen = new Set<GlassGroup>();
       const lines: string[] = [];
       for (const g of this._glassGroups.values()) {
@@ -4593,74 +4671,6 @@ export class Canvas implements DirtyTracker {
         + ` chainPool=${c.ChainPool} extentSnap=${RegionExtentSnap.Unit} surfaces=${c.Surfaces}`;
       if (line !== this._blurPlanLastLine) { this._blurPlanLastLine = line; JTrace(line); }
     }
-
-    // Every card target still holding a region of the frame lands in the scene now. The drain is
-    // blits, in walk order, each a blend-disabled replace of exactly the bytes the scene would have
-    // held -- see the card-composite section in `WebGL2.Renderer`. Anything that draws directly
-    // into the scene before this point has already triggered it through `_noteSceneDraw`.
-    if (this._renderer instanceof WebGL2Renderer) {
-      this._renderer.FlushCardComposites();
-      this._renderer.RebindSceneTarget();
-    }
-
-    // Apply deferred janvas clip masks. Wiping scene FBO pixels outside the
-    // nearest Overflow:Hidden ancestor's rounded rect — done now, after
-    // every in-tree consumer has read the scene, so pblur/glass blur
-    // pyramids see foreign content (not zeroed corners) while the
-    // presented frame still respects the visual clip.
-    if (this._pendingJanvasMasks.length > 0 && this._renderer instanceof WebGL2Renderer) {
-      const gl = this._renderer.GetGL();
-      if (gl) {
-        const gl2r = this._renderer;
-        gl2r.RebindSceneTarget();
-        gl.viewport(0, 0, w, h);
-        gl.disable(gl.SCISSOR_TEST);
-        gl.disable(gl.DEPTH_TEST);
-        gl.disable(gl.CULL_FACE);
-        gl.disable(gl.STENCIL_TEST);
-        gl.colorMask(true, true, true, true);
-        gl.depthMask(false);
-        gl.disable(gl.BLEND);
-        for (const m of this._pendingJanvasMasks) {
-          gl2r.DrawClipMask(m.drawX, m.drawY, m.drawW, m.drawH, m.clipX, m.clipY, m.clipW, m.clipH, m.radius, m.smoothness, this._ground);
-        }
-        gl2r.InvalidateStateCache();
-      }
-    }
-
-    // Final composite: the whole frame lives in sceneFbo. `PresentScene`
-    // does a hardware `blitFramebuffer` from sceneFbo into the swap chain —
-    // 2-3× faster than the old shader-based Blit(SceneTexture) path on
-    // integrated GPUs, and can fuse with InvalidateFrameTransients on
-    // tile-based mobile renderers (scene never leaves tile memory).
-    // Headless: there is no swap chain — the scene stays in `_sceneFbo` for the caller to sample
-    // (SceneGLTexture). Skip present + the transient discard (the caller reads the scene texture this frame).
-    // `?scene-restarts` / `?small-restarts`: close the frame. It EMITS NOTHING here -- it rolls the
-    // spread's denominator, reports the frame's shortfall on the gate and counts the frame for the
-    // census. It used to pay the balance on this line, where the walk has been drawing into the
-    // scene all frame, so the balance probe ENDED a live encoder and booked `restart-probe:1` at an
-    // instant that is not an insertion point. See `WebGL2Renderer.DiagRestartFrameEnd`.
-    if (this._restartRenderer !== null) this._restartRenderer.DiagRestartFrameEnd();
-    if (!this._headless) {
-      r.PresentScene();
-      this._ffPresented = true;
-      if (_firstFrameHook) { const hook = _firstFrameHook; _firstFrameHook = null; hook(); }
-      // Screenshot capture: read the freshly-presented swap chain BEFORE the
-      // transient discard below (the back buffer isn't preserved between frames).
-      if (this._pendingCapture) {
-        const cb = this._pendingCapture;
-        this._pendingCapture = null;
-        void r.CapturePng().then(cb);
-      }
-      // Tell the driver we don't need the default framebuffer's depth or the
-      // scene FBO's color for the rest of this frame. On tile-based mobile
-      // GPUs this discards the tile memory instead of writing it back to
-      // main memory — real bandwidth win on iPad / Android.
-      r.InvalidateFrameTransients();
-    }
-
-    r.EndShadowBackdropFrame();
-    r.EndFrame();
   };
 
   private _cascadeOpacity = (node: Jiv, parentOp: number): void => {
@@ -5053,6 +5063,13 @@ export class Canvas implements DirtyTracker {
     const vacuous = resting && s.Surfaces > 0 && s.Hits === 0 && s.Cold === 0
       && s.Why.first === 0 && s.Why.gap === 0;
     if (vacuous) ses.Vacuous++;
+    this._bcLastFrame = {
+      Surfaces: s.Surfaces, Hits: s.Hits, Misses: s.Misses, Cold: s.Cold, Stored: s.Stored, Grouped: s.Grouped,
+      Dirty: { ...s.Why }, DirtyPieces: reg.Full ? -1 : reg.Count, DirtyPx: reg.Px,
+      Changed: st.Changed, New: st.New, Gone: st.Gone, Fresh: { ...st.Fresh },
+      Untracked: st.Untracked, Duplicate: st.Duplicate, Seeded: st.Seeded, Resting: resting, Vacuous: vacuous,
+    };
+    if (!JauiTracing() && PerfLevers.TraceGates) return;
     const c = r.BlurCacheCensus;
     const why = s.Why;
     const line = `jaui:blur-cache arm=${this._blurCache} surfaces=${s.Surfaces} hits=${s.Hits} misses=${s.Misses}`
@@ -5067,12 +5084,6 @@ export class Canvas implements DirtyTracker {
       + ` resting=${resting ? 1 : 0} vacuous=${vacuous ? 1 : 0}`
       + (this._blurCache === 'verify' ? ` verified=${c.Verified} mismatches=${c.Mismatches} read=${r.BlurCacheReadKind}` : '')
       + ' pixels=SAME';
-    this._bcLastFrame = {
-      Surfaces: s.Surfaces, Hits: s.Hits, Misses: s.Misses, Cold: s.Cold, Stored: s.Stored, Grouped: s.Grouped,
-      Dirty: { ...why }, DirtyPieces: reg.Full ? -1 : reg.Count, DirtyPx: reg.Px,
-      Changed: st.Changed, New: st.New, Gone: st.Gone, Fresh: { ...st.Fresh },
-      Untracked: st.Untracked, Duplicate: st.Duplicate, Seeded: st.Seeded, Resting: resting, Vacuous: vacuous,
-    };
     if (line !== this._bcLastLine) { this._bcLastLine = line; JTrace(line); }
   };
   private _bcLastFrame: BlurCacheFrame | null = null;
