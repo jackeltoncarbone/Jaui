@@ -6842,12 +6842,9 @@ export class Canvas implements DirtyTracker {
     const contentLY = node.Y + padT;
     const contentH = cy * (node.Height - padT - padB);
 
-    let totalTextHeight = 0;
-    for (const w of anim.Words) {
-      const bottom = w.TargetY + w.Height;
-      if (bottom > totalTextHeight) totalTextHeight = bottom;
-    }
-    const yOffset = (contentH - cy * totalTextHeight) / 2;
+    // Each generation centers on its own block: the living words on where their lines are now, a fading
+    // generation on the block it left. One shared block let a taller outgoing text lift the new one until it pruned.
+    const liveYOffset = (contentH - cy * anim.LiveExtent) / 2;
 
     // Pull the animator's effective FontWeight once (snapped to 25 in
     // Text.Animator). All words in a block transition together, so we
@@ -6872,6 +6869,7 @@ export class Canvas implements DirtyTracker {
       // is a canvas-space (cy-scaled) centering term; fold it back to local
       // (÷cy) so the matrix re-applies it correctly under rotation.
       const wlx = contentLX + w.SpringX.Value;
+      const yOffset = w.Dying ? (contentH - cy * w.DyingExtent) / 2 : liveYOffset;
       const wly = contentLY + (yOffset / cyForFold) + w.SpringY.Value;
       // Glyph anchor in the UNROTATED (scale+translate-only) frame: the mapped
       // node center plus the scaled offset from the node center, with rotation

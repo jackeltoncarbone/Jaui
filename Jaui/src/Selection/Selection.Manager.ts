@@ -318,12 +318,7 @@ export class SelectionManager implements Animatable {
     const contentY = textJiv.Y + padT;
     const contentH = textJiv.Height - padT - padB;
 
-    let totalH = 0;
-    for (const w of anim.Words) {
-      const bottom = w.TargetY + w.Height;
-      if (bottom > totalH) totalH = bottom;
-    }
-    const yOff = (contentH - totalH) / 2;
+    const yOff = (contentH - anim.LiveExtent) / 2;
 
     const localX = cssX - contentX;
     const localY = cssY - contentY - yOff;
@@ -332,6 +327,7 @@ export class SelectionManager implements Animatable {
     let bestWord = anim.Words[0];
     let bestScore = Infinity;
     for (const w of anim.Words) {
+      if (w.Dying) continue;
       const lineTop = w.TargetY;
       const lineBot = w.TargetY + w.Height;
       const yInLine = localY >= lineTop && localY < lineBot;
@@ -546,12 +542,7 @@ export class SelectionManager implements Animatable {
     const ctx = textJiv.ResolveCtx!;
     const [padT, , padB, padL] = ResolveLengthTuple4(textJiv.Layout.Padding, ctx, ['H', 'W', 'H', 'W']);
     const contentH = textJiv.Height - padT - padB;
-    let totalH = 0;
-    for (let i = 0; i < anim.Words.length; i++) {
-      const b = anim.Words[i].TargetY + anim.Words[i].Height;
-      if (b > totalH) totalH = b;
-    }
-    const yOff = (contentH - totalH) / 2;
+    const yOff = (contentH - anim.LiveExtent) / 2;
 
     const padX = SELECTION_PAD_X;
     const padY = SELECTION_PAD_Y;

@@ -161,4 +161,41 @@ describe('TextAnimator (per-word)', () => {
     a.Update('', DefaultTextStyle, null);
     expect(a.Words.every((w) => w.Dying)).toBe(true);
   });
+
+  it('a taller outgoing text never sets the block the new text centers on', () => {
+    const a = new TextAnimator(DefaultTextStyle);
+    a.Update('one two three', DefaultTextStyle, 32);
+    for (const w of a.Words) { w.SpringX.Snap(); w.SpringY.Snap(); w.Opacity.Snap(); }
+    const lineH = a.Words[0].Height;
+    expect(a.LiveExtent).toBeCloseTo(lineH * 3);
+
+    a.Update('four', DefaultTextStyle, 32);
+    expect(a.LiveExtent).toBeCloseTo(lineH);
+    const dying = a.Words.filter((w) => w.Dying);
+    expect(dying).toHaveLength(3);
+    expect(dying.every((w) => Math.abs(w.DyingExtent - lineH * 3) < 1e-6)).toBe(true);
+
+    // Pruning the faded generation leaves the living block where it was.
+    let frames = 0;
+    while (a.Tick(1 / 60) && frames < 200) frames++;
+    a.Update('four', DefaultTextStyle, 32);
+    expect(a.Words.some((w) => w.Dying)).toBe(false);
+    expect(a.LiveExtent).toBeCloseTo(lineH);
+  });
+
+  it('a rewrap grows the block continuously with its traveling lines', () => {
+    const a = new TextAnimator(DefaultTextStyle);
+    a.Update('one two three', DefaultTextStyle, 200);
+    for (const w of a.Words) { w.SpringX.Snap(); w.SpringY.Snap(); w.Opacity.Snap(); }
+    const lineH = a.Words[0].Height;
+
+    a.Update('one two three', DefaultTextStyle, 32);
+    expect(a.LiveExtent).toBeCloseTo(lineH);
+    let previous = a.LiveExtent;
+    for (let i = 0; i < 200 && a.Tick(1 / 60); i++) {
+      expect(Math.abs(a.LiveExtent - previous)).toBeLessThan(lineH * 0.5);
+      previous = a.LiveExtent;
+    }
+    expect(a.LiveExtent).toBeCloseTo(lineH * 3);
+  });
 });

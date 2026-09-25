@@ -48,6 +48,9 @@ export interface AnimatedWord {
   TintB: Spring;
   TintA: Spring;
   Dying: boolean;          // true when opacity target is 0 (being removed)
+  /** The height of the block this word was centered in when it started dying, so a fading generation
+   *  stays where it was drawn while the new one centers on its own lines. */
+  DyingExtent: number;
 }
 
 export class TextAnimator implements Animatable {
@@ -100,6 +103,17 @@ export class TextAnimator implements Animatable {
   /** Words still fading out, which the next Update prunes once they settle. */
   get HasDying(): boolean { return this.Words.some((w) => w.Dying); }
   get Style(): ResolvedTextStyle { return this._style; }
+  /** Bottom of the living words where their springs are now: the block height the text centers on. Words
+   *  still fading out are not in it, and a line still traveling counts where it is, so the block moves continuously. */
+  get LiveExtent(): number {
+    let extent = 0;
+    for (const w of this.Words) {
+      if (w.Dying) continue;
+      const bottom = w.SpringY.Value + w.Height;
+      if (bottom > extent) extent = bottom;
+    }
+    return extent;
+  }
   /** Current FontWeight to render at — the spring's value rounded to the
    *  nearest integer. Renderer uses this for the atlas fetch. Integer is
    *  the maximum granularity available (the canvas `font` shorthand parses
@@ -382,6 +396,7 @@ export class TextAnimator implements Animatable {
     // visible words are its positions, not the source tokens.
     const newTokens = newPositions.map((p) => p.Content);
     const visibleCount = newPositions.length;
+    const outgoingExtent = this.LiveExtent;
 
     // Match new tokens against living words by content — first-occurrence greedy match.
     const living = this.Words.filter((w) => !w.Dying);
@@ -453,6 +468,7 @@ export class TextAnimator implements Animatable {
           TintB: new Spring(1, this._stiffness, this._damping, 1),
           TintA: new Spring(1, this._stiffness, this._damping, 1),
           Dying: false,
+          DyingExtent: 0,
         };
         word.Opacity.Set(1);
         reordered.push(word);
@@ -466,6 +482,7 @@ export class TextAnimator implements Animatable {
       if (!usedLiving.has(w)) {
         if (w.Opacity.Set(0)) needsKick = true;
         w.Dying = true;
+        w.DyingExtent = outgoingExtent;
         reordered.push(w);
       }
     }
