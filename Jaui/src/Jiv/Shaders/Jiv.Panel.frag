@@ -864,6 +864,10 @@ void main() {
                 // glass's own layer is.
                 float glow = GLASS_LENS_INNER_GLOW.x * GLASS_LENS_INNER_GLOW.y * (1.0 - GlassShadowFall(d, 2.0 * GLASS_LENS_INNER_GLOW.z));
                 face = min(face + glow * glassiness * (1.0 - lensInk), vec3(1.0));
+                // Its contrast edge over that: plusDarker by depth, the outer quarter point left as it was.
+                vec2 edgeLayer = mix(GLASS_LENS_CONTRAST_EDGE_DARK, GLASS_LENS_CONTRAST_EDGE_LIGHT, glassLight);
+                float edgeAlpha = edgeLayer.y * clamp((-d - 0.25) / 0.25, 0.0, 1.0) * glassiness * (1.0 - lensInk);
+                face = mix(face, max(face + edgeLayer.x - 1.0, 0.0), edgeAlpha);
                 // The lens's inner shadow, inverted: the outside cast GLASS_LENS_INNER_SHADOW.z pt down into it,
                 // its radius and opacity Apple's. The shifted depth to first order along the normal.
                 float shifted = d - dot(nScreen, vec2(0.0, GLASS_LENS_INNER_SHADOW.z));
