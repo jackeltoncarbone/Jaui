@@ -22,7 +22,8 @@ Status column:
 | blur radius and ramp (3.2) | `GlassBlur: Auto \| <pt>`, built | `GlassBlurRadius`, `GlassBodyLod`; an authored value rides lane 46 above the dispersion in sixteenths of a point (0 is Auto) | matches: Apple's LOD names a Gaussian (`GLASS_TEXEL_SIGMA_*` x its texel, fitted 0.62, Apple's own x1.6 read back), and each read finds the level of whatever pyramid it gets that delivers it (`GlassPyramidLevel`, from the level-0 texel and sigma the build records on its region), since we never render below native. Measured: 11.6 px at 3x on large glass (law 11.9, Apple 10.7 to 11.8), 4.9 on a 62 pt bar (Apple 5.0 to 5.3) |
 | face matrix (3.3) | `GlassFace: Auto \| Ycc(<white>, <black>, <saturation>, <fill>)` | the face table in `Glass.md` (fitted) | differs: fitted to SwiftUI and iOS captures, not the recipe's [C] numbers (the recipe's numbers rendered 58 levels off SwiftUI regular); to settle in phase 2 |
 | thin-glass luma tracking (3.3) | derived | the probe (`u_ShadowState`, 56 pt gate) | differs: Apple's law is now [C] (LiquidGlass.md 3.3): a hysteresis switch between the regular light and dark faces, gated at 64 pt; ours blends a fitted face by the mean. No JSS option yet |
-| edge bleed (3.4) | `GlassBleed: Auto \| None` | shader | matches |
+| edge bleed (3.4) | `GlassBleed: Auto \| None`, built | shader; None zeroes the reach (amount, height) and keeps the blur and opacity, riding lane 46 as 2 x 16384 | matches: DesignLibrary zeroes `EdgeBleed.amount` and `height` when Layers lacks 0x40, which the sheet subvariants 27 to 29 remove (`sub_18AE83CAC`, `sub_18AE88C0C`) [C] |
+| outer lens past the outline (3.1) | `GlassOuterRefraction: Auto \| None`, built | shader outer shift; None rides lane 46 as 1 x 16384 | matches: DesignLibrary zeroes `Refraction.outerHeight` and `outerAmount` when Layers lacks 0x10 (the sheet subvariants, `SolariumDisableOuterRefraction`) [C] |
 | drop shadow (3.5) | `GlassShadow: Auto \| None` | shader, `GlassShadowRadius` 10 + 14 u | differs: our small-glass radius is 10 pt (fitted to one Edit button) where Apple's is 24 |
 | holding tone, clamp (3.6) | derived | shader, clamp `[0, 1]` | matches (SDR) |
 | dispersion (3.7) | `GlassDispersion: 0` (`aberration_amount`) | `ChromaticAberration`, a per-channel read | differs: ours is not Apple's 6-tap filter; Apple sets 0 on standard glass and on the lens |
@@ -162,6 +163,7 @@ GlassSize: Auto | 0 | 1 | 2
 GlassBlur: Auto | <pt>
 GlassRefraction: Auto | Inner(<amount>, <height>) Outer(<amount>, <height>) Opacity(<n>)
 GlassFace: Auto | Ycc(<white>, <black>, <saturation>, <fill>)
+GlassOuterRefraction: Auto | None
 GlassBleed: Auto | None
 GlassShadow: Auto | None
 GlassDispersion: 0 | <n>

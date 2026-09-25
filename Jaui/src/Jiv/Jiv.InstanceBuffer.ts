@@ -342,10 +342,11 @@ export class JivInstanceBuffer {
     // The highlight: each light's amount and the band's depth in points.
     data[offset + 44] = style.RimStrength;
     data[offset + 45] = style.RimWidth;
-    // The dispersion (0..4) with an authored GlassBlur above it in sixteenths of a point, 0 for Apple's law
-    // (Jiv.Panel.frag, GlassLaneCa / GlassLaneBlur).
+    // The dispersion (0..4), an authored GlassBlur above it in sixteenths of a point (0 for Apple's law), then the
+    // exterior switches: 1 outer refraction off, 2 bleed reach off (Jiv.Panel.frag, GlassLaneCa / Blur / Exterior).
     data[offset + 46] = Math.min(3.999, Math.max(0, style.ChromaticAberration))
-      + 4 * Math.min(4095, Math.round(style.GlassBlur * 16));
+      + 4 * Math.min(4095, Math.round(style.GlassBlur * 16))
+      + 16384 * ((style.GlassOuterRefraction ? 0 : 1) + (style.GlassBleed ? 0 : 2));
     data[offset + 47] = style.BorderFade * avgScale * d;
 
     // The flex's little glow (Core/Flex.ts): its centre as a fraction of the box, 10 bits an axis, then its

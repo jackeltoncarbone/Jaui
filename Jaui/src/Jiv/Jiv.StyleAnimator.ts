@@ -202,6 +202,8 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.Background = target.Background;
   render.Flex = target.Flex;
   render.GlassBlur = target.GlassBlur;
+  render.GlassOuterRefraction = target.GlassOuterRefraction;
+  render.GlassBleed = target.GlassBleed;
 };
 
 export class JivStyleAnimator implements Animatable {

@@ -263,6 +263,13 @@ export interface JivStyle {
   /** `GlassBlur: Auto | <points>`: the body blur's BlurRadius, QuartzCore's `inputBlurRadius` (Jwift/Apple/LiquidGlass.md
    *  3.2), read through the same LOD law. Auto is Apple's law by size, 1.33 to 4 pt on regular glass, 1 on clear. */
   GlassBlur: string;
+  /** `GlassOuterRefraction: Auto | None`: the lens past the outline, QuartzCore's `inputOuterRefractionAmount` and
+   *  `Height` (Jwift/Apple/LiquidGlass.md 3.1). None zeroes both, as DesignLibrary does when Layers lacks 0x10: a sheet
+   *  at a partial detent, or `SolariumDisableOuterRefraction` (Jwift/Apple/Sheets.md). */
+  GlassOuterRefraction: string;
+  /** `GlassBleed: Auto | None`: the edge bleed's reach outward, `inputBleedAmount` and `Height` (LiquidGlass.md 3.4).
+   *  None zeroes both and keeps its blur and opacity, as DesignLibrary does when Layers lacks 0x40 (Sheets.md). */
+  GlassBleed: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.
   // Internal/legacy. Author-facing visual transform lives on the
@@ -428,6 +435,9 @@ export interface JivRenderStyle {
   GlassDispersionAngle: number;
   /** Resolved `GlassBlur` in points, 0 for Auto (Apple's law). Snaps: a glass changing size swaps its read at once. */
   GlassBlur: number;
+  /** Resolved `GlassOuterRefraction` and `GlassBleed`: true for Auto (Apple's reach), false for None. Snap. */
+  GlassOuterRefraction: boolean;
+  GlassBleed: boolean;
 
   /** Resolved `RimWidth`, in points. */
   RimWidth: number;

@@ -696,6 +696,10 @@ void main() {
     float bodyTint = v_Lighting.y;
     float chromaticAberration = GlassLaneCa(v_Specular.z);
     float glassBlur = GlassLaneBlur(v_Specular.z);
+    // DesignLibrary zeroes an absent exterior layer's amount and height (Layers 0x10, 0x40; Jwift/Apple/Sheets.md).
+    float glassExterior = GlassLaneExterior(v_Specular.z);
+    bool glassOuterOff = mod(glassExterior, 2.0) > 0.5;
+    bool glassBleedOff = glassExterior > 1.5;
     float borderFade = v_Specular.w;
 
     vec2 p = pLocal - panelCenter;
@@ -810,7 +814,7 @@ void main() {
             } else {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassInnerShift(d, glassSpan) * lens;
-            float outerShift = GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;
+            float outerShift = glassOuterOff ? 0.0 : GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;
             float radius = GlassBlurRadius(glassSpan, glassClear, glassBlur);
             float innerLod = GlassNativeLod(radius * GlassBlurScale(d + innerShift, glassSpan), glassDpr, glassClear);
             vec2 innerOffset = nScreen * innerShift * glassDpr;
@@ -838,7 +842,7 @@ void main() {
             // The edge bleed of regular glass from 64 pt: the backdrop 0.35 S outward, blurred at 0.35 S,
             // weighted toward the face's own darks on light glass and its lights on dark glass.
             if (ramps.y > 0.0 && glassClear < 1.0 && !GlassSkips(GLASS_SKIP_BLEED)) {
-                float bleedShift = GlassShift(d, 0.35 * glassSpan, 0.35 * glassSpan);
+                float bleedShift = glassBleedOff ? 0.0 : GlassShift(d, 0.35 * glassSpan, 0.35 * glassSpan);
                 vec3 bleed = GlassBleed(glassSample(v_PixelPos + nScreen * bleedShift * glassDpr,
                                                     GlassNativeLod(0.35 * glassSpan, glassDpr, glassClear)), glassLight);
                 float lum = dot(face, GLASS_BLEED_LUMA);

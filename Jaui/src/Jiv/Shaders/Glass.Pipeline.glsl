@@ -129,9 +129,11 @@ const vec3 GLASS_LENS_INNER_GLOW = vec3(0.8, 0.3, 8.0);
 // Lane 43 carries the glass's clear amount (0..1) and its pressed glow in thousandths above it.
 float GlassLaneClear(float lane) { return mod(lane, 4.0); }
 float GlassLaneGlow(float lane) { return floor(lane / 4.0) / 1000.0; }
-// The dispersion lane: the dispersion (0..4) with an authored GlassBlur in sixteenths of a point above it.
+// The dispersion lane: the dispersion (0..4), an authored GlassBlur in sixteenths of a point above it, then the
+// exterior switches (1 outer refraction off, 2 bleed reach off).
 float GlassLaneCa(float lane) { return mod(lane, 4.0); }
-float GlassLaneBlur(float lane) { return floor(lane / 4.0) / 16.0; }
+float GlassLaneBlur(float lane) { return floor(mod(lane, 16384.0) / 4.0) / 16.0; }
+float GlassLaneExterior(float lane) { return floor(lane / 16384.0); }
 // UIKit's flex big glow over a pressed glass: a white layer with a backdrop-aware vibrant colour matrix, YCC black
 // 0.05, white 1.05, saturation 1.2, at `glow` (the spec's bigGlowOpacity) [C: _UIFlexInteraction.BigGlow,
 // UIKitCore 0x188B0F3D0]. It lies over the glass and its rim; here it recolours both (the items draw over it).

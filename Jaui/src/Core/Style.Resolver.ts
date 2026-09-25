@@ -235,6 +235,14 @@ const _resolveGlassBlur = (raw: string | undefined, ctx: ResolveContext): number
   return v === 'Auto' ? 0 : Math.max(0, Resolve(v, ctx, 'W'));
 };
 
+/** An `Auto | None` glass switch: true for Auto. */
+const _resolveGlassSwitch = (name: string, raw: string | undefined, ctx: ResolveContext): boolean => {
+  const v = ResolveTernary(raw ?? 'Auto', ctx).trim();
+  if (v === 'Auto') return true;
+  if (v === 'None') return false;
+  throw new Error(`[Jaui] ${name}: "${v}" -- expected Auto or None.`);
+};
+
 const _FLEX_KINDS =new Set<FlexKind>(['None', 'Auto', 'Small', 'UltraSmall', 'Large', 'Menu']);
 const _FLEX_NONE: FlexSettings = { Kind: 'None', Lift: NaN, BigGlow: NaN, LittleGlow: NaN, Movement: true };
 
@@ -378,6 +386,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     FlexTouchAlpha: 0,
     ...resolveDispersion(s.GlassDispersion, glass, ctx),
     GlassBlur: _resolveGlassBlur(s.GlassBlur, ctx),
+    GlassOuterRefraction: _resolveGlassSwitch('GlassOuterRefraction', s.GlassOuterRefraction, ctx),
+    GlassBleed: _resolveGlassSwitch('GlassBleed', s.GlassBleed, ctx),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
 
