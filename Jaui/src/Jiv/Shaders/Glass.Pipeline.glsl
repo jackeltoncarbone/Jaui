@@ -33,8 +33,9 @@ float GlassBlurScale(float t, float span) {
 
 float GlassBackdropScale(float clear) { return mix(0.25, 0.5, clear); }
 
-float GlassBlurRadius(float span, float clear) {
-    return mix(1.3333 + 2.6667 * GlassSizeRamps(span).x, 1.0, clear);
+// An authored GlassBlur (above 0) replaces the law (Core/Glass.Pipeline.ts, GlassBlurRadius).
+float GlassBlurRadius(float span, float clear, float authored) {
+    return authored > 0.0 ? authored : mix(1.3333 + 2.6667 * GlassSizeRamps(span).x, 1.0, clear);
 }
 
 // A radius in points to the LOD of our native pyramid with the blur Apple's quarter (clear: half) resolution
@@ -116,6 +117,9 @@ const vec3 GLASS_LENS_INNER_GLOW = vec3(0.8, 0.3, 8.0);
 // Lane 43 carries the glass's clear amount (0..1) and its pressed glow in thousandths above it.
 float GlassLaneClear(float lane) { return mod(lane, 4.0); }
 float GlassLaneGlow(float lane) { return floor(lane / 4.0) / 1000.0; }
+// The dispersion lane: the dispersion (0..4) with an authored GlassBlur in sixteenths of a point above it.
+float GlassLaneCa(float lane) { return mod(lane, 4.0); }
+float GlassLaneBlur(float lane) { return floor(lane / 4.0) / 16.0; }
 // UIKit's flex big glow over a pressed glass: a white layer with a backdrop-aware vibrant colour matrix, YCC black
 // 0.05, white 1.05, saturation 1.2, at `glow` (the spec's bigGlowOpacity) [C: _UIFlexInteraction.BigGlow,
 // UIKitCore 0x188B0F3D0]. It lies over the glass and its rim; here it recolours both (the items draw over it).

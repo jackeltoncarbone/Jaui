@@ -20,9 +20,9 @@ export const GlassSizeRamps = (span: number): { U: number; V: number } => ({
 /** The backdrop's scale in Apple's pipeline: a quarter for regular glass, a half for clear. */
 export const GlassBackdropScale = (variant: GlassVariant): number => (variant === 'Clear' ? 0.5 : 0.25);
 
-/** BlurRadius in points: 1.33 to 4 over `u` for regular glass, 1 for clear. */
-export const GlassBlurRadius = (span: number, variant: GlassVariant): number =>
-  variant === 'Clear' ? 1 : 1.3333 + 2.6667 * GlassSizeRamps(span).U;
+/** BlurRadius in points: 1.33 to 4 over `u` for regular glass, 1 for clear; an authored `GlassBlur` (above 0) instead. */
+export const GlassBlurRadius = (span: number, variant: GlassVariant, authored: number = 0): number =>
+  authored > 0 ? authored : variant === 'Clear' ? 1 : 1.3333 + 2.6667 * GlassSizeRamps(span).U;
 
 /** A radius in points to Apple's LOD on its backdrop texture: `r` in backdrop texels, then log2. */
 export const GlassAppleLod = (radiusPt: number, dpr: number, variant: GlassVariant): number => {
@@ -44,8 +44,8 @@ export const GlassNativeLod = (appleLod: number, variant: GlassVariant): number 
   appleLod + Math.log2((variant === 'Clear' ? GLASS_TEXEL_SIGMA_CLEAR : GLASS_TEXEL_SIGMA_REGULAR) / GlassBackdropScale(variant));
 
 /** The body's LOD at blur scale `k` (0.5 at the edge ramp's floor, 1 in the body), on our pyramid. */
-export const GlassBodyLod = (span: number, k: number, dpr: number, variant: GlassVariant): number =>
-  GlassNativeLod(GlassAppleLod(GlassBlurRadius(span, variant) * k, dpr, variant), variant);
+export const GlassBodyLod = (span: number, k: number, dpr: number, variant: GlassVariant, authored: number = 0): number =>
+  GlassNativeLod(GlassAppleLod(GlassBlurRadius(span, variant, authored) * k, dpr, variant), variant);
 
 /** Edge bleed: opacity over `v` (0 below 64 pt), outward shift and blur, and its LOD. Off on clear glass. */
 export const GlassBleedLod = (span: number, dpr: number, variant: GlassVariant): number =>
@@ -88,9 +88,9 @@ export interface GlassBlurNeeds {
   ReachPt: number;
 }
 
-export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVariant, lens: boolean): GlassBlurNeeds => {
-  const base = lens ? GlassNativeLod(0, variant) : GlassBodyLod(span, 0.5, dpr, variant);
-  let top = GlassBodyLod(span, 1, dpr, variant);
+export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVariant, lens: boolean, blur: number = 0): GlassBlurNeeds => {
+  const base = lens ? GlassNativeLod(0, variant) : GlassBodyLod(span, 0.5, dpr, variant, blur);
+  let top = GlassBodyLod(span, 1, dpr, variant, blur);
   const sigmaPt = (lod: number): number => Math.pow(2, lod) / dpr;
   // The outer sample looks 0.2 S past the outline.
   let reach = 0.2 * span + 3 * sigmaPt(base);

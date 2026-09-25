@@ -42,6 +42,7 @@ export const DefaultJivStyle: JivStyle = {
   FlexLittleGlow: 'Auto',
   FlexMovement: 'Auto',
   GlassDispersion: 'Auto',
+  GlassBlur: 'Auto',
   Transform: '',                         // empty = identity
   // Visual* — render-time, per-element. `VisualScale: '1'` is identity;
   // `VisualTranslate: '0'` is no offset; `VisualOrigin: '0.5'` is center.

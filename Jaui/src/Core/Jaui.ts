@@ -5741,7 +5741,7 @@ export class Canvas implements DirtyTracker {
     // Glass reads past its face (the outer lens sample, and on large glass the edge bleed and the colored
     // shadow) and deeper than its base (the body at full radius): Core/Glass.Pipeline.ts says how far.
     const glass = _isGlass(rs.Material)
-      ? GlassBlurNeedsOf(JivGlassSpanOf(node, eff), d, rs.GlassVariant, GlassIsLens(rs.Lens)) : null;
+      ? GlassBlurNeedsOf(JivGlassSpanOf(node, eff), d, rs.GlassVariant, GlassIsLens(rs.Lens), rs.GlassBlur) : null;
     const margin = Math.max(frostCssPx * d + 8 * d, glass !== null ? glass.ReachPt * avgScale * d : 0);
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
     // second reading of them: the surface draws with its shadow excluded, so its quad is the face,

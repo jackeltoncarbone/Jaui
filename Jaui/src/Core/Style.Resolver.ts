@@ -229,7 +229,13 @@ const resolveDispersion = (raw: string, glass: GlassKind, ctx: ResolveContext): 
   };
 };
 
-const _FLEX_KINDS = new Set<FlexKind>(['None', 'Auto', 'Small', 'UltraSmall', 'Large', 'Menu']);
+/** `GlassBlur: Auto | <points>`, 0 for Auto (Core/Glass.Pipeline.ts, GlassBlurRadius). */
+const _resolveGlassBlur = (raw: string | undefined, ctx: ResolveContext): number => {
+  const v = ResolveTernary(raw ?? 'Auto', ctx).trim();
+  return v === 'Auto' ? 0 : Math.max(0, Resolve(v, ctx, 'W'));
+};
+
+const _FLEX_KINDS =new Set<FlexKind>(['None', 'Auto', 'Small', 'UltraSmall', 'Large', 'Menu']);
 const _FLEX_NONE: FlexSettings = { Kind: 'None', Lift: NaN, BigGlow: NaN, LittleGlow: NaN, Movement: true };
 
 /** `Flex`, `FlexLift`, `FlexBigGlow`, `FlexLittleGlow`, `FlexMovement` (Core/Flex.ts). Auto resolves to NaN. */
@@ -370,6 +376,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     FlexTouchDiameter: 0,
     FlexTouchAlpha: 0,
     ...resolveDispersion(s.GlassDispersion, glass, ctx),
+    GlassBlur: _resolveGlassBlur(s.GlassBlur, ctx),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
 

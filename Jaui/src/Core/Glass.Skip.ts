@@ -172,7 +172,8 @@ export const GlassInstanceCensus = (d: Float32Array, b: number, mask: number): G
   const dpr = Math.max(d[b + O.Dpr], 1e-3);
   const clear = d[b + O.Clear] > 0.5;
   const refraction = d[b + O.Refraction];
-  const ca = d[b + O.Ca];
+  // The lane carries an authored GlassBlur above the dispersion (Jiv.InstanceBuffer, lane 46).
+  const ca = d[b + O.Ca] % 4;
   const glassiness = smoothstep(0, 1, d[b + O.Thickness]);
   const bleeds = !clear && GlassSizeRamps(span).V > 0;
   const clipCount = d[b + O.ClipCount];

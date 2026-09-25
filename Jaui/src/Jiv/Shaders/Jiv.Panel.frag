@@ -689,7 +689,8 @@ void main() {
 
     float thickness = v_Refraction.x;
     float bodyTint = v_Lighting.y;
-    float chromaticAberration = v_Specular.z;
+    float chromaticAberration = GlassLaneCa(v_Specular.z);
+    float glassBlur = GlassLaneBlur(v_Specular.z);
     float borderFade = v_Specular.w;
 
     vec2 p = pLocal - panelCenter;
@@ -805,7 +806,7 @@ void main() {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassInnerShift(d, glassSpan) * lens;
             float outerShift = GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;
-            float radius = GlassBlurRadius(glassSpan, glassClear);
+            float radius = GlassBlurRadius(glassSpan, glassClear, glassBlur);
             float innerLod = GlassNativeLod(radius * GlassBlurScale(d + innerShift, glassSpan), glassDpr, glassClear);
             vec2 innerOffset = nScreen * innerShift * glassDpr;
             // Dispersion, where a class asks for it (the moving selection lens): red at (1 + 0.2 ca) of the

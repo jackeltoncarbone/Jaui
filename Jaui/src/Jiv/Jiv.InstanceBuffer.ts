@@ -121,9 +121,9 @@ const AUTO_FROST_MIN = 0.5;
 /** The backdrop frost a panel draws with, in CSS px: its authored `Blur()`, or the size rule under `Blur(Auto)`. */
 export const JivFrostCssPx = (jiv: Jiv, dpr: number = 1): number => {
   const style = jiv.RenderStyle;
-  // Glass's pyramid is built at its sharpest read (Core/Glass.Pipeline.ts): the frost is Apple's, not authored.
+  // Glass's pyramid is built at its sharpest read (Core/Glass.Pipeline.ts): Apple's law, or its authored GlassBlur.
   if (style.Material === 'LiquidGlass') {
-    return Math.pow(2, GlassBlurNeedsOf(JivGlassSpan(jiv), dpr, style.GlassVariant, GlassIsLens(style.Lens)).BaseLod) / dpr;
+    return Math.pow(2, GlassBlurNeedsOf(JivGlassSpan(jiv), dpr, style.GlassVariant, GlassIsLens(style.Lens), style.GlassBlur).BaseLod) / dpr;
   }
   if (!style.BackdropFrostAuto) return style.BackdropFrostBlur;
   const minHalf = Math.min(jiv.Width, jiv.Height) * 0.5;
@@ -342,7 +342,10 @@ export class JivInstanceBuffer {
     // The highlight: each light's amount and the band's depth in points.
     data[offset + 44] = style.RimStrength;
     data[offset + 45] = style.RimWidth;
-    data[offset + 46] = style.ChromaticAberration;
+    // The dispersion (0..4) with an authored GlassBlur above it in sixteenths of a point, 0 for Apple's law
+    // (Jiv.Panel.frag, GlassLaneCa / GlassLaneBlur).
+    data[offset + 46] = Math.min(3.999, Math.max(0, style.ChromaticAberration))
+      + 4 * Math.min(4095, Math.round(style.GlassBlur * 16));
     data[offset + 47] = style.BorderFade * avgScale * d;
 
     // The flex's little glow (Core/Flex.ts): its centre as a fraction of the box, 10 bits an axis, then its

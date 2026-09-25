@@ -19,7 +19,7 @@ Status column:
 | size class 0 / 1 / 2 (2) | `GlassSize: Auto \| 0 \| 1 \| 2` | size class 0 laws only | missing |
 | S, u, v (2) | derived, not authored | `JivGlassSpan`, `GlassSizeRamps` | matches |
 | inner / outer lens (3.1) | `GlassRefraction: Auto \| Inner(<amount>, <height>) Outer(<amount>, <height>) Opacity(<n>)` | `GlassInnerShift`, the outer shift in `Jiv.Panel.frag`, lane 39 `Refraction` as a multiplier | matches the laws; `Refraction` as a free multiplier is ours only |
-| blur radius and ramp (3.2) | `GlassBlur: Auto \| <pt>` | `GlassBlurRadius`, `GlassBodyLod` | matches the radius; we read a native pyramid mapped to Apple's LOD (`GLASS_TEXEL_SIGMA_*`, fitted), since we never render below native |
+| blur radius and ramp (3.2) | `GlassBlur: Auto \| <pt>`, built | `GlassBlurRadius`, `GlassBodyLod`; an authored value rides lane 46 above the dispersion in sixteenths of a point (0 is Auto) | matches the radius; we read a native pyramid mapped to Apple's LOD (`GLASS_TEXEL_SIGMA_*`, fitted), since we never render below native. The pyramid's level 0 is built at a power-of-two downsample, so the delivered blur moves in steps: at 2x and 3x, 8 to 10.7 pt all read alike |
 | face matrix (3.3) | `GlassFace: Auto \| Ycc(<white>, <black>, <saturation>, <fill>)` | the face table in `Glass.md` (fitted) | differs: fitted to SwiftUI and iOS captures, not the recipe's [C] numbers (the recipe's numbers rendered 58 levels off SwiftUI regular); to settle in phase 2 |
 | thin-glass luma tracking (3.3) | derived | the probe (`u_ShadowState`, 56 pt gate) | differs: Apple's law is now [C] (LiquidGlass.md 3.3): a hysteresis switch between the regular light and dark faces, gated at 64 pt; ours blends a fitted face by the mean. No JSS option yet |
 | edge bleed (3.4) | `GlassBleed: Auto \| None` | shader | matches |
@@ -103,6 +103,7 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 | row side padding | 28 [C] | 10 | −18 |
 | section insets | 10 top and bottom [C] | 4 / 6 | −6 / −4 |
 | highlight | radius 24, insets 10 / 2 [C] | radius 8 | differs |
+| blur | regular glass, BlurRadius 4 pt [C]; the page behind reads σ 3.6 pt on Apple's frames [I] | `JwiftMenuGlass`, `GlassBlur: 9pt` (σ 3.1 pt); Auto read 1.5 pt | −0.5 pt σ |
 | flex | variant 5, Menu [C] | `Flex: Menu` exists (glow only, the pulse not ported); the open dropdown wears `Flex: None` (Jack: an open menu is inert) | differs |
 
 ### Search field (TextInput.jss `Jwift_Field_Glass`)

@@ -260,6 +260,9 @@ export interface JivStyle {
    *  `height` pt from `inset` pt in, along the normal turned by `angle`. Auto is Apple's for the glass: the lens
    *  variant's content lensing (-3pt 3.3pt 0pt 90deg, DesignLibrary's recipe) on `Glass: Lens`, none otherwise. */
   GlassDispersion: string;
+  /** `GlassBlur: Auto | <points>`: the body blur's BlurRadius, QuartzCore's `inputBlurRadius` (Jwift/Apple/LiquidGlass.md
+   *  3.2), read through the same LOD law. Auto is Apple's law by size, 1.33 to 4 pt on regular glass, 1 on clear. */
+  GlassBlur: string;
 
   // Transform — function-syntax string composing translate/scale/rotate/skew/origin.
   // Internal/legacy. Author-facing visual transform lives on the
@@ -423,6 +426,8 @@ export interface JivRenderStyle {
   GlassDispersionHeight: number;
   GlassDispersionInset: number;
   GlassDispersionAngle: number;
+  /** Resolved `GlassBlur` in points, 0 for Auto (Apple's law). Snaps: a glass changing size swaps its read at once. */
+  GlassBlur: number;
 
   /** Resolved `RimWidth`, in points. */
   RimWidth: number;
