@@ -149,6 +149,8 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['PointScale',             s => s.PointScale,                   (s, v) => { s.PointScale = v; }],
 ];
 
+/** At-rest frames the sleep guard skips before its backstop re-resolve. */
+const BACKSTOP_FRAMES = 60;
 const DEFAULT_STIFFNESS = 260;
 const DEFAULT_DAMPING = 32;
 const DEFAULT_MASS = 1;
@@ -229,7 +231,24 @@ export class JivStyleAnimator implements Animatable {
   Wake = (): void => {
     this._dirty = true;
     this._idleFrames = 0;
+    this.Rouse?.();
     this.OnWake?.();
+  };
+
+  /** The animation manager's hook: every write that can change the next Tick's outcome calls it. */
+  Rouse: (() => void) | null = null;
+
+  /** Asleep only when nothing outside the springs moves it: no @Animation driver (a delayed one reports
+   *  idle before it starts), no flex, and a settled Presence, which PresenceManager steps, not this. */
+  CanSleep = (): boolean =>
+    !this._animDriver.HasAnimations && this._jiv.Flex === null && this._jiv.PresenceSpring.IsSettled;
+
+  /** The sleep guard's backstop, kept while asleep: the frames until the guard would re-resolve. */
+  BackstopIn = (): number => BACKSTOP_FRAMES + 1 - this._idleFrames;
+
+  /** The backstop is due: the next Tick re-resolves, as the guard's last idle frame would. */
+  Backstop = (): void => {
+    this._idleFrames = BACKSTOP_FRAMES;
   };
 
   constructor(private _jiv: Jiv) {
@@ -254,6 +273,7 @@ export class JivStyleAnimator implements Animatable {
     // without going through Canvas. Set late so the Jiv carries its own
     // StyleAnimator reference for class-swap path (`_applyOpts`).
     _jiv.StyleAnimator = this;
+    _jiv.OnPresenceTarget = this.Wake;
   }
 
   /** Re-tune the per-channel springs from a new `Springs` map (e.g. after
@@ -263,6 +283,7 @@ export class JivStyleAnimator implements Animatable {
    *  Spec: per-class @Spring/@Transition wins over Animation default. */
   RetuneSprings = (overrides: Record<string, Partial<SpringConfig>> | null): void => {
     this._dirty = true;
+    this.Rouse?.();
     for (let i = 0; i < BINDINGS.length; i++) {
       const prop = BINDINGS[i][0];
       const cfg = _resolveSpringConfig(overrides, prop);
@@ -284,6 +305,7 @@ export class JivStyleAnimator implements Animatable {
     table: Record<string, AnimationDefinition> | null,
   ): void => {
     this._dirty = true;
+    this.Rouse?.();
     this._animDriver.Apply(apps ?? [], table ?? {});
   };
 
@@ -368,7 +390,7 @@ export class JivStyleAnimator implements Animatable {
       for (let i = 0; i < this._springs.length; i++) {
         if (!this._springs[i].IsSettled) { allSettled = false; break; }
       }
-      if (allSettled && this._idleFrames++ < 60) return false;
+      if (allSettled && this._idleFrames++ < BACKSTOP_FRAMES) return false;
     }
     this._idleFrames = 0;
     this._dirty = false;

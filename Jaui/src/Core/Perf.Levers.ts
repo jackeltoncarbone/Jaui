@@ -10,6 +10,8 @@ export const PerfLevers = {
   FrameTimer: true,
   /** Reuse one live predicate view per element. */
   PredicateViews: true,
+  /** Step only the animatables that can move; one at exact rest sleeps until something rouses it. */
+  SleepingAnimators: true,
 };
 
 (globalThis as unknown as { __jauiLevers?: typeof PerfLevers }).__jauiLevers = PerfLevers;

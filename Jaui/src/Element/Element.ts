@@ -256,6 +256,8 @@ export class Element {
    *  so every Jiv fades in and out by default. See Presence.md for the full
    *  contract — implicit-opacity fallback, settle-then-remove, etc. */
   PresenceSpring: Spring = new Spring(0, 220, 26);
+  /** Told when the Presence target flips, so a style animator asleep at rest reads Presence again. */
+  OnPresenceTarget: (() => void) | null = null;
   /** True once `RequestLeave` has been called — further calls are no-ops,
    *  and the engine will hard-remove this element from its parent once the
    *  spring settles at 0. */
@@ -334,6 +336,7 @@ export class Element {
     if (this.LeaveRequested) return;
     this.LeaveRequested = true;
     this.PresenceSpring.Target = 0;
+    this.OnPresenceTarget?.();
     this.MarkLayoutDirty();
   };
 

@@ -149,6 +149,7 @@ export class TextAnimator implements Animatable {
     const wrapChanged = maxWidth !== this._maxWidth;
 
     let needsKick = false;
+    if (sizeMorphPath || weightMorphPath || contentChanged || styleChanged || wrapChanged) this.Rouse?.();
 
     if (sizeMorphPath) {
       needsKick = this._retargetFontSize(content, style, maxWidth) || needsKick;
@@ -198,8 +199,13 @@ export class TextAnimator implements Animatable {
    * animate (caller should Kick).
    */
   Resync = (): boolean => {
+    this.Rouse?.();
     return this._reflow(this._maxWidth);
   };
+
+  /** The animation manager's hook. Every word and weight spring moves only through Update and Resync,
+   *  so once Tick returns false every further Tick is a no-op until one of them changes something. */
+  Rouse: (() => void) | null = null;
 
   Tick = (dt: number): boolean => {
     let active = false;

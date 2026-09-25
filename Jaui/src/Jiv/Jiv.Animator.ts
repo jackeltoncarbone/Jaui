@@ -40,8 +40,13 @@ export class JivAnimator implements Animatable {
     };
   }
 
+  /** The animation manager's hook. Only SetTargets and SnapToTargets move these springs, so once Tick
+   *  returns false every further Tick rewrites the same four values until one of them runs. */
+  Rouse: (() => void) | null = null;
+
   /** Update targets. Returns true if any spring needs to animate. */
   SetTargets = (targets: { X?: number; Y?: number; Width?: number; Height?: number }): boolean => {
+    this.Rouse?.();
     let needsKick = false;
     if (targets.X !== undefined) needsKick = this.Springs.X.Set(targets.X) || needsKick;
     if (targets.Y !== undefined) needsKick = this.Springs.Y.Set(targets.Y) || needsKick;
@@ -54,6 +59,7 @@ export class JivAnimator implements Animatable {
    *  first layout so a newly-appeared element renders at its final position
    *  immediately — no "swoop in from 0,0". */
   SnapToTargets = (): void => {
+    this.Rouse?.();
     this.Springs.X.Snap();
     this.Springs.Y.Snap();
     this.Springs.Width.Snap();
