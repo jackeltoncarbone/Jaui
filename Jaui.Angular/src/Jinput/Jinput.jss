@@ -63,6 +63,14 @@ JinputPlaceholder {
   FontStyle: Italic
 }
 
+// A single-line field's placeholder is one line, tail truncated, as UITextField's is; wrapped, it spilled
+// out of the field's fixed height.
+JinputPlaceholderSingleLine : JinputPlaceholder {
+  Width: 100%
+  MaxLines: 1
+  TextOverflow: Ellipsis
+}
+
 // The touch selection's pins: a bar the height of the line and a round knob,
 // caret-white so the selection primitives read as one family. Layered with
 // the caret, above text.

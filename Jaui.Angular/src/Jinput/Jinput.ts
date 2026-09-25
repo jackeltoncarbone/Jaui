@@ -119,7 +119,7 @@ function _withAlpha(color: string, alpha: number): string {
       <jiv #wrap class="JinputWrap"
         [childLayout]="{ Height: LaidOutHeight() + 'px' }">
         @if (showPlaceholder()) {
-          <jext class="JinputPlaceholder" [text]="Placeholder()" [textStyle]="placeholderTextStyle()" />
+          <jext [class]="MultiLine() ? 'JinputPlaceholder' : 'JinputPlaceholderSingleLine'" [text]="Placeholder()" [textStyle]="placeholderTextStyle()" />
         } @else {
           <!-- Selection rects FIRST so segment text paints on top. Live
                SelectionRects() (not a snapshot): the engine's implicit
