@@ -14,6 +14,8 @@ export const PerfLevers = {
   SleepingAnimators: true,
   /** Run text transitions over the subtrees whose inputs changed, not the whole tree. */
   ScopedTextTransitions: true,
+  /** Rerun the opacity, grade and vibrancy cascades only after a RenderStyle write or a tree change. */
+  CascadeOnChange: true,
 };
 
 (globalThis as unknown as { __jauiLevers?: typeof PerfLevers }).__jauiLevers = PerfLevers;

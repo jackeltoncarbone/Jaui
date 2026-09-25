@@ -12,6 +12,7 @@ import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intri
 import { TextCache } from '../Text/Text.Cache';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { PerfLevers } from './Perf.Levers';
+import { CascadeEpoch } from './Cascade.Epoch';
 import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
@@ -2759,20 +2760,25 @@ export class Canvas implements DirtyTracker {
     // ancestors' so children inherit parent dimming (CSS-like). The style
     // animator rewrites Opacity each frame from its spring, so this
     // multiplied value only lives for the current render pass.
-    this._cascadeOpacity(this.Root, 1);
+    // Skipped whole while no RenderStyle was written and no node joined or left since the last one.
+    const cascade = !PerfLevers.CascadeOnChange || CascadeEpoch.Value !== this._cascadedEpoch;
+    this._cascadedEpoch = CascadeEpoch.Value;
+    if (cascade) this._cascadeOpacity(this.Root, 1);
 
     // Cascade the foreground filter grade (CSS `filter` on a subtree).
     // brightness/saturation/contrast are pointwise, so folding the parent's
     // grade into each descendant is identical to grading the composited
     // subtree as a group — but free (no offscreen pass). `Isolate` starts a
     // fresh grade for the subtree.
-    this._cascadeFilterGrade(this.Root, 1, 1, 1);
+    if (cascade) this._cascadeFilterGrade(this.Root, 1, 1, 1);
 
     // Cascade VIBRANCY (Core/Vibrancy.ts): one more VALUE on the same kind of walk, like `color`. No new
     // pass, no render target. `Isolate` is the barrier.
-    this._vibrancyStats.CascadeVisited = 0;
-    this._vibrancyStats.CascadeCarried = 0;
-    this._cascadeVibrancy(this.Root, null);
+    if (cascade) {
+      this._vibrancyStats.CascadeVisited = 0;
+      this._vibrancyStats.CascadeCarried = 0;
+      this._cascadeVibrancy(this.Root, null);
+    }
 
     r.Resize(w, h, this._dpr);
     r.BeginFrame();
@@ -4672,6 +4678,9 @@ export class Canvas implements DirtyTracker {
       if (line !== this._blurPlanLastLine) { this._blurPlanLastLine = line; JTrace(line); }
     }
   };
+
+  /** The CascadeEpoch the three cascades last ran at, or -1 before the first. */
+  private _cascadedEpoch = -1;
 
   private _cascadeOpacity = (node: Jiv, parentOp: number): void => {
     // Root is a framework-managed container — its RenderStyle resolves

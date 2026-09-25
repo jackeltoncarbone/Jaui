@@ -9,6 +9,8 @@ import type {
 import type { Jiv } from './Jiv';
 import type { JivStyle, JivRenderStyle } from './Jiv.Types';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
+import { CascadeEpoch } from '../Core/Cascade.Epoch';
+import type { VibrancyDeclaration } from '../Core/Vibrancy';
 
 /**
  * Springs every numeric channel of a Jiv's RenderStyle toward the
@@ -336,6 +338,7 @@ export class JivStyleAnimator implements Animatable {
    *  back onto RenderStyle. Used on first layout so newly-created Jivs
    *  render at the target without a frame of catch-up animation. */
   SnapToTargets = (): void => {
+    _holdCascadeInputs(this._jiv.RenderStyle);
     const target = ResolveStyle(this._jiv.EffectiveStyle(), this._ctx());
     _copyNonAnimated(this._jiv.RenderStyle, target);
     for (let i = 0; i < BINDINGS.length; i++) {
@@ -346,6 +349,7 @@ export class JivStyleAnimator implements Animatable {
       set(this._jiv.RenderStyle, s.Value);
     }
     this._jiv.RenderStyle.GlassVariant = target.GlassVariant;
+    _noteCascadeInputs(this._jiv.RenderStyle);
   };
 
   /** Lays the running flex (Core/Flex.ts) over the resolved springs: its scale and translation compose with
@@ -394,6 +398,7 @@ export class JivStyleAnimator implements Animatable {
     }
     this._idleFrames = 0;
     this._dirty = false;
+    _holdCascadeInputs(this._jiv.RenderStyle);
 
     // Advance any @Animation drivers first so the patched style flows
     // through ResolveStyle alongside the static base. The driver's patch
@@ -453,9 +458,32 @@ export class JivStyleAnimator implements Animatable {
     render.GlassVariant = render.GlassClear >= 0.999 ? 'Clear' : 'Regular';
 
     const flexActive = this._composeFlex(dt);
+    _noteCascadeInputs(render);
     return springActive || driverActive || flexActive;
   };
 }
+
+/** The RenderStyle fields the render's cascades read, as they stood before a write. */
+const _cascadeBefore = { Opacity: 0, Brightness: 0, Saturation: 0, Contrast: 0, Isolate: false, Vibrancy: 'None' as VibrancyDeclaration };
+
+const _holdCascadeInputs = (r: JivRenderStyle): void => {
+  const b = _cascadeBefore;
+  b.Opacity = r.Opacity; b.Brightness = r.Brightness; b.Saturation = r.Saturation; b.Contrast = r.Contrast;
+  b.Isolate = r.Isolate; b.Vibrancy = r.VibrancyDeclaration;
+};
+
+const _sameVibrancy = (a: VibrancyDeclaration, b: VibrancyDeclaration): boolean =>
+  a === b || (typeof a === 'object' && typeof b === 'object'
+    && a.R === b.R && a.G === b.G && a.B === b.B && a.Amount === b.Amount && a.Cover === b.Cover);
+
+/** Moves the CascadeEpoch when this write changed anything the cascades read. */
+const _noteCascadeInputs = (r: JivRenderStyle): void => {
+  const b = _cascadeBefore;
+  if (r.Opacity !== b.Opacity || r.Brightness !== b.Brightness || r.Saturation !== b.Saturation
+    || r.Contrast !== b.Contrast || r.Isolate !== b.Isolate || !_sameVibrancy(r.VibrancyDeclaration, b.Vibrancy)) {
+    CascadeEpoch.Value++;
+  }
+};
 
 /** Resolve a per-property spring config against the overrides map. Falls
  *  back to `@Spring *` (universal default) before the global defaults so

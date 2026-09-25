@@ -19,6 +19,7 @@ import type { ResolveContext } from '../Core/Length';
 import { DirtyFlag, type DirtyFlags } from '../Core/Types';
 import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import { Spring } from '../Animation/Spring';
+import { CascadeEpoch } from '../Core/Cascade.Epoch';
 import type { VibrancyValue } from '../Core/Vibrancy';
 
 /** Side-channel from Element to its owning Canvas (or any consumer that wants
@@ -371,6 +372,7 @@ export class Element {
     child.Parent = this;
     this.Children.push(child);
     this.Dirty |= DirtyFlag.Children;
+    CascadeEpoch.Value++;
     // Inherit the parent's tracker so the freshly-mounted subtree starts
     // notifying Canvas the moment it's part of the live tree. Pre-existing
     // descendants under `child` get the tracker via `_propagateTracker`.
@@ -402,6 +404,7 @@ export class Element {
     if (idx >= 0) {
       this.Children.splice(idx, 1);
       child.Parent = null;
+      CascadeEpoch.Value++;
       // Detach the subtree's tracker — orphan nodes shouldn't push dirty
       // notifications to a Canvas that no longer owns them.
       child._propagateTracker(null);
