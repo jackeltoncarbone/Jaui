@@ -40,12 +40,9 @@ const BED = jssClass(PERF, 'PerfBed');
 const GRID = jssClass(PERF, 'PerfGrid');
 const CARD = jssClass(PERF, 'PerfCard');
 const SCREEN = jssClass(readAppJss(), 'Screen');
-/** `@JwiftScreenRadius: 52pt` — the app shell's corner, and therefore every node's clip corner. */
-const SCREEN_RADIUS_PT = (() => {
-  const m = /@JwiftScreenRadius:\s*([\d.]+)pt/.exec(readJwiftGlass());
-  if (!m) throw new Error('no @JwiftScreenRadius in Jwift.Glass.jss');
-  return parseFloat(m[1]);
-})();
+// The scene's screen corner: a rounded screen, so the clip's corners are in play. The app's own corner is the
+// display's (@DisplayCornerRadius); this is the fixture's.
+const SCREEN_RADIUS_PT = 52;
 
 /** The harness pins 1280 x 800 CSS px at deviceScaleFactor 2. */
 const VIEW_W = 1280;
