@@ -8148,6 +8148,7 @@ export class Canvas implements DirtyTracker {
     if (params.has('wkr-jaui-prof') || hash.includes('wkr-jaui-prof')) {
       this._consoleProfilingEnabled = true;
     }
+    if ((debug || this._consoleProfilingEnabled) && this._renderer instanceof WebGL2Renderer) this._renderer.FrameTimerArmed = true;
     // Per-PASS GPU timing. Armed by the profiling flag OR by `?trace`, whose gesture meter is the
     // only instrument a phone has -- and which needs this reading from the Mac to interpret what
     // it sees. Not a mode: armed, the frame ALTERNATES between the existing whole-frame query and

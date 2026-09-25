@@ -41,6 +41,7 @@ import svgStrokeFragSrc from '../Svg/Shaders/Svg.Stroke.frag.gen';
 import type { StrokeStyle } from './Renderer';
 import type { Color } from './Types';
 import type { VibrancyBlend } from './Vibrancy';
+import { PerfLevers } from './Perf.Levers';
 
 // ─── Jline (stroke) uniform-location bundle ─────────────────────────────────
 interface _StrokeLocs {
@@ -1267,7 +1268,7 @@ export class WebGL2Renderer implements Renderer {
     // isn't available or query creation fails silently, _timerActive stays
     // null and EndFrame / GetFrameGpuMs become no-ops.
     const ext = this._timerExt;
-    if (ext) {
+    if (ext && (this._passArmed || this.FrameTimerArmed || !PerfLevers.FrameTimer)) {
       // Armed, every OTHER frame belongs to the per-pass split instead, and must not open a
       // whole-frame query: only one TIME_ELAPSED query may be active at a time, so the two
       // readings cannot share a frame. The frames this skips are exactly the split ones.
@@ -1357,6 +1358,10 @@ export class WebGL2Renderer implements Renderer {
     this.GetFrameGpuMs();
     pass.EndFrame();
   };
+
+  /** Time whole frames on the GPU. Only a reader arms it (the debug HUD, `?wkr-jaui-prof`): an unread query
+   *  is a begin, an end and a delete on every frame for nothing. */
+  FrameTimerArmed = false;
 
   /** Arm per-pass GPU timing. Diagnostic only — `?wkr-jaui-prof` or `?trace`. Takes effect at the
    *  next frame; the timer itself is built there, since Init may not have run yet. */
