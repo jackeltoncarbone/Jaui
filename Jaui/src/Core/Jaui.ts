@@ -3627,8 +3627,12 @@ export class Canvas implements DirtyTracker {
           const _tSnap = performance.now();
           // The active lens reads the scene as it stood under its lifted items (`below`), unblurred, at its
           // BackdropView's capture scale (Jiv.Panel.frag, lensCapture).
-          sceneSnap = below !== null ? below : instFrostLod < SCENE_TAP_FROST_LOD ? r.SnapshotScreen(region) : null;
+          // A snapshot binds its copy target, so whatever backdrop this surface takes below, the walk must
+          // rebind the scene before it draws; a branch that builds nothing would otherwise paint off screen.
+          const snapTaken = below === null && instFrostLod < SCENE_TAP_FROST_LOD;
+          sceneSnap = below !== null ? below : snapTaken ? r.SnapshotScreen(region) : null;
           this._opMs.Snap += performance.now() - _tSnap;
+          let leftScene = snapTaken;
           // See the rim site: a snapshot is a scene READ and stays in the walk, so under
           // `?blur-phased` it is an extra encoder end AND a different scene state than this
           // surface's own pyramid. 0 on `glass-grid` and `idle`; non-zero voids the arm.
@@ -3639,9 +3643,7 @@ export class Canvas implements DirtyTracker {
           // full-sigma mip chain. `plan.MaxLod` is how deep a chain this panel can actually read
           // — `_backdropMaxLod`, floored by the adaptive shadow's own detail LOD.
           lastBaseFrostLod = plan.BaseFrostLod;
-          // `?blur-first`: this surface's fill pyramid was built before the bed's first draw, so
-          // the build is a lookup and the scene target was never unbound here — which is why the
-          // `RebindSceneTarget` below stays inside the branch that actually left it.
+          // `?blur-first`: this surface's fill pyramid was built before the bed's first draw, so the build is a lookup.
           const preFill = this._blurFirst || this._phasedWalk ? this._blurFirstFill.get(node) : undefined;
           // Inside a scroll edge: the strip's own pyramid, when this surface's sample region lies within
           // it. The strip's level n is a Gaussian about 2^n device px wide over a raw level 0, and the
@@ -3701,8 +3703,9 @@ export class Canvas implements DirtyTracker {
               fillBuilt = true;
               return built;
             });
-            r.RebindSceneTarget();
+            leftScene = true;
           }
+          if (leftScene) r.RebindSceneTarget();
         }
 
         // Adaptive shadow: read the backdrop this surface just sampled, under its own footprint.
