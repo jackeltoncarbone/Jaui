@@ -270,66 +270,27 @@ export class Jaui implements OnInit, OnDestroy {
         readSafeArea();
         timers.push(setTimeout(readSafeArea, SAFE_REREAD_MS));
       };
+      // A mobile browser's toolbar is not a safe area and the host keeps it off the canvas (the canvas ends
+      // at the visible bottom), but the host zeroes its bottom inset while a toolbar stands, since the home
+      // indicator then sits below it. The toolbar moves with `visualViewport` resize/scroll, which a window
+      // `resize` does not report on iOS, so those re-read too: one frame, after the host's own write.
+      let barFrame = 0;
+      const onViewportChange = (): void => {
+        if (barFrame) return;
+        barFrame = requestAnimationFrame(() => { barFrame = 0; readSafeArea(); });
+      };
       readSafeArea();
       window.addEventListener('resize', onSafeAreaChange, { passive: true });
       window.addEventListener('orientationchange', onSafeAreaChange, { passive: true });
+      vv?.addEventListener('resize', onViewportChange, { passive: true });
+      vv?.addEventListener('scroll', onViewportChange, { passive: true });
       this._teardownSafeArea = () => {
         window.removeEventListener('resize', onSafeAreaChange);
         window.removeEventListener('orientationchange', onSafeAreaChange);
+        vv?.removeEventListener('resize', onViewportChange);
+        vv?.removeEventListener('scroll', onViewportChange);
         for (const t of timers) clearTimeout(t);
         cancelAnimationFrame(frame);
-      };
-    }
-
-    // ENVIRONMENT INSET: the MOBILE BROWSER'S OWN BOTTOM CHROME, published the same way and for the same
-    // reason as the safe area above — and it is a DIFFERENT QUANTITY. No safe-area inset ever reports a
-    // URL bar or a toolbar: those are browser chrome, not a display cutout, so `@SafeBottom` is 0 on the
-    // exact device where a bottom-attached surface is most hidden. The host measures the overhang from two
-    // probes and publishes it as `--BrowserBarBottom` (Ui/SafeArea); mirroring it here is the only way a
-    // canvas stylesheet can reach it, and until this existed the canvas dock had no term for it at all
-    // (Design/BottomChrome.Conformance.spec.ts records that gap in its own words).
-    //
-    // IT REPLACES `@SafeBottom`, IT DOES NOT STACK ON IT — which is why the `Up` twin is published and is
-    // not dead wiring. The overhang is measured as "how far the lvh box's bottom sits below the VISIBLE
-    // bottom", and the visible bottom on iOS is the top of the toolbar. The home indicator lives BELOW
-    // that line, inside the toolbar's own band, so a surface lifted clear of the bar is already clear of
-    // the indicator by construction. Adding both would double-count the indicator and float the surface a
-    // finger's width above the chrome it only had to clear. So a sheet writes the same shape Jwift's
-    // Drawer.jss already uses for the inset it replaces:
-    //     @BrowserBarBottom + (1 - @BrowserBarBottomUp) * @SafeBottom
-    // Where there is no browser bar — an installed PWA, desktop, Chrome-Android (whose layout viewport
-    // resizes, so the overhang stays 0) — the term vanishes and the safe area stands alone, unchanged.
-    //
-    // READ LIVE, not latched. The safe area is latched-to-max because it is a property of the device; the
-    // browser bar genuinely slides in and out as the page scrolls, and a surface that did not track it
-    // would sit in the wrong place half the time. `visualViewport` scroll/resize is what fires as the bar
-    // moves (a window `resize` does not, on iOS), so it drives the read. The read is coalesced to one
-    // frame: `getComputedStyle` forces style resolution and vv scroll fires at input frequency. The rAF
-    // also orders this AFTER the host's own latch — SafeArea installs pre-bootstrap, so for any one event
-    // its write is queued first and this reads the value it just published rather than the last frame's.
-    this._registry.SetVar('BrowserBarBottom', '0px');
-    this._registry.SetVar('BrowserBarBottomUp', '0');
-    if (vv) {
-      let barFrame = 0;
-      const readBrowserBar = (): void => {
-        barFrame = 0;
-        const raw = getComputedStyle(document.documentElement).getPropertyValue('--BrowserBarBottom');
-        const px = Math.max(0, Math.round(parseFloat(raw) || 0));
-        this._registry.SetVar('BrowserBarBottom', `${px}px`);
-        this._registry.SetVar('BrowserBarBottomUp', px > 0 ? '1' : '0');
-      };
-      const onBarChange = (): void => {
-        if (barFrame) return;
-        barFrame = requestAnimationFrame(readBrowserBar);
-      };
-      onBarChange();
-      vv.addEventListener('resize', onBarChange, { passive: true });
-      vv.addEventListener('scroll', onBarChange, { passive: true });
-      window.addEventListener('orientationchange', onBarChange, { passive: true });
-      this._teardownBrowserBar = () => {
-        vv.removeEventListener('resize', onBarChange);
-        vv.removeEventListener('scroll', onBarChange);
-        window.removeEventListener('orientationchange', onBarChange);
         if (barFrame) cancelAnimationFrame(barFrame);
       };
     }
@@ -363,7 +324,6 @@ export class Jaui implements OnInit, OnDestroy {
 
   private _teardownKeyboardInset: (() => void) | null = null;
   private _teardownSafeArea: (() => void) | null = null;
-  private _teardownBrowserBar: (() => void) | null = null;
 
   ngOnInit(): void {
     const sheet = this.stylesheet();
@@ -380,7 +340,6 @@ export class Jaui implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this._teardownKeyboardInset?.();
     this._teardownSafeArea?.();
-    this._teardownBrowserBar?.();
     this.Bridge.Embeds.Dispose();
     this.Canvas.Stop();
     this.Bridge.Worker?.terminate();
