@@ -28,11 +28,12 @@ describe('LinkTarget', () => {
 
   it('follows the card href from a jext title and from inside a wrapper component such as an icon', () => {
     const { root, hrefs } = card();
+    const text = root.querySelector('jiv > jiv')!.parentElement!;
     const title = document.createElement('jext');
     const icon = document.createElement('icon');
     const glyph = document.createElement('jext');
     icon.appendChild(glyph);
-    root.lastElementChild!.append(title, icon);
+    text.append(title, icon);
     expect(LinkTarget(title, (h) => hrefs.get(h))).toBe('/show/spring-show');
     expect(LinkTarget(glyph, (h) => hrefs.get(h))).toBe('/show/spring-show');
   });
