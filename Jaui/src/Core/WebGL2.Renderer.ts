@@ -39,6 +39,7 @@ import svgFillFragSrc from '../Svg/Shaders/Svg.Fill.frag.gen';
 import svgStrokeVertSrc from '../Svg/Shaders/Svg.Stroke.vert.gen';
 import svgStrokeFragSrc from '../Svg/Shaders/Svg.Stroke.frag.gen';
 import type { StrokeStyle } from './Renderer';
+import type { Color } from './Types';
 import type { VibrancyBlend } from './Vibrancy';
 
 // ─── Jline (stroke) uniform-location bundle ─────────────────────────────────
@@ -324,8 +325,8 @@ const CLIP_TEX_MIN_WIDTH = 2048;  // 512 clips × 2 texels
 // Post-pass clip for a janvas. The unit quad is stretched to the full janvas
 // rect (u_DrawRect) — every pixel the foreign renderer could have written —
 // and the fragment uses a rounded-rect SDF against the parent's clip shape
-// (u_ClipRect + u_Radius) to discard pixels INSIDE the clip and paint
-// transparent pixels OUTSIDE. This clips both rounded corners AND any janvas
+// (u_ClipRect + u_Radius) to discard pixels INSIDE the clip and paint the
+// ground OUTSIDE, as though the janvas never drew there. This clips both rounded corners AND any janvas
 // content that extends past the clipping ancestor's rect.
 const CLIP_MASK_VERT = `#version 300 es
 precision highp float;
@@ -346,6 +347,7 @@ uniform vec4 u_ClipRect;      // clip shape — parent's rect, device px
 uniform float u_Radius;       // device px (uniform across corners)
 uniform float u_Smoothness;   // the continuous corner's smoothing
 uniform vec2 u_Resolution;    // canvas size in device px
+uniform vec3 u_Ground;        // the scene's clear colour
 out vec4 fragColor;
 ${cornerSrc}
 void main() {
@@ -355,7 +357,7 @@ void main() {
     float sd = ContinuousCorner(p - (u_ClipRect.xy + 0.5 * u_ClipRect.zw), 0.5 * u_ClipRect.zw,
                                 vec4(u_Radius), u_Smoothness, unused);
     if (sd <= 0.0) discard;
-    fragColor = vec4(0.0, 0.0, 0.0, 0.0);
+    fragColor = vec4(u_Ground, 1.0);
 }
 `;
 
@@ -4778,6 +4780,7 @@ export class WebGL2Renderer implements Renderer {
   private _clipMaskRadiusLoc!: WebGLUniformLocation | null;
   private _clipMaskSmoothnessLoc!: WebGLUniformLocation | null;
   private _clipMaskResLoc!: WebGLUniformLocation | null;
+  private _clipMaskGroundLoc!: WebGLUniformLocation | null;
   private _compileClipMaskShader = (batch: ShaderBatch): void => {
     this._clipMaskShader = batch.Add(CLIP_MASK_VERT, CLIP_MASK_FRAG);
   };
@@ -4789,10 +4792,11 @@ export class WebGL2Renderer implements Renderer {
     this._clipMaskRadiusLoc = gl.getUniformLocation(p, 'u_Radius');
     this._clipMaskSmoothnessLoc = gl.getUniformLocation(p, 'u_Smoothness');
     this._clipMaskResLoc = gl.getUniformLocation(p, 'u_Resolution');
+    this._clipMaskGroundLoc = gl.getUniformLocation(p, 'u_Ground');
   };
 
   /** Janvas post-pass clipper. Rasterises a quad covering the janvas's
-   *  screen rect (drawRect) and paints transparent pixels wherever the
+   *  screen rect (drawRect) and paints the ground wherever the
    *  fragment falls OUTSIDE the parent's rounded clip shape (clipRect +
    *  radius + smoothness). All rects in device px, top-left origin.
    *  Smoothness 0 = pure circle corners; >0 = squircle (Apple-style). */
@@ -4801,9 +4805,11 @@ export class WebGL2Renderer implements Renderer {
     clipX: number, clipY: number, clipW: number, clipH: number,
     radius: number,
     smoothness: number,
+    ground: Color,
   ): void => {
     const gl = this._gl;
     this._useProgram(this._clipMaskShader.Program);
+    gl.uniform3f(this._clipMaskGroundLoc, ground.R, ground.G, ground.B);
     gl.uniform4f(this._clipMaskDrawRectLoc, drawX, drawY, drawW, drawH);
     gl.uniform4f(this._clipMaskClipRectLoc, clipX, clipY, clipW, clipH);
     gl.uniform1f(this._clipMaskRadiusLoc, radius);

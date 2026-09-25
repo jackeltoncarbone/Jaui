@@ -422,7 +422,7 @@ export interface GlassSkipCensus {
   /** Empty unless a flag refused the arm outright, in which case it names which. */
   Refused: string;
 }
-import { DirtyFlag } from './Types';
+import { DirtyFlag, type Color } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
@@ -1505,6 +1505,21 @@ export class Canvas implements DirtyTracker {
       try { this._postFrameSubs[i](); } catch (e) { console.error('[Jaui] post-frame sub threw', e); }
     }
   };
+
+  /** THE GROUND: the colour beneath everything, which the scene clears to and a janvas clip mask
+   *  restores. It is the clear rather than a panel because every panel paints after the janvas
+   *  pre-pass, so a full-canvas ground panel would cover a janvas. */
+  SetGround = (color: string): void => {
+    const next = ParseColor(color);
+    const g = this._ground;
+    if (next.R === g.R && next.G === g.G && next.B === g.B) return;
+    this._ground = { R: next.R, G: next.G, B: next.B, A: 1 };
+    // Every backdrop read the old ground, so no cached pyramid may survive it.
+    this._bc.Reset();
+    this.RequestFrame();
+  };
+
+  private _ground: Color = { R: 0, G: 0, B: 0, A: 1 };
 
   /** Replace the active JSS var table. The Angular layer calls this when
    *  the nearest `JssRegistry` picks up new declarations (e.g. a `<jyle>`
@@ -2771,7 +2786,7 @@ export class Canvas implements DirtyTracker {
     // blits per frame: 1 (final present), down from 1+N (one per
     // glass/pblur that used to call SnapshotScreen).
     r.DisableBlend();
-    r.BeginScenePass(0, 0, 0);
+    r.BeginScenePass(this._ground.R, this._ground.G, this._ground.B);
     // `?blur-cache`: the paint ledger opens beside the scene it describes, before the first draw
     // into it (the janvas pre-pass below).
     this._bcBeginFrame(w, h);
@@ -4606,7 +4621,7 @@ export class Canvas implements DirtyTracker {
         gl.depthMask(false);
         gl.disable(gl.BLEND);
         for (const m of this._pendingJanvasMasks) {
-          gl2r.DrawClipMask(m.drawX, m.drawY, m.drawW, m.drawH, m.clipX, m.clipY, m.clipW, m.clipH, m.radius, m.smoothness);
+          gl2r.DrawClipMask(m.drawX, m.drawY, m.drawW, m.drawH, m.clipX, m.clipY, m.clipW, m.clipH, m.radius, m.smoothness, this._ground);
         }
         gl2r.InvalidateStateCache();
       }
@@ -9670,6 +9685,9 @@ export class Jaui {
   /** Push the active JSS var table into the canvas — called by the Angular
    *  layer whenever the JssRegistry version bumps. */
   SetJssVars(vars: Map<string, string>): void { this.Canvas.SetJssVars(vars); }
+
+  /** The colour beneath everything (see `Canvas.SetGround`). */
+  SetGround(color: string): void { this.Canvas.SetGround(color); }
 }
 
 // Walks the hit ancestor chain. Disabled stops the walk and forces default

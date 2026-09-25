@@ -153,6 +153,10 @@ export class CanvasProxy {
     this._bridge.PostMessage({ T: 'jss-vars', Entries: Array.from(vars.entries()) });
   };
 
+  SetGround = (color: string): void => {
+    this._bridge.PostMessage({ T: 'ground', Color: color });
+  };
+
   Start = (): void => {
     this._bridge.PostMessage({ T: 'control', Action: 'start' });
   };

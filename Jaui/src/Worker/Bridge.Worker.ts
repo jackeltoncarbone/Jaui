@@ -27,6 +27,7 @@ import {
   type M2W_Resize,
   type M2W_DprChange,
   type M2W_JssVars,
+  type M2W_Ground,
   type M2W_Control,
   type M2W_ContextMenu,
   type M2W_GestureClaim,
@@ -114,6 +115,7 @@ export class WorkerBridge {
   AttachCanvas = (canvas: Canvas): void => {
     this._canvas = canvas;
     this.Canvas = canvas;
+    if (this._ground !== null) canvas.SetGround(this._ground);
     // Bidirectional wiring: cursor + capture writes from engine relay
     // back to main. Bridge owns the postMessage shape; engine doesn't
     // know about our wire format.
@@ -163,6 +165,7 @@ export class WorkerBridge {
       return;
     }
     if (isMessage<M2W_JssVars>(m, 'jss-vars')) return this._onJssVars(m);
+    if (isMessage<M2W_Ground>(m, 'ground')) return this._onGround(m);
     if (isMessage<M2W_Control>(m, 'control')) return this._onControl(m);
     if (isMessage<M2W_JivOps>(m, 'jiv-ops')) return this._onJivOps(m);
     if (isMessage<M2W_ImageLoadUrl>(m, 'image-url')) return this._onImageUrl(m);
@@ -387,6 +390,13 @@ export class WorkerBridge {
     // public Resize entry isn't typed for this; we use the bridge-friendly
     // public ResizeFromBridge helper added on Canvas.
     this._canvas.ResizeFromBridge(m.Width, m.Height);
+  };
+
+  /** Kept for a canvas that attaches after the host has posted its ground. */
+  private _ground: string | null = null;
+  private _onGround = (m: M2W_Ground): void => {
+    this._ground = m.Color;
+    this._canvas?.SetGround(m.Color);
   };
 
   private _onJssVars = (m: M2W_JssVars): void => {

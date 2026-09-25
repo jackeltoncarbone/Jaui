@@ -179,6 +179,12 @@ export interface M2W_JssVars {
   Entries: [string, string][];
 }
 
+/** The host's ground: the colour beneath everything, which the scene clears to. */
+export interface M2W_Ground {
+  T: 'ground';
+  Color: string;
+}
+
 /** Lifecycle: Start = begin rAF, Stop = pause. */
 export interface M2W_Control {
   T: 'control';
@@ -403,6 +409,7 @@ export type M2W =
   | M2W_FocusChange
   | M2W_FontsLoadingDone
   | M2W_JssVars
+  | M2W_Ground
   | M2W_Control
   | M2W_JivOps
   | M2W_ImageLoadUrl

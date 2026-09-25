@@ -94,6 +94,9 @@ export class Jaui implements OnInit, OnDestroy {
   /** Host environment vars, published through the same SetVar path as the insets. A theme hands its colour
    *  tokens in here, so a sheet's `@Ink` re-resolves live when the theme flips. */
   readonly vars = input<Readonly<Record<string, string>>>({});
+  /** The colour beneath everything: the scene clears to it, so it sits under a `<janvas>` where a
+   *  full-screen ground panel would paint over one. */
+  readonly ground = input<string>('rgb(0, 0, 0)');
   readonly ready = output<CanvasProxy>();
 
   /** Main-thread proxy for the worker-side Canvas. Children inject this
@@ -198,6 +201,7 @@ export class Jaui implements OnInit, OnDestroy {
       const vars = this.vars();
       for (const name of Object.keys(vars)) this._registry.SetVar(name, vars[name]);
     });
+    effect(() => this.Canvas.SetGround(this.ground()));
 
     // ENVIRONMENT INSET: `@KeyboardInset` is always defined — 0px until a real
     // soft keyboard occludes the viewport — so any stylesheet can put it in

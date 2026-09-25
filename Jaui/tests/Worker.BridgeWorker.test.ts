@@ -27,17 +27,20 @@ const _ptr = (over: Partial<PointerPayload> = {}): PointerPayload => ({
 });
 
 // Minimal Canvas mock — bridge calls IngestEvent / ResizeFromBridge /
-// SetJssVars / Start / Stop / OnCursorChange / OnPointerCaptureRequest.
+// SetJssVars / SetGround / Start / Stop / OnCursorChange / OnPointerCaptureRequest.
 const _mockCanvas = () => ({
   IngestEvent: vi.fn(),
   IngestPointerCaptureGranted: vi.fn(),
   IngestPointerCaptureReleased: vi.fn(),
   ResizeFromBridge: vi.fn(),
   SetJssVars: vi.fn(),
+  SetGround: vi.fn(),
   Start: vi.fn(),
   Stop: vi.fn(),
   OnCursorChange: vi.fn(),
   OnPointerCaptureRequest: vi.fn(),
+  OnSelectionTextChange: vi.fn(),
+  Wake: vi.fn(),
 });
 
 describe('WorkerBridge — inbound dispatch', () => {
@@ -171,6 +174,17 @@ describe('WorkerBridge — inbound dispatch', () => {
     const map = canvas.SetJssVars.mock.calls[0][0] as Map<string, string>;
     expect(map.get('Primary')).toBe('#fff');
     expect(map.get('Gap')).toBe('8pt');
+  });
+
+  it('routes M2W_Ground to SetGround, and keeps one that arrives before the canvas', () => {
+    const bridge = new WorkerBridge(vi.fn());
+    bridge.HandleMessage({ T: 'ground', Color: 'rgb(255, 255, 255)' });
+    const canvas = _mockCanvas();
+    bridge.AttachCanvas(canvas as never);
+    expect(canvas.SetGround).toHaveBeenCalledWith('rgb(255, 255, 255)');
+
+    bridge.HandleMessage({ T: 'ground', Color: 'rgb(0, 0, 0)' });
+    expect(canvas.SetGround).toHaveBeenLastCalledWith('rgb(0, 0, 0)');
   });
 
   it('routes M2W_Control start → Canvas.Start, stop → Canvas.Stop', () => {
