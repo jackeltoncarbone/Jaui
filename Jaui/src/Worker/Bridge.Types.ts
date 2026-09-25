@@ -256,6 +256,7 @@ export interface JivApplyOpts {
     PointerEvents?: 'Auto' | 'None';
     Cursor?: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
     UserSelect?: 'Auto' | 'None';
+    PanClaim?: 'None' | 'Down' | 'Vertical';
     PointScale?: string;
     /** When true, the next layout commit snaps to the resolved rect with no
      *  spring animation. Set on jinput text segments so paste / token-driven
@@ -453,7 +454,7 @@ export interface W2M_HitEvent {
   /** Worker-side Jiv id whose handler fired. Maps to the Angular Jiv
    *  component's host element. */
   JivId: number;
-  Kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup' | 'wheel';
+  Kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup' | 'wheel' | 'panclaim';
   /** Original event payload so the synthetic event carries faithful
    *  clientX/Y/buttons/etc. for downstream listeners. For `wheel` kind this
    *  is a `WheelPayload` (carries DeltaX/Y/Mode) — main narrows on Kind. */

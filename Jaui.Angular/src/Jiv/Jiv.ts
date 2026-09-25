@@ -199,6 +199,7 @@ export class Jiv implements OnInit, OnDestroy {
       OnPointerMove: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointermove', src)),
       OnPointerUp: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerup', src)),
       OnWheel: (src) => this._host.nativeElement.dispatchEvent(_cloneWheelEvent(src)),
+      OnPanClaim: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('panclaim', src)),
     });
 
     // Initial create — sends construction-time options. Attach fires
@@ -324,7 +325,7 @@ export class Jiv implements OnInit, OnDestroy {
     const elementProps: JivApplyOpts['ElementProps'] = {};
     for (const key of [
       'Overflow', 'Clip', 'Visible', 'Interactive', 'PointerEvents',
-      'Cursor', 'UserSelect', 'PointScale',
+      'Cursor', 'UserSelect', 'PointScale', 'PanClaim',
     ]) {
       if (key in styleBag) {
         const v = styleBag[key];

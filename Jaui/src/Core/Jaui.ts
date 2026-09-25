@@ -7899,35 +7899,64 @@ export class Canvas implements DirtyTracker {
     const DRAG_SLOP_CSS_PX = 10;
     interface DragCtx {
       candidates: Jiv[]; target: Jiv | null;
+      /** The nearest ancestor with a `PanClaim`, which may take the pan before any scroller does. */
+      claimant: Jiv | null; source: PointerEvent;
       startX: number; startY: number; lastX: number; lastY: number;
     }
     const drags = new Map<number, DragCtx>();
 
     this._on('pointerdown', (e: PointerEvent) => {
-      if (e.pointerType === 'mouse') return; // reserve mouse-drag for future selection
-
       this._measureScrollContents(this.Root);
       const rect = this._pageRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
-      const candidates = this._scrollManager.ResolveScrollCandidates(cssX, cssY);
-      if (candidates.length === 0) return;
+      let claimant: Jiv | null = null;
+      for (let cur = this._scrollManager.HitTopmost(cssX, cssY); cur; cur = cur.Parent as Jiv | null) {
+        if (cur.PanClaim !== 'None') { claimant = cur; break; }
+      }
+      // A mouse drag scrolls nothing (it is reserved for selection); it can only be claimed.
+      const candidates = e.pointerType === 'mouse' ? [] : this._scrollManager.ResolveScrollCandidates(cssX, cssY);
+      if (candidates.length === 0 && claimant === null) return;
 
-      this._capturePointer(e.pointerId);
+      if (candidates.length > 0) this._capturePointer(e.pointerId);
       for (const c of candidates) this._scrollManager.DragStart(c);
       drags.set(e.pointerId, {
-        candidates, target: candidates.length === 1 ? candidates[0] : null,
+        candidates, target: candidates.length === 1 && claimant === null ? candidates[0] : null,
+        claimant, source: e,
         startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY,
       });
     });
+
+    /** Whether the claimant takes this pan: a vertical one, downward (or upward for `Vertical`), that the
+     *  vertical scroller under the finger cannot use because it rests at its top. iOS's sheet rule. */
+    const claims = (ctx: DragCtx, tx: number, ty: number): boolean => {
+      const owner = ctx.claimant;
+      if (owner === null || Math.abs(ty) <= Math.abs(tx)) return false;
+      if (ty < 0 && owner.PanClaim !== 'Vertical') return false;
+      const vertical = ctx.candidates.find((c) => c.ContentHeight - c.Height > 0.5);
+      return vertical === undefined || vertical.ScrollY <= 0.5;
+    };
 
     /** Hand an undecided drag to one scroller once it has a direction. The
      *  others are let go with no momentum: they were only ever caught. */
     const decide = (ctx: DragCtx, clientX: number, clientY: number): boolean => {
       if (ctx.target !== null) return true;
+      if (drags.get(ctx.source.pointerId) !== ctx) return false;
       const tx = clientX - ctx.startX;
       const ty = clientY - ctx.startY;
       if (tx * tx + ty * ty < DRAG_SLOP_CSS_PX * DRAG_SLOP_CSS_PX) return false;
+      if (claims(ctx, tx, ty)) {
+        for (const c of ctx.candidates) this._scrollManager.DragCancel(c);
+        drags.delete(ctx.source.pointerId);
+        if (this._hasCapture(ctx.source.pointerId)) this._releasePointer(ctx.source.pointerId);
+        this._flexEnd();
+        ctx.claimant!.OnPanClaim?.(ctx.source);
+        return false;
+      }
+      if (ctx.candidates.length === 0) {
+        drags.delete(ctx.source.pointerId);
+        return false;
+      }
       ctx.target = this._scrollManager.PickDragTarget(ctx.candidates, -tx, -ty);
       if (ctx.target !== null) this._flexEnd();
       for (const c of ctx.candidates) if (c !== ctx.target) this._scrollManager.DragCancel(c);

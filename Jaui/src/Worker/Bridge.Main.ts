@@ -102,6 +102,8 @@ export interface JivHitHandlers {
   /** Wheel over this Jiv when it's the topmost hit. Source carries the
    *  delta fields (WheelPayload) so main can rebuild a faithful WheelEvent. */
   OnWheel?: (src: WheelPayload) => void;
+  /** This node's `PanClaim` took a pan; the source is the press point. */
+  OnPanClaim?: (src: PointerPayload) => void;
   /** Called when the worker posts a fresh rect snapshot for this node.
    *  Set on Handles that have subscribed via `WatchRect(true)`. The box
    *  carries the clipped-visible rect, accumulated opacity and corner radii
@@ -539,6 +541,7 @@ export class MainBridge {
       case 'pointermove':   h.OnPointerMove?.(m.Source); break;
       case 'pointerup':     h.OnPointerUp?.(m.Source); break;
       case 'wheel':         h.OnWheel?.(m.Source as WheelPayload); break;
+      case 'panclaim':      h.OnPanClaim?.(m.Source); break;
     }
   };
 

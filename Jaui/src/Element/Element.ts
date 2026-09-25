@@ -56,7 +56,12 @@ export interface ElementOptions {
   PointerEvents?: 'Auto' | 'None';
   Cursor?: CursorStyle;
   UserSelect?: 'Auto' | 'None';
+  PanClaim?: PanClaim;
 }
+
+/** Which vertical pans a node takes from the scrollers inside it: `Down` takes a downward pan when nothing under
+ *  the finger can scroll up, `Vertical` also takes an upward one from a scroller resting at its top. A sheet's card. */
+export type PanClaim = 'None' | 'Down' | 'Vertical';
 
 export class Element {
   // ── Computed layout position (set by layout solver or manually) ──
@@ -247,6 +252,11 @@ export class Element {
    *  consumer (e.g. the drill field) uses this to drive its own zoom. Angular
    *  binding bridges it to a DOM `wheel` event on the host element. */
   OnWheel: ((e: WheelEvent) => void) | null = null;
+
+  /** Fired when this node's `PanClaim` takes a pan; the event carries the press point. The claimant follows the
+   *  pointer from here with its own `document` listeners, and no scroller under the finger moves. */
+  OnPanClaim: ((e: PointerEvent) => void) | null = null;
+  PanClaim: PanClaim = 'None';
   PointerEvents: 'Auto' | 'None' = 'Auto';
   Cursor: CursorStyle = 'Default';
   UserSelect: 'Auto' | 'None' = 'Auto';
@@ -303,6 +313,7 @@ export class Element {
     this.PointerEvents = options?.PointerEvents ?? 'Auto';
     this.Cursor = options?.Cursor ?? 'Default';
     this.UserSelect = options?.UserSelect ?? 'Auto';
+    this.PanClaim = options?.PanClaim ?? 'None';
 
     this.Layout = { ...DefaultLayoutConfig, ...options?.Layout };
 

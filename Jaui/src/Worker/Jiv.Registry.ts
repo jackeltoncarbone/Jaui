@@ -572,6 +572,7 @@ export class JivRegistry {
     if (ep.PointerEvents !== undefined) core.PointerEvents = ep.PointerEvents;
     if (ep.Cursor !== undefined) core.Cursor = ep.Cursor;
     if (ep.UserSelect !== undefined) core.UserSelect = ep.UserSelect;
+    if (ep.PanClaim !== undefined) core.PanClaim = ep.PanClaim;
     // Empty string for PointScale would parse as an empty length expression
     // and throw on every frame in the layout solver. Treat empty as absent.
     if (ep.PointScale !== undefined && ep.PointScale !== '' && core.PointScale !== ep.PointScale) {
@@ -630,11 +631,12 @@ export class JivRegistry {
     core.OnPointerMove = (e) => this._postHit(id, 'pointermove', _payloadFromPointerEvent(e));
     core.OnPointerUp = (e) => this._postHit(id, 'pointerup', _payloadFromPointerEvent(e));
     core.OnWheel = (e) => this._postHit(id, 'wheel', _payloadFromWheelEvent(e));
+    core.OnPanClaim = (e) => this._postHit(id, 'panclaim', _payloadFromPointerEvent(e));
   };
 
   private _postHit = (
     jivId: number,
-    kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup' | 'wheel',
+    kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup' | 'wheel' | 'panclaim',
     source: PointerPayload,
   ): void => {
     this._post({ T: 'hit', JivId: jivId, Kind: kind, Source: source });

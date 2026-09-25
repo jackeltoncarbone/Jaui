@@ -5,7 +5,7 @@ import { DefaultJivStyle } from './Jiv.Defaults';
 import type { LayoutConfig, ChildLayout, Overflow, Clip } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
 import type { SpringConfig, AnimationApplication, AnimationDefinition } from '../Animation/Animation.Types';
-import { Element, type CursorStyle } from '../Element/Element';
+import { Element, type CursorStyle, type PanClaim } from '../Element/Element';
 import { DirtyFlag } from '../Core/Types';
 import type { PredicateStyle, PredicateExpr } from '../Jss/Jss.Parser';
 import {
@@ -326,6 +326,7 @@ export class Jiv extends Element {
     PointerEvents?: 'Auto' | 'None';
     Cursor?: CursorStyle;
     UserSelect?: 'Auto' | 'None';
+    PanClaim?: PanClaim;
   }) {
     const mergedStyle: JivStyle = { ...DefaultJivStyle, ...options?.Style };
 
@@ -347,6 +348,7 @@ export class Jiv extends Element {
       PointerEvents: options?.PointerEvents,
       Cursor: options?.Cursor,
       UserSelect: options?.UserSelect,
+      PanClaim: options?.PanClaim,
     });
 
     this.Style = mergedStyle;

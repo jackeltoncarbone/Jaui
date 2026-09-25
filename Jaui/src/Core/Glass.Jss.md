@@ -127,6 +127,22 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 
 Worn by: `JwiftPressGlass` (every glass button, the avatar pill, the drill sync button, the item page's glass actions), `JwiftProminent`, `JwiftDangerProminent` (solid plates: the lift and movement, no glow). Not worn: rows, cells and chips (`JwiftPress`, a fill highlight), fields, the open dropdown. The tab bar still sets its swell and glow from `TabBar.ts` through `FlexLiftScale` / `FlexBigGlow`, which now read the same spec.
 
+## 3b. Sheets (Jwift/Apple/Sheets.md), built
+
+| Apple lever | JSS / input, default | Apple's default | status |
+|---|---|---|---|
+| detents | `<sheet [detents]>`, `['content']` | `[.large]`; a fitted sheet is the custom detent [C] | matches |
+| `largestUndimmedDetentIdentifier` | `[largestUndimmedDetent]`, null | nil: dimmed at every detent [D] | matches |
+| `prefersGrabberVisible` | `[grabber]`, shown only when resizable | off; the HIG asks for it on a resizable sheet [C][D] | matches |
+| `isModalInPresentation` + discard ask | `[hasUnsavedChanges]`, false | false [D] | matches |
+| the dimming view | `Jwift_SheetDim`, black at 0.2 / 0.48 | `_alertControllerDimmingViewColor` [C] | matches |
+| partial-height inset | 8 pt closing to 0 at large, as layout | 8 pt as a uniform scale [C] | differs in form: reflow, not scale |
+| corners | top 38, bottom `max(@DisplayCornerRadius - 14 v, 20)`, form sheet 32 | `sub_189108DF4` [C] | matches |
+| the display's corner | `@DisplayCornerRadius`, published by the engine | `displayCornerRadius` [C] | matches where the shell passes it; Apple's per-device table otherwise |
+| the sheet pan | `PanClaim: None \| Down \| Vertical` on the card | UIKit's sheet pan yields to a scroller not at its top [C] | matches |
+| spring | `@Spring { Stiffness: 333.3, Damping: 36.5 }` | damping 1, response 0.344 s [C] | matches; 0.8 on a fast flick is not built |
+| the bar button | `<glass-button size="bar">`, 44 pt | 44 pt [I] | matches |
+
 ## 4. Sizing in JSS
 
 Sizing stays ordinary layout (`Height`, `Padding`, `Gap`, `BorderRadius`); what changes is where the values come from. Each Jwift control's numbers become Apple's, named once as variables in the Jwift sheet (for example `@AppleTabBarHeight`, `@AppleMenuRadius`), each citing `Sizing.md`. Three behaviours become properties, because they are rules rather than numbers:
