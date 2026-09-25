@@ -27,6 +27,7 @@ import { SemanticMirror, type MirrorEntry } from '../Seo/Semantic.Mirror';
 import { ExtractBackgroundUrl, ResolveSemantics } from '../Seo/Seo.Resolve';
 import { JAUI_NAVIGATE, type SemanticRole } from '../Seo/Seo.Types';
 import { WireTeleportInputs } from '../Teleport/Teleport.Wiring';
+import { LinkTarget } from './Jiv.Link';
 
 /**
  * Maps each attached node's worker handle to the Angular host element that owns
@@ -39,6 +40,9 @@ import { WireTeleportInputs } from '../Teleport/Teleport.Wiring';
  * and `<janvas>` register here so mixed trees order correctly.
  */
 export const JAUI_HOST_EL = new WeakMap<JivHandle, HTMLElement>();
+
+/** Each `<jiv>` host's component, so a tap can find the nearest ancestor `href` through the DOM. */
+const JIV_OF_HOST = new WeakMap<Element, Jiv>();
 
 declare const ngDevMode: unknown;
 
@@ -109,8 +113,9 @@ export class Jiv implements OnInit, OnDestroy {
   /** Heading level (1–6) when the role resolves to Heading. Default 2. */
   readonly level = input<number | undefined>(undefined);
   /** Real navigation target. Projects an `<a href>` into the mirror AND
-   *  navigates on canvas tap (via JAUI_NAVIGATE) unless a `(click)` handler
-   *  called preventDefault. One declaration: behavior + crawl graph. */
+   *  navigates on a canvas tap on this node or anything inside it (via
+   *  JAUI_NAVIGATE) unless a `(click)` handler called preventDefault. One
+   *  declaration: behavior + crawl graph. */
   readonly href = input<string | null | undefined>(undefined);
   /** Alt text — with an image background, projects an `<img alt>`. */
   readonly alt = input<string | null | undefined>(undefined);
@@ -166,6 +171,7 @@ export class Jiv implements OnInit, OnDestroy {
     const bridge = this._canvas.Bridge;
     this.Node = new JivHandle(bridge, bridge.AllocateId());
     JAUI_HOST_EL.set(this.Node, this._host.nativeElement);
+    JIV_OF_HOST.set(this._host.nativeElement, this);
 
     // Bridge engine-side hit handlers to bubbling DOM events on this
     // component's host element so Angular `(click)` / `(pointerdown)` etc.
@@ -179,8 +185,9 @@ export class Jiv implements OnInit, OnDestroy {
       OnClick: () => {
         const evt = new MouseEvent('click', { bubbles: true, cancelable: true });
         this._host.nativeElement.dispatchEvent(evt);
-        const href = this.href();
-        if (href && !evt.defaultPrevented) this._navigate(href);
+        if (evt.defaultPrevented) return;
+        const href = LinkTarget(this._host.nativeElement, (host) => JIV_OF_HOST.get(host)?.href());
+        if (href) this._navigate(href);
       },
       OnContextMenu: (src) => {
         this._host.nativeElement.dispatchEvent(new MouseEvent('contextmenu', {
