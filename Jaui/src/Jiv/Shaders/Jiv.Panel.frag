@@ -64,6 +64,8 @@ uniform sampler2D u_Backdrop;
 // the scissor. Same texels, same device density; only the address changes. See BackdropRegion
 // in Core/Renderer.ts for the derivation and a worked round trip.
 uniform vec4 u_BackdropXf;
+// What u_Backdrop's level 0 holds: its texel and the Gaussian sigma it delivers, device px (glassSample).
+uniform vec2 u_BackdropLevel;
 // Raw scene snapshot — sampled when effective LOD is 0 (no-frost,
 // no-refraction) so panels with just BackdropBrightness/Saturation/
 // Contrast don't inherit the pyramid's baked-in 1px base blur. This one is ALWAYS canvas-sized,
@@ -358,13 +360,14 @@ vec3 applyTint(vec3 color, float tint) {
     return mix(color, vec3(step(0.0, tint)), abs(tint));
 }
 
-// The glass's own read: the pyramid at an absolute LOD of our native scale (Glass.Pipeline.glsl's
-// GlassNativeLod), `pixel` in device px. The pyramid was built at u_BaseFrostLod, so that LOD is its level 0.
+// The glass's own read: a Gaussian of 2^lod device px (Glass.Pipeline.glsl's GlassNativeLod), `pixel` in device px,
+// at the level of this pyramid that delivers it.
 vec3 glassSample(vec2 pixel, float lod) {
     if (GlassSkips(GLASS_SKIP_BACKDROP)) return GLASS_SKIP_FLAT;
     vec2 uv = pixel / u_Resolution;
     uv.y = 1.0 - uv.y;
-    return textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, max(0.0, lod - u_BaseFrostLod)).rgb;
+    return textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw,
+                      GlassPyramidLevel(exp2(lod), u_BackdropLevel.x, u_BackdropLevel.y)).rgb;
 }
 
 // The BackdropView's read: the scene under the lifted items (u_Scene) as a CABackdropLayer captures it, at

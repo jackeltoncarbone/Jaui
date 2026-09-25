@@ -102,6 +102,8 @@ interface _PanelLocs {
   viewOffset:   WebGLUniformLocation | null;
   backdrop:     WebGLUniformLocation | null;
   backdropXf:   WebGLUniformLocation | null;
+  // What the pyramid's level 0 holds: its texel and its sigma, device px (glass reads its levels through them).
+  backdropLevel: WebGLUniformLocation | null;
   scene:        WebGLUniformLocation | null;
   baseFrostLod: WebGLUniformLocation | null;
   clipTex:      WebGLUniformLocation | null;
@@ -135,6 +137,7 @@ const _extractPanelLocs = (gl: WebGL2RenderingContext, p: WebGLProgram): _PanelL
   viewOffset:   gl.getUniformLocation(p, 'u_ViewOffset'),
   backdrop:     gl.getUniformLocation(p, 'u_Backdrop'),
   backdropXf:   gl.getUniformLocation(p, 'u_BackdropXf'),
+  backdropLevel: gl.getUniformLocation(p, 'u_BackdropLevel'),
   scene:        gl.getUniformLocation(p, 'u_Scene'),
   baseFrostLod: gl.getUniformLocation(p, 'u_BaseFrostLod'),
   clipTex:      gl.getUniformLocation(p, 'u_ClipTex'),
@@ -1553,6 +1556,7 @@ export class WebGL2Renderer implements Renderer {
     const backdropRegion = _regionOf(backdrop);
     gl.uniform4f(locs.backdropXf,
       backdropRegion.ScaleX, backdropRegion.ScaleY, backdropRegion.OffsetX, backdropRegion.OffsetY);
+    gl.uniform2f(locs.backdropLevel, backdropRegion.Texel, backdropRegion.Sigma);
     gl.uniform1i(locs.clipTex, 1);
     gl.uniform1i(locs.scene, 2);
     gl.uniform1f(locs.baseFrostLod, baseFrostLod);
@@ -3468,8 +3472,8 @@ export class WebGL2Renderer implements Renderer {
     this._sceneLedger.NoteTargetBind('blur');
     const tex = pass.Blur(this._sceneFbo.Texture, qw, qh, 0, undefined, undefined);
     pass.GenerateOutputMipmap(Math.max(1, maxLod - 2));
-    // It covers the WHOLE canvas (at quarter resolution), so screen UV addresses it unchanged.
-    const region = pass.LastRegion;
+    // It covers the WHOLE canvas (at quarter resolution), so screen UV addresses it unchanged; a texel is 4 device px.
+    const region = { ...pass.LastRegion, Texel: width / qw };
     // BlurPass bound its own programs; invalidate the cache like ComputeBlur does.
     this._lastProgram = null;
     // Restore the scene FBO so the subsequent glass draws target it.

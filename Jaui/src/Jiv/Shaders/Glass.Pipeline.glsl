@@ -47,6 +47,18 @@ float GlassNativeLod(float radiusPt, float dpr, float clear) {
     return appleLod + log2(mix(GLASS_TEXEL_SIGMA_REGULAR, GLASS_TEXEL_SIGMA_CLEAR, clear) / scale);
 }
 
+// The pyramid level that delivers a Gaussian of `sigma` device px. Level L of a pyramid whose level 0 has `texel`
+// device px and delivers `sigma0` reads as variance sigma0^2 + (5/12) texel^2 (4^L - 1): each [1 3 3 1] mip hop adds
+// 3/4 of its source texel squared, the bilinear read 1/6 of its own. Trilinear mixes variances, so the fraction is
+// linear in variance between whole levels (Core/Glass.Pipeline.ts states the same).
+float GlassPyramidLevel(float sigma, float texel, float sigma0) {
+    float q = (sigma * sigma - sigma0 * sigma0) / (0.41666667 * texel * texel) + 1.0;
+    if (q <= 1.0) return 0.0;
+    float whole = floor(0.5 * log2(q));
+    float p = exp2(2.0 * whole);
+    return whole + (q - p) / (3.0 * p);
+}
+
 // QuartzCore's set_ycc_composite without its fill: BT.709 luma remapped to (white - black) Y + black, chroma
 // scaled by `saturation`.
 vec3 GlassYcc(vec3 c, float white, float black, float saturation) {

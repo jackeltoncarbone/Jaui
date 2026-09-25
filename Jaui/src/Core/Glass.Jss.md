@@ -19,7 +19,7 @@ Status column:
 | size class 0 / 1 / 2 (2) | `GlassSize: Auto \| 0 \| 1 \| 2` | size class 0 laws only | missing |
 | S, u, v (2) | derived, not authored | `JivGlassSpan`, `GlassSizeRamps` | matches |
 | inner / outer lens (3.1) | `GlassRefraction: Auto \| Inner(<amount>, <height>) Outer(<amount>, <height>) Opacity(<n>)` | `GlassInnerShift`, the outer shift in `Jiv.Panel.frag`, lane 39 `Refraction` as a multiplier | matches the laws; `Refraction` as a free multiplier is ours only |
-| blur radius and ramp (3.2) | `GlassBlur: Auto \| <pt>`, built | `GlassBlurRadius`, `GlassBodyLod`; an authored value rides lane 46 above the dispersion in sixteenths of a point (0 is Auto) | matches the radius; we read a native pyramid mapped to Apple's LOD (`GLASS_TEXEL_SIGMA_*`, fitted), since we never render below native. The pyramid's level 0 is built at a power-of-two downsample, so the delivered blur moves in steps: at 2x and 3x, 8 to 10.7 pt all read alike |
+| blur radius and ramp (3.2) | `GlassBlur: Auto \| <pt>`, built | `GlassBlurRadius`, `GlassBodyLod`; an authored value rides lane 46 above the dispersion in sixteenths of a point (0 is Auto) | matches: Apple's LOD names a Gaussian (`GLASS_TEXEL_SIGMA_*` x its texel, fitted 0.62, Apple's own x1.6 read back), and each read finds the level of whatever pyramid it gets that delivers it (`GlassPyramidLevel`, from the level-0 texel and sigma the build records on its region), since we never render below native. Measured: 11.6 px at 3x on large glass (law 11.9, Apple 10.7 to 11.8), 4.9 on a 62 pt bar (Apple 5.0 to 5.3) |
 | face matrix (3.3) | `GlassFace: Auto \| Ycc(<white>, <black>, <saturation>, <fill>)` | the face table in `Glass.md` (fitted) | differs: fitted to SwiftUI and iOS captures, not the recipe's [C] numbers (the recipe's numbers rendered 58 levels off SwiftUI regular); to settle in phase 2 |
 | thin-glass luma tracking (3.3) | derived | the probe (`u_ShadowState`, 56 pt gate) | differs: Apple's law is now [C] (LiquidGlass.md 3.3): a hysteresis switch between the regular light and dark faces, gated at 64 pt; ours blends a fitted face by the mean. No JSS option yet |
 | edge bleed (3.4) | `GlassBleed: Auto \| None` | shader | matches |
@@ -103,7 +103,7 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 | row side padding | 28 [C] | 10 | −18 |
 | section insets | 10 top and bottom [C] | 4 / 6 | −6 / −4 |
 | highlight | radius 24, insets 10 / 2 [C] | radius 8 | differs |
-| blur | regular glass, BlurRadius 4 pt [C]; the page behind reads σ 3.6 pt on Apple's frames [I] | `JwiftMenuGlass`, `GlassBlur: 9pt` (σ 3.1 pt); Auto read 1.5 pt | −0.5 pt σ |
+| blur | regular glass, BlurRadius 4 pt [C]; the page behind reads σ 3.6 pt on Apple's frames [I] | `JwiftGlass`, Auto: σ 3.9 pt at the centre, 2.8 pt a quarter in | 0 within Apple's spread |
 | flex | variant 5, Menu [C] | `Flex: Menu` exists (glow only, the pulse not ported); the open dropdown wears `Flex: None` (Jack: an open menu is inert) | differs |
 
 ### Search field (TextInput.jss `Jwift_Field_Glass`)

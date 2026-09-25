@@ -57,11 +57,15 @@ export interface BackdropRegion {
    *  progressive blur's cubic B-spline) need the pyramid's own resolution, not the canvas's. */
   readonly TexelsX: number;
   readonly TexelsY: number;
+  /** What level 0 holds: its texel in device px and the Gaussian sigma it delivers in device px. Glass reads
+   *  its levels through these (Core/Glass.Pipeline.ts, GlassPyramidLevel). */
+  readonly Texel: number;
+  readonly Sigma: number;
 }
 
 /** A full-canvas pyramid: screen UV addresses it unchanged. */
 export const BACKDROP_REGION_FULL: BackdropRegion =
-  { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: 0, TexelsY: 0 };
+  { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: 0, TexelsY: 0, Texel: 1, Sigma: 0 };
 
 export interface GpuBufferHandle {
   readonly _brand: 'GpuBufferHandle';

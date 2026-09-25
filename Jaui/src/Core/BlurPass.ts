@@ -6,7 +6,7 @@ import type { PassTimers } from './Pass.Timers';
 import { JTrace } from '../Diagnostics/Jaui.Trace';
 import {
   GAUSS_MAX_FETCHES, GaussianKernelWith, RadiusForFetches, PlanSeparable, PlanSeparableTargets,
-  ChainCost, type GaussianKernel, type SeparablePlan, type SeparableRequest,
+  ChainCost, ChainDeliveredSigma, type GaussianKernel, type SeparablePlan, type SeparableRequest,
 } from './Blur.Separable';
 
 export { GAUSS_MAX_FETCHES, type GaussianKernel };
@@ -1615,7 +1615,7 @@ export class BlurPass {
         ...NO_BUILD, Plan: 'root', Passes: 1, Fill: rect.W * rect.H, Reads: rect.W * rect.H,
       };
       this._lastDepth = 0;
-      this._lastRegion = this._region(rect, scaleX, scaleY);
+      this._lastRegion = this._region(rect, scaleX, scaleY, 0);
       return this._levels[0].Texture;
     }
 
@@ -1804,7 +1804,7 @@ export class BlurPass {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._target('default');
     if (timedUp) this.Timers!.End();
-    this._lastRegion = this._region(rect, scaleX, scaleY);
+    this._lastRegion = this._region(rect, scaleX, scaleY, ChainDeliveredSigma(k, depth, tapOffset));
 
     return this._levels[0].Texture;
   };
@@ -1911,7 +1911,7 @@ export class BlurPass {
       SigmaTarget: plan.Sigma, SigmaResidual: plan.Sigma, Fetches: k.Fetches,
       Fill: cost.Fill, Reads: cost.Reads,
     };
-    this._lastRegion = this._region(rect, scaleX, scaleY);
+    this._lastRegion = this._region(rect, scaleX, scaleY, plan.Sigma);
     return this._levels[0].Texture;
   };
 
@@ -2033,7 +2033,7 @@ export class BlurPass {
     };
     // The chain's screen rect, grown to `bw * k x bh * k` so the map lands on base texel centres.
     const ext: RegionRect = { X: rect.X, YBottom: rect.YBottom, W: tg.Wk, H: tg.Hk, Full: false };
-    this._lastRegion = this._region(ext, width / tg.Wk, height / tg.Hk);
+    this._lastRegion = this._region(ext, width / tg.Wk, height / tg.Hk, plan.SigmaTarget);
     return this._levels[0].Texture;
   };
 
@@ -2180,7 +2180,8 @@ export class BlurPass {
     // get a sensible answer for any of them. It is set to the atlas's own full extent so a reader
     // that does gets the TEXTURE's shape rather than the last slot's, which would be a wrong map
     // wearing a plausible one's shape.
-    this._lastRegion = { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: atlasW, TexelsY: atlasH };
+    const sigma = ChainDeliveredSigma(1, depth, tapOffset);
+    this._lastRegion = { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: atlasW, TexelsY: atlasH, Texel: 1, Sigma: sigma };
 
     const regions: BackdropRegion[] = [];
     for (const m of members) {
@@ -2197,6 +2198,8 @@ export class BlurPass {
         OffsetY: (m.Slot.YBottom - m.Rect.YBottom) / atlasH,
         TexelsX: atlasW,
         TexelsY: atlasH,
+        Texel: 1,
+        Sigma: sigma,
       });
     }
     return { Texture: this._levels[0].Texture, Regions: regions };
@@ -2981,10 +2984,12 @@ export class BlurPass {
     this._gl.uniform4f(loc, rect.X / srcW, rect.YBottom / srcH, rect.W / srcW, rect.H / srcH);
   };
 
-  private _region = (rect: RegionRect, scaleX: number, scaleY: number): BackdropRegion => {
+  /** `sigma` is the Gaussian level 0 delivers, device px; its texel is the rect's width over level 0's. */
+  private _region = (rect: RegionRect, scaleX: number, scaleY: number, sigma: number): BackdropRegion => {
     const texels = this._levels[0];
+    const texel = rect.W / texels.Width;
     if (rect.Full) {
-      return { ...BACKDROP_REGION_FULL, TexelsX: texels.Width, TexelsY: texels.Height };
+      return { ...BACKDROP_REGION_FULL, TexelsX: texels.Width, TexelsY: texels.Height, Texel: texel, Sigma: sigma };
     }
     return {
       ScaleX: scaleX,
@@ -2993,6 +2998,8 @@ export class BlurPass {
       OffsetY: -rect.YBottom / rect.H,
       TexelsX: texels.Width,
       TexelsY: texels.Height,
+      Texel: texel,
+      Sigma: sigma,
     };
   };
 

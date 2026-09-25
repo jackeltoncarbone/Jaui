@@ -78,13 +78,13 @@ describe('blur-mips > the mip stack of a separable build is built from that buil
 });
 
 describe('blur-mips > the walk`s admission rule and its control arm (source)', () => {
-  it('a mip consumer takes the plan up to ONE LOD, and never on the Gaussian arm', () => {
+  it('a mip consumer takes the plan up to ONE LOD (glass at any depth), and never on the Gaussian arm', () => {
     expect(JAUI).toContain('const SEPARABLE_MIP_MAX_LOD = 1;');
     expect(JAUI).toContain(`  private _maySeparable = (plan: GlassBlurPlan): boolean =>
     plan.MaxLod === 0
       ? this._glassGaussian !== 'off' || this._blurSeparable
       : this._blurSeparable && this._glassGaussian === 'off' && this._blurSeparableMips
-        && plan.MaxLod <= SEPARABLE_MIP_MAX_LOD;`);
+        && (plan.Glass || plan.MaxLod <= SEPARABLE_MIP_MAX_LOD);`);
   });
 
   it('DEFAULT separable; `?blur-mips=chain` is the control; anything else throws by name', () => {

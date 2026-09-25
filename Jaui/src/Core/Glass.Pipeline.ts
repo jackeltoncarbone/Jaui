@@ -33,17 +33,32 @@ export const GlassAppleLod = (radiusPt: number, dpr: number, variant: GlassVaria
 };
 
 /**
- * THE MAPPING TO OUR NATIVE PYRAMID. Apple samples a quarter (clear: half) resolution texture at a mip
- * LOD; we never render below native, so we sample our own native pyramid at the LOD with the same blur.
- * Apple's level L holds texels 2^L / backdropScale device px wide; a texel reads as a Gaussian of
- * a share of its width. Our LOD n is a Gaussian of 2^n device px, so n = L + log2(share / backdropScale). The
- * shares are fitted per backdrop scale to SwiftUI's own render of the same inputs (the detail left in the body:
- * 0.62 for the quarter-scale regular backdrop, 0.28 for clear's half scale), not read from Apple.
+ * THE BLUR APPLE'S LOD DELIVERS. Apple samples a quarter (clear: half) resolution texture at a mip LOD; we
+ * never render below native, so we read our own pyramid at the Gaussian that LOD delivers. Apple's level L
+ * holds texels 2^L / backdropScale device px wide; a texel reads as a Gaussian of a share of its width. Our
+ * LOD n names a Gaussian of 2^n device px, so n = L + log2(share / backdropScale), and GlassPyramidLevel finds
+ * the level of the pyramid at hand that delivers it. The shares are fitted per backdrop scale to SwiftUI's own
+ * render of the same inputs (0.62 for the quarter-scale regular backdrop, 0.28 for clear's half scale); the
+ * regular one is Apple's own x1.6 read back (1 / 1.6 = 0.625), which makes BlurRadius the sigma in points.
  */
 export const GLASS_TEXEL_SIGMA_REGULAR = 0.62;
 export const GLASS_TEXEL_SIGMA_CLEAR = 0.28;
 export const GlassNativeLod = (appleLod: number, variant: GlassVariant): number =>
   appleLod + Math.log2((variant === 'Clear' ? GLASS_TEXEL_SIGMA_CLEAR : GLASS_TEXEL_SIGMA_REGULAR) / GlassBackdropScale(variant));
+
+/**
+ * The level of a pyramid that delivers a Gaussian of `sigma` device px, fractional as trilinear reads it. Level 0
+ * has `texel` device px and delivers `sigma0`; each MIP hop, a [1 3 3 1] binomial, adds 3/4 of its source texel
+ * squared and the bilinear read 1/6 of its own, so level L reads as variance sigma0^2 + (5/12) texel^2 (4^L - 1)
+ * (exact to 0.05 px against the passes' own 1D operators). Glass.Pipeline.glsl states the same.
+ */
+export const GlassPyramidLevel = (sigma: number, texel: number, sigma0: number): number => {
+  const q = (sigma * sigma - sigma0 * sigma0) / ((5 / 12) * texel * texel) + 1;
+  if (q <= 1) return 0;
+  const whole = Math.floor(0.5 * Math.log2(q));
+  const p = Math.pow(4, whole);
+  return whole + (q - p) / (3 * p);
+};
 
 /** The body's LOD at blur scale `k` (0.5 at the edge ramp's floor, 1 in the body), on our pyramid. */
 export const GlassBodyLod = (span: number, k: number, dpr: number, variant: GlassVariant, authored: number = 0): number =>
@@ -81,10 +96,11 @@ export const GlassShadowPeak = (span: number, clear: number, lens: boolean = fal
 };
 
 /**
- * The pyramid a glass surface needs, in our LOD units: built at its sharpest read (the outer sample at
- * half radius; an active lens's BackdropView, the backdrop layer's capture with no blur [C]) and deep enough
- * for its deepest (the body at full radius; the bleed and the colored shadow on large glass). `Reach` is how
- * far past the face, in points, any of its reads can land.
+ * The pyramid a glass surface needs: built at its sharpest read (the outer sample at half radius; an active lens's
+ * BackdropView, the backdrop layer's capture with no blur [C]), `BaseLod` in our LOD units, and `MaxLod` levels deep
+ * for its deepest (the body at full radius; the bleed and the colored shadow on large glass), taken at a native
+ * level 0 with no blur of its own, the deepest any build needs. `Reach` is how far past the face, in points, any of
+ * its reads can land.
  */
 export interface GlassBlurNeeds {
   BaseLod: number;
@@ -106,5 +122,5 @@ export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVarian
     reach = Math.max(reach, 0.35 * span + 3 * sigmaPt(bleed),
       2 * GlassShadowRadius(span) + GLASS_SHADOW_OFFSET_Y + GlassShadowAmount(span) + 3 * sigmaPt(shadow));
   }
-  return { BaseLod: base, MaxLod: Math.max(1, Math.ceil(top - base)), ReachPt: reach };
+  return { BaseLod: base, MaxLod: Math.max(1, Math.ceil(GlassPyramidLevel(Math.pow(2, top), 1, 0))), ReachPt: reach };
 };

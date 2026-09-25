@@ -94,7 +94,7 @@ const ABLATE_FRAMES = 12;
 const ABLATE_IDLE_MS = 250;
 /** `?blur-mips=separable`: the deepest LOD a mip consumer may read and still take the separable plan.
  *  One LOD, because past it a re-based (`k > 1`) level 0 moves the picture rather than the rounding --
- *  see `_maySeparable`. */
+ *  see `_maySeparable`. Glass is exempt: it reads its levels by what they hold. */
 const SEPARABLE_MIP_MAX_LOD = 1;
 
 /** The frost LOD an INSTANCE carries, from `JivFrostCssPx`. Mirror of Jiv.InstanceBuffer (`data[offset + 35]`). */
@@ -490,6 +490,8 @@ interface GlassBlurPlan {
   /** Whether the backdrop probe runs for this surface: an adaptive shadow or adaptive glass reads it
    *  (it deepens `MaxLod`). */
   AdaptiveShadow: boolean;
+  /** A glass surface: its reads find their own level of whatever pyramid it gets (Glass.Pipeline.ts, GlassPyramidLevel). */
+  Glass: boolean;
   /** `JivFrostCssPx` floored at one device pixel — what the margin and the radius are built from. */
   FrostCssPx: number;
 }
@@ -5774,6 +5776,7 @@ export class Canvas implements DirtyTracker {
       InstFrostLod: instFrostLod,
       Px: px, Py: py, Pw: pw, Ph: ph, Margin: margin, TapReach: tapReach,
       AdaptiveShadow: adaptiveShadow,
+      Glass: glass !== null,
       FrostCssPx: frostCssPx,
     };
   };
@@ -6436,7 +6439,7 @@ export class Canvas implements DirtyTracker {
     plan.MaxLod === 0
       ? this._glassGaussian !== 'off' || this._blurSeparable
       : this._blurSeparable && this._glassGaussian === 'off' && this._blurSeparableMips
-        && plan.MaxLod <= SEPARABLE_MIP_MAX_LOD;
+        && (plan.Glass || plan.MaxLod <= SEPARABLE_MIP_MAX_LOD);
 
   /** Issue ONE per-surface build: the walk's two calls, and the pool bookkeeping. This is the
    *  path `?blur-first`, `?blur-phased` and every atlas REFUSAL take, and it is the engine as it
