@@ -1,4 +1,5 @@
 import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop, GlassKind } from '../Jiv/Jiv.Types';
+import { LAYER_TOP } from '../Jiv/Jiv.Types';
 import { ParseProgressiveBlur } from '../ProgressiveBlur/ProgressiveBlur.Stops';
 import type { ResolveContext } from './Length';
 import { Resolve, ResolveTernary, ResolveVars } from './Length';
@@ -405,7 +406,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
 
     Opacity: Resolve(s.Opacity, ctx, 'W'),
 
-    Layer: Resolve(s.Layer, ctx, 'W'),
+    Layer: s.Layer === 'Top' ? LAYER_TOP : Resolve(s.Layer, ctx, 'W'),
   };
 };
 

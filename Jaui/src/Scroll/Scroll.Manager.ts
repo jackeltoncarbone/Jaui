@@ -10,6 +10,7 @@ import {
   type ReleaseSample,
 } from './Scroll.Release';
 import { JTrace, JauiTracing, JMs } from '../Diagnostics/Jaui.Trace';
+import { LAYER_TOP } from '../Jiv/Jiv.Types';
 
 /**
  * Scroll physics for Overflow:Scroll Jivs. Two behaviors share the same state:
@@ -103,6 +104,10 @@ export class ScrollManager implements Animatable {
   AutoScrollSpeed = 0;
   /** Seconds to dwell at each end before restarting — gives the loop a beat. */
   private _autoHoldSec = 1.2;
+
+  /** Set by the render walk on a frame that painted a `Layer: Top` subtree, so the hit test only
+   *  looks for them while one is up. */
+  TopLayerPresent = false;
 
   constructor(private _root: Jiv) {}
 
@@ -438,7 +443,47 @@ export class ScrollManager implements Animatable {
   /** Topmost Jiv at (cssX, cssY) — respects Visible + PointerEvents. Shared
    *  by scroll, interaction-state tracking, and (soon) focus/click. */
   HitTopmost = (cssX: number, cssY: number): Jiv | null => {
+    // `Layer: Top` subtrees paint after the whole tree, so they take the pointer first, last painted first.
+    if (this.TopLayerPresent) {
+      const tops: { N: Jiv; M: Mat2x3 }[] = [];
+      this._collectTopLayer(this._root, MAT_IDENTITY, tops);
+      for (let i = tops.length - 1; i >= 0; i--) {
+        const hit = this._hitTopmost(tops[i].N, cssX, cssY, tops[i].M);
+        if (hit) return hit;
+      }
+    }
     return this._hitTopmost(this._root, cssX, cssY, MAT_IDENTITY);
+  };
+
+  /** Every visible `Layer: Top` node in paint order, each with the parent frame `_hitTopmost` takes.
+   *  Ignores clips: a top-layer subtree is outside all of them. */
+  private _collectTopLayer = (node: Jiv, m: Mat2x3, out: { N: Jiv; M: Mat2x3 }[]): void => {
+    if (!node.Visible) return;
+    const eff = this._rotated(node, m);
+    const childM = node.Overflow === 'Scroll' ? matMul(eff, [1, 0, 0, 1, -node.ScrollX, -node.ScrollY]) : eff;
+    for (const c of this._paintOrder(node.Children as Jiv[])) {
+      const cm = c.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll' ? eff : childM;
+      if (c.RenderStyle.Layer >= LAYER_TOP && c.Visible) out.push({ N: c, M: cm });
+      this._collectTopLayer(c, cm, out);
+    }
+  };
+
+  /** Children in paint order: Layer ascending, tree order breaking ties. */
+  private _paintOrder = (children: Jiv[]): Jiv[] => {
+    for (let i = 0; i < children.length; i++) {
+      if (children[i].RenderStyle.Layer !== 0) return [...children].sort((a, b) => a.RenderStyle.Layer - b.RenderStyle.Layer);
+    }
+    return children;
+  };
+
+  /** `m` with the node's own rotation about its Transform origin, exactly as renderNode composes it. */
+  private _rotated = (node: Jiv, m: Mat2x3): Mat2x3 => {
+    const rotDeg = node.RenderStyle.Transform.Rotation;
+    if (rotDeg === 0) return m;
+    const th = rotDeg * (Math.PI / 180), rc = Math.cos(th), rs = Math.sin(th);
+    const rpx = node.X + node.Width * node.RenderStyle.Transform.OriginX;
+    const rpy = node.Y + node.Height * node.RenderStyle.Transform.OriginY;
+    return matMul(m, [rc, rs, -rs, rc, rpx * (1 - rc) + rpy * rs, rpy * (1 - rc) - rpx * rs]);
   };
 
   Tick = (dt: number): boolean => {
@@ -622,14 +667,7 @@ export class ScrollManager implements Animatable {
     // Visual* is intentionally NOT applied here — the legacy hit-test ignored
     // VisualScale/Translate, and preserving that keeps a VisualScale'd node
     // hit-testable at its layout box (paint/hit already diverged under Visual*).
-    let eff = m;
-    const rotDeg = node.RenderStyle.Transform.Rotation;
-    if (rotDeg !== 0) {
-      const th = rotDeg * (Math.PI / 180), rc = Math.cos(th), rs = Math.sin(th);
-      const rpx = node.X + node.Width * node.RenderStyle.Transform.OriginX;
-      const rpy = node.Y + node.Height * node.RenderStyle.Transform.OriginY;
-      eff = matMul(eff, [rc, rs, -rs, rc, rpx * (1 - rc) + rpy * rs, rpy * (1 - rc) - rpx * rs]);
-    }
+    const eff = this._rotated(node, m);
 
     // Invert eff to map the canvas pointer into this node's local (node.X/Y)
     // frame. node.X/Y are ROOT-ABSOLUTE, so containment tests them directly.
@@ -675,6 +713,7 @@ export class ScrollManager implements Animatable {
       });
       for (let i = 0; i < decorated.length; i++) {
         const c = decorated[i].c;
+        if (c.RenderStyle.Layer >= LAYER_TOP) continue;
         const m = c.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll' ? eff : childM;
         const hit = this._hitTopmost(c, px, py, m);
         if (hit) return hit;

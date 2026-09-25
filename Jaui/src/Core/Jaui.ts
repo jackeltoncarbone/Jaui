@@ -66,6 +66,7 @@ import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICK
 import { ImageCache } from '../Image/Image.Cache';
 import { BrowserPlatform, type Platform } from './Platform';
 import type { MaterialType } from '../Jiv/Jiv.Types';
+import { LAYER_TOP } from '../Jiv/Jiv.Types';
 import { SetPredicateViewport } from '../Jss/Jss.Predicate';
 
 /** True for glass panel materials (LiquidGlass, SolidGlass). Other non-None
@@ -449,7 +450,8 @@ import { InputRouter } from './Input/InputRouter';
 interface PerspCtx { D: number; Ox: number; Oy: number }
 /** A subtree deferred by a live teleport, with the frame it was deferred FROM. */
 interface TeleportDefer { N: Jiv; M: Mat2x3; MH: Mat3x3 | null; P: PerspCtx | null }
-interface TeleportScope { Deferred: TeleportDefer[]; Stack: ClipStack }
+/** `Top` is the frame's root scope, where `Layer: Top` subtrees defer to; absent on a root scope itself. */
+interface TeleportScope { Deferred: TeleportDefer[]; Stack: ClipStack; Top?: TeleportScope }
 
 /** Everything one glass surface's pyramid build needs, resolved from the node's world transform
  *  and the clip stack. The two sites that build one (the glass FILL and the glass rim OVERLAY)
@@ -2020,7 +2022,9 @@ export class Canvas implements DirtyTracker {
       || _isGlass(s.Material) || s.Material === 'ProgressiveBlur'
       || _hasBackdropFilter(node)
       || VibrancyIsActive(s.BackdropVibrancy, s.BackdropVibrancyCover) || VibrancyTouchesInk(s, node.EffectiveVibrancy)
-      || (s.RimStrength > 0 && s.RimWidth > 0 && s.Background.Color.A < 0.999);
+      || (s.RimStrength > 0 && s.RimWidth > 0 && s.Background.Color.A < 0.999)
+      // A top-layer subtree paints outside its ancestors, so no ancestor's capture can hold it.
+      || s.Layer >= LAYER_TOP;
     if (!dyn) {
       const kids = node.Children as Jiv[];
       for (let i = 0; i < kids.length; i++) {
@@ -3101,12 +3105,18 @@ export class Canvas implements DirtyTracker {
         const pin = child.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll';
         const cM = pin ? eff : childM;
         const cMH = pin ? effH : childMH;
+        // `Layer: Top` escapes every ancestor: deferred to the frame's root scope and replayed clip-free.
+        if (child.RenderStyle.Layer >= LAYER_TOP) {
+          (scope.Top ?? scope).Deferred.push({ N: child, M: cM, MH: cMH, P: persp });
+          this._scrollManager.TopLayerPresent = true;
+          continue;
+        }
         if (child.TeleportSeq !== 0) {
           scope.Deferred.push({ N: child, M: cM, MH: cMH, P: persp });
           continue;
         }
         if (child.RenderStyle.Layer !== 0) {
-          const childScope: TeleportScope = { Deferred: [], Stack: clip };
+          const childScope: TeleportScope = { Deferred: [], Stack: clip, Top: scope.Top ?? scope };
           // A teleported descendant deferred into THIS layered scope is painted with
           // `childScope.Stack` — the clip ABOVE this node — so a card flying home stays
           // WHOLE during the flight: it is not sheared by the box it is flying INTO, even a
@@ -4278,6 +4288,8 @@ export class Canvas implements DirtyTracker {
     this._vibrancyStats.PanelBatches = 0;
     this._vibrancyStats.Refused = {};
     const rootScope: TeleportScope = { Deferred: [], Stack: EmptyClipStack };
+    // Re-found by the walk below; the hit test looks for top-layer subtrees only while one painted.
+    this._scrollManager.TopLayerPresent = false;
     if (this._phasedWalk && !this._diagNoUi) {
       // THE PHASED COMPOSITION, run for `?blur-phased` and for the DEFAULT `?pyramid-atlas` alike
       // -- one traversal shape, so the two arms differ in the atlas and in nothing else and the
@@ -5678,7 +5690,7 @@ export class Canvas implements DirtyTracker {
     if (n.Overflow !== 'Visible' && inside) return false;
     const childM = this._descendOffset(n, own);
     for (const c of n.Children as Jiv[]) {
-      if (c.TeleportSeq !== 0) continue;
+      if (c.TeleportSeq !== 0 || c.RenderStyle.Layer >= LAYER_TOP) continue;
       const cm = c.ChildLayout.Position === 'Pinned' && n.Overflow === 'Scroll' ? own : childM;
       if (this._reachesRimBand(glass, c, cm, inset, budget)) return true;
     }
@@ -6325,6 +6337,10 @@ export class Canvas implements DirtyTracker {
       const pin = child.ChildLayout.Position === 'Pinned' && node.Overflow === 'Scroll';
       const cM = pin ? eff : childM;
       const cMH = pin ? effH : childMH;
+      if (child.RenderStyle.Layer >= LAYER_TOP) {
+        (scope.Top ?? scope).Deferred.push({ N: child, M: cM, MH: cMH, P: persp });
+        continue;
+      }
       if (child.TeleportSeq !== 0) {
         scope.Deferred.push({ N: child, M: cM, MH: cMH, P: persp });
         continue;
@@ -6334,7 +6350,7 @@ export class Canvas implements DirtyTracker {
       // overwrote it. Only the scan reads it, so an unflagged pre-pass does not carry the write.
       if (this._glassGroupScan !== null) this._glassGroupParent = node;
       if (child.RenderStyle.Layer !== 0) {
-        const childScope: TeleportScope = { Deferred: [], Stack: clip };
+        const childScope: TeleportScope = { Deferred: [], Stack: clip, Top: scope.Top ?? scope };
         this._blurFirstNode(child, cM, clip, childScope, cMH, persp, w, h);
         this._blurFirstReplay(childScope, w, h);
         continue;

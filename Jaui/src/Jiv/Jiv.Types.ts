@@ -329,9 +329,16 @@ export interface JivStyle {
   /** Sibling stacking order. Higher = paints on top. Default `0`.
    *  Ties break by tree order (later sibling wins), just like the no-Layer
    *  case. Layer is *sibling-local* — a child's Layer does not escape its
-   *  parent, same as CSS z-index within a stacking context. */
+   *  parent, same as CSS z-index within a stacking context.
+   *
+   *  `Top` is the one exception: the web's top layer (popover, dialog). The
+   *  subtree keeps its layout but paints and hit-tests after the whole tree,
+   *  outside every ancestor's stacking and clip. An open menu is the case. */
   Layer: string;
 }
+
+/** `Layer: Top` resolved. Finite so a sibling sort by subtraction stays a number. */
+export const LAYER_TOP = 1e9;
 
 /**
  * Fully resolved version of JivStyle — every authored string is parsed and
