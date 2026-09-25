@@ -4070,16 +4070,10 @@ export class Canvas implements DirtyTracker {
       const scope: TeleportScope = { Deferred: [], Stack: stack };
       this._capturing = true;
       this._liftingTwins = true;
-      // Each item scaled about its own centre as the lens lifts (UIKit's selected twins, LensLiftedScale). The twins
-      // are the lens's portal, which takes the bar's model transform and not its flex swell (a presentation
-      // modifier), so the bar's own VisualScale is taken back out of their matrix.
+      // Each item scaled about its own centre as the lens lifts (UIKit's selected twins, LensLiftedScale), in the bar's
+      // matrix, its pressed swell included: Apple's lensed items read 1.16 against the swollen bar's own and 1.21
+      // against the resting one (MacStories release capture), so the portal carries the swell.
       const scale = 1 + (lens.RenderStyle.LensLiftedScale - 1) * lens.RenderStyle.Lens;
-      const bs = bar.RenderStyle;
-      const sx = bs.VisualScaleX, sy = bs.VisualScaleY;
-      const px = bar.X + bar.Width * bs.VisualOriginX, py = bar.Y + bar.Height * bs.VisualOriginY;
-      const unswell: Mat2x3 = [1 / sx, 0, 0, 1 / sy, -(px * (1 - sx) + bs.VisualTranslateX) / sx, -(py * (1 - sy) + bs.VisualTranslateY) / sy];
-      const mTwin = matMul(m, unswell);
-      const mhTwin = mh !== null ? mat3Mul(mh, mat3FromAffine(unswell)) : null;
       let drawn = 0;
       const skipped: string[] = [];
       const twins: Jiv[] = [];
@@ -4094,8 +4088,8 @@ export class Canvas implements DirtyTracker {
         if (this._lensTrace) twins.push(item);
         const cx = item.X + item.Width * 0.5, cy = item.Y + item.Height * 0.5;
         const lift: Mat2x3 = [scale, 0, 0, scale, cx * (1 - scale), cy * (1 - scale)];
-        renderNode(item, matMul(mTwin, lift), this._childClip(bar, stack, boxClip, item), scope,
-          mhTwin !== null ? mat3Mul(mhTwin, mat3FromAffine(lift)) : null, persp);
+        renderNode(item, matMul(m, lift), this._childClip(bar, stack, boxClip, item), scope,
+          mh !== null ? mat3Mul(mh, mat3FromAffine(lift)) : null, persp);
       }
       replayScope(scope);
       flushPanels();
@@ -4111,8 +4105,8 @@ export class Canvas implements DirtyTracker {
         const rows = twins.map((item) => {
           const cx = item.X + item.Width * 0.5, cy = item.Y + item.Height * 0.5;
           const read = (dy: number): string => {
-            const X = Math.round(matApplyX(mTwin, cx, cy + dy) * this._dpr);
-            const Y = Math.round(matApplyY(mTwin, cx, cy + dy) * this._dpr);
+            const X = Math.round(matApplyX(m, cx, cy + dy) * this._dpr);
+            const Y = Math.round(matApplyY(m, cx, cy + dy) * this._dpr);
             cgl.readPixels(X - 6, h - 1 - Y - 6, 12, 12, cgl.RGBA, cgl.UNSIGNED_BYTE, px);
             let peak = 0;
             for (let i = 3; i < px.length; i += 4) peak = Math.max(peak, px[i]);
@@ -4124,7 +4118,7 @@ export class Canvas implements DirtyTracker {
         });
         console.info(`[lens-trace] #${this._lensTraceCount + 1} twin readback: ${rows.join(' | ')}`);
       }
-      trace(`twins: ${drawn} drawn at scale ${scale.toFixed(3)} under lens layer ${lens.RenderStyle.Layer}, swell ${sx.toFixed(3)} x ${sy.toFixed(3)}; target tex ${this._lensTraceTexId(fbo.Texture)} gen ${this._lensTraceGen} ${w} x ${h}${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}`);
+      trace(`twins: ${drawn} drawn at scale ${scale.toFixed(3)} under lens layer ${lens.RenderStyle.Layer}; target tex ${this._lensTraceTexId(fbo.Texture)} gen ${this._lensTraceGen} ${w} x ${h}${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}`);
       flushW = savedW; flushH = savedH;
       this._renderer.RebindSceneTarget();
       return this._renderer.WrapTexture(fbo.Texture);
