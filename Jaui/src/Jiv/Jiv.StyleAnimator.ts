@@ -10,6 +10,7 @@ import type { Jiv } from './Jiv';
 import type { JivStyle, JivRenderStyle } from './Jiv.Types';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { CascadeEpoch } from '../Core/Cascade.Epoch';
+import { GlassIsActiveLens } from '../Core/Glass.Pipeline';
 import type { VibrancyDeclaration } from '../Core/Vibrancy';
 
 /**
@@ -415,6 +416,7 @@ export class JivStyleAnimator implements Animatable {
     }
     const target = ResolveStyle(patched, this._ctx());
     const render = this._jiv.RenderStyle;
+    const heldLayer = render.Layer;
     _copyNonAnimated(render, target);
     let springActive = false;
     for (let i = 0; i < BINDINGS.length; i++) {
@@ -457,6 +459,12 @@ export class JivStyleAnimator implements Animatable {
     }
     // The CPU plans the backdrop for Regular until the glass is wholly clear.
     render.GlassVariant = render.GlassClear >= 0.999 ? 'Clear' : 'Regular';
+    // A lens changes layer only while it lenses: over its siblings exactly while it draws their lifted twins, under
+    // them otherwise, so no frame covers an item with glass that no longer holds it.
+    if (render.Layer !== heldLayer && (target.Lens > 0 || render.Lens > 0)) {
+      const lifted = GlassIsActiveLens(render.Lens, render.Material);
+      render.Layer = lifted ? Math.max(render.Layer, heldLayer) : Math.min(render.Layer, heldLayer);
+    }
 
     const flexActive = this._composeFlex(dt);
     _noteCascadeInputs(render);

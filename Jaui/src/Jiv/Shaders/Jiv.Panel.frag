@@ -484,7 +484,9 @@ vec3 GlassActiveLens(float d, vec2 n, float lens, float light, float amount, flo
     vec3 lensed = sum * vec3(0.5, 1.0 / 3.0, 0.5) * (alpha / 7.0);
     lensContent(base, dpr, ease, inkPacked, itemCover);
     itemCover *= amount;
-    return mix(lensContent(v_PixelPos, dpr, 0.0, 0.0, cover).rgb, lensed, edge * amount);
+    // The unlensed read is the same portal, so it keeps the selection's ink: without it a fading lens washes its twins
+    // back to their raw ink, which is white for a vibrant label and vanishes on light glass.
+    return mix(lensContent(v_PixelPos, dpr, 0.0, inkPacked, cover).rgb, lensed, edge * amount);
 }
 
 // Sample the backdrop at this Jiv's frost. A Jiv that authored no frost samples the raw scene

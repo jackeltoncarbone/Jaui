@@ -18,7 +18,7 @@ import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
-import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassIsLens } from './Glass.Pipeline';
+import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassIsLens, GlassIsActiveLens } from './Glass.Pipeline';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
   Vibrancy, VibrancyBlendOf, VibrancyGateLine, VibrancyGraded, VibrancyInkScale, VibrancyIsActive,
@@ -5724,7 +5724,7 @@ export class Canvas implements DirtyTracker {
   private _activeLensChild = (node: Jiv): Jiv | null => {
     for (const child of node.Children as Jiv[]) {
       const rs = child.RenderStyle;
-      if (child.Visible && GlassIsLens(rs.Lens) && _isGlass(rs.Material)) return child;
+      if (child.Visible && GlassIsActiveLens(rs.Lens, rs.Material)) return child;
     }
     return null;
   };

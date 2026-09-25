@@ -7,7 +7,7 @@ import { ResolveLengthTuple4 } from './Length.Tuple';
 import { ParseColor } from './Color.Parse';
 import { ParseBackground } from './Background.Parse';
 import { ParseFilter, SplitTopLevelArgs } from './Filter.Parse';
-import type { VibrancyDeclaration } from './Vibrancy';
+import { InkLevelOf, type VibrancyDeclaration } from './Vibrancy';
 import type { Color } from './Types';
 import { ResolveTransform } from '../Transform/Transform.Parse';
 import type { FlexKind, FlexSettings } from './Flex';
@@ -274,7 +274,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   const fg = ParseFilter(_resolveGradeArgs(ResolveTernary(s.Filter, ctx), ctx), 'foreground');
   const backdrop = ParseFilter(_resolveGradeArgs(ResolveTernary(s.BackdropFilter, ctx), ctx));
   // The INK zone. Takes `Vibrancy()` only, through the same arg resolution as its siblings.
-  const ink = ParseFilter(_resolveGradeArgs(ResolveTernary(s.TextFilter, ctx), ctx), 'text');
+  const inkFilter = ParseFilter(_resolveGradeArgs(ResolveTernary(s.TextFilter, ctx), ctx), 'text');
+  const ink = InkLevelOf(inkFilter.Vibrancy, inkFilter.VibrancyCover);
   const frostAuto = backdrop.BlurRaw !== null && backdrop.BlurRaw.trim().toLowerCase() === 'auto';
   const resolveBlur = (raw: string | null): number =>
     (frostAuto ? AUTO_FROST_MAX : raw !== null ? Resolve(raw, ctx, 'W') : 0);
@@ -330,8 +331,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     VibrancyDeclaration: _resolveVibrancyProperty(ResolveTernary(s.Vibrancy, ctx), ctx),
     ForegroundVibrancy: fg.Vibrancy,
     ForegroundVibrancyCover: fg.VibrancyCover,
-    TextVibrancy: ink.Vibrancy,
-    TextVibrancyCover: ink.VibrancyCover,
+    TextVibrancy: ink.Amount,
+    TextVibrancyCover: ink.Cover,
     ForegroundVibrancyColor: _resolveVibrancyColor(fg.VibrancyColor, ctx),
     BackdropVibrancyColor: _resolveVibrancyColor(backdrop.VibrancyColor, ctx),
 

@@ -137,9 +137,20 @@ export const BackdropVibrancy = (rs: JivRenderStyle): VibrancyLevel =>
 export const ForegroundVibrancy = (rs: JivRenderStyle): VibrancyLevel =>
   _gated(rs.ForegroundVibrancy, rs.ForegroundVibrancyCover);
 
-/** The ink zone's level. Read from the style, not the cascade: `TextFilter` is per element. */
+/** Ordinary ink on the formula: amount 1, cover 1 is source-over. Ink without vibrancy resolves here, not to (0, 0),
+ *  which draws nothing, so a spring from a vibrant label to a plain one never passes through invisible ink. */
+export const ORDINARY_INK: VibrancyLevel = { Amount: 1, Cover: 1 };
+
+/** The ink zone's resolved level: its vibrancy, or ordinary ink when it has none. */
+export const InkLevelOf = (amount: number, cover: number): VibrancyLevel =>
+  VibrancyIsActive(amount, cover) ? { Amount: amount, Cover: cover } : ORDINARY_INK;
+
+const _isOrdinaryInk = (amount: number, cover: number): boolean =>
+  Math.abs(amount - ORDINARY_INK.Amount) <= VIBRANCY_EPSILON && Math.abs(cover - ORDINARY_INK.Cover) <= VIBRANCY_EPSILON;
+
+/** The ink zone's level, zero at ordinary ink. Read from the style, not the cascade: `TextFilter` is per element. */
 export const TextVibrancy = (rs: JivRenderStyle): VibrancyLevel =>
-  _gated(rs.TextVibrancy, rs.TextVibrancyCover);
+  _isOrdinaryInk(rs.TextVibrancy, rs.TextVibrancyCover) ? NO_LEVEL : _gated(rs.TextVibrancy, rs.TextVibrancyCover);
 
 /** A cascaded value's level, zero under the null arm. */
 export const CascadedVibrancy = (v: VibrancyValue | null): VibrancyLevel =>
@@ -160,7 +171,8 @@ export const VibrancyTouchesInk = (rs: JivRenderStyle, effective: VibrancyValue 
   if (Vibrancy.Mode === 'off') return false;
   if (effective !== null && VibrancyIsActive(effective.Amount, effective.Cover)) return true;
   if (VibrancyIsActive(rs.ForegroundVibrancy, rs.ForegroundVibrancyCover)) return true;
-  if (VibrancyIsActive(rs.TextVibrancy, rs.TextVibrancyCover)) return true;
+  const ink = TextVibrancy(rs);
+  if (VibrancyIsActive(ink.Amount, ink.Cover)) return true;
   const d = rs.VibrancyDeclaration;
   return d !== 'Inherit' && d !== 'None' && VibrancyIsActive(d.Amount, d.Cover);
 };

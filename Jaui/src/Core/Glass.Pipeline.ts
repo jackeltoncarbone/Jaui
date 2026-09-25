@@ -4,6 +4,8 @@
  * and its source is in `Core/Glass.md`.
  */
 
+import type { MaterialType } from '../Jiv/Jiv.Types';
+
 export type GlassVariant = 'Regular' | 'Clear';
 
 /** Glass this small tracks its backdrop's luma: its appearance and its face follow what is behind it. Apple's line is
@@ -64,6 +66,8 @@ export const GlassShadowAmount = (span: number): number => Math.min(0.625 * span
 
 /** The active lens: a glass whose Lens is above 0 (Glass.Pipeline.glsl, GlassActiveLens). */
 export const GlassIsLens = (lens: number): boolean => lens > 0;
+/** A lens the walk draws as one, lifted items and all: its Lens above 0 while it is still glass. */
+export const GlassIsActiveLens = (lens: number, material: MaterialType): boolean => GlassIsLens(lens) && material === 'LiquidGlass';
 /** The active lens's shadow peak: Apple's pressed tab darkens what is below it 10% at the edge (MacStories light). */
 export const GLASS_LENS_SHADOW_PEAK = 0.1;
 /** The shadow's peak alpha: opacity (0.5 - 0.25u) times its fill (black 0.12 plus SDR 0.08 + 0.16u), or
