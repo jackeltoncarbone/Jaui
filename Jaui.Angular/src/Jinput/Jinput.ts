@@ -986,13 +986,14 @@ export class Jinput implements OnDestroy {
     if (document.activeElement === input) input.blur();
   };
 
-  /** Replace the whole value with the caret at its end. A bound Text change never reaches the hidden
-   *  textarea while it is focused, so the next keystroke would bring the old value back; this does. */
-  SetText = (value: string): void => {
+  /** Replace the whole value with the caret at `caret` (its end by default). A bound Text change never reaches
+   *  the hidden textarea while it is focused, so the next keystroke would bring the old value back; this does. */
+  SetText = (value: string, caret: number = value.length): void => {
     const input = this._hiddenInput()?.nativeElement;
     if (input) {
       input.value = value;
-      input.setSelectionRange(value.length, value.length);
+      const at = Math.max(0, Math.min(value.length, Math.round(caret)));
+      input.setSelectionRange(at, at);
     }
     this.Text.set(value);
     if (this._focused()) this.syncSelection();
