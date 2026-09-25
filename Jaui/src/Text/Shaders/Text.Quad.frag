@@ -27,13 +27,16 @@ void main() {
     if (clipD > 1.0) discard;
     float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
     vec4 texel = texture(u_Atlas, v_TexCoord);
-    vec4 ink = texel * v_Tint * v_Opacity * clipAlpha;
+    // Opacity scales coverage only: the blend multiplies the colour by alpha, so opacity on rgb too would
+    // square it (light ink at 0.1 read as 0.01 on a dark ground while dark ink read 0.1 on a light one).
+    vec4 ink = texel * v_Tint * clipAlpha;
+    ink.a *= v_Opacity;
     float cover = u_VibrancyCover;
     if (u_GlassInk.x >= 0.0) {
         float light = smoothstep(0.45, 0.55, texelFetch(u_ShadowState, ivec2(int(u_GlassInk.x), 0), 0).g);
         float turn = abs(light - u_GlassInk.y);
         vec4 label = light > 0.5 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(1.0, 1.0, 1.0, 0.95);
-        ink = mix(ink, vec4(label.rgb * v_Opacity * clipAlpha, texel.a * label.a * v_Opacity * clipAlpha), turn);
+        ink = mix(ink, vec4(label.rgb * clipAlpha, texel.a * label.a * v_Opacity * clipAlpha), turn);
         if (cover >= 0.0) cover = mix(cover, 1.0, turn);
     }
     fragColor = cover < 0.0 ? ink : vec4(ink.rgb * ink.a, ink.a * cover);
