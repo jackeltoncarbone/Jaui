@@ -179,6 +179,8 @@ interface PaintRecord {
 
 /** Readers: the sites that build a blur from the scene. */
 export const READER_FILL = 1;
+/** An adaptive-shadow probe: the few texels of a pyramid it samples, and the scene they reach. */
+export const READER_PROBE = 2;
 export const READER_PBLUR = 3;
 
 export interface ReaderState<Slot> {

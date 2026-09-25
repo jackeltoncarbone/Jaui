@@ -61,11 +61,14 @@ export interface BackdropRegion {
    *  its levels through these (Core/Glass.Pipeline.ts, GlassPyramidLevel). */
   readonly Texel: number;
   readonly Sigma: number;
+  /** Device px from a level-0 texel's centre to the farthest source pixel the build read for it
+   *  (Core/Pyramid.Reach.ts); Infinity when the build does not say. */
+  readonly Reach: number;
 }
 
 /** A full-canvas pyramid: screen UV addresses it unchanged. */
 export const BACKDROP_REGION_FULL: BackdropRegion =
-  { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: 0, TexelsY: 0, Texel: 1, Sigma: 0 };
+  { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: 0, TexelsY: 0, Texel: 1, Sigma: 0, Reach: Infinity };
 
 export interface GpuBufferHandle {
   readonly _brand: 'GpuBufferHandle';

@@ -286,6 +286,8 @@ export interface ShadowProbe {
   Key: object;
   Rect: { x: number; y: number; w: number; h: number };
   DetailLod: number;
+  /** Whether the reading is provably last frame's (`Shadow.Texel`); absent is unknown. */
+  InputsSame?: boolean;
 }
 const PANEL_FLOATS_PER_INSTANCE = 56;
 // Offsets INTO one packed panel instance of the five numbers the fragment's `hasBackdropFilter`
@@ -3646,7 +3648,7 @@ export class WebGL2Renderer implements Renderer {
     const slots: number[] = [];
     this._shadowBatch = true;
     try {
-      for (const p of probes) slots.push(this.MeasureShadowBackdrop(p.Key, p.Rect, p.DetailLod, backdrop, scene, dtSeconds));
+      for (const p of probes) slots.push(this.MeasureShadowBackdrop(p.Key, p.Rect, p.DetailLod, backdrop, scene, dtSeconds, p.InputsSame));
     } finally {
       this._shadowBatch = false;
     }

@@ -56,8 +56,9 @@ import {
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 import {
   PaintLedger, GuardedRect, UnionRect, BLUR_READ_GUARD_PX, BLUR_CACHE_BUDGET_BYTES, DAMAGE_MAX_PIECES,
-  RECORD_NODE, RECORD_EDGE, RECORD_JANVAS, READER_FILL, READER_PBLUR, type ReaderWhy,
+  RECORD_NODE, RECORD_EDGE, RECORD_JANVAS, READER_FILL, READER_PROBE, READER_PBLUR, type ReaderWhy,
 } from './Blur.Cache';
+import { PyramidSampleReach } from './Pyramid.Reach';
 import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited, type TickPaceMode } from './Tick.Pace';
 // Backend-agnostic — Canvas orchestrates rendering against the `Renderer`
 // interface only. Concrete renderers (WebGL2, WebGPU) are built by
@@ -502,6 +503,8 @@ interface EdgeBackdrop {
   Handle: GpuTextureHandle;
   Region: { x: number; y: number; w: number; h: number };
   MaxLod: number;
+  /** The strip's build, for a probe that samples it (`_probeReadClean`). */
+  Key: string;
 }
 
 /** ONE GLASS GROUP: a run of glass siblings under one parent that share a blur class, and the
@@ -1003,6 +1006,8 @@ export class Canvas implements DirtyTracker {
   /** `?blur-cache`'s last FILL verdict, for the probe that follows it: a clean fill is a probe whose
    *  pyramid and sharp tap are last frame's (`Shadow.Texel`). And each surface's last probe rect. */
   private _bcFillClean: Jiv | null = null;
+  /** That fill's build key: what its pyramid is a function of, beside the scene under it. */
+  private _bcFillKey = '';
   private _probeLast = new WeakMap<Jiv, { x: number; y: number; w: number; h: number; Lod: number }>();
   /** `?glass-skip` -- THE GLASS DRAW'S STAGE ABLATIONS. `null` is unarmed (today's engine, no
    *  census); a number is the `u_GlassSkip` mask every glass draw uploads, 0 for `none`, the control
@@ -3439,7 +3444,8 @@ export class Canvas implements DirtyTracker {
         // Handed to the subtree's glass only by a scroll edge, and only for a plain ramp along its own unrotated axis.
         if (lastBackdrop !== null && node.RenderStyle.ProgressiveBlurKind === 'ScrollEdge'
             && node.RenderStyle.ProgressiveBlurStops === null && !_rotated) {
-          edgeHere = { Handle: lastBackdrop, Region: region, MaxLod: maxLod };
+          edgeHere = { Handle: lastBackdrop, Region: region, MaxLod: maxLod,
+            Key: `edge|${region.x},${region.y},${region.w},${region.h}|${maxLod}|${w}x${h}` };
         }
         r.RebindSceneTarget();
         r.EnableBlend();
@@ -3575,6 +3581,8 @@ export class Canvas implements DirtyTracker {
         let sceneSnap: GpuTextureHandle | null;
         // The deepest level the backdrop this surface reads was built to; unbounded for its own.
         let backdropLodCap = Infinity;
+        // The build this surface's pyramid came from, when a probe of it can be proven against the scene.
+        let probePyramid: string | null = null;
         // `?scene-restarts` / `?small-restarts`: whether THIS surface built a fill pyramid on this
         // line rather than taking a pre-built one. The insertion point below needs to know, and
         // the build sits inside a branch whose locals do not survive it.
@@ -3679,6 +3687,7 @@ export class Canvas implements DirtyTracker {
             // The shader reads `frostLod - u_BaseFrostLod`, so the base is what lands it on `level`.
             lastBaseFrostLod = plan.InstFrostLod - level;
             backdropLodCap = edgeFill.MaxLod;
+            probePyramid = edgeFill.Key;
             // `?blur-cache`: the strip's pyramid is keyed to the strip, not to this surface, so this
             // surface's pixels are called changed every frame, as a glass group's members are.
             if (this._bcOn) this._bc.Fresh('edge');
@@ -3703,6 +3712,7 @@ export class Canvas implements DirtyTracker {
               fillBuilt = true;
               return built;
             });
+            if (this._bcOn) probePyramid = this._bcFillKey;
             leftScene = true;
           }
           if (leftScene) r.RebindSceneTarget();
@@ -3735,12 +3745,14 @@ export class Canvas implements DirtyTracker {
           this._adaptiveShadowsDrawn = true;
         } else if (_rsAdaptiveShadow && lastBackdrop) {
           const detailLod = Math.min(backdropLodCap, Math.log2(Math.max(frostCssPx, SHADOW_DETAIL_MIN_PT) * d) - lastBaseFrostLod);
-          // The reading is provably last frame's only when the blur cache just called this surface's
-          // fill clean AND the probe reads the same rect at the same level; otherwise it is unknown.
+          // The reading is provably last frame's when nothing changed within the reach of the texels it
+          // samples, or when the blur cache just called the whole fill clean and the rect and level held.
           const last = this._probeLast.get(node);
           const sameRect = last !== undefined && last.x === px && last.y === py && last.w === pw && last.h === ph && last.Lod === detailLod;
           this._probeLast.set(node, { x: px, y: py, w: pw, h: ph, Lod: detailLod });
-          const inputsSame = this._bcOn && this._bcFillClean === node && sameRect;
+          const readClean = this._bcOn && probePyramid !== null
+            && this._probeReadClean(node, probePyramid, px, py, pw, ph, detailLod, lastBackdrop, w, h);
+          const inputsSame = this._bcOn && (readClean || (this._bcFillClean === node && sameRect));
           const slot = r.MeasureShadowBackdrop(node, { x: px, y: py, w: pw, h: ph }, detailLod, lastBackdrop, _shadowScene, dt, inputsSame);
           if (slot >= 0) {
             shadowBackdrop = { Slot: slot };
@@ -5011,7 +5023,7 @@ export class Canvas implements DirtyTracker {
       + `|${presample ? 1 : 0}${gaussian ? 1 : 0}|${w}x${h}`;
     const v = bc.Reader(owner, kind, key, GuardedRect(region.x, region.y, region.w, region.h, BLUR_READ_GUARD_PX));
     bc.Sig.Number(v.Token);
-    if (kind === READER_FILL) this._bcFillClean = v.Why === 'clean' ? owner : null;
+    if (kind === READER_FILL) { this._bcFillClean = v.Why === 'clean' ? owner : null; this._bcFillKey = key; }
     const st = v.State;
     const stats = this._bcStats;
     stats.Surfaces++;
@@ -5059,6 +5071,24 @@ export class Canvas implements DirtyTracker {
       if (st.Slot !== null) stats.Stored++;
     }
     return handle;
+  };
+
+  /**
+   * Do the texels a probe of `x, y, pw, ph` samples at `lod` hold last frame's values? True when the pyramid
+   * is the same build and nothing changed this frame within their reach of the scene
+   * (`PyramidSampleReach`): a change elsewhere under a wide pyramid cannot move the probe's reading.
+   */
+  private _probeReadClean = (
+    node: Jiv, pyramid: string, x: number, y: number, pw: number, ph: number, lod: number,
+    handle: GpuTextureHandle, w: number, h: number,
+  ): boolean => {
+    const region = handle.Region;
+    if (region === undefined) return false;
+    const reach = PyramidSampleReach(region, lod, w, h);
+    if (!Number.isFinite(reach)) return false;
+    const guard = Math.ceil(reach) + 1;
+    const key = `${pyramid}|${x},${y},${pw},${ph}|${lod}|${guard}`;
+    return this._bc.Reader(node, READER_PROBE, key, GuardedRect(x, y, pw, ph, guard)).Why === 'clean';
   };
 
   /** Open the frame: the seed is everything every draw depends on that no instance carries. */
@@ -6686,7 +6716,7 @@ export class Canvas implements DirtyTracker {
     this._opMs.Mip += performance.now() - t1;
     // `?shadow-probe=group`: every member's probe, here, where the build has just ended the scene's
     // encoder and before any member paints. The batch rebinds the scene itself.
-    if (this._shadowProbe !== 'group' || !this._glassGroupProbe(r, g, handle, dt)) r.RebindSceneTarget();
+    if (this._shadowProbe !== 'group' || !this._glassGroupProbe(r, g, handle, dt, w, h)) r.RebindSceneTarget();
     for (const m of g.Members) this._glassGroupHandles.set(m, handle);
     const st = this._glassGroupStats;
     st.Builds++;
@@ -6705,17 +6735,23 @@ export class Canvas implements DirtyTracker {
    *  glass-grid (every class there authors frost).
    *
    *  False when no member qualified, so the caller still owes the scene its rebind. */
-  private _glassGroupProbe = (r: WebGL2Renderer, g: GlassGroup, handle: GpuTextureHandle, dt: number): boolean => {
+  private _glassGroupProbe = (
+    r: WebGL2Renderer, g: GlassGroup, handle: GpuTextureHandle, dt: number, w: number, h: number,
+  ): boolean => {
     const d = this._dpr;
     const probes: ShadowProbe[] = [];
     const nodes: Jiv[] = [];
+    const u = g.Plan.Region;
+    const pyramid = `group|${u.x},${u.y},${u.w},${u.h}|${g.Radius}|${g.Plan.K}|${g.Members.length}|${w}x${h}`;
     for (let i = 0; i < g.Members.length; i++) {
       const plan = g.Plans[i];
       if (!plan.AdaptiveShadow || plan.InstFrostLod < SCENE_TAP_FROST_LOD) continue;
+      const lod = Math.log2(Math.max(plan.FrostCssPx, SHADOW_DETAIL_MIN_PT) * d) - plan.BaseFrostLod;
       probes.push({
         Key: g.Members[i],
         Rect: { x: plan.Px, y: plan.Py, w: plan.Pw, h: plan.Ph },
-        DetailLod: Math.log2(Math.max(plan.FrostCssPx, SHADOW_DETAIL_MIN_PT) * d) - plan.BaseFrostLod,
+        DetailLod: lod,
+        InputsSame: this._bcOn && this._probeReadClean(g.Members[i], pyramid, plan.Px, plan.Py, plan.Pw, plan.Ph, lod, handle, w, h),
       });
       nodes.push(g.Members[i]);
     }

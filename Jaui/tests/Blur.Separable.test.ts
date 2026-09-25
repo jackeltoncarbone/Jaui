@@ -11,6 +11,7 @@ import {
   GaussianKernelWith, RadiusForFetches, FetchesForRadius, GAUSS_MAX_FETCHES,
   type GaussianKernel, type SeparableRequest,
 } from '../src/Core/Blur.Separable';
+import type { BackdropRegion } from '../src/Core/Renderer';
 import { FakeGl } from './Blur.Chains.Source';
 import { arrowBody } from './Scene.ReadAfterWrite.Source';
 import { BedTile } from './Presample.Kernel.Source';
@@ -354,10 +355,14 @@ describe('blurfast > what BlurPass issues', () => {
     expect(b.K).toBe(1);
     expect(b.SigmaTarget).toBeCloseTo(GAUSS_MATCH_SIGMA, 9);
     expect(r.Pass.LastDepth).toBe(0);
-    // The consumer's map is the CHAIN's map: same rect, level 0 the rect's own size.
+    // The consumer's map is the CHAIN's map: same rect, level 0 the rect's own size. Only the reach differs,
+    // since the two plans read the scene through different passes.
     const chain = Rig();
     chain.Pass.Blur(chain.Src as WebGLTexture, CANVAS_W, CANVAS_H, 8, 0, CARD, undefined, false, 'off', null);
-    expect(JSON.stringify(r.Pass.LastRegion)).toBe(JSON.stringify(chain.Pass.LastRegion));
+    const map = ({ Reach: _reach, ...m }: BackdropRegion): string => JSON.stringify(m);
+    expect(map(r.Pass.LastRegion)).toBe(map(chain.Pass.LastRegion));
+    expect(r.Pass.LastRegion.Reach).toBeGreaterThan(0);
+    expect(r.Pass.LastRegion.Reach).toBeLessThan(Infinity);
   });
 
   it('`separable = null` IS the chain: four draws, the byte-for-byte call stream of a call without it', () => {

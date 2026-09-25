@@ -2,6 +2,7 @@ import { ShaderBatch, type ShaderProgram } from './Shader.Compiler';
 import { QuadGeometry } from './Geometry.Quad';
 import { Framebuffer } from './Framebuffer';
 import { BACKDROP_REGION_FULL, type BackdropRegion } from './Renderer';
+import { HopReach } from './Pyramid.Reach';
 import type { PassTimers } from './Pass.Timers';
 import { JTrace } from '../Diagnostics/Jaui.Trace';
 import {
@@ -313,6 +314,13 @@ void main() {
 /** Programs only a `?glass-gaussian` arm compiled -- and, since the separable plan became the
  *  default, the one program every per-surface pass compiles at boot. One, both directions. */
 export const BLUR_PROGRAMS_GAUSSIAN = 1;
+
+/** The farthest fetch a kernel issues, in source texels: its radius, or an offset past it. */
+export const KernelTexels = (k: GaussianKernel): number => {
+  let far = k.Radius;
+  for (let i = 0; i < k.Fetches; i++) far = Math.max(far, Math.abs(k.Offsets[i]));
+  return far;
+};
 
 /**
  * The linear-sampled Gaussian for one sigma (Rakos, rastergrid 2010), truncated at `ceil(3 sigma)`.
@@ -1615,7 +1623,7 @@ export class BlurPass {
         ...NO_BUILD, Plan: 'root', Passes: 1, Fill: rect.W * rect.H, Reads: rect.W * rect.H,
       };
       this._lastDepth = 0;
-      this._lastRegion = this._region(rect, scaleX, scaleY, 0);
+      this._lastRegion = this._region(rect, scaleX, scaleY, 0, HopReach(0, 1));
       return this._levels[0].Texture;
     }
 
@@ -1631,6 +1639,9 @@ export class BlurPass {
     let srcTex = input;
     let srcW = width, srcH = height;
     let srcRect: RegionRect = rect;
+    // What each hop adds to a level-0 texel's reach: the first reads the canvas, one device px a texel.
+    let reach = 0;
+    const texelOf = (w: number, h: number): number => Math.max(rect.W / w, rect.H / h);
     // THE TAP OFFSET, HOISTED ABOVE THE PRE-DOWNSAMPLE. It is a pure function of the coarse
     // sigma and the depth, so computing it here rather than after the ping-pong is the same
     // number on every existing path -- `radius` is not read again below it. It moves because the
@@ -1719,6 +1730,7 @@ export class BlurPass {
       let curW = rect.W, curH = rect.H;
       const passes = Math.round(Math.log2(k));
       for (let s = 0; s < passes; s++) {
+        reach += HopReach(0.5 * (pre !== null ? tapOffset : 1.0), s === 0 ? 1 : texelOf(srcW, srcH));
         curW = Math.max(1, Math.floor(curW / 2));
         curH = Math.max(1, Math.floor(curH / 2));
         const fb = pp[s % 2];
@@ -1763,6 +1775,7 @@ export class BlurPass {
 
     for (let i = 1; i <= depth; i++) {
       const dst = this._levels[i];
+      reach += HopReach(0.5 * tapOffset, i === 1 && k === 1 ? 1 : texelOf(srcW, srcH));
       this._bindTarget(dst, `l${i}`);
       // Again: only the first hop reads the canvas-sized input through the region rect.
       this._setSrcRect(this._downSrcLoc, i === 1 ? srcRect : null, srcW, srcH);
@@ -1791,6 +1804,7 @@ export class BlurPass {
 
     for (let i = depth - 1; i >= 0; i--) {
       const dst = this._levels[i];
+      reach += HopReach(tapOffset, texelOf(srcW, srcH));
       this._bindTarget(dst, `l${i}`);
       gl.bindTexture(gl.TEXTURE_2D, srcTex);
       gl.uniform2f(this._upHpLoc, 0.5 / srcW, 0.5 / srcH);
@@ -1804,7 +1818,8 @@ export class BlurPass {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this._target('default');
     if (timedUp) this.Timers!.End();
-    this._lastRegion = this._region(rect, scaleX, scaleY, ChainDeliveredSigma(k, depth, tapOffset));
+    // A zero-depth chain writes no level 0, so what it holds is not this scene's.
+    this._lastRegion = this._region(rect, scaleX, scaleY, ChainDeliveredSigma(k, depth, tapOffset), depth > 0 ? reach : Infinity);
 
     return this._levels[0].Texture;
   };
@@ -1911,7 +1926,8 @@ export class BlurPass {
       SigmaTarget: plan.Sigma, SigmaResidual: plan.Sigma, Fetches: k.Fetches,
       Fill: cost.Fill, Reads: cost.Reads,
     };
-    this._lastRegion = this._region(rect, scaleX, scaleY, plan.Sigma);
+    // H reads the canvas and V the temp, one device px a texel each, along one axis each.
+    this._lastRegion = this._region(rect, scaleX, scaleY, plan.Sigma, HopReach(KernelTexels(k), 1));
     return this._levels[0].Texture;
   };
 
@@ -1967,12 +1983,16 @@ export class BlurPass {
 
     const timedDown = this.Timers !== null && this.Timers.Begin('blur-down');
     let src = input, srcW = width, srcH = height;
+    // The box hops, then the pair at the base's texel; H and V each widen one axis, so they add once.
+    const padW = (tg.Bw + 2 * R) * K, padH = (tg.Bh + 2 * R) * K;
+    let reach = 0;
     if (hops.length > 0) {
       gl.useProgram(this._down.Program);
       gl.uniform1i(this._downTexLoc, 0);
       gl.uniform1f(this._downOffLoc, 1.0);
       for (let s = 0; s < hops.length; s++) {
         const fb = hops[s];
+        reach += HopReach(0.5, s === 0 ? 1 : Math.max(padW / srcW, padH / srcH));
         this._bindTarget(fb, `sep-hop${s + 1}`);
         if (debug) this._gaussDebugClear();
         if (s === 0) {
@@ -1989,6 +2009,7 @@ export class BlurPass {
       }
     }
 
+    reach += HopReach(KernelTexels(kern), hops.length === 0 ? 1 : Math.max(padW / srcW, padH / srcH));
     gl.useProgram(prog.Program);
     gl.uniform1i(this._gTexLoc, 0);
     this._uploadKernel(kern);
@@ -2033,7 +2054,7 @@ export class BlurPass {
     };
     // The chain's screen rect, grown to `bw * k x bh * k` so the map lands on base texel centres.
     const ext: RegionRect = { X: rect.X, YBottom: rect.YBottom, W: tg.Wk, H: tg.Hk, Full: false };
-    this._lastRegion = this._region(ext, width / tg.Wk, height / tg.Hk, plan.SigmaTarget);
+    this._lastRegion = this._region(ext, width / tg.Wk, height / tg.Hk, plan.SigmaTarget, reach);
     return this._levels[0].Texture;
   };
 
@@ -2181,7 +2202,7 @@ export class BlurPass {
     // that does gets the TEXTURE's shape rather than the last slot's, which would be a wrong map
     // wearing a plausible one's shape.
     const sigma = ChainDeliveredSigma(1, depth, tapOffset);
-    this._lastRegion = { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: atlasW, TexelsY: atlasH, Texel: 1, Sigma: sigma };
+    this._lastRegion = { ScaleX: 1, ScaleY: 1, OffsetX: 0, OffsetY: 0, TexelsX: atlasW, TexelsY: atlasH, Texel: 1, Sigma: sigma, Reach: Infinity };
 
     const regions: BackdropRegion[] = [];
     for (const m of members) {
@@ -2200,6 +2221,7 @@ export class BlurPass {
         TexelsY: atlasH,
         Texel: 1,
         Sigma: sigma,
+        Reach: Infinity,
       });
     }
     return { Texture: this._levels[0].Texture, Regions: regions };
@@ -2984,12 +3006,13 @@ export class BlurPass {
     this._gl.uniform4f(loc, rect.X / srcW, rect.YBottom / srcH, rect.W / srcW, rect.H / srcH);
   };
 
-  /** `sigma` is the Gaussian level 0 delivers, device px; its texel is the rect's width over level 0's. */
-  private _region = (rect: RegionRect, scaleX: number, scaleY: number, sigma: number): BackdropRegion => {
+  /** `sigma` is the Gaussian level 0 delivers, device px; its texel is the rect's width over level 0's.
+   *  `reach` is how far a level-0 texel read its source (Core/Pyramid.Reach.ts). */
+  private _region = (rect: RegionRect, scaleX: number, scaleY: number, sigma: number, reach: number): BackdropRegion => {
     const texels = this._levels[0];
     const texel = rect.W / texels.Width;
     if (rect.Full) {
-      return { ...BACKDROP_REGION_FULL, TexelsX: texels.Width, TexelsY: texels.Height, Texel: texel, Sigma: sigma };
+      return { ...BACKDROP_REGION_FULL, TexelsX: texels.Width, TexelsY: texels.Height, Texel: texel, Sigma: sigma, Reach: reach };
     }
     return {
       ScaleX: scaleX,
@@ -3000,6 +3023,7 @@ export class BlurPass {
       TexelsY: texels.Height,
       Texel: texel,
       Sigma: sigma,
+      Reach: reach,
     };
   };
 
