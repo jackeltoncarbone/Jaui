@@ -44,7 +44,7 @@ const CHILD_LAYOUT_PROPS = new Set([
 const TEXT_STYLE_PROPS = new Set([
   'FontFamily', 'FontSize', 'FontWeight', 'FontStyle',
   'Color', 'LineHeight', 'LetterSpacing',
-  'TextAlign', 'TextAlignLast', 'TextOverflow', 'MaxLines',
+  'TextAlign', 'TextAlignLast', 'TextOverflow', 'MaxLines', 'FontVariantNumeric',
 ]);
 
 /** Resolve a property name to its target slot. Unknown → Style (catch-all). */

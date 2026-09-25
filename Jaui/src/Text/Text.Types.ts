@@ -1,6 +1,7 @@
 import type { Color } from '../Core/Types';
 import { Resolve, ResolveTernary, ResolveVars, type ResolveContext } from '../Core/Length';
 import { ParseColor } from '../Core/Color.Parse';
+import { TabularFamilyStack } from './Text.Tabular';
 
 export type TextAlign = 'Left' | 'Center' | 'Right' | 'Justify';
 /** Per-line override for the *last* line — mirrors CSS `text-align-last`.
@@ -9,6 +10,8 @@ export type TextAlign = 'Left' | 'Center' | 'Right' | 'Justify';
 export type TextAlignLast = 'Auto' | 'Left' | 'Center' | 'Right' | 'Justify';
 export type TextOverflow = 'Clip' | 'Ellipsis';
 export type FontStyle = 'Normal' | 'Italic';
+/** CSS `font-variant-numeric`, the part Apple uses: `TabularNums` is `.monospacedDigit()` (Text/Text.Tabular.ts). */
+export type FontVariantNumeric = 'Normal' | 'TabularNums';
 
 /**
  * Authorable text style. Every dimensional / color field is a CSS-string.
@@ -27,6 +30,7 @@ export interface TextStyle {
   TextAlignLast: TextAlignLast;
   TextOverflow: TextOverflow;
   MaxLines: number | null;     // null = unlimited
+  FontVariantNumeric?: FontVariantNumeric;
 }
 
 /** Fully resolved TextStyle — numbers + parsed Color object. What the text
@@ -45,9 +49,16 @@ export interface ResolvedTextStyle {
   MaxLines: number | null;
 }
 
+const _resolveNumeric = (v: FontVariantNumeric | undefined): FontVariantNumeric => {
+  if (v === undefined || v === 'Normal') return 'Normal';
+  if (v === 'TabularNums') return v;
+  throw new Error(`[Jaui] FontVariantNumeric: "${v}" -- expected Normal or TabularNums.`);
+};
+
 /** Resolve a TextStyle into its numeric/parsed form using the Jiv's ctx. */
 export const ResolveTextStyle = (style: TextStyle, ctx: ResolveContext): ResolvedTextStyle => ({
-  FontFamily: style.FontFamily,
+  // Tabular figures resolve into the family stack, so every cache that keys on the family keys on them too.
+  FontFamily: _resolveNumeric(style.FontVariantNumeric) === 'TabularNums' ? TabularFamilyStack(style.FontFamily) : style.FontFamily,
   FontSize: Resolve(style.FontSize, ctx, 'W'),
   FontWeight: style.FontWeight,
   FontStyle: style.FontStyle,
@@ -82,6 +93,7 @@ export const DefaultTextStyle: TextStyle = {
   TextAlignLast: 'Auto',
   TextOverflow: 'Clip',
   MaxLines: null,
+  FontVariantNumeric: 'Normal',
 };
 
 export interface TextMeasurement {

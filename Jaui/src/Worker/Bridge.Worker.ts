@@ -17,6 +17,7 @@ import { WorkerPlatform, type WorkerPlatformInit } from './Worker.Platform';
 import type { JivRegistry } from './Jiv.Registry';
 import { PrimeFontInSharedCtx } from '../Text/Text.WordLayout';
 import { BumpFontGeneration, PrimeFontInMeasureCtx, FamilyResolvesInMeasureCtx } from '../Text/Text.Measure';
+import { RangeCoversDigits, TABULAR_FEATURE_SETTINGS, TabularFamilyName } from '../Text/Text.Tabular';
 import {
   isMessage,
   type M2W,
@@ -220,10 +221,22 @@ export class WorkerBridge {
     // is exactly the one whose weight you need to read.
     const weight = m.Descriptors?.Weight ?? '400';
     const style = m.Descriptors?.Style ?? 'normal';
+    // A face holding the digits gets its tabular twin (Text/Text.Tabular.ts), built from its own copy of the bytes.
+    const twinFamily = TabularFamilyName(m.Family);
+    const twin = RangeCoversDigits(desc.unicodeRange)
+      ? new FontFace(twinFamily, m.Buffer.slice(0), { ...desc, featureSettings: TABULAR_FEATURE_SETTINGS }) : null;
     const ff = new FontFace(m.Family, m.Buffer, desc);
     ff.load().then(async () => {
       const fontSet = (self as unknown as { fonts?: FontFaceSet }).fonts;
       fontSet?.add(ff);
+      if (twin) {
+        try {
+          await twin.load();
+          fontSet?.add(twin);
+          PrimeFontInSharedCtx(twinFamily, weight, style);
+          PrimeFontInMeasureCtx(twinFamily, weight, style);
+        } catch { /* no twin: tabular text falls through to the proportional face */ }
+      }
       // WebKit (iPad / iOS Safari) workaround: `self.fonts.add(ff)` alone
       // doesn't reliably register the font with the OffscreenCanvas 2D
       // measureText/fillText pipeline — the font set and the canvas's
