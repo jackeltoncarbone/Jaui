@@ -3,7 +3,7 @@
  *
  * iOS reads it from the device (`UITraitCollection.displayCornerRadius`), which a web page cannot. A native shell
  * that can passes it in as the root custom property `--DisplayCornerRadius`; otherwise it is Apple's value for the
- * device class, looked up by the screen's size in points. A screen with square corners (every desktop) is 0.
+ * device class, looked up by the screen's size in points. Anything else is a window, and takes macOS 26's corner.
  */
 export function DisplayCornerRadius(): number {
   if (typeof window === 'undefined' || typeof document === 'undefined') return 0;
@@ -34,7 +34,11 @@ const DISPLAY_CORNERS: ReadonlyArray<readonly [narrow: number, tall: number, rad
   [1032, 1376, 18],   // iPad Pro 13 (M4)
 ];
 
+/** A macOS 26 window with a unified toolbar: `-[NSThemeFrame _getCachedWindowCornerRadius]` returns 26 for it (20
+ *  unified compact, 16 expanded or no toolbar, 15 utility, 26 sheet and alert) [C] (Jwift/Apple/Sizing.md). */
+export const WINDOW_CORNER_RADIUS = 26;
+
 export function DisplayCornerForScreen(narrow: number, tall: number): number {
   for (const [w, h, radius] of DISPLAY_CORNERS) if (w === narrow && h === tall) return radius;
-  return 0;
+  return WINDOW_CORNER_RADIUS;
 }
