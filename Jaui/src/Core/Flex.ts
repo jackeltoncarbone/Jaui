@@ -41,7 +41,7 @@ const lerp = (t: number, a: number, b: number): number => a + (b - a) * t;
 const mix = (auto: number, own: number, authored: number): number => auto * own + (1 - auto) * authored;
 
 /** The spec for a control of `width` x `height` points (sub_188F76B80 for Auto): a longer side under 120 takes
- *  UltraSmall; otherwise Small to Large by the shorter side over 44 to 160, the movement fields staying Small's. */
+ *  UltraSmall; otherwise Small to Large by the shorter side over 44 to 160, and calmer movement by the longer side. */
 export const FlexSpecFor = (kind: FlexKind, width: number, height: number): FlexSpec | null => {
   switch (kind) {
     case 'None': return null;
@@ -52,18 +52,23 @@ export const FlexSpecFor = (kind: FlexKind, width: number, height: number): Flex
   }
   if (Math.max(width, height) < 120) return ULTRA_SMALL;
   const t = Math.min(1, Math.max(0, (Math.min(width, height) - 44) / (160 - 44)));
+  // Ours, past UIKit: a long control (a tab bar) calms its movement by its longer side, 200 to 480 pt.
+  const u = Math.min(1, Math.max(0, (Math.max(width, height) - 200) / (480 - 200)));
   return {
     ...SMALL,
+    MovePoints: lerp(u, SMALL.MovePoints, 4),
+    MinScale: lerp(u, SMALL.MinScale, 0.96),
+    MaxScale: lerp(u, SMALL.MaxScale, 1.04),
     Lift: lerp(t, SMALL.Lift, LARGE.Lift),
     BigGlow: lerp(t, SMALL.BigGlow, LARGE.BigGlow),
     LittleGlow: lerp(t, SMALL.LittleGlow, LARGE.LittleGlow),
     Dissipation: lerp(t, SMALL.Dissipation, LARGE.Dissipation),
-    Threshold: lerp(t, SMALL.Threshold, LARGE.Threshold),
-    MoveNorm: lerp(t, SMALL.MoveNorm, LARGE.MoveNorm),
+    Threshold: lerp(t, SMALL.Threshold, LARGE.Threshold) * lerp(u, 1, 2.5),
+    MoveNorm: lerp(t, SMALL.MoveNorm, LARGE.MoveNorm) * lerp(u, 1, 2),
     Damping: lerp(t, SMALL.Damping, LARGE.Damping),
     Response: lerp(t, SMALL.Response, LARGE.Response),
-    TrackingDamping: lerp(t, SMALL.TrackingDamping, LARGE.TrackingDamping),
-    TrackingResponse: lerp(t, SMALL.TrackingResponse, LARGE.TrackingResponse),
+    TrackingDamping: lerp(u, lerp(t, SMALL.TrackingDamping, LARGE.TrackingDamping), 0.8),
+    TrackingResponse: lerp(u, lerp(t, SMALL.TrackingResponse, LARGE.TrackingResponse), 0.4),
   };
 };
 
