@@ -39,7 +39,7 @@ Status column:
 | Apple piece | proposed JSS, default | today | status |
 |---|---|---|---|
 | the lens view on a selection | `Lens: None \| Tab \| Segment` on the indicator | `Jwift_SelectionIndicator_Pressed`, a Layer 2 glass | differs: ours is one glass over a snapshot |
-| lens size, item + 8 pt all round (Tab); pill + 12 / 8 pt (Segment) | derived from `Lens`; `LensOutset: Auto \| <x> <y>` | `SelectionIndicator.ts`: `min(1.708 bar, 1.35 pitch)` × `1.173 bar` | differs: our rule can be narrower than the pill (the pricing control shows it); Apple's never is |
+| lens size, item + 8 pt all round (Tab); pill + 12 / 8 pt (Segment) | derived from `Lens`; `LensOutset: Auto \| <x> <y>` | `SelectionIndicator.Geometry.ts`: the pill + 8 / 8 (Tab), + 12 / 8 (Segment), grown by bounds, concentric with the bar | matches, and ours holds the ends at the lens's own inset |
 | warped copy of the items, real items erased (destOut) | derived from `Lens` | none; the lens magnifies a snapshot of bar and items (flat plate 1.21) | missing; the plate is ours only |
 | backdrop below, warped and blurred (warpsContentBelow) | `LensWarpBelow: Auto \| None` | none | missing (lifted values [I]) |
 | warpSDF amount −17.5, SDF displacement 11.2 | `LensWarp: Auto` | none | missing (law [I]) |
@@ -48,7 +48,7 @@ Status column:
 | hang time 0.22 s | derived | none (the bar lets go at once) | missing |
 | selection springs (Sizing.md 1) | `@Spring X { Damping: 0.85, Response: 0.2s }` (Apple's form, proposed) | grow 409 / 25.3, release 2187 / 112 (fitted), position 85 ms, size 220 ms | differs |
 
-Also ours only, and deletion candidates: `Magnification`, `LensInk`, `GLASS_LENS_BEZEL`, `GLASS_LENS_SPLIT`, `GLASS_LENS_OVER_BAR`, `GLASS_LENS_BAR_INSET`, lanes 50 to 53 as the lens uses them, `GlassLensBody`, `GlassLensRimHeights`, `GLASS_LENS_SHADOW_PEAK`, the lens `VisualScale` sizing in `SelectionIndicator.ts`, and its velocity stretch (`STRETCH_MAX`, `SPEED_HALF`, `PERP_GAIN`, `SQUISH_*`).
+Also ours only, and deletion candidates: `Magnification`, `LensInk`, `GLASS_LENS_BEZEL`, `GLASS_LENS_SPLIT`, `GLASS_LENS_OVER_BAR`, `GLASS_LENS_BAR_INSET`, lanes 50 to 53 as the lens uses them, `GlassLensBody`, `GlassLensRimHeights`, `GLASS_LENS_SHADOW_PEAK`.
 
 ## 3. Sizing: Apple against ours
 
@@ -69,12 +69,12 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 | symbol centre | 20 pt below the item top [C] (`_UITabButton` layoutSubviews) | 19.8 pt when the item `Gap` is 3.8 pt and the label `LineHeight` 1.05 (held, see Sizing.md 1) | 0.2 pt; today 20.8 pt |
 | label baseline | frame bottom 7 pt above the item bottom [C], so 44.6 pt with SF's 2.41 pt descent | 44.67 pt with the same (held) values | 0.1 pt; today 43.0 pt |
 | search circle | the bar's inner height [I] | 62 pt (`Jwift_TabAccessory`) | ≈ 0 |
-| lens size | item + 16 × item + 16 [C]: ≈ 70 pt tall | 72.7 pt tall, 1.35 pitch wide (1.708 bar cap) | +2.7 pt tall; width rule differs |
+| lens size | item + 16 × item + 16 [C]: ≈ 70 pt tall | item + 16 × 70 pt, by bounds, radius 35 = 31 + 4 | 0 |
 | lens width, measured | 105 pt on a 78 pt pitch [I] | 106 pt at that pitch | +1 |
 | bar swell pressed | 1.04 measured [I] | 1.02 (`Jwift_TabBar_Pressed`) | −0.02 |
 | item scale | none [C]; the copy reads 1.16 icon, 1.19 label [I] | the plate reads 1.21 about the lens centre | differs |
-| drag stretch | the flex formula, min 0.75 / max 1.15 (Loupe) [C] | velocity stretch up to 0.35, squish 0.22 | differs |
-| springs | 0.85 / 0.2 s, 0.85 / 0.3 s dragging; 0.85 / 0.4 s, 0.85 / 0.6 s release [C] | 409 / 25.3 grow, 2187 / 112 release; 85 ms, 220 ms transitions | differs |
+| drag stretch | the flex formula, min 0.75 / max 1.15 (Loupe) [C] | the Loupe row on velocity (FlexMovement.ts), area kept, no narrower than square | min differs: square keeps it concentric |
+| springs | 0.85 / 0.2 s, 0.85 / 0.3 s dragging; 0.85 / 0.4 s, 0.85 / 0.6 s release [C] | the same for position and bounds; lift 409 / 25.3 grow, 2187 / 112 release (fitted) | lift springs lost to decompilation |
 
 ### Segmented control (our tab bar with label-only items)
 
