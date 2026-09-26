@@ -1,6 +1,7 @@
 import { Spring } from '../Animation/Spring';
 import type { Animatable } from '../Animation/Animation.Manager';
 import type { ResolvedTextStyle } from './Text.Types';
+import type { TextCacheMemo } from './Text.Cache';
 import { LayoutWords, type WordPosition } from './Text.WordLayout';
 
 /**
@@ -51,6 +52,8 @@ export interface AnimatedWord {
   /** The height of the block this word was centered in when it started dying, so a fading generation
    *  stays where it was drawn while the new one centers on its own lines. */
   DyingExtent: number;
+  /** The atlas entry this word was last drawn from (`TextCache.GetFor`). */
+  TextCacheMemo?: TextCacheMemo;
 }
 
 export class TextAnimator implements Animatable {

@@ -23,6 +23,17 @@ export interface TextCacheEntry {
   /** Index into `_shelves` of the shelf this raster sits on. Eviction needs it
    *  to hand the atlas space back — see `_release`. */
   Shelf: number;
+  /** False once the cache has dropped it, so a remembered entry is never drawn from space handed back. */
+  Resident: boolean;
+}
+
+/** What `GetFor` remembers on its holder: the inputs of the last fetch and the entry they gave. */
+export interface TextCacheMemo {
+  Entry: TextCacheEntry;
+  Content: string;
+  Style: ResolvedTextStyle;
+  MaxWidth: number | null;
+  Dpr: number;
 }
 
 /** Shelf in the shelf-packing atlas. */
@@ -115,11 +126,28 @@ export class TextCache {
     return entry;
   };
 
+  /** `Get`, remembered on `holder`: drawn again with the same inputs (the same style object), the entry is
+   *  the one `Get` would return, without hashing the key. */
+  GetFor = (
+    holder: { TextCacheMemo?: TextCacheMemo }, content: string, style: ResolvedTextStyle, maxWidth: number | null, dpr: number,
+  ): TextCacheEntry => {
+    const m = holder.TextCacheMemo;
+    if (m !== undefined && m.Entry.Resident && m.Style === style && m.Content === content
+      && m.MaxWidth === maxWidth && m.Dpr === dpr) {
+      m.Entry.LastUsed = this._frameCounter;
+      return m.Entry;
+    }
+    const entry = this.Get(content, style, maxWidth, dpr);
+    if (m === undefined) holder.TextCacheMemo = { Entry: entry, Content: content, Style: style, MaxWidth: maxWidth, Dpr: dpr };
+    else { m.Entry = entry; m.Content = content; m.Style = style; m.MaxWidth = maxWidth; m.Dpr = dpr; }
+    return entry;
+  };
+
   Dispose = (): void => {
     // GpuTextureHandle is opaque — the Renderer owns GPU lifecycle.
     // We just drop our reference.
     this._atlas = null;
-    this._cache.clear();
+    this._dropAll();
     this._shelves.length = 0;
     this._nextShelfY = 0;
   };
@@ -137,9 +165,14 @@ export class TextCache {
    *  the clear and the next rasterize pass — visible as a hard text+icon
    *  blink on font-load. */
   Clear = (): void => {
-    this._cache.clear();
+    this._dropAll();
     this._shelves.length = 0;
     this._nextShelfY = 0;
+  };
+
+  private _dropAll = (): void => {
+    for (const entry of this._cache.values()) entry.Resident = false;
+    this._cache.clear();
   };
 
   private _ensureAtlas = (): GpuTextureHandle => {
@@ -206,6 +239,7 @@ export class TextCache {
    *  UV pointing into it, so its cursor rewinds and the strip is allocatable
    *  again — stale pixels there are overwritten by the next upload. */
   private _release = (entry: TextCacheEntry): void => {
+    entry.Resident = false;
     const shelf = this._shelves[entry.Shelf];
     if (!shelf) return;
     shelf.Live--;
@@ -226,7 +260,7 @@ export class TextCache {
   };
 
   private _rebuildAtlas = (): void => {
-    this._cache.clear();
+    this._dropAll();
     this._shelves.length = 0;
     this._nextShelfY = 0;
     // Recreate the atlas texture (fresh, cleared to transparent).
@@ -312,6 +346,7 @@ export class TextCache {
       Measurement: measurement,
       LastUsed: this._frameCounter,
       Shelf: origin.Shelf,
+      Resident: true,
     };
   };
 

@@ -170,6 +170,47 @@ describe('TextCache', () => {
     });
   });
 
+  describe('GetFor', () => {
+    it('returns the entry Get returns, and touches it', () => {
+      const r = mockRenderer();
+      const cache = new TextCache(r);
+      const word = {};
+      cache.BeginFrame();
+      const first = cache.GetFor(word, 'hello', DefaultTextStyle, null, 1);
+      expect(first).toBe(cache.Get('hello', DefaultTextStyle, null, 1));
+      cache.BeginFrame();
+      cache.BeginFrame();
+      expect(cache.GetFor(word, 'hello', DefaultTextStyle, null, 1)).toBe(first);
+      expect(first.LastUsed).toBe(cache.Get('hello', DefaultTextStyle, null, 1).LastUsed);
+    });
+
+    it('fetches again when an input changes', () => {
+      const r = mockRenderer();
+      const cache = new TextCache(r);
+      const word = {};
+      const a = cache.GetFor(word, 'hello', DefaultTextStyle, null, 1);
+      expect(cache.GetFor(word, 'hello', DefaultTextStyle, null, 2)).not.toBe(a);
+      expect(cache.GetFor(word, 'world', DefaultTextStyle, null, 2)).toBe(cache.Get('world', DefaultTextStyle, null, 2));
+      expect(cache.GetFor(word, 'world', { ...DefaultTextStyle, FontSize: 30 }, null, 2)).not.toBe(cache.Get('world', DefaultTextStyle, null, 2));
+    });
+
+    it('never hands back an entry the cache dropped', () => {
+      const r = mockRenderer();
+      const cache = new TextCache(r, 4);
+      const word = {};
+      cache.BeginFrame();
+      const kept = cache.GetFor(word, 'w0', DefaultTextStyle, null, 1);
+      for (let i = 1; i < 6; i++) { cache.BeginFrame(); cache.Get(`w${i}`, DefaultTextStyle, null, 1); }
+      expect(kept.Resident).toBe(false);
+      const again = cache.GetFor(word, 'w0', DefaultTextStyle, null, 1);
+      expect(again).not.toBe(kept);
+      expect(again.Resident).toBe(true);
+      cache.Clear();
+      expect(again.Resident).toBe(false);
+      expect(cache.GetFor(word, 'w0', DefaultTextStyle, null, 1)).not.toBe(again);
+    });
+  });
+
   describe('Dispose', () => {
     it('deletes the atlas texture and clears entries', () => {
       const r = mockRenderer();

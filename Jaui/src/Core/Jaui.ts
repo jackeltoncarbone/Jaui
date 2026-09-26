@@ -6912,7 +6912,7 @@ export class Canvas implements DirtyTracker {
       const styleForCache = styleNeedsWeightOverride
         ? { ...w.Style, FontWeight: effectiveWeight }
         : w.Style;
-      const entry = this._textCache.Get(w.Content, styleForCache, null, this._dpr);
+      const entry = this._textCache.GetFor(w, w.Content, styleForCache, null, this._dpr);
       // Word anchor in LOCAL coords, then mapped through the full matrix. yOffset
       // is a canvas-space (cy-scaled) centering term; fold it back to local
       // (÷cy) so the matrix re-applies it correctly under rotation.
