@@ -14,12 +14,17 @@
 export type JauiTraceSink = (name: string) => void;
 
 let _sink: JauiTraceSink | null = null;
+let _listening = true;
 
 /** Install the sink every engine mark goes to, or clear it with null. */
 export const OnJauiTrace = (sink: JauiTraceSink | null): void => { _sink = sink; };
 
+/** Whether the installed sink is read. A host that installs one only to buffer boot marks turns this off
+ *  once it knows nobody will, which stops the per-frame census the engine builds for a listener. */
+export const SetJauiTraceListening = (listening: boolean): void => { _listening = listening; };
+
 /** True when somebody is listening. Guard a mark whose NAME costs something to build. */
-export const JauiTracing = (): boolean => _sink !== null;
+export const JauiTracing = (): boolean => _sink !== null && _listening;
 
 /** Name a moment. A no-op with no sink installed. */
 export const JTrace = (name: string): void => {

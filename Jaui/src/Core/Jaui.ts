@@ -10014,7 +10014,7 @@ export { BuildVectorPaint, type SvgVectorPaint, type SvgFillShape, type SvgStrok
 export type { ParsedSvg, SvgNode, SvgPathNode, SvgTextNode, SvgContour, SvgFillRule } from '../Svg/Svg.Types';
 
 // Boot tracing — the host installs a sink and every engine mark lands on its timeline.
-export { OnJauiTrace, JauiTracing, type JauiTraceSink } from '../Diagnostics/Jaui.Trace';
+export { OnJauiTrace, JauiTracing, SetJauiTraceListening, type JauiTraceSink } from '../Diagnostics/Jaui.Trace';
 
 // Worker boot — apps call CheckBrowserSupport() before mounting Angular.
 export { CheckBrowserSupport, type BrowserSupportResult } from '../Worker/Browser.Support';
