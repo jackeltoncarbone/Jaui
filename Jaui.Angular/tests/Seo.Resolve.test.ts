@@ -56,6 +56,14 @@ describe('ResolveSemantics', () => {
     expect(r?.Text).toBeNull();
   });
 
+  it('an image-cache key keeps its alt but projects no src, since no browser can fetch it', () => {
+    const r = ResolveSemantics({ Alt: 'Show Studio', BackgroundUrl: 'ss-head-logo:#FFFFFF' });
+    expect(r?.Tag).toBe('img');
+    expect(r?.Src).toBeNull();
+    expect(r?.Alt).toBe('Show Studio');
+    expect(ResolveSemantics({ Alt: 'Cover', BackgroundUrl: '/seed/cover.jpg' })?.Src).toBe('/seed/cover.jpg');
+  });
+
   it('maps container and text roles to their tags', () => {
     expect(ResolveSemantics({ Role: 'Navigation' })?.Tag).toBe('nav');
     expect(ResolveSemantics({ Role: 'Main' })?.Tag).toBe('main');

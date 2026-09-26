@@ -1,3 +1,4 @@
+import { IsFetchableImage } from 'jaui';
 import type { ResolvedSemantics, SemanticRole } from './Seo.Types';
 
 /** Everything a Jiv knows about itself that can drive projection. */
@@ -78,7 +79,8 @@ export const ResolveSemantics = (source: SemanticsSource): ResolvedSemantics | n
     Tag: tag,
     Text: role === 'Image' ? null : source.Text ?? null,
     Href: role === 'Link' ? source.Href ?? null : null,
-    Src: role === 'Image' ? source.BackgroundUrl ?? null : null,
+    // An image-cache key (`ss-logo:#fff`) is not an address; as a src the browser could only fail to fetch it.
+    Src: role === 'Image' && source.BackgroundUrl && IsFetchableImage(source.BackgroundUrl) ? source.BackgroundUrl : null,
     Alt: role === 'Image' ? source.Alt ?? '' : null,
     Label: source.Label ?? null,
     TabIndex: interactive ? -1 : null,

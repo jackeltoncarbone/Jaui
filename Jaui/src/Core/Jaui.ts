@@ -9972,7 +9972,7 @@ export { TextCache } from '../Text/Text.Cache';
 
 // Image
 export type { ImageStyle, ObjectFit } from '../Image/Image.Types';
-export { ImageCache, RecolorSvg, type ImageEntry } from '../Image/Image.Cache';
+export { ImageCache, RecolorSvg, IsFetchableImage, type ImageEntry } from '../Image/Image.Cache';
 
 // Scroll
 export type { ScrollConfig, ScrollAlign, ScrollAxis, ScrollMotion, ScrollToOptions } from '../Scroll/Scroll.Types';

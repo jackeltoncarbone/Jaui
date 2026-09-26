@@ -30,7 +30,7 @@ const _FETCHABLE_SCHEME = /^(https?|data|blob|file):/i;
 /** Is this source something the network can actually take? A relative path is; so is http/https/data/
  *  blob/file. `ss-logo:#f09dcc` is NOT — it is an image-cache KEY whose pixels are handed in under that
  *  key by LoadSvg / LoadBitmap / LoadCanvas, and fetching it can only ever fail. */
-const _isFetchable = (url: string): boolean => !_HAS_SCHEME.test(url) || _FETCHABLE_SCHEME.test(url);
+export const IsFetchableImage = (url: string): boolean => !_HAS_SCHEME.test(url) || _FETCHABLE_SCHEME.test(url);
 
 /** Internal — tracks an SVG source so it can be re-rasterized at a new DPR
  *  when the browser zoom / DPR changes. Without this the first rasterization
@@ -49,7 +49,7 @@ export class ImageCache {
    *  from retrying a broken URL every tick (which otherwise spams the console
    *  with thousands of 404s over a few seconds). */
   private _failed = new Set<string>();
-  /** Keys that are not URLs at all (see `_isFetchable`). Held so the per-frame auto-load tests each
+  /** Keys that are not URLs at all (see `IsFetchableImage`). Held so the per-frame auto-load tests each
    *  one once rather than re-parsing it every tick. */
   private _keyed = new Set<string>();
   private _svgSources = new Map<string, _SvgSource>();
@@ -132,7 +132,7 @@ export class ImageCache {
     if (this._keyed.has(url)) return;
     // An engine KEY, not a URL: its pixels arrive under the key from LoadSvg / LoadBitmap. Fetching it
     // spends a request and a console error per key, and leaves every Jiv bound to it stuck in Failed.
-    if (!_isFetchable(url)) { this._keyed.add(url); return; }
+    if (!IsFetchableImage(url)) { this._keyed.add(url); return; }
     // Mark the URL as loading immediately so subsequent LoadUrl calls
     // for the same URL coalesce — even if the actual fetch is sitting
     // in the queue, repeat consumers shouldn't double-enqueue.
