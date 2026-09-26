@@ -10,7 +10,7 @@ import { ParseFilter, SplitTopLevelArgs } from './Filter.Parse';
 import { InkLevelOf, type VibrancyDeclaration } from './Vibrancy';
 import type { Color } from './Types';
 import { ResolveTransform } from '../Transform/Transform.Parse';
-import type { FlexKind, FlexSettings } from './Flex';
+import { FLEX_AUTO, type FlexAmounts, type FlexKind } from './Flex';
 
 /** The most frost `BackdropFilter: Blur(Auto)` draws, in CSS px. The field resolves to it, so every
  *  reader that sizes for the largest frost is right; the panel's own is `JivFrostCssPx`. */
@@ -252,24 +252,37 @@ const _resolveGlassFrost = (raw: string | undefined, ctx: ResolveContext): numbe
   return frost;
 };
 
-const _FLEX_KINDS =new Set<FlexKind>(['None', 'Auto', 'Small', 'UltraSmall', 'Large', 'Menu']);
-const _FLEX_NONE: FlexSettings = { Kind: 'None', Lift: NaN, BigGlow: NaN, LittleGlow: NaN, Movement: true };
+const _FLEX_KINDS = new Set<FlexKind>(['None', 'Auto', 'Small', 'UltraSmall', 'Large', 'Menu']);
 
-/** `Flex`, `FlexLift`, `FlexBigGlow`, `FlexLittleGlow`, `FlexMovement` (Core/Flex.ts). Auto resolves to NaN. */
-const _resolveFlex = (s: JivStyle, ctx: ResolveContext): FlexSettings => {
-  const kind = ResolveTernary(s.Flex ?? 'None', ctx).trim() as FlexKind;
-  if (kind === 'None') return _FLEX_NONE;
+/** `Flex: None | Auto | Small | UltraSmall | Large | Menu` (Core/Flex.ts). */
+const _resolveFlexKind = (raw: string | undefined, ctx: ResolveContext): FlexKind => {
+  const kind = ResolveTernary(raw ?? 'None', ctx).trim() as FlexKind;
   if (!_FLEX_KINDS.has(kind)) throw new Error(`[Jaui] Flex: "${kind}" -- expected None, Auto, Small, UltraSmall, Large or Menu.`);
-  const auto = (raw: string | undefined): number => {
+  return kind;
+};
+
+/** `FlexLift`, `FlexBigGlow`, `FlexLittleGlow`, `FlexStretch`: each Auto or a number, as the animator springs them
+ *  (Core/Flex.ts FlexAmounts). Auto is a weight of 1 on the spec's value; FlexStretch's Auto is 1. */
+const _resolveFlexAmounts = (s: JivStyle, ctx: ResolveContext): Readonly<FlexAmounts> => {
+  if ((s.FlexLift ?? 'Auto') === 'Auto' && (s.FlexBigGlow ?? 'Auto') === 'Auto'
+    && (s.FlexLittleGlow ?? 'Auto') === 'Auto' && (s.FlexStretch ?? 'Auto') === 'Auto') return FLEX_AUTO;
+  // NaN is Auto.
+  const amount = (name: string, raw: string | undefined, low: number, high: number): number => {
     const v = ResolveTernary(raw ?? 'Auto', ctx).trim();
-    return v === 'Auto' ? NaN : Resolve(v, ctx, 'W');
+    if (v === 'Auto') return NaN;
+    const n = Resolve(v, ctx, 'W');
+    if (!Number.isFinite(n)) throw new Error(`[Jaui] ${name}: "${v}" -- expected Auto or a number.`);
+    return Math.min(high, Math.max(low, n));
   };
+  const lift = amount('FlexLift', s.FlexLift, -Infinity, Infinity);
+  const bigGlow = amount('FlexBigGlow', s.FlexBigGlow, 0, 1);
+  const littleGlow = amount('FlexLittleGlow', s.FlexLittleGlow, 0, 1);
+  const stretch = amount('FlexStretch', s.FlexStretch, 0, Infinity);
   return {
-    Kind: kind,
-    Lift: auto(s.FlexLift),
-    BigGlow: auto(s.FlexBigGlow),
-    LittleGlow: auto(s.FlexLittleGlow),
-    Movement: ResolveTernary(s.FlexMovement ?? 'Auto', ctx).trim() !== 'None',
+    FlexLift: Number.isNaN(lift) ? 0 : lift, FlexLiftAuto: Number.isNaN(lift) ? 1 : 0,
+    FlexBigGlow: Number.isNaN(bigGlow) ? 0 : bigGlow, FlexBigGlowAuto: Number.isNaN(bigGlow) ? 1 : 0,
+    FlexLittleGlow: Number.isNaN(littleGlow) ? 0 : littleGlow, FlexLittleGlowAuto: Number.isNaN(littleGlow) ? 1 : 0,
+    FlexStretch: Number.isNaN(stretch) ? 1 : stretch,
   };
 };
 
@@ -283,6 +296,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   const glass: GlassKind = glassRaw === 'Regular' || glassRaw === 'Clear' || glassRaw === 'Lens' ? glassRaw : 'None';
   // Auto: a glass is fully in, anything else has no glass to fade.
   const thickness = s.Thickness === 'Auto' ? (glass === 'None' ? 0 : 1) : Resolve(s.Thickness, ctx, 'W');
+  const flex = _resolveFlexAmounts(s, ctx);
 
   // Filters — each authored as a CSS-shaped function list, normalized into
   // the per-zone scalar render fields the shader already consumes. Blur()'s
@@ -388,7 +402,14 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     RimStrength: Math.max(0, Math.min(2, Resolve(ResolveTernary(s.RimStrength, ctx), ctx, 'W'))),
     LensLiftedScale: Math.max(0.01, Resolve(s.LensLiftedScale, ctx, 'W')),
     GlassGlow: Math.min(1, Math.max(0, Resolve(s.GlassGlow, ctx, 'W'))),
-    Flex: _resolveFlex(s, ctx),
+    Flex: _resolveFlexKind(s.Flex, ctx),
+    FlexLift: flex.FlexLift,
+    FlexLiftAuto: flex.FlexLiftAuto,
+    FlexBigGlow: flex.FlexBigGlow,
+    FlexBigGlowAuto: flex.FlexBigGlowAuto,
+    FlexLittleGlow: flex.FlexLittleGlow,
+    FlexLittleGlowAuto: flex.FlexLittleGlowAuto,
+    FlexStretch: flex.FlexStretch,
     FlexTouchX: 0,
     FlexTouchY: 0,
     FlexTouchDiameter: 0,

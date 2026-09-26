@@ -123,10 +123,20 @@ Apple's column is `Sizing.md`; ours is the Jwift sheet named.
 | liftScalePoints | `FlexLift: Auto \| <points>` | 16 small, 4 large; scale `(longer + pts) / longer` [C] | matches |
 | bigGlowOpacity | `FlexBigGlow: Auto \| <0..1>` | 1 small, 0 large [C] | matches; drawn on glass only (`GlassPressGlow`, lane 43 with `GlassGlow`) |
 | littleGlowOpacity | `FlexLittleGlow: Auto \| <0..1>` | 0.3 small, 0.2 large, 0.5 menu [C] | matches in value; the disc's blur law and its colour matrix are [I] (`GlassTouchGlow`, lanes 48 and 49) |
-| translation stretch, acceleration squash | `FlexMovement: Auto \| None` | on (sources 3) [C] | matches the law; the integrator's smoothing is [I] (50 ms) |
+| translation stretch, acceleration squash | `FlexStretch: Auto \| <number>` | on, 1 (sources 3) [C] | matches the law; the integrator's smoothing is [I] (50 ms); a multiple of Apple's, ours |
 | springs | none (Apple's) | scale, tracking and glow springs [C] | matches |
 
-Worn by: `JwiftPressGlass` (every glass button, the avatar pill, the drill sync button, the item page's glass actions), `JwiftProminent`, `JwiftDangerProminent` (solid plates: the lift and movement, no glow). Not worn: rows, cells and chips (`JwiftPress`, a fill highlight), fields, the open dropdown. The tab bar still sets its swell and glow from `TabBar.ts` through `FlexLiftScale` / `FlexBigGlow`, which now read the same spec.
+**The amounts are ordinary numeric properties.** `FlexLift`, `FlexBigGlow`, `FlexLittleGlow` and `FlexStretch` spring like any other (default Stiffness 260, Damping 32) and take `@Transition` / `@Spring` under their own names, so a state rule that changes one eases in, mid-press too, and Auto eases to a number and back (Auto is a weight on the spec's value for the control's size). `FlexStretch` multiplies the stretch toward the finger and the acceleration squash about the lift: 0 is none (the lift and glows alone), 1 is Apple's, 1.5 half again. It scales `movementPoints` and the squash range around 1 together, so it holds on a small control and a large one. The stretch is a render transform, but the panel is redrawn at its stretched size with a true continuous corner (radius times the mean scale, clamped to the half side), never a scaled corner. `Flex: None` mid-press lets the press settle home on its springs.
+
+```
+Jwift_Thing : JwiftGlass, JwiftPressGlass {
+  FlexStretch: 1.5
+  @Transition FlexStretch { Duration: 200ms }
+}
+Jwift_Thing:Disabled { FlexStretch: 0 }       // eases the stretch out, keeps the lift and glows
+```
+
+Worn by: `JwiftPressGlass` (every glass button, the avatar pill, the drill sync button, the item page's glass actions, the hero's button), `JwiftProminent`, `JwiftDangerProminent` (solid plates: the lift and movement, no glow), and the tab bar (`Jwift_TabBar : JwiftGlass, JwiftFlex`), whose selection lens rides the bar's flex as its child and adds only its own loupe stretch. Not worn: rows, cells and chips (`JwiftPress`, a fill highlight), fields, the open dropdown, the tab bar's round accessory (its lens and 1.02 swell).
 
 ## 3b. Sheets (Jwift/Apple/Sheets.md), built
 
@@ -179,7 +189,7 @@ Flex: None | Auto | Small | UltraSmall | Large | Menu
 FlexLift: Auto | <points>
 FlexBigGlow: Auto | <0..1>
 FlexLittleGlow: Auto | <0..1>
-FlexMovement: Auto | None
+FlexStretch: Auto | <number>
 ```
 
 `Auto` is Apple's law for the shape's S. Plain `Glass: Regular` is Apple's regular glass.
@@ -189,7 +199,7 @@ FlexMovement: Auto | None
 ```
 JwiftGlass                        { Glass: Regular }
 JwiftClearGlass                   { Glass: Clear }
-Jwift_TabBar : JwiftGlass         { Height: @AppleTabBarHeight  Flex: Auto }       // the 1.02 swell goes; the flex lift replaces it
+Jwift_TabBar : JwiftGlass         { Height: @AppleTabBarHeight  Flex: Auto }       // built: JwiftFlex, the swell is the flex lift
 Jwift_SelectionIndicator          { Background: @JwiftSelectionFill }             // the resting pill: no glass
 Jwift_SelectionIndicator_Pressed  { Glass: Lens  Lens: Tab }
 Jwift_SegmentIndicator_Pressed    { Glass: Lens  Lens: Segment }

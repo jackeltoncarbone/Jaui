@@ -40,7 +40,7 @@ export const DefaultJivStyle: JivStyle = {
   FlexLift: 'Auto',
   FlexBigGlow: 'Auto',
   FlexLittleGlow: 'Auto',
-  FlexMovement: 'Auto',
+  FlexStretch: 'Auto',
   GlassDispersion: 'Auto',
   GlassBlur: 'Auto',
   GlassOuterRefraction: 'Auto',

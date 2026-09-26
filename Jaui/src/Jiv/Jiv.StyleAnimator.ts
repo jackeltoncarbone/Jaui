@@ -89,6 +89,14 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['RimStrength',            s => s.RimStrength,                  (s, v) => { s.RimStrength = v; }],
   ['LensLiftedScale',        s => s.LensLiftedScale,              (s, v) => { s.LensLiftedScale = v; }],
   ['GlassGlow',              s => s.GlassGlow,                    (s, v) => { s.GlassGlow = v; }],
+  // The flex's amounts (Core/Flex.ts), each with its Auto weight under the same name, so Auto and a number ease.
+  ['FlexLift',               s => s.FlexLift,                     (s, v) => { s.FlexLift = v; }],
+  ['FlexLift',               s => s.FlexLiftAuto,                 (s, v) => { s.FlexLiftAuto = v; }],
+  ['FlexBigGlow',            s => s.FlexBigGlow,                  (s, v) => { s.FlexBigGlow = v; }],
+  ['FlexBigGlow',            s => s.FlexBigGlowAuto,              (s, v) => { s.FlexBigGlowAuto = v; }],
+  ['FlexLittleGlow',         s => s.FlexLittleGlow,               (s, v) => { s.FlexLittleGlow = v; }],
+  ['FlexLittleGlow',         s => s.FlexLittleGlowAuto,           (s, v) => { s.FlexLittleGlowAuto = v; }],
+  ['FlexStretch',            s => s.FlexStretch,                  (s, v) => { s.FlexStretch = v; }],
   ['GlassDispersion',        s => s.GlassDispersionAmount,        (s, v) => { s.GlassDispersionAmount = v; }],
   ['GlassDispersion',        s => s.GlassDispersionHeight,        (s, v) => { s.GlassDispersionHeight = v; }],
   ['GlassDispersion',        s => s.GlassDispersionInset,         (s, v) => { s.GlassDispersionInset = v; }],
@@ -359,12 +367,15 @@ export class JivStyleAnimator implements Animatable {
 
   /** Lays the running flex (Core/Flex.ts) over the resolved springs: its scale and translation compose with
    *  VisualScale / VisualTranslate, its big glow adds to GlassGlow, its little glow rides the FlexTouch fields.
+   *  It reads the sprung `Flex*` amounts every frame, and `Flex: None` mid-press lets it settle home.
    *  Once it settles it is dropped, and the node is exactly its resting self. */
   private _composeFlex = (dt: number): boolean => {
     const flex = this._jiv.Flex;
     if (flex === null) return false;
-    const moving = flex.Step(dt);
     const render = this._jiv.RenderStyle;
+    if (render.Flex === 'None') flex.End();
+    flex.Tune(render);
+    const moving = flex.Step(dt);
     if (!moving) {
       this._jiv.Flex = null;
       render.FlexTouchX = render.FlexTouchY = render.FlexTouchDiameter = render.FlexTouchAlpha = 0;

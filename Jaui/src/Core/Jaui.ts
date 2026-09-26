@@ -7512,11 +7512,12 @@ export class Canvas implements DirtyTracker {
   private _flexBegin = (hit: Jiv, e: PointerEvent): void => {
     this._flexEnd();
     let node: Jiv | null = hit;
-    while (node && (node.RenderStyle.Flex?.Kind ?? 'None') === 'None') node = node.Parent as Jiv | null;
+    while (node && (node.RenderStyle.Flex ?? 'None') === 'None') node = node.Parent as Jiv | null;
     if (!node || !node.Interactive) return;
     const [x, y] = this._flexLocal(node, e.clientX, e.clientY);
     const motion = node.Flex ?? new FlexMotion();
-    if (!motion.Begin(x, y, node.Width, node.Height, node.ResolveCtx?.PointScale ?? 1, node.RenderStyle.Flex, e.timeStamp)) return;
+    const style = node.RenderStyle;
+    if (!motion.Begin(x, y, node.Width, node.Height, node.ResolveCtx?.PointScale ?? 1, style.Flex, style, e.timeStamp)) return;
     node.Flex = motion;
     this._flexNode = node;
     this._flexPointer = e.pointerId;
@@ -9995,8 +9996,8 @@ export type {
 export { AnimationManager } from '../Animation/Animation.Manager';
 export { JivAnimator } from '../Jiv/Jiv.Animator';
 export { Spring } from '../Animation/Spring';
-export { FlexLiftScale, FlexBigGlow, FlexSpecFor } from './Flex';
-export type { FlexKind, FlexSpec } from './Flex';
+export { FlexSpecFor, FLEX_AUTO } from './Flex';
+export type { FlexKind, FlexSpec, FlexAmounts } from './Flex';
 export { JivAnimationDriver } from '../Animation/Animation.Driver';
 
 // Accessibility

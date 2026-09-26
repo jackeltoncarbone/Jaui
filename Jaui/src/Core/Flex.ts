@@ -37,6 +37,8 @@ const LARGE: FlexSpec = {
 const MENU: FlexSpec = { ...SMALL, Lift: 0, BigGlow: 0, LittleGlow: 0.5, Threshold: Infinity, MoveNorm: Infinity };
 
 const lerp = (t: number, a: number, b: number): number => a + (b - a) * t;
+// An amount under its Auto weight: the spec's own value at 1, the authored one at 0.
+const mix = (auto: number, own: number, authored: number): number => auto * own + (1 - auto) * authored;
 
 /** The spec for a control of `width` x `height` points (sub_188F76B80 for Auto): a longer side under 120 takes
  *  UltraSmall; otherwise Small to Large by the shorter side over 44 to 160, the movement fields staying Small's. */
@@ -65,23 +67,23 @@ export const FlexSpecFor = (kind: FlexKind, width: number, height: number): Flex
   };
 };
 
-/** The pressed swell of a `width` x `height` pt control: (longer + liftScalePoints) / longer. */
-export const FlexLiftScale = (width: number, height: number): number => {
-  const spec = FlexSpecFor('Auto', width, height)!;
-  return 1 + spec.Lift / Math.max(width, height, 1);
-};
-
-/** The big glow's opacity while pressed (bigGlowOpacity of the Auto spec). */
-export const FlexBigGlow = (width: number, height: number): number => FlexSpecFor('Auto', width, height)!.BigGlow;
-
-/** Resolved `Flex*` settings. NaN is Auto: the spec's own value. */
-export interface FlexSettings {
-  Kind: FlexKind;
-  Lift: number;
-  BigGlow: number;
-  LittleGlow: number;
-  Movement: boolean;
+/** The live `Flex*` amounts, each sprung by the style animator like any numeric property. A `*Auto` weight of 1
+ *  takes the spec's value for the control's size, 0 the authored one, so Auto and a number ease into each other.
+ *  `FlexStretch` multiplies the stretch and the squash: 0 none, 1 Apple's (Auto). */
+export interface FlexAmounts {
+  FlexLift: number;
+  FlexLiftAuto: number;
+  FlexBigGlow: number;
+  FlexBigGlowAuto: number;
+  FlexLittleGlow: number;
+  FlexLittleGlowAuto: number;
+  FlexStretch: number;
 }
+
+/** Every amount at Auto: the spec's own lift and glows, Apple's stretch. */
+export const FLEX_AUTO: Readonly<FlexAmounts> = {
+  FlexLift: 0, FlexLiftAuto: 1, FlexBigGlow: 0, FlexBigGlowAuto: 1, FlexLittleGlow: 0, FlexLittleGlowAuto: 1, FlexStretch: 1,
+};
 
 // UIKit's spring (damping ratio, response) as a unit-mass oscillator.
 const tune = (spring: Spring, damping: number, response: number): void => {
@@ -127,8 +129,10 @@ export class FlexMotion {
   Active = false;
 
   private _spec: FlexSpec = SMALL;
-  private _movement = true;
-  private _lift = 1;
+  private _liftPoints = 0;
+  private _bigGlow = 0;
+  private _littleGlow = 0;
+  private _stretch = 1;
   private _width = 1;
   private _height = 1;
   private _pointScale = 1;
@@ -153,17 +157,12 @@ export class FlexMotion {
   }
 
   /** The touch lands at (`x`, `y`) on a `width` x `height` px control (showGlowAt, activateIfPermitted). */
-  Begin(x: number, y: number, width: number, height: number, pointScale: number, settings: FlexSettings, timeMs: number): boolean {
+  Begin(x: number, y: number, width: number, height: number, pointScale: number, kind: FlexKind, amounts: FlexAmounts,
+    timeMs: number): boolean {
     const scale = pointScale > 0 ? pointScale : 1;
-    const spec = FlexSpecFor(settings.Kind, width / scale, height / scale);
+    const spec = FlexSpecFor(kind, width / scale, height / scale);
     if (spec === null || width <= 0 || height <= 0) return false;
-    this._spec = {
-      ...spec,
-      Lift: Number.isNaN(settings.Lift) ? spec.Lift : settings.Lift,
-      BigGlow: Number.isNaN(settings.BigGlow) ? spec.BigGlow : settings.BigGlow,
-      LittleGlow: Number.isNaN(settings.LittleGlow) ? spec.LittleGlow : settings.LittleGlow,
-    };
-    this._movement = settings.Movement;
+    this._spec = spec;
     this._width = width;
     this._height = height;
     this._pointScale = scale;
@@ -179,8 +178,6 @@ export class FlexMotion {
     this._lastT = timeMs;
     this._velocityX = this._velocityY = this._accelerationX = this._accelerationY = 0;
     this._sampleVelocityX = this._sampleVelocityY = 0;
-    const longer = Math.max(width, height) / scale;
-    this._lift = (longer + this._spec.Lift) / longer;
     // The little glow: a white disc 1.5 x the shorter side, at most 160 pt, laid at the touch (sub_188D881C8).
     this.LittleDiameter = Math.min(1.5 * Math.min(width, height), 160 * scale);
     this.LittleX.Value = this.LittleX.Target = cx;
@@ -195,10 +192,21 @@ export class FlexMotion {
     tune(this.LittleAlpha, 1, 0.1);
     tune(this.LittleX, 1, 0.15);
     tune(this.LittleY, 1, 0.15);
-    this.BigGlow.Target = this._spec.BigGlow;
-    this.LittleAlpha.Target = this._spec.LittleGlow;
+    this.Tune(amounts);
     this._retarget();
     return true;
+  }
+
+  /** The live amounts (the style animator's springs), read every frame, so a change eases in mid-press. */
+  Tune(amounts: FlexAmounts): void {
+    const spec = this._spec;
+    this._liftPoints = mix(amounts.FlexLiftAuto, spec.Lift, amounts.FlexLift);
+    this._bigGlow = mix(amounts.FlexBigGlowAuto, spec.BigGlow, amounts.FlexBigGlow);
+    this._littleGlow = mix(amounts.FlexLittleGlowAuto, spec.LittleGlow, amounts.FlexLittleGlow);
+    this._stretch = Math.max(0, amounts.FlexStretch);
+    if (!this.Active) return;
+    this.BigGlow.Target = this._bigGlow;
+    this.LittleAlpha.Target = this._littleGlow * (this._dissipated ? 0.5 : 1);
   }
 
   /** The finger is at (`x`, `y`) (handlePan, state changed). */
@@ -225,7 +233,7 @@ export class FlexMotion {
       this._dissipated = true;
       tune(this.LittleAlpha, 1, 0.5);
       tune(this.LittleScale, 1, 0.5);
-      this.LittleAlpha.Target = this._spec.LittleGlow * 0.5;
+      this.LittleAlpha.Target = this._littleGlow * 0.5;
       this.LittleScale.Target = 2;
     }
     this._retarget();
@@ -247,7 +255,7 @@ export class FlexMotion {
   }
 
   Step(dt: number): boolean {
-    if (this.Active && this._movement && dt > 0) {
+    if (this.Active && dt > 0) {
       // The integrator's acceleration: the smoothed change of the finger's velocity, decaying when it rests.
       const k = 1 - Math.exp(-dt / ACCELERATION_SMOOTHING_S);
       const vx = this._velocityX + (this._sampleVelocityX - this._velocityX) * k;
@@ -280,11 +288,13 @@ export class FlexMotion {
       this.TranslateX.Target = this.TranslateY.Target = 0;
       return;
     }
-    let sx = this._lift;
-    let sy = this._lift;
+    const longer = Math.max(this._width, this._height) / this._pointScale;
+    const lift = Math.max(0.01, (longer + this._liftPoints) / longer);
+    let sx = 0;
+    let sy = 0;
     let tx = 0;
     let ty = 0;
-    if (this._movement && Number.isFinite(spec.Threshold) && spec.Threshold > 0) {
+    if (Number.isFinite(spec.Threshold) && spec.Threshold > 0) {
       const ps = this._pointScale;
       const x = this._lastX;
       const y = this._lastY;
@@ -306,7 +316,7 @@ export class FlexMotion {
         ty = this._height * k * Math.sign(translationY);
       }
     }
-    if (this._movement && Number.isFinite(spec.MoveNorm)) {
+    if (Number.isFinite(spec.MoveNorm)) {
       const bounds = (side: number): [number, number] => {
         const pts = side / this._pointScale;
         return [Math.max(spec.MinScale, (pts - spec.MovePoints) / pts), Math.min(spec.MaxScale, (pts + spec.MovePoints) / pts)];
@@ -328,9 +338,10 @@ export class FlexMotion {
         sx += softClamp(lerp(ay, 1, minX), minX, maxX) - 1;
       }
     }
-    this.ScaleX.Target = sx;
-    this.ScaleY.Target = sy;
-    this.TranslateX.Target = tx;
-    this.TranslateY.Target = ty;
+    const k = this._stretch;
+    this.ScaleX.Target = lift + sx * k;
+    this.ScaleY.Target = lift + sy * k;
+    this.TranslateX.Target = tx * k;
+    this.TranslateY.Target = ty * k;
   }
 }

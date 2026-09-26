@@ -1,7 +1,7 @@
 import type { Color } from '../Core/Types';
 // Type-only, so the Vibrancy <-> Jiv.Types cycle is erased at compile time.
 import type { VibrancyDeclaration } from '../Core/Vibrancy';
-import type { FlexSettings } from '../Core/Flex';
+import type { FlexKind } from '../Core/Flex';
 import type { Transform } from '../Transform/Transform.Types';
 import type { FitMode } from '../Element/Element';
 
@@ -247,14 +247,15 @@ export interface JivStyle {
    *  lift, the stretch toward a travelling finger, the big glow and the little glow under the finger. Auto is UIKit's
    *  dynamic variant by size (Core/Flex.ts). Default None. */
   Flex: string;
-  /** `FlexLift: Auto | <points>`: the pressed swell's liftScalePoints. Auto is the spec's. */
+  /** `FlexLift: Auto | <points>`: the pressed swell's liftScalePoints. Auto is the spec's. Springs. */
   FlexLift: string;
-  /** `FlexBigGlow: Auto | <0..1>`: the big glow's opacity while pressed. Auto is the spec's bigGlowOpacity. */
+  /** `FlexBigGlow: Auto | <0..1>`: the big glow's opacity while pressed. Auto is the spec's bigGlowOpacity. Springs. */
   FlexBigGlow: string;
-  /** `FlexLittleGlow: Auto | <0..1>`: the little glow's opacity under the finger. Auto is the spec's. */
+  /** `FlexLittleGlow: Auto | <0..1>`: the little glow's opacity under the finger. Auto is the spec's. Springs. */
   FlexLittleGlow: string;
-  /** `FlexMovement: Auto | None`: None keeps the lift and glows and drops the stretch and the squash. */
-  FlexMovement: string;
+  /** `FlexStretch: Auto | <number>`: the stretch toward the finger and the acceleration squash, as a multiple of
+   *  Apple's (Auto, 1); 0 keeps the lift and glows alone. Springs, so a change eases in, mid-press too. */
+  FlexStretch: string;
   /** `GlassDispersion: Auto | None | <amount> <height> <inset> <angle>`: the dispersion of the glass's content lensing,
    *  QuartzCore's glassForeground (Jwift/Apple/LiquidGlass.md 3.7): `amount` pt of spread at the outline, easing over
    *  `height` pt from `inset` pt in, along the normal turned by `angle`. Auto is Apple's for the glass: the lens
@@ -425,8 +426,16 @@ export interface JivRenderStyle {
   LensInk: Color;
   LensLiftedScale: number;
   GlassGlow: number;
-  /** Resolved `Flex*` (Core/Flex.ts); not animated. */
-  Flex: FlexSettings;
+  /** Resolved `Flex` kind (Core/Flex.ts); snaps. */
+  Flex: FlexKind;
+  /** The `Flex*` amounts (Core/Flex.ts FlexAmounts), each sprung under its property's name. */
+  FlexLift: number;
+  FlexLiftAuto: number;
+  FlexBigGlow: number;
+  FlexBigGlowAuto: number;
+  FlexLittleGlow: number;
+  FlexLittleGlowAuto: number;
+  FlexStretch: number;
   /** The flex's little glow this frame (Core/Flex.ts): centre in local CSS px, diameter in CSS px, alpha 0..1.
    *  Written by the style animator while a flex runs; zero otherwise. */
   FlexTouchX: number;
