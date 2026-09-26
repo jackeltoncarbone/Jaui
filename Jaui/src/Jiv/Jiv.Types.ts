@@ -256,6 +256,11 @@ export interface JivStyle {
   /** `FlexStretch: Auto | <number>`: the stretch toward the finger and the acceleration squash, as a multiple of
    *  Apple's (Auto, 1); 0 keeps the lift and glows alone. Springs, so a change eases in, mid-press too. */
   FlexStretch: string;
+  /** `FlexHold: <0..1>`: the fraction of the pressed lift and big glow held with no finger down, as if the control
+   *  sat pressed with nobody touching it. No Auto -- a plain number, default 0. Springs like the other amounts, so
+   *  a state rule that sets it eases in; a real press on top takes the larger of the two, never doubling. Requires
+   *  `Flex` not `None`. */
+  FlexHold: string;
   /** `GlassDispersion: Auto | None | <amount> <height> <inset> <angle>`: the dispersion of the glass's content lensing,
    *  QuartzCore's glassForeground (Jwift/Apple/LiquidGlass.md 3.7): `amount` pt of spread at the outline, easing over
    *  `height` pt from `inset` pt in, along the normal turned by `angle`. Auto is Apple's for the glass: the lens
@@ -436,6 +441,8 @@ export interface JivRenderStyle {
   FlexLittleGlow: number;
   FlexLittleGlowAuto: number;
   FlexStretch: number;
+  /** `FlexHold`, sprung under its own name -- no Auto weight to pair with it. */
+  FlexHold: number;
   /** The flex's little glow this frame (Core/Flex.ts): centre in local CSS px, diameter in CSS px, alpha 0..1.
    *  Written by the style animator while a flex runs; zero otherwise. */
   FlexTouchX: number;

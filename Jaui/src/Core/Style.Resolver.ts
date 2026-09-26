@@ -262,10 +262,12 @@ const _resolveFlexKind = (raw: string | undefined, ctx: ResolveContext): FlexKin
 };
 
 /** `FlexLift`, `FlexBigGlow`, `FlexLittleGlow`, `FlexStretch`: each Auto or a number, as the animator springs them
- *  (Core/Flex.ts FlexAmounts). Auto is a weight of 1 on the spec's value; FlexStretch's Auto is 1. */
+ *  (Core/Flex.ts FlexAmounts). Auto is a weight of 1 on the spec's value; FlexStretch's Auto is 1. `FlexHold` has
+ *  no Auto -- a plain 0..1, default 0. */
 const _resolveFlexAmounts = (s: JivStyle, ctx: ResolveContext): Readonly<FlexAmounts> => {
   if ((s.FlexLift ?? 'Auto') === 'Auto' && (s.FlexBigGlow ?? 'Auto') === 'Auto'
-    && (s.FlexLittleGlow ?? 'Auto') === 'Auto' && (s.FlexStretch ?? 'Auto') === 'Auto') return FLEX_AUTO;
+    && (s.FlexLittleGlow ?? 'Auto') === 'Auto' && (s.FlexStretch ?? 'Auto') === 'Auto'
+    && (s.FlexHold ?? '0') === '0') return FLEX_AUTO;
   // NaN is Auto.
   const amount = (name: string, raw: string | undefined, low: number, high: number): number => {
     const v = ResolveTernary(raw ?? 'Auto', ctx).trim();
@@ -278,11 +280,15 @@ const _resolveFlexAmounts = (s: JivStyle, ctx: ResolveContext): Readonly<FlexAmo
   const bigGlow = amount('FlexBigGlow', s.FlexBigGlow, 0, 1);
   const littleGlow = amount('FlexLittleGlow', s.FlexLittleGlow, 0, 1);
   const stretch = amount('FlexStretch', s.FlexStretch, 0, Infinity);
+  const holdRaw = ResolveTernary(s.FlexHold ?? '0', ctx).trim();
+  const hold = Resolve(holdRaw, ctx, 'W');
+  if (!Number.isFinite(hold)) throw new Error(`[Jaui] FlexHold: "${holdRaw}" -- expected a number.`);
   return {
     FlexLift: Number.isNaN(lift) ? 0 : lift, FlexLiftAuto: Number.isNaN(lift) ? 1 : 0,
     FlexBigGlow: Number.isNaN(bigGlow) ? 0 : bigGlow, FlexBigGlowAuto: Number.isNaN(bigGlow) ? 1 : 0,
     FlexLittleGlow: Number.isNaN(littleGlow) ? 0 : littleGlow, FlexLittleGlowAuto: Number.isNaN(littleGlow) ? 1 : 0,
     FlexStretch: Number.isNaN(stretch) ? 1 : stretch,
+    FlexHold: Math.min(1, Math.max(0, hold)),
   };
 };
 
@@ -410,6 +416,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     FlexLittleGlow: flex.FlexLittleGlow,
     FlexLittleGlowAuto: flex.FlexLittleGlowAuto,
     FlexStretch: flex.FlexStretch,
+    FlexHold: flex.FlexHold,
     FlexTouchX: 0,
     FlexTouchY: 0,
     FlexTouchDiameter: 0,

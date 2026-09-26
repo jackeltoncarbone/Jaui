@@ -136,7 +136,17 @@ Jwift_Thing : JwiftGlass, JwiftPressGlass {
 Jwift_Thing:Disabled { FlexStretch: 0 }       // eases the stretch out, keeps the lift and glows
 ```
 
-Worn by: `JwiftPressGlass` (every glass button, the avatar pill, the drill sync button, the item page's glass actions, the hero's button), `JwiftProminent`, `JwiftDangerProminent` (solid plates: the lift and movement, no glow), and the tab bar (`Jwift_TabBar : JwiftGlass, JwiftFlex`), whose selection lens rides the bar's flex as its child and adds only its own loupe stretch. Not worn: rows, cells and chips (`JwiftPress`, a fill highlight), fields, the open dropdown, the tab bar's round accessory (its lens and 1.02 swell).
+`FlexHold: <0..1>`, default 0 -- ours, no Apple lever: the fraction of the pressed lift and big glow held with
+nobody touching it, as if the control sat pressed on its own. No Auto, and no stretch toward a finger; it
+springs under its own name like the other amounts, so a state rule that sets it eases in. A real press on top
+takes the larger of its own lift/glow and the held ones, so holding never doubles a press. Requires `Flex` not
+`None`.
+
+```
+Jwift_Field_Glass:(Editing) { FlexHold: 1 }   // the active field sits lifted and glowing, no finger down
+```
+
+Worn by: `JwiftPressGlass` (every glass button, the avatar pill, the drill sync button, the item page's glass actions, the hero's button), `JwiftProminent`, `JwiftDangerProminent` (solid plates: the lift and movement, no glow), and the tab bar (`Jwift_TabBar : JwiftGlass, JwiftFlex`), whose selection lens rides the bar's flex as its child and adds only its own loupe stretch. Not worn: rows, cells and chips (`JwiftPress`, a fill highlight), the open dropdown, the tab bar's round accessory (its lens and 1.02 swell). A field (`Jwift_Field_Glass`) wears only `FlexHold`, with `FlexStretch: 0`: a place, not a target, that holds its lift and glow while editing but never stretches toward a finger.
 
 ## 3b. Sheets (Jwift/Apple/Sheets.md), built
 

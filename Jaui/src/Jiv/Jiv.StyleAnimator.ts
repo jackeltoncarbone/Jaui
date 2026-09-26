@@ -9,6 +9,7 @@ import type {
 import type { Jiv } from './Jiv';
 import type { JivStyle, JivRenderStyle } from './Jiv.Types';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
+import { FlexHeld } from '../Core/Flex';
 import { CascadeEpoch } from '../Core/Cascade.Epoch';
 import { GlassIsActiveLens } from '../Core/Glass.Pipeline';
 import type { VibrancyDeclaration } from '../Core/Vibrancy';
@@ -97,6 +98,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['FlexLittleGlow',         s => s.FlexLittleGlow,               (s, v) => { s.FlexLittleGlow = v; }],
   ['FlexLittleGlow',         s => s.FlexLittleGlowAuto,           (s, v) => { s.FlexLittleGlowAuto = v; }],
   ['FlexStretch',            s => s.FlexStretch,                  (s, v) => { s.FlexStretch = v; }],
+  ['FlexHold',               s => s.FlexHold,                     (s, v) => { s.FlexHold = v; }],
   ['GlassDispersion',        s => s.GlassDispersionAmount,        (s, v) => { s.GlassDispersionAmount = v; }],
   ['GlassDispersion',        s => s.GlassDispersionHeight,        (s, v) => { s.GlassDispersionHeight = v; }],
   ['GlassDispersion',        s => s.GlassDispersionInset,         (s, v) => { s.GlassDispersionInset = v; }],
@@ -362,30 +364,53 @@ export class JivStyleAnimator implements Animatable {
       set(this._jiv.RenderStyle, s.Value);
     }
     this._jiv.RenderStyle.GlassVariant = target.GlassVariant;
+    // FlexHold can already be settled at 1 on first paint (an editor that opens already focused) — apply
+    // it here too, not only in the running Tick loop, or the node would draw one frame unlifted.
+    this._applyFlexHold(this._jiv.RenderStyle);
     _noteCascadeInputs(this._jiv.RenderStyle);
+  };
+
+  /** The held lift and big glow (FlexHold, Core/Flex.ts FlexHeld): a control can sit lifted and glowing
+   *  with no finger down. Composed onto VisualScale / GlassGlow the same way the running press is, so the
+   *  renderer's continuous-corner rule (a real size change, never a scaled corner) applies to it too. */
+  private _applyFlexHold = (render: JivRenderStyle): void => {
+    if (render.FlexHold <= 0) return;
+    const held = FlexHeld(render.Flex, this._jiv.Width, this._jiv.Height, this._jiv.ResolveCtx?.PointScale ?? 1, render);
+    render.VisualScaleX *= held.Lift;
+    render.VisualScaleY *= held.Lift;
+    render.GlassGlow = Math.min(1, render.GlassGlow + held.Glow);
   };
 
   /** Lays the running flex (Core/Flex.ts) over the resolved springs: its scale and translation compose with
    *  VisualScale / VisualTranslate, its big glow adds to GlassGlow, its little glow rides the FlexTouch fields.
-   *  It reads the sprung `Flex*` amounts every frame, and `Flex: None` mid-press lets it settle home.
-   *  Once it settles it is dropped, and the node is exactly its resting self. */
+   *  It reads the sprung `Flex*` amounts every frame, and `Flex: None` mid-press lets it settle home. Once it
+   *  settles it is dropped, and the node is exactly its resting self -- except for FlexHold, composed here
+   *  whether or not a press is running, so an editing field still sits lifted with nobody touching it; a
+   *  running press takes the larger of its own lift/glow and the held ones, so holding never doubles a press. */
   private _composeFlex = (dt: number): boolean => {
-    const flex = this._jiv.Flex;
-    if (flex === null) return false;
     const render = this._jiv.RenderStyle;
+    const flex = this._jiv.Flex;
+    if (flex === null) {
+      this._applyFlexHold(render);
+      return false;
+    }
     if (render.Flex === 'None') flex.End();
     flex.Tune(render);
     const moving = flex.Step(dt);
     if (!moving) {
       this._jiv.Flex = null;
       render.FlexTouchX = render.FlexTouchY = render.FlexTouchDiameter = render.FlexTouchAlpha = 0;
+      this._applyFlexHold(render);
       return false;
     }
-    render.VisualScaleX *= flex.ScaleX.Value;
-    render.VisualScaleY *= flex.ScaleY.Value;
+    const held = render.FlexHold > 0
+      ? FlexHeld(render.Flex, this._jiv.Width, this._jiv.Height, this._jiv.ResolveCtx?.PointScale ?? 1, render)
+      : { Lift: 1, Glow: 0 };
+    render.VisualScaleX *= Math.max(flex.ScaleX.Value, held.Lift);
+    render.VisualScaleY *= Math.max(flex.ScaleY.Value, held.Lift);
     render.VisualTranslateX += flex.TranslateX.Value;
     render.VisualTranslateY += flex.TranslateY.Value;
-    render.GlassGlow = Math.min(1, render.GlassGlow + Math.max(0, flex.BigGlow.Value));
+    render.GlassGlow = Math.min(1, render.GlassGlow + Math.max(0, flex.BigGlow.Value, held.Glow));
     render.FlexTouchX = flex.LittleX.Value;
     render.FlexTouchY = flex.LittleY.Value;
     render.FlexTouchDiameter = flex.LittleDiameter * flex.LittleScale.Value;

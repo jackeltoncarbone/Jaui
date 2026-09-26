@@ -41,6 +41,7 @@ export const DefaultJivStyle: JivStyle = {
   FlexBigGlow: 'Auto',
   FlexLittleGlow: 'Auto',
   FlexStretch: 'Auto',
+  FlexHold: '0',
   GlassDispersion: 'Auto',
   GlassBlur: 'Auto',
   GlassOuterRefraction: 'Auto',

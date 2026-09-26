@@ -84,11 +84,31 @@ export interface FlexAmounts {
   FlexLittleGlow: number;
   FlexLittleGlowAuto: number;
   FlexStretch: number;
+  /** `FlexHold: <0..1>`: the fraction of the pressed lift and big glow held with no finger down. No Auto —
+   *  a plain number, default 0. */
+  FlexHold: number;
 }
 
-/** Every amount at Auto: the spec's own lift and glows, Apple's stretch. */
+/** Every amount at Auto: the spec's own lift and glows, Apple's stretch, no hold. */
 export const FLEX_AUTO: Readonly<FlexAmounts> = {
-  FlexLift: 0, FlexLiftAuto: 1, FlexBigGlow: 0, FlexBigGlowAuto: 1, FlexLittleGlow: 0, FlexLittleGlowAuto: 1, FlexStretch: 1,
+  FlexLift: 0, FlexLiftAuto: 1, FlexBigGlow: 0, FlexBigGlowAuto: 1, FlexLittleGlow: 0, FlexLittleGlowAuto: 1,
+  FlexStretch: 1, FlexHold: 0,
+};
+
+/** The held lift and big glow at `amounts.FlexHold` (0..1), with no finger down: 1 gives the same lift and
+ *  big glow a full press shows at rest (the spec's own, or the authored amount under its Auto weight), 0
+ *  gives neither. FlexHold's own spring is the only easing here — this is a plain function of its current
+ *  value, not itself sprung. The stretch toward a finger plays no part: a hold has no finger position.
+ *  `Flex: None` gives no spec, so no hold either. */
+export const FlexHeld = (kind: FlexKind, width: number, height: number, pointScale: number, amounts: FlexAmounts): { Lift: number; Glow: number } => {
+  const hold = Math.max(0, Math.min(1, amounts.FlexHold));
+  const scale = pointScale > 0 ? pointScale : 1;
+  const spec = hold > 0 ? FlexSpecFor(kind, width / scale, height / scale) : null;
+  if (spec === null || width <= 0 || height <= 0) return { Lift: 1, Glow: 0 };
+  const longer = Math.max(width, height) / scale;
+  const liftPoints = mix(amounts.FlexLiftAuto, spec.Lift, amounts.FlexLift);
+  const bigGlow = mix(amounts.FlexBigGlowAuto, spec.BigGlow, amounts.FlexBigGlow);
+  return { Lift: 1 + (liftPoints / longer) * hold, Glow: bigGlow * hold };
 };
 
 // UIKit's spring (damping ratio, response) as a unit-mass oscillator.
