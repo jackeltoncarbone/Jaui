@@ -23,6 +23,7 @@
  */
 
 import { Jiv as JivCore } from '../Jiv/Jiv';
+import { Element } from '../Element/Element';
 import { DefaultJivStyle } from '../Jiv/Jiv.Defaults';
 import { Janvas as JanvasCore } from '../Janvas/Janvas';
 import type { JanvasRenderer } from '../Janvas/Janvas.Renderer';
@@ -98,6 +99,8 @@ export class JivRegistry {
   private _post: (msg: W2M, transfer?: Transferable[]) => void;
 
   constructor(root: JivCore, post: (msg: W2M, transfer?: Transferable[]) => void) {
+    // Every authored write now arrives through `_applyOpts`, which bumps the node's version.
+    Element.AuthoredTracked = true;
     this._root = root;
     this._post = post;
     this._nodes.set(ROOT_ID, root);
@@ -352,6 +355,7 @@ export class JivRegistry {
       console.warn(`[JivRegistry] apply: missing id=${id}`);
       return;
     }
+    core.AuthoredVersion++;
     this._applyElementProps(core, opts);
     // Class-snapshot semantics: when a bag is present, callers are
     // delivering the full state for that bag (resolved from a JSS class),

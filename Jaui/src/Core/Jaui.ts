@@ -1362,6 +1362,7 @@ export class Canvas implements DirtyTracker {
     // retargeted, a class swap, a scroll easing, a presence mount -- restarts this loop first.
     this._animationManager.OnWake(this.Wake);
     this._scrollManager = new ScrollManager(this.Root);
+    this._scrollManager.GlobalVars = () => this._jssVars;
     this._animationManager.Register(this._scrollManager);
     // TEMPORARY: `?autoscroll[=NN]` turns on demo auto-scroll — every scroll
     // box slowly scrolls to its end, pauses, and restarts, forever. Used to

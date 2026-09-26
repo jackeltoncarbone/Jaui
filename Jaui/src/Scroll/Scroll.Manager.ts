@@ -11,6 +11,8 @@ import {
 } from './Scroll.Release';
 import { JTrace, JauiTracing, JMs } from '../Diagnostics/Jaui.Trace';
 import { LAYER_TOP } from '../Jiv/Jiv.Types';
+import { Element } from '../Element/Element';
+import { SubtreeReadsScrollVars } from './Scroll.VarReaders';
 
 /**
  * Scroll physics for Overflow:Scroll Jivs. Two behaviors share the same state:
@@ -651,8 +653,16 @@ export class ScrollManager implements Animatable {
     jiv.SetVar('ScrollActive', active || performance.now() - s.lastActiveAt < 900 ? 1 : 0);
     // Var-driven LENGTHS in the overlay subtree re-resolve on the next solve;
     // SetVar wakes styles but not layout, so say it moved.
-    if (jiv.VarMap.get('ScrollY') !== before) jiv.MarkLayoutDirty();
+    if (jiv.VarMap.get('ScrollY') !== before && this._readsScrollVars(jiv)) jiv.MarkLayoutDirty();
   };
+
+  /** The canvas's global JSS vars, which a subtree's var references resolve through. */
+  GlobalVars: () => ReadonlyMap<string, string> = () => new Map();
+
+  /** Whether a re-solve after this scroller moves could change anything. Without a registry carrying every
+   *  authored write the answer cannot be cached, so it is always yes. */
+  private _readsScrollVars = (jiv: Jiv): boolean =>
+    !Element.AuthoredTracked || SubtreeReadsScrollVars(jiv, this.GlobalVars());
 
   private _stepWalk = (node: Jiv, fn: (j: Jiv) => void): void => {
     if (node.Overflow === 'Scroll') fn(node);

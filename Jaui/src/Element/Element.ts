@@ -20,6 +20,7 @@ import { DirtyFlag, type DirtyFlags } from '../Core/Types';
 import type { SvgVectorPaint } from '../Svg/Svg.VectorPaint';
 import { Spring } from '../Animation/Spring';
 import { CascadeEpoch } from '../Core/Cascade.Epoch';
+import { CollectVarRefs } from '../Core/Var.Refs';
 import type { VibrancyValue } from '../Core/Vibrancy';
 
 /** Side-channel from Element to its owning Canvas (or any consumer that wants
@@ -91,6 +92,26 @@ export class Element {
   // ── Tree ──
   Parent: Element | null = null;
   Children: Element[] = [];
+
+  // ── Authored-source version ──
+  /** Bumped by every authored write the worker registry applies, so a reader of the authored bags can cache. */
+  AuthoredVersion = 0;
+  /** True once a registry carries every authored write; before that `AuthoredVersion` says nothing. */
+  static AuthoredTracked = false;
+  private _varRefs: ReadonlySet<string> | null = null;
+  private _varRefsAt = -1;
+  /** Every `@Name` this node's authored values reference, cached per `AuthoredVersion`. */
+  AuthoredVarRefs = (): ReadonlySet<string> => {
+    if (this._varRefs === null || this._varRefsAt !== this.AuthoredVersion) {
+      this._varRefs = CollectVarRefs(this.AuthoredValues(), (o) => o instanceof Element);
+      this._varRefsAt = this.AuthoredVersion;
+    }
+    return this._varRefs;
+  };
+  /** The authored bags a length or a predicate can reference a var from. */
+  protected AuthoredValues(): unknown[] {
+    return [this.Layout, this.ChildLayout, this.TextStyle, this.PointScale];
+  }
 
   // ── Layout ──
 

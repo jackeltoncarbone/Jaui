@@ -442,6 +442,13 @@ export class Jiv extends Element {
 
   /** Snapshot the just-applied base Layout. Called by the worker registry
    *  right after assigning the class's Layout, before any overlay. */
+  protected override AuthoredValues(): unknown[] {
+    return [
+      ...super.AuthoredValues(), this.Style, this.PredicateStyles, this.TextSelectionStyle, this.Springs,
+      this.Animations, this.AnimationTable, this.Flex, this._baseLayout, this._baseChildLayout,
+    ];
+  }
+
   SetBaseLayout = (): void => { this._baseLayout = { ...this.Layout }; };
 
   /** Snapshot the just-applied base ChildLayout (see SetBaseLayout). */
