@@ -50,8 +50,6 @@ export interface LaidOutSegment {
   Height: number;
   /** Row index, 0-based. Two segments share a Row iff they share a Y. */
   Row: number;
-  /** Where the rendered `<jext>` goes: it drops leading whitespace, so its box starts past it. */
-  InkX: number;
 }
 
 export interface CaretRect { x: number; y: number; height: number; }
@@ -67,6 +65,15 @@ export interface LayoutMetrics {
 }
 
 export type MeasureFn = (text: string) => number;
+
+export interface Rect { X: number; Y: number; Width: number; Height: number; }
+
+/** Whether `(px, py)` — in the same coordinate space as `rect` — falls inside it. Half-open on the
+ *  right and bottom edges, matching the engine's own hit-test convention. Shared by every consumer
+ *  that decides "is this pointer press on the field or outside it" (Jinput's tap-outside dismissal,
+ *  its touch summon gate), so a field never has to reinvent this check. */
+export const PointInRect = (px: number, py: number, rect: Rect): boolean =>
+  px >= rect.X && px < rect.X + rect.Width && py >= rect.Y && py < rect.Y + rect.Height;
 
 export interface LayoutSpan {
   Start: number;
@@ -184,7 +191,7 @@ export const LayoutSegments = (
     if (line.segs.length === 0) {
       out.push({
         Seg: { Text: '', StartIndex: line.startIdx, EndIndex: line.startIdx },
-        X: 0, Y: y, Width: 0, Height: metrics.LineHeightPx, Row: row, InkX: 0,
+        X: 0, Y: y, Width: 0, Height: metrics.LineHeightPx, Row: row,
       });
       continue;
     }
@@ -231,11 +238,9 @@ export const LayoutSegments = (
     const flush = (): void => {
       if (!cur) return;
       if (cur.endInSeg > cur.startInSeg) {
-        const text = cur.seg.Text.substring(cur.startInSeg, cur.endInSeg);
-        const lead = /^\s*/.exec(text)![0];
         out.push({
           Seg: {
-            Text: text,
+            Text: cur.seg.Text.substring(cur.startInSeg, cur.endInSeg),
             StartIndex: cur.seg.StartIndex + cur.startInSeg,
             EndIndex: cur.seg.StartIndex + cur.endInSeg,
             Color: cur.seg.Color,
@@ -246,7 +251,6 @@ export const LayoutSegments = (
           X: cur.x, Y: cur.y,
           Width: cur.width, Height: metrics.LineHeightPx,
           Row: cur.row,
-          InkX: cur.x + (lead ? measure(lead) : 0),
         });
       }
       cur = null;

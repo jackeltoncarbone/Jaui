@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  CharPosition, IndexAtPoint, LayoutSegments, RangeRects, SegmentsFromSpans,
+  CharPosition, IndexAtPoint, LayoutSegments, PointInRect, RangeRects, SegmentsFromSpans,
   type LayoutMetrics, type LayoutSpan,
 } from '../src/Jinput/Jinput.Layout';
 
@@ -42,10 +42,10 @@ describe('Jinput layout: tokens inline', () => {
     expect(laid[1].Width).toBe(measure('halt'));
   });
 
-  it('places each rendered box past leading whitespace the renderer drops', () => {
+  it('keeps a leading-whitespace piece at its full measured box, never narrower than the caret/click math uses', () => {
     const laid = LayoutSegments(SegmentsFromSpans('  Band', []), metrics(1000), measure);
     expect(laid[0].X).toBe(0);
-    expect(laid[0].InkX).toBe(10);
+    expect(laid[0].Width).toBe(measure('  Band'));
   });
 });
 
@@ -155,5 +155,33 @@ describe('SegmentsFromSpans', () => {
   it('keeps a hard newline split segment in its span color', () => {
     const laid = LayoutSegments(SegmentsFromSpans('ab\ncd', [{ Start: 0, End: 5, Color: '#0f0' }]), metrics(100), measure);
     expect(laid.map((s) => [s.Seg.Text, s.Seg.Color, s.Row])).toEqual([['ab', '#0f0', 0], ['cd', '#0f0', 1]]);
+  });
+});
+
+// The predicate a field's tap-outside dismissal is built on (Jinput's `_insideSurface`): does the
+// press land on the field's own HitSurface, or elsewhere on the canvas. Apple's rule is "a pointerdown
+// on anything that isn't the field resigns first responder" — this is the "is it the field" half.
+describe('PointInRect: pointerdown inside keeps focus, outside blurs', () => {
+  const field = { X: 100, Y: 200, Width: 240, Height: 48 };
+
+  it('a press in the middle of the field is inside', () => {
+    expect(PointInRect(150, 210, field)).toBe(true);
+  });
+
+  it('a press elsewhere on the canvas — above, below, left, right of the field — is outside', () => {
+    expect(PointInRect(150, 100, field)).toBe(false); // above
+    expect(PointInRect(150, 400, field)).toBe(false); // below
+    expect(PointInRect(50, 210, field)).toBe(false);   // left
+    expect(PointInRect(500, 210, field)).toBe(false);  // right
+  });
+
+  it('the top/left edge belongs to the field; the bottom/right edge does not (half-open, matches the engine hit-test)', () => {
+    expect(PointInRect(field.X, field.Y, field)).toBe(true);
+    expect(PointInRect(field.X + field.Width, field.Y, field)).toBe(false);
+    expect(PointInRect(field.X, field.Y + field.Height, field)).toBe(false);
+  });
+
+  it('a zero-size surface (rect not yet measured) never reads as inside', () => {
+    expect(PointInRect(0, 0, { X: 0, Y: 0, Width: 0, Height: 0 })).toBe(false);
   });
 });

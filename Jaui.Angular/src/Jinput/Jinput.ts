@@ -9,7 +9,7 @@ import { Jiv } from '../Jiv/Jiv';
 import { Jext } from '../Jext/Jext';
 import { Jyle } from '../Jyle/Jyle';
 import {
-  LayoutSegments, SegmentsFromSpans, CharPosition, IndexAtPoint, RangeRects, WordRangeAt,
+  LayoutSegments, SegmentsFromSpans, CharPosition, IndexAtPoint, RangeRects, WordRangeAt, PointInRect,
   type LayoutMetrics, type LayoutSegmentInput, type LaidOutSegment,
 } from './Jinput.Layout';
 import type { JivHandle } from 'jaui';
@@ -188,9 +188,9 @@ const _watchPageFonts = (): void => {
               [textStyle]="segmentTextStyle(laid.Seg)"
               [childLayout]="{
                 Position: 'Placed',
-                Left: laid.InkX + 'px',
+                Left: laid.X + 'px',
                 Top: laid.Y + 'px',
-                Width: (laid.X + laid.Width - laid.InkX + SegmentSlackPx()) + 'px',
+                Width: (laid.Width + SegmentSlackPx()) + 'px',
                 Height: laid.Height + 'px',
               }" />
           }
@@ -980,8 +980,7 @@ export class Jinput implements OnDestroy {
     const cRect = canvasEl.getBoundingClientRect();
     const localX = e.clientX - cRect.left;
     const localY = e.clientY - cRect.top;
-    return localX >= surface.X && localX < surface.X + surface.Width
-        && localY >= surface.Y && localY < surface.Y + surface.Height;
+    return PointInRect(localX, localY, surface);
   };
 
   /** Tap-outside dismissal (SS-199). Fires for every real pointerdown on the
