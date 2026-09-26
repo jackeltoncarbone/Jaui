@@ -106,11 +106,13 @@ float AppleCorner(vec2 p, vec2 halfSize, vec4 radii, bool circular, out vec2 out
 // fields blend, so the curve springs like any other property.
 float ContinuousCorner(vec2 p, vec2 halfSize, vec4 radii, float smoothing, out vec2 outward) {
     float s = clamp(smoothing, 0.0, 1.0);
-    if (s >= 1.0) return AppleCorner(p, halfSize, radii, false, outward);
-    if (s <= 0.0) return AppleCorner(p, halfSize, radii, true, outward);
-    vec2 outCircular;
-    float dCircular = AppleCorner(p, halfSize, radii, true, outCircular);
-    float dContinuous = AppleCorner(p, halfSize, radii, false, outward);
-    outward = CornerUnit(mix(outCircular, outward, s));
+    // One call site per field: a compiler inlines each once, not once per return (D3D's took twice as long).
+    vec2 outCircular = vec2(0.0), outContinuous = vec2(0.0);
+    float dCircular = 0.0, dContinuous = 0.0;
+    if (s < 1.0) dCircular = AppleCorner(p, halfSize, radii, true, outCircular);
+    if (s > 0.0) dContinuous = AppleCorner(p, halfSize, radii, false, outContinuous);
+    if (s >= 1.0) { outward = outContinuous; return dContinuous; }
+    if (s <= 0.0) { outward = outCircular; return dCircular; }
+    outward = CornerUnit(mix(outCircular, outContinuous, s));
     return mix(dCircular, dContinuous, s);
 }

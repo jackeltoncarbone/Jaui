@@ -42,14 +42,25 @@ export class ShaderBatch {
   private _issueMs = 0;
   private _resolveMs = 0;
   private _resolved = false;
+  private _completion: number | null = null;
 
   constructor(gl: WebGL2RenderingContext) {
     this._gl = gl;
     // Requesting the extension is what tells ANGLE the caller intends to poll rather than block,
-    // and is the documented signal to use the parallel compile path. We never read
-    // COMPLETION_STATUS_KHR: we need all thirteen before the first frame either way, so a spin
-    // that resolves them out of order buys nothing over one wait on the slowest.
-    try { gl.getExtension('KHR_parallel_shader_compile'); } catch { /* core WebGL2 still works */ }
+    // and is the documented signal to use the parallel compile path. The boot set never polls: it
+    // needs every program before the first frame, so one wait on the slowest is its whole cost.
+    try {
+      const ext = gl.getExtension('KHR_parallel_shader_compile') as { COMPLETION_STATUS_KHR: number } | null;
+      this._completion = ext?.COMPLETION_STATUS_KHR ?? null;
+    } catch { /* core WebGL2 still works */ }
+  }
+
+  /** Has the driver finished every program, so `Resolve` will not block? Without the extension there
+   *  is no asking, and it answers true: the caller then waits, as it always did. */
+  get Done(): boolean {
+    if (this._resolved || this._completion === null) return true;
+    for (const job of this._jobs) if (!this._gl.getProgramParameter(job.Program, this._completion)) return false;
+    return true;
   }
 
   /** How many programs this batch carries. */

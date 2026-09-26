@@ -417,21 +417,12 @@ void lensField(vec2 pixel, float dpr, float ovalization, out float d, out vec2 n
 // lifted items, at the backdrop layer's scale) through its displacementMap, and over it the contentWrapper, the lifted
 // items (u_LensItems, premultiplied) through its own, in the selection's ink when it has one [C: they are the
 // selected twins]. Each warp is taken at that pixel's own depth and normal, as each layer's filter draws it. Opaque,
-// as the glass's background is; `cover` is the items' alpha.
-vec4 lensContent(vec2 pixel, float dpr, float ease, float inkPacked, out float cover) {
-    float d;
-    vec2 n;
-    lensField(pixel, dpr, GLASS_LENS_OVALIZATION, d, n);
-    vec3 backdrop = lensCapture(pixel + n * GlassShift(d, GLASS_LENS_BACKDROP_WARP.x * dpr * GLASS_LENS_BACKDROP_CAPTURE,
-                                                      GLASS_LENS_BACKDROP_WARP.y) * dpr * ease);
-    vec2 read = pixel + n * GlassShift(d, GLASS_LENS_ITEM_WARP.x, GLASS_LENS_ITEM_WARP.y) * dpr * ease;
-    vec2 uv = read / u_Resolution;
+// as the glass's background is; `cover` is the items' alpha. Where a tap reads is found first (GlassActiveLens).
+vec4 lensContent(vec2 backdropAt, vec2 itemsAt, float itemsClip, float inkPacked, out float cover) {
+    vec3 backdrop = lensCapture(backdropAt);
+    vec2 uv = itemsAt / u_Resolution;
     uv.y = 1.0 - uv.y;
-    // The portal of the items clips to the capsule [C: liftedContentPortalView], before the warp reads it.
-    float readDepth;
-    vec2 readNormal;
-    lensField(read, dpr, 0.0, readDepth, readNormal);
-    vec4 items = texture(u_LensItems, uv) * clamp(0.5 - readDepth * dpr, 0.0, 1.0);
+    vec4 items = texture(u_LensItems, uv) * itemsClip;
     if (inkPacked > 0.5) {
         float packed = inkPacked - 1.0;
         vec3 inkColor = vec3(floor(packed / 65536.0), mod(floor(packed / 256.0), 256.0), mod(packed, 256.0)) / 255.0;
@@ -439,6 +430,10 @@ vec4 lensContent(vec2 pixel, float dpr, float ease, float inkPacked, out float c
     }
     cover = items.a;
     return vec4(backdrop * (1.0 - items.a) + items.rgb, 1.0);
+}
+// The portal of the items clips to the capsule [C: liftedContentPortalView], at the depth where the warp reads them.
+float lensPortal(float readDepth, float dpr) {
+    return clamp(0.5 - readDepth * dpr, 0.0, 1.0);
 }
 // THE ACTIVE LENS, as UIKit's _UILiquidLensView builds it (Glass.Pipeline.glsl, Jwift/Apple/LiquidGlass.md 7).
 // Its glass, the ClearGlassView, holds the warped backdrop (its glass background reads the BackdropView under it) and
@@ -450,6 +445,7 @@ vec4 lensContent(vec2 pixel, float dpr, float ease, float inkPacked, out float c
 // by the dispersion angle with its components swapped [C: glass_foreground_base %70 to %72]. `n` is the outward
 // normal on screen, `d` the depth in pt (negative inside), `inkPacked` the selection's ink (0 for none), `amount` how
 // far the glass has come in. `itemCover` is how much of the pixel the lensed items cover.
+const int LENS_TAPS = 7;
 vec3 GlassActiveLens(float d, vec2 n, float lens, float light, float amount, float inkPacked, out float itemCover) {
     float ease = amount * lens;
     float dpr = max(v_Lighting.x, 1e-3);
@@ -464,32 +460,61 @@ vec3 GlassActiveLens(float d, vec2 n, float lens, float light, float amount, flo
     vec2 turned = vec2(n.x * cos(disAngle) - n.y * sin(disAngle), n.x * sin(disAngle) + n.y * cos(disAngle));
     vec2 dir = GlassSkips(GLASS_SKIP_CA) ? vec2(0.0)
         : turned.yx * GlassShift(d + disInset, disAmount, disHeight) * dpr * ease;
+    // The taps: three toward +dir, then four toward -dir from `base` itself.
+    vec2 at[LENS_TAPS];
+    for (int i = 0; i < 3; i++) at[i] = base + (1.0 - float(i) / 3.0) * dir;
+    for (int i = 0; i < 4; i++) at[3 + i] = base - float(i) / 3.0 * dir;
+    // Every tap's two corner fields in ONE loop, its depth and then its portal at the warped read: D3D's compiler
+    // unrolls a field per call and took 12 s over the fourteen.
+    vec2 backdropAt[LENS_TAPS], itemsAt[LENS_TAPS];
+    float itemsClip[LENS_TAPS];
+    for (int i = 0; i < 2 * LENS_TAPS; i++) {
+        bool portal = i >= LENS_TAPS;
+        int k = portal ? i - LENS_TAPS : i;
+        float fieldDepth;
+        vec2 fieldNormal;
+        lensField(portal ? itemsAt[k] : at[k], dpr, portal ? 0.0 : GLASS_LENS_OVALIZATION, fieldDepth, fieldNormal);
+        if (portal) {
+            itemsClip[k] = lensPortal(fieldDepth, dpr);
+        } else {
+            backdropAt[k] = at[k] + fieldNormal * GlassShift(fieldDepth, GLASS_LENS_BACKDROP_WARP.x * dpr
+                * GLASS_LENS_BACKDROP_CAPTURE, GLASS_LENS_BACKDROP_WARP.y) * dpr * ease;
+            itemsAt[k] = at[k] + fieldNormal * GlassShift(fieldDepth, GLASS_LENS_ITEM_WARP.x, GLASS_LENS_ITEM_WARP.y)
+                * dpr * ease;
+        }
+    }
     vec3 sum = vec3(0.0);
     float alpha = 0.0;
     float cover;
     for (int i = 0; i < 3; i++) {
         float w = 1.0 - float(i) / 3.0;
-        vec4 a = lensContent(base + w * dir, dpr, ease, inkPacked, cover);
+        vec4 a = lensContent(backdropAt[i], itemsAt[i], itemsClip[i], inkPacked, cover);
         sum.r += a.r / max(a.a, 1e-6) * w;
         sum.g += a.g / max(a.a, 1e-6) * (1.0 - w);
         alpha += a.a;
     }
     for (int i = 0; i < 4; i++) {
         float t = float(i) / 3.0;
-        vec4 b = lensContent(base - t * dir, dpr, ease, inkPacked, cover);
+        vec4 b = lensContent(backdropAt[3 + i], itemsAt[3 + i], itemsClip[3 + i], inkPacked, cover);
         sum.g += b.g / max(b.a, 1e-6) * (1.0 - t);
         sum.b += b.b / max(b.a, 1e-6) * t;
         alpha += b.a;
+        // The items the lens covers are the ones at `base`, the first of these.
+        if (i == 0) itemCover = cover;
     }
     float ramp = GLASS_LENS_LENSING_EDGE.y > GLASS_LENS_LENSING_EDGE.x
         ? clamp((d - GLASS_LENS_LENSING_EDGE.x) / (GLASS_LENS_LENSING_EDGE.y - GLASS_LENS_LENSING_EDGE.x), 0.0, 1.0) : 0.0;
     float edge = 1.0 - mix(GLASS_LENS_LENSING_EDGE.z, GLASS_LENS_LENSING_EDGE.w, ramp);
     vec3 lensed = sum * vec3(0.5, 1.0 / 3.0, 0.5) * (alpha / 7.0);
-    lensContent(base, dpr, ease, inkPacked, itemCover);
     itemCover *= amount;
-    // The unlensed read is the same portal, so it keeps the selection's ink: without it a fading lens washes its twins
-    // back to their raw ink, which is white for a vibrant label and vanishes on light glass.
-    return mix(lensContent(v_PixelPos, dpr, 0.0, inkPacked, cover).rgb, lensed, edge * amount);
+    // The unlensed read is the same portal, unwarped, so it keeps the selection's ink: without it a fading lens washes
+    // its twins back to their raw ink, which is white for a vibrant label and vanishes on light glass.
+    float plainDepth;
+    vec2 plainNormal;
+    lensField(v_PixelPos, dpr, 0.0, plainDepth, plainNormal);
+    float plainCover;
+    vec3 plain = lensContent(v_PixelPos, v_PixelPos, lensPortal(plainDepth, dpr), inkPacked, plainCover).rgb;
+    return mix(plain, lensed, edge * amount);
 }
 
 // Sample the backdrop at this Jiv's frost. A Jiv that authored no frost samples the raw scene
@@ -809,8 +834,8 @@ void main() {
         } else {
             vec3 face;
             float lensInk = 0.0;
-            // The lens is its own program (ACTIVE_LENS): D3D's compiler takes seconds over its unrolled taps, so the
-            // glass every page boots with leaves it out, and a batch holding a lens draws with the lens program.
+            // The lens is its own program (ACTIVE_LENS): it more than doubles the glass's compile on D3D, so the glass
+            // every page boots with leaves it out, and a batch holding a lens draws with the lens program.
 #if defined(ACTIVE_LENS)
             if (v_RimEdge.z > 0.0) {
                 // It comes and goes with the glass itself, so a press and a release never pop.

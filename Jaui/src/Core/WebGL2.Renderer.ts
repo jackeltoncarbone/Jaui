@@ -1235,6 +1235,7 @@ export class WebGL2Renderer implements Renderer {
     // the scene ledger is not a timer and must reset on EVERY frame or a split frame would report
     // the previous frame's restarts.
     this._sceneLedger.BeginFrame();
+    this.LensProgramPending = false;
     this._blurPlanBeginFrame();
     this._shadowStill = 0;
     // Same reason: these are per-frame counts, and the gate line at the end of the walk reports the
@@ -1541,7 +1542,7 @@ export class WebGL2Renderer implements Renderer {
       && this._batchTakesFlatProgram(baseFrostLod);
     const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
     const isTwoStop = isBorderless && this.DiagTwoStopGradient && _paintFitsTwoStops(bgPaint);
-    const isLens = isGlass && this._batchHasLens();
+    const isLens = isGlass && this._batchHasLens() && this._glassLensReady();
     const program = isLens ? this._glassLensProgram()
       : isGlass ? this._panelShaderGlass
       : isTwoStop ? this._panelShaderTwoStop
@@ -1686,10 +1687,21 @@ export class WebGL2Renderer implements Renderer {
 
   // ── The active lens's program: the glass program with ACTIVE_LENS ──
   // Issued with the boot batch but never collected with it, so the first frame does not wait for it; collected the
-  // first time a lens draws. On D3D it compiles in about ten seconds, the boot glass without it in about one.
+  // first time a lens draws once the driver has it. On D3D it compiles in about two seconds, the boot glass in one.
   private _panelShaderGlassLens: ShaderProgram | null = null;
   private _panelLocsGlassLens: _PanelLocs | null = null;
   private _lensShaders: ShaderBatch | null = null;
+
+  /** Set by a frame that drew a lens as plain glass because its program was still compiling: draw again. */
+  LensProgramPending = false;
+
+  // Never waits: a lens pressed while its program compiles draws as the plain glass under it, and takes the lens on
+  // a later frame. Waiting froze the worker for the rest of the compile on a first-ever Windows visit.
+  private _glassLensReady = (): boolean => {
+    if (this._lensShaders === null || this._lensShaders.Done) return true;
+    this.LensProgramPending = true;
+    return false;
+  };
 
   private _issueLensProgram = (): void => {
     const late = new ShaderBatch(this._gl);

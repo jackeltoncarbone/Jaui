@@ -2509,6 +2509,8 @@ export class Canvas implements DirtyTracker {
       }
       this._render(dt);
       if (snapNow && gl2 !== null) { gl2.ShadowSnap = false; this._shadowSnapped = gl2.ShadowSnapped; }
+      // A lens drew as plain glass while its program compiles: keep drawing until it can draw as the lens.
+      if (gl2 !== null && gl2.LensProgramPending) this.RequestFrame();
       if (wantsCost) this._tickPace.NoteRenderCost(performance.now() - tRender);
       // The renderer's ledger reset in `BeginFrame` and has just been filled by the walk. Read it
       // here rather than in the HUD block so a parked frame keeps reporting 0 alongside the other
