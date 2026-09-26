@@ -50,7 +50,8 @@ export const FlexSpecFor = (kind: FlexKind, width: number, height: number): Flex
     case 'Large': return LARGE;
     case 'Menu': return MENU;
   }
-  if (Math.max(width, height) < 120) return ULTRA_SMALL;
+  // Ours, past UIKit: a small control reaches less and rubber-bands past its edge a third as far as UltraSmall.
+  if (Math.max(width, height) < 120) return { ...ULTRA_SMALL, MovePoints: 6, Threshold: 6000 };
   const t = Math.min(1, Math.max(0, (Math.min(width, height) - 44) / (160 - 44)));
   // Ours, past UIKit: a long control (a tab bar) calms its movement by its longer side, 200 to 480 pt.
   const u = Math.min(1, Math.max(0, (Math.max(width, height) - 200) / (480 - 200)));
