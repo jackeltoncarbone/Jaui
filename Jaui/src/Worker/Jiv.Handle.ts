@@ -445,7 +445,26 @@ export class JivHandle {
       if (ep.Clip !== undefined) this._clip = ep.Clip;
       if (ep.PointScale !== undefined) this._pointScale = ep.PointScale;
     }
-    this._bridge.Enqueue({ K: 'apply', Id: this.Id, Opts: opts });
+    this._bridge.Enqueue({ K: 'apply', Id: this.Id, Opts: this._unsent(opts) });
+  };
+
+  // What the last applies sent, per option: a bag the worker already holds is not sent again, so a
+  // moving width costs a ChildLayout, not a style cascade and an animation restart. A flush resets it.
+  private _sent: Partial<Record<keyof JivApplyOpts, unknown>> = {};
+
+  private _unsent = (opts: JivApplyOpts): JivApplyOpts => {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(opts) as (keyof JivApplyOpts)[]) {
+      const value = opts[key];
+      // A running @Animation restarts on every apply that carries it, so a live set is always sent; and an
+      // AttachTo the worker could not resolve yet (its target not created) resolves on a later apply.
+      const live = (key === 'Animations' || key === 'AnimationTable') && (opts.Animations?.length ?? 0) > 0;
+      const attach = key === 'ChildLayout' && opts.ChildLayout !== undefined && 'AttachTo' in opts.ChildLayout;
+      if (!live && !attach && key in this._sent && _sameValue(this._sent[key], value)) continue;
+      this._sent[key] = value;
+      out[key] = value;
+    }
+    return out as JivApplyOpts;
   };
 
   /** Attach tessellated vector-SVG geometry to this jiv (built main-thread by the
@@ -488,6 +507,8 @@ export class JivHandle {
 
   private _flush = (): void => {
     this._dirty = false;
+    // The worker now holds the merged bags, not what an apply last sent: the next apply sends every bag.
+    this._sent = {};
     // ElementProps: omit defaults / empty values. Empty `PointScale` ('')
     // would be parsed as a length expression on the worker and throw
     // "Unexpected end of length expression" every frame.
@@ -527,4 +548,18 @@ export class JivHandle {
     };
     this._bridge.SetHitHandlers(this.Id, merged);
   };
+}
+
+/** Plain-data equality: the same primitive, or arrays and objects holding equal values under the same keys. */
+function _sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+    if (!_sameValue((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) return false;
+  }
+  return true;
 }
