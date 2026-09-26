@@ -50,6 +50,8 @@ export interface LaidOutSegment {
   Height: number;
   /** Row index, 0-based. Two segments share a Row iff they share a Y. */
   Row: number;
+  /** Where the rendered `<jext>` goes: it drops leading whitespace, so its box starts past it. */
+  InkX: number;
 }
 
 export interface CaretRect { x: number; y: number; height: number; }
@@ -65,6 +67,38 @@ export interface LayoutMetrics {
 }
 
 export type MeasureFn = (text: string) => number;
+
+export interface LayoutSpan {
+  Start: number;
+  End: number;
+  Color?: string;
+  Background?: string;
+  Class?: string;
+  FontWeight?: number;
+}
+
+/** Split `text` by `spans` into contiguous segments. Spans are clamped to the text and to each other, so an
+ *  overlapping or stale span never draws a character twice. */
+export const SegmentsFromSpans = (text: string, spans: readonly LayoutSpan[]): LayoutSegmentInput[] => {
+  if (text.length === 0) return [];
+  if (spans.length === 0) return [{ Text: text, StartIndex: 0, EndIndex: text.length }];
+  const sorted = [...spans].sort((a, b) => a.Start - b.Start);
+  const out: LayoutSegmentInput[] = [];
+  let cursor = 0;
+  for (const span of sorted) {
+    const start = Math.max(cursor, Math.min(span.Start, text.length));
+    const end = Math.min(span.End, text.length);
+    if (end <= start) continue;
+    if (start > cursor) out.push({ Text: text.slice(cursor, start), StartIndex: cursor, EndIndex: start });
+    out.push({
+      Text: text.slice(start, end), StartIndex: start, EndIndex: end,
+      Color: span.Color, Background: span.Background, Class: span.Class, FontWeight: span.FontWeight,
+    });
+    cursor = end;
+  }
+  if (cursor < text.length) out.push({ Text: text.slice(cursor), StartIndex: cursor, EndIndex: text.length });
+  return out;
+};
 
 /**
  * Atom-based row wrap with hard newline support.
@@ -120,6 +154,7 @@ export const LayoutSegments = (
       const part = parts[i];
       if (part.length > 0) {
         lines[lines.length - 1].segs.push({
+          ...seg,
           Text: part,
           StartIndex: cursor,
           EndIndex: cursor + part.length,
@@ -133,20 +168,8 @@ export const LayoutSegments = (
     }
   }
 
-  // Step 2: word-wrap each line. Walks every (word + trailing-whitespace)
-  // "atom" through one consistent break-point check, so a single long
-  // segment with no token spans still breaks at word boundaries — Jaui's
-  // <jext> renderer internally word-wraps each segment using its own
-  // LayoutWidth as maxWidth (see Jaui.ts _processTextTransitions), so
-  // without intra-segment wrap here, the rendered text occupies multiple
-  // visual rows while LaidOutSegments thinks everything is on row 0 — and
-  // every selection rect / caret / click hit-test collapses to row 0.
-  //
-  // Pieces accumulate per (segment × current row): when an atom-step
-  // forces a wrap, the in-flight piece is flushed at its row, and a new
-  // piece begins on the next row for the remaining characters of the same
-  // segment. This produces one LaidOutSegment per visual row a segment
-  // occupies — RangeRects and IndexAtPoint then see the true row count.
+  // Step 2: word-wrap each line into one piece per (segment x row), so each
+  // rendered <jext> holds exactly one visual row and never wraps on its own.
   const out: LaidOutSegment[] = [];
   let row = 0;
   let y = 0;
@@ -161,9 +184,37 @@ export const LayoutSegments = (
     if (line.segs.length === 0) {
       out.push({
         Seg: { Text: '', StartIndex: line.startIdx, EndIndex: line.startIdx },
-        X: 0, Y: y, Width: 0, Height: metrics.LineHeightPx, Row: row,
+        X: 0, Y: y, Width: 0, Height: metrics.LineHeightPx, Row: row, InkX: 0,
       });
       continue;
+    }
+
+    // A word is a non-whitespace run plus its trailing whitespace, and it spans segment boundaries:
+    // "token" + "." or a span that ends mid-word stay one unbreakable word.
+    interface Fragment { seg: LayoutSegmentInput; start: number; end: number; width: number; }
+    interface Word { fragments: Fragment[]; width: number; ink: number; trailing: boolean; }
+    const words: Word[] = [];
+    let open: Word | null = null;
+    for (const seg of line.segs) {
+      const text = seg.Text;
+      let i = 0;
+      while (i < text.length) {
+        let j = i;
+        while (j < text.length && !/\s/.test(text[j])) j++;
+        let k = j;
+        while (k < text.length && /\s/.test(text[k])) k++;
+        if (!open || (j > i && open.trailing)) {
+          open = { fragments: [], width: 0, ink: 0, trailing: false };
+          words.push(open);
+        }
+        const width = measure(text.substring(i, k));
+        // Ink excludes trailing whitespace: a space hanging past the edge never forces a wrap.
+        if (j > i) open.ink = open.width + (k > j ? measure(text.substring(i, j)) : width);
+        if (k > j) open.trailing = true;
+        open.fragments.push({ seg, start: i, end: k, width });
+        open.width += width;
+        i = k;
+      }
     }
 
     interface Piece {
@@ -180,9 +231,11 @@ export const LayoutSegments = (
     const flush = (): void => {
       if (!cur) return;
       if (cur.endInSeg > cur.startInSeg) {
+        const text = cur.seg.Text.substring(cur.startInSeg, cur.endInSeg);
+        const lead = /^\s*/.exec(text)![0];
         out.push({
           Seg: {
-            Text: cur.seg.Text.substring(cur.startInSeg, cur.endInSeg),
+            Text: text,
             StartIndex: cur.seg.StartIndex + cur.startInSeg,
             EndIndex: cur.seg.StartIndex + cur.endInSeg,
             Color: cur.seg.Color,
@@ -193,49 +246,32 @@ export const LayoutSegments = (
           X: cur.x, Y: cur.y,
           Width: cur.width, Height: metrics.LineHeightPx,
           Row: cur.row,
+          InkX: cur.x + (lead ? measure(lead) : 0),
         });
       }
       cur = null;
     };
 
-    for (const seg of line.segs) {
-      const text = seg.Text;
-      let i = 0;
-      while (i < text.length) {
-        // Atom = maximal non-whitespace run + adjacent trailing whitespace.
-        // Either part may be empty (the segment can start with whitespace).
-        let j = i;
-        while (j < text.length && !/\s/.test(text[j])) j++;
-        let k = j;
-        while (k < text.length && /\s/.test(text[k])) k++;
-        if (k === i) {
-          // Defensive: should not happen, but avoid an infinite loop.
-          i++;
-          continue;
-        }
-        const atomText = text.substring(i, k);
-        const atomWidth = measure(atomText);
-        if (x > 0 && x + atomWidth > metrics.WrapWidth) {
-          // Soft flex-wrap break — JinputWrap inserts a RowGap between rows.
-          flush();
-          y += metrics.RowPitchPx;
-          row++;
-          x = 0;
-        }
-        if (!cur || cur.seg !== seg || cur.row !== row) {
-          flush();
-          cur = { seg, startInSeg: i, endInSeg: k, x, width: atomWidth, row, y };
-        } else {
-          cur.endInSeg = k;
-          cur.width += atomWidth;
-        }
-        x += atomWidth;
-        i = k;
+    for (const word of words) {
+      if (x > 0 && x + word.ink > metrics.WrapWidth) {
+        // Soft wrap: the row pitch includes the RowGap.
+        flush();
+        y += metrics.RowPitchPx;
+        row++;
+        x = 0;
       }
-      // End of segment — flush so a subsequent segment on the same row
-      // starts as its own piece (preserves per-segment styling slices).
-      flush();
+      for (const f of word.fragments) {
+        if (!cur || cur.seg !== f.seg || cur.row !== row) {
+          flush();
+          cur = { seg: f.seg, startInSeg: f.start, endInSeg: f.end, x, width: f.width, row, y };
+        } else {
+          cur.endInSeg = f.end;
+          cur.width += f.width;
+        }
+        x += f.width;
+      }
     }
+    flush();
   }
   return out;
 };

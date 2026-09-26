@@ -9,7 +9,7 @@ import { Jiv } from '../Jiv/Jiv';
 import { Jext } from '../Jext/Jext';
 import { Jyle } from '../Jyle/Jyle';
 import {
-  LayoutSegments, CharPosition, IndexAtPoint, RangeRects, WordRangeAt,
+  LayoutSegments, SegmentsFromSpans, CharPosition, IndexAtPoint, RangeRects, WordRangeAt,
   type LayoutMetrics, type LayoutSegmentInput, type LaidOutSegment,
 } from './Jinput.Layout';
 import type { JivHandle } from 'jaui';
@@ -78,12 +78,7 @@ export interface JinputPeerCaret {
   Focused?: boolean;
 }
 
-interface RenderedSegment extends LayoutSegmentInput {
-  Color?: string;
-  Background?: string;
-  Class?: string;
-  FontWeight?: number;
-}
+type RenderedSegment = LayoutSegmentInput;
 
 /** Convert any CSS color string (#rgb / #rrggbb / hsl(...) / rgb(...)) to
  *  an rgba(...) value at the supplied alpha. Used for peer selection
@@ -104,6 +99,28 @@ function _withAlpha(color: string, alpha: number): string {
   if (c.startsWith('rgb(')) return c.replace(/^rgb\(/, 'rgba(').replace(/\)$/, `, ${alpha})`);
   return c;
 }
+
+const _FONT_PROBE_TEXT = 'ABCDEFGHIJKLM abcdefghijklm 0123456789';
+
+/** Moves whenever the page may have gained a face: a stylesheet loaded, or the FontFaceSet finished a load. */
+const _pageFontEpoch = signal(0);
+let _pageFontsWatched = false;
+const _watchPageFonts = (): void => {
+  if (_pageFontsWatched) return;
+  _pageFontsWatched = true;
+  const bump = (): void => _pageFontEpoch.update(v => v + 1);
+  document.fonts.addEventListener?.('loadingdone', bump);
+  if (document.readyState !== 'complete') window.addEventListener('load', bump, { once: true });
+  const watchLink = (node: Node): void => {
+    if (node instanceof HTMLLinkElement && node.relList.contains('stylesheet')) node.addEventListener('load', bump, { once: true });
+  };
+  document.querySelectorAll('link').forEach(watchLink);
+  if (typeof MutationObserver !== 'undefined') {
+    new MutationObserver((records) => {
+      for (const r of records) r.addedNodes.forEach(watchLink);
+    }).observe(document.head ?? document.documentElement, { childList: true });
+  }
+};
 
 @Component({
   selector: 'jinput',
@@ -171,9 +188,9 @@ function _withAlpha(color: string, alpha: number): string {
               [textStyle]="segmentTextStyle(laid.Seg)"
               [childLayout]="{
                 Position: 'Placed',
-                Left: laid.X + 'px',
+                Left: laid.InkX + 'px',
                 Top: laid.Y + 'px',
-                Width: laid.Width + 'px',
+                Width: (laid.X + laid.Width - laid.InkX + SegmentSlackPx()) + 'px',
                 Height: laid.Height + 'px',
               }" />
           }
@@ -422,13 +439,7 @@ export class Jinput implements OnDestroy {
   private readonly _caretBright = signal(true);
   private _blinkTimer: ReturnType<typeof setInterval> | null = null;
   private readonly _wrapWidth = signal(600);
-  // Bumped when a font that affects measurement finishes loading, so
-  // computed signals that depend on _measureWidth re-run with the now-
-  // correct glyph metrics. measureText falls back to system-ui until
-  // the @font-face Inter lands in the canvas2d font registry; system-ui
-  // is wider than Inter, so lines wrap earlier than Jaui's renderer
-  // (which has Inter primed in the worker's OffscreenCanvas) and leave
-  // a visible right-margin gap on every row.
+  // Bumped when the measured face changes; every layout computed re-runs against it.
   private readonly _fontGen = signal(0);
 
   // ── Computed: derived metrics, segments, layout ─────────────────
@@ -436,48 +447,8 @@ export class Jinput implements OnDestroy {
     this.Text().length === 0 && this.Placeholder().length > 0,
   );
 
-  /** Splits Text by Spans into rendering segments, each with its [Start,
-   *  End) range and optional Color / Background overrides. Empty Spans →
-   *  one segment for the whole text. Spans must not overlap. */
-  readonly RenderedSegments = computed<RenderedSegment[]>(() => {
-    const text = this.Text();
-    const spans = this.Spans();
-    if (spans.length === 0) {
-      return text.length === 0
-        ? []
-        : [{ Text: text, StartIndex: 0, EndIndex: text.length }];
-    }
-    const sorted = [...spans].sort((a, b) => a.Start - b.Start);
-    const out: RenderedSegment[] = [];
-    let cursor = 0;
-    for (const span of sorted) {
-      if (span.Start > cursor) {
-        out.push({
-          Text: text.slice(cursor, span.Start),
-          StartIndex: cursor,
-          EndIndex: span.Start,
-        });
-      }
-      out.push({
-        Text: text.slice(span.Start, span.End),
-        StartIndex: span.Start,
-        EndIndex: span.End,
-        Color: span.Color,
-        Background: span.Background,
-        Class: span.Class,
-        FontWeight: span.FontWeight,
-      });
-      cursor = span.End;
-    }
-    if (cursor < text.length) {
-      out.push({
-        Text: text.slice(cursor),
-        StartIndex: cursor,
-        EndIndex: text.length,
-      });
-    }
-    return out;
-  });
+  /** Text split by Spans into rendering segments (Jinput.Layout SegmentsFromSpans). */
+  readonly RenderedSegments = computed<RenderedSegment[]>(() => SegmentsFromSpans(this.Text(), this.Spans()));
 
   private readonly _Metrics = computed<LayoutMetrics>(() => {
     const lhPx = this.FontSizePx() * this.LineHeightRatio();
@@ -487,18 +458,6 @@ export class Jinput implements OnDestroy {
       WrapWidth: Math.max(50, this._wrapWidth()),
     };
   });
-
-  private readonly _SegmentsForLayout = computed<LayoutSegmentInput[]>(() =>
-    this.RenderedSegments().map(s => ({
-      Text: s.Text,
-      StartIndex: s.StartIndex,
-      EndIndex: s.EndIndex,
-      Color: s.Color,
-      Background: s.Background,
-      Class: s.Class,
-      FontWeight: s.FontWeight,
-    })),
-  );
 
   /** Total laid-out height in CSS px — used to size the wrap container so
    *  Position:Placed children don't collapse to zero height. Computed as
@@ -530,15 +489,20 @@ export class Jinput implements OnDestroy {
       if (!c) throw new Error('[Jinput] failed to acquire 2D context');
       this._measureCtx = c;
     }
-    this._measureCtx.font = `${this.FontWeight()} ${this.FontSizePx()}px ${this.FontFamily()}`;
+    // The generation rides in the size, as Text.Measure does, so a face resolved before its font landed is never reused.
+    const size = this.FontSizePx() + this._fontGen() * 1e-4;
+    this._measureCtx.font = `${this.FontWeight()} ${size}px ${this.FontFamily()}`;
     return this._measureCtx.measureText(text).width;
   };
+
+  /** Room past a segment's measured width so a sub-pixel disagreement with the renderer never wraps its last word. */
+  readonly SegmentSlackPx = computed(() => this.FontSizePx() * 0.5);
 
   readonly LaidOutSegments = computed<LaidOutSegment[]>(() => {
     // Track _fontGen so a font-load completion re-runs this with
     // measurement values reflecting the loaded font.
     this._fontGen();
-    return LayoutSegments(this._SegmentsForLayout(), this._Metrics(), this._measureWidth);
+    return LayoutSegments(this.RenderedSegments(), this._Metrics(), this._measureWidth);
   });
 
   readonly CaretRect = computed(() => {
@@ -835,19 +799,31 @@ export class Jinput implements OnDestroy {
     window.addEventListener('pointercancel', this._onPointerUpSummon, true);
     }
 
-    // Re-run layout once the @font-face font lands in the canvas2d font
-    // registry — measureText falls back to a wider system font until
-    // then, which makes lines wrap earlier than Jaui's renderer (whose
-    // OffscreenCanvas has the font primed earlier) and leaves a visible
-    // right-edge gap on every row. document.fonts.ready resolves when
-    // every pending @font-face has loaded; calling .load() for our
-    // specific font kicks the browser to fetch it if it hasn't already.
-    if (typeof document !== 'undefined' && document.fonts) {
-      const fontSpec = `${this.FontWeight()} ${this.FontSizePx()}px ${this.FontFamily()}`;
-      document.fonts.load(fontSpec).finally(() => this._fontGen.update(v => v + 1));
-      document.fonts.ready.then(() => this._fontGen.update(v => v + 1));
+    // Measure in the face the renderer draws. The page's font sheet can land after this runs (index.html
+    // swaps it in off the critical path), so ask for the face again every time the page may have gained one.
+    if (this._isBrowser && document.fonts) {
+      _watchPageFonts();
+      effect(() => {
+        _pageFontEpoch();
+        const spec = `${this.FontWeight()} ${this.FontSizePx()}px ${this.FontFamily()}`;
+        document.fonts.load(spec).then((faces) => {
+          if (faces.length > 0) this._remeasureIfFaceChanged(spec);
+        }, () => { /* no such face: the fallback is what both sides draw */ });
+      });
     }
   }
+
+  private _probeWidth = -1;
+  /** Bumps the font generation only when the loaded face actually measures differently, so repeat loads cost nothing. */
+  private _remeasureIfFaceChanged = (spec: string): void => {
+    const probe = document.createElement('canvas').getContext('2d');
+    if (!probe) return;
+    probe.font = spec.replace(/(\d+(?:\.\d+)?)px/, (_m, px: string) => `${Number(px) + (this._fontGen() + 1) * 1e-4}px`);
+    const width = probe.measureText(_FONT_PROBE_TEXT).width;
+    if (width === this._probeWidth) return;
+    this._probeWidth = width;
+    this._fontGen.update(v => v + 1);
+  };
 
   ngOnDestroy(): void {
     if (this._isBrowser) {
