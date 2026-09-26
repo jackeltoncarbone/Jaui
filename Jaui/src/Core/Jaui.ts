@@ -7154,12 +7154,15 @@ export class Canvas implements DirtyTracker {
         // up the chain is stable, which yields the full-tree solve that
         // `_resize` already runs — i.e. the worst case is "no perf win for
         // a few frames during a resize-driven cascade," not "wrong layout."
+        // A subtree solve seeds from the candidate's and its parent's last solve, so a box mounted since
+        // then (no ResolveCtx yet) cannot be a scope: it threw in SolveLayout on every tick.
+        const solved = cur.ResolveCtx != null && cur.Parent?.ResolveCtx != null;
         const anim = this._animators.get(cur);
-        if (!anim
+        if (solved && (!anim
             || (anim.Springs.X.IsSettled
                 && anim.Springs.Y.IsSettled
                 && anim.Springs.Width.IsSettled
-                && anim.Springs.Height.IsSettled)) {
+                && anim.Springs.Height.IsSettled))) {
           return cur;
         }
       }
