@@ -303,3 +303,24 @@ describe('Occlusion — a carve never claims ink outside the fill it replaces', 
     expect(Math.max(shape.Y0, piece.Y0)).toBe(0);
   });
 });
+
+describe('Occlusion — a shadowed fill still covers', () => {
+  // The panel shader's "fill OVER shadow", stepped through float32: where the fill is alpha 1 the shadow cannot reach
+  // the pixel, so a shadowed opaque fill claims exactly what an unshadowed one does (it is never withheld: its shadow
+  // paints outside the fill).
+  it('over a fill of alpha 1 the composite is the fill exactly, at every shadow alpha and colour', () => {
+    const f = Math.fround;
+    for (let k = 0; k < 2000; k++) {
+      const fill = [f(Math.random()), f(Math.random()), f(Math.random())];
+      const shadow = [f(Math.random()), f(Math.random()), f(Math.random())];
+      const shadowA = f(k === 0 ? 1 : Math.random());
+      const fillA = 1;
+      const outA = f(fillA + f(shadowA * f(1 - fillA)));
+      expect(outA).toBe(1);
+      for (let c = 0; c < 3; c++) {
+        const rgb = f(f(f(fill[c] * fillA) + f(f(shadow[c] * shadowA) * f(1 - fillA))) / outA);
+        expect(rgb).toBe(fill[c]);
+      }
+    }
+  });
+});

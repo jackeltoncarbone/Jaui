@@ -6105,10 +6105,11 @@ export class Canvas implements DirtyTracker {
       : bg.Stops.every((s) => s.Color.A >= 1);
     // `_hasPaintedBorder` rather than a second border predicate: it is the one the re-emitted stroke
     // routes on, and a fill this admitted while that refused would be a fill with a stroke outside
-    // it. The shadow is the same clause from the other side -- it paints UNDER and AROUND the fill.
-    const paintsOutsideTheFill = this._hasPaintedBorder(node)
-      || (rs.ShadowColor.A > 0.001 && !JivInstanceBuffer.DiagNoShadow);
-    const opaque = opaqueBg && node.EffectiveOpacity >= 1 && !paintsOutsideTheFill;
+    // it. The shadow is the same clause from the other side -- it paints UNDER and AROUND the fill, so
+    // a shadowed fill is never withheld; it still COVERS, because over a fill of alpha 1 the shader's
+    // composite is exactly the fill (`fillA + shadowAlpha * 0`), shadow or not.
+    const opaqueFace = opaqueBg && node.EffectiveOpacity >= 1 && !this._hasPaintedBorder(node);
+    const opaque = opaqueFace && !(rs.ShadowColor.A > 0.001 && !JivInstanceBuffer.DiagNoShadow);
 
     const avgScale = (matScaleX(eff) + matScaleY(eff)) * 0.5;
     let radius = 0;
@@ -6117,7 +6118,7 @@ export class Canvas implements DirtyTracker {
     const reach = CornerReach(radius, rs.BorderRadiusSmoothness);
 
     let cover: readonly PixelRect[] = EMPTY_COVER;
-    let covers = opaque;
+    let covers = opaqueFace;
     if (covers) {
       // TWO CHAINS, and the second is the fallback for the first. `region` is the honest set — a
       // rounded rect's face minus its four CORNER blocks (`CoveredRegion`), which is what the App's
