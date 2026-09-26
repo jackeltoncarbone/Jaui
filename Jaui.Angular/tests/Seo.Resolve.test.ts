@@ -57,7 +57,7 @@ describe('ResolveSemantics', () => {
   });
 
   it('an image-cache key keeps its alt but projects no src, since no browser can fetch it', () => {
-    const r = ResolveSemantics({ Alt: 'Show Studio', BackgroundUrl: 'ss-head-logo:#FFFFFF' });
+    const r = ResolveSemantics({ Alt: 'Show Studio', BackgroundUrl: 'ss-head-logo:#FFFFFF', BackgroundFetchable: false });
     expect(r?.Tag).toBe('img');
     expect(r?.Src).toBeNull();
     expect(r?.Alt).toBe('Show Studio');

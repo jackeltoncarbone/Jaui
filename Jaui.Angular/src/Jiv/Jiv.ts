@@ -11,6 +11,7 @@ import {
   input,
 } from '@angular/core';
 import {
+  IsFetchableImage,
   JivHandle,
   type JivApplyOpts,
   type JivStyle,
@@ -286,6 +287,7 @@ export class Jiv implements OnInit, OnDestroy {
           Label: this.label(),
           Text: this.text() ?? null,
           BackgroundUrl: this._backgroundUrl,
+          BackgroundFetchable: this._backgroundUrl ? IsFetchableImage(this._backgroundUrl) : undefined,
         })
       : null;
     this._mirror.Apply(this._mirrorEntry, resolved, this._navigate);
