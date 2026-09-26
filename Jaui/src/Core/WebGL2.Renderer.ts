@@ -3098,10 +3098,18 @@ export class WebGL2Renderer implements Renderer {
     }
     const w = region.TexelsX, h = region.TexelsY;
     const srcTex = _unwrap(src);
-    gl.bindTexture(gl.TEXTURE_2D, srcTex);
-    const minFilter = gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER) as number;
-    const maxLevel = gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL) as number;
-    gl.bindTexture(gl.TEXTURE_2D, null);
+    // A pyramid in a Framebuffer says its own sampler state and format; asking the GPU is a round trip each.
+    const owner = Framebuffer.Of(srcTex);
+    let minFilter: number, maxLevel: number;
+    if (owner !== undefined) {
+      minFilter = owner.MinFilter;
+      maxLevel = owner.MaxLevel;
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, srcTex);
+      minFilter = gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER) as number;
+      maxLevel = gl.getTexParameter(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL) as number;
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    }
     const mipmapped = minFilter !== gl.LINEAR && minFilter !== gl.NEAREST;
     let depth = 0;
     for (let lw = w, lh = h; lw > 1 || lh > 1; lw = Math.max(1, lw >> 1), lh = Math.max(1, lh >> 1)) depth++;
@@ -3112,7 +3120,7 @@ export class WebGL2Renderer implements Renderer {
     if (read === null || draw === null) throw new Error('[Jaui] blur-cache: failed to create a copy framebuffer');
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, read);
     gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex, 0);
-    const fmt = this._bcFormatOf(gl.READ_FRAMEBUFFER);
+    const fmt = owner !== undefined ? { Internal: owner.InternalFormat, Bpp: 4 } : this._bcFormatOf(gl.READ_FRAMEBUFFER);
     const bytes = ChainBytesFor(w, h, levels, fmt.Bpp);
 
     let s = slot;

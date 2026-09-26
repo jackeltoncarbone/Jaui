@@ -25,6 +25,13 @@ export class Framebuffer {
   /** Deepest mip level currently ALLOCATED for the colour texture (0 = base only).
    *  Storage is allocated empty; contents are written by whoever builds the chain. */
   private _mipLevels: number = 0;
+  /** The colour texture's MIN_FILTER and MAX_LEVEL as last written, GL's defaults until then, so a reader
+   *  never has to ask the GPU process (a synchronous round trip). Every write to them is in this class. */
+  private _minFilter: number = 0x2702;
+  private _maxLevel: number = 1000;
+  private static readonly _owners = new WeakMap<WebGLTexture, Framebuffer>();
+  /** The Framebuffer whose colour texture this is, if any. */
+  static Of = (tex: WebGLTexture): Framebuffer | undefined => Framebuffer._owners.get(tex);
 
   constructor(gl: WebGL2RenderingContext, opts?: { depth?: boolean; highPrecision?: boolean }) {
     this._gl = gl;
@@ -38,6 +45,7 @@ export class Framebuffer {
     const tex = gl.createTexture();
     if (!tex) throw new Error('[Jaui] Failed to create FBO texture');
     this.Texture = tex;
+    Framebuffer._owners.set(tex, this);
 
     if (this._hasDepth) {
       const rb = gl.createRenderbuffer();
@@ -90,6 +98,7 @@ export class Framebuffer {
     }
     // Start with plain LINEAR. Caller calls EnsureMipLevels() to opt into mipmap filtering.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    this._minFilter = gl.LINEAR;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -169,6 +178,8 @@ export class Framebuffer {
     if (want > this._mipLevels) this._mipLevels = want;
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, this._mipLevels);
+    this._minFilter = gl.LINEAR_MIPMAP_LINEAR;
+    this._maxLevel = this._mipLevels;
     gl.bindTexture(gl.TEXTURE_2D, null);
   };
 
@@ -180,11 +191,17 @@ export class Framebuffer {
     gl.bindTexture(gl.TEXTURE_2D, this.Texture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0);
+    this._minFilter = gl.LINEAR;
+    this._maxLevel = 0;
     gl.bindTexture(gl.TEXTURE_2D, null);
   };
 
   /** The deepest mip level allocated (and so `TEXTURE_MAX_LEVEL`). */
   get MipLevels(): number { return this._mipLevels; }
+  get MinFilter(): number { return this._minFilter; }
+  get MaxLevel(): number { return this._maxLevel; }
+  /** The colour texture's sized format: an unsized RGBA/UNSIGNED_BYTE level is RGBA8. */
+  get InternalFormat(): number { return this._highPrecision ? this._gl.RGB10_A2 : this._gl.RGBA8; }
 
   /** Deepest mip level a full chain would have at the current size. */
   private _mipDepth = (): number => {
