@@ -77,6 +77,8 @@ const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 /** The finest blur (pt) an adaptive shadow compares the sharp backdrop against, so clear glass still sees
  *  its text as detail. */
 const SHADOW_DETAIL_MIN_PT = 4;
+/** The most wall time one tick steps the springs through (in 33ms substeps). See `_tickInner`. */
+const STEP_BUDGET_S = 0.25;
 /** `?ablate`: the arms it knows, the rendered frames each holds for, and the render-to-render gap
  *  past which the page was idle rather than slow. */
 const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui',
@@ -2268,7 +2270,14 @@ export class Canvas implements DirtyTracker {
     // actually waking us at 60Hz?").
     this._updateHud(time);
 
-    const dt = this._lastTime === 0 ? 0.016 : Math.min((time - this._lastTime) / 1000, 0.033);
+    // `dt` stays capped at one 30Hz step: it is what a single spring integration and `_render` can
+    // take without going unstable. `elapsed` is the wall time the frame actually covered, and the
+    // springs below are stepped through ALL of it (up to STEP_BUDGET_S) in `dt`-sized substeps.
+    // Stepping them by the capped `dt` alone ran every animation in slow motion whenever a frame
+    // took longer than 33ms: WebKit on the M4 draws /explore's entry at ~9fps, so its springs
+    // advanced a third of real time per frame and the page settled at 9.8s instead of 5.8s.
+    const elapsed = this._lastTime === 0 ? 0.016 : Math.max(0, (time - this._lastTime) / 1000);
+    const dt = Math.min(elapsed, 0.033);
     this._lastTime = time;
 
     // `?tick-pace=lock` derives the display's vsync from the CALLBACK cadence, so it has to see
@@ -2286,7 +2295,14 @@ export class Canvas implements DirtyTracker {
     // is now schedule-only; this does NOT change any rAF kick or the boot path.
     const awake = JauiTracing() ? this._awake : null;
     if (awake !== null) this._animationManager.ActiveNames = [];
-    this._animationManager.StepFrame(dt);
+    // A tab back from the background reports seconds of elapsed time: the budget bounds the
+    // catch-up to a handful of substeps rather than simulating the whole absence.
+    for (let left = Math.min(elapsed, STEP_BUDGET_S); ;) {
+      const step = Math.min(left, 0.033);
+      this._animationManager.StepFrame(step);
+      left -= step;
+      if (left <= 1e-6) break;
+    }
     if (awake !== null) {
       for (const n of this._animationManager.ActiveNames ?? []) awake.Anim.set(n, (awake.Anim.get(n) ?? 0) + 1);
       this._animationManager.ActiveNames = null;
