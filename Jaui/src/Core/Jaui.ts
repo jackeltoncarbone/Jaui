@@ -441,6 +441,7 @@ import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
 import { FocusManager } from './Focus/FocusManager';
 import { InputRouter } from './Input/InputRouter';
+import { InertUnderDisabled } from './Pointer.Inert';
 
 /** A perspective viewing context established by an ancestor (CSS `perspective`).
  *  D = viewing distance, (Ox, Oy) = vanishing point — both in CANVAS px (the same frame as the
@@ -7624,7 +7625,8 @@ export class Canvas implements DirtyTracker {
     }, { passive: false });
 
     this._on('pointerdown', (e: PointerEvent) => {
-      const hit = topmostAt(e.clientX, e.clientY);
+      // A disabled control still covers what is under it, but takes no press, click or pointer event.
+      const hit = InertUnderDisabled(topmostAt(e.clientX, e.clientY));
       _clickDownJiv = hit;
       _clickDownX = e.clientX;
       _clickDownY = e.clientY;
@@ -7668,7 +7670,7 @@ export class Canvas implements DirtyTracker {
     });
 
     this._on('pointerup', (e: PointerEvent) => {
-      const upHit = topmostAt(e.clientX, e.clientY);
+      const upHit = InertUnderDisabled(topmostAt(e.clientX, e.clientY));
       if (upHit && _clickDownJiv === upHit && upHit.OnClick) {
         upHit.OnClick();
       }
@@ -7685,7 +7687,7 @@ export class Canvas implements DirtyTracker {
     // the Angular bridge.
     this._on('contextmenu', (e: MouseEvent) => {
       e.preventDefault();
-      const hit = topmostAt(e.clientX, e.clientY);
+      const hit = InertUnderDisabled(topmostAt(e.clientX, e.clientY));
       if (hit?.OnContextMenu) hit.OnContextMenu(e);
     });
 
