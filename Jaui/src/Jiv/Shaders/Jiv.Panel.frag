@@ -809,10 +809,15 @@ void main() {
         } else {
             vec3 face;
             float lensInk = 0.0;
+            // The lens is its own program (ACTIVE_LENS): D3D's compiler takes seconds over its unrolled taps, so the
+            // glass every page boots with leaves it out, and a batch holding a lens draws with the lens program.
+#if defined(ACTIVE_LENS)
             if (v_RimEdge.z > 0.0) {
                 // It comes and goes with the glass itself, so a press and a release never pop.
                 face = GlassActiveLens(d, nScreen, v_RimEdge.z, glassLight, glassiness, v_RimEdge.w, lensInk);
-            } else {
+            } else
+#endif
+            {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassInnerShift(d, glassSpan) * lens;
             float outerShift = glassOuterOff ? 0.0 : GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;

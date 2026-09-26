@@ -300,6 +300,8 @@ const PANEL_OFF_BACKDROP_SATURATION = 33;
 const PANEL_OFF_BACKDROP_CONTRAST = 34;
 const PANEL_OFF_FROST_LOD = 35;
 const PANEL_OFF_BODY_TINT = 41;
+/** The instance's active lens (a_RimEdge.z): above 0 it takes the lens program. */
+const PANEL_OFF_LENS = 50;
 /** The fragment's own epsilon, `Jiv.Panel.frag`'s `hasBackdropFilter`. One number, both sides. */
 const PANEL_BACKDROP_FILTER_EPSILON = 0.001;
 
@@ -1021,6 +1023,8 @@ export class WebGL2Renderer implements Renderer {
     // print `n=<boot> +<late>` and a reader can tell a boot compile from a flag's.
     this._bootShaderCount = batch.Count;
     JTrace(`jaui:shaders:issued n=${batch.Count} ${JMs(batch.IssueMs)}ms`);
+    // Behind the boot set, so it never delays it, and as early as the boot's own: ready when the boot used to be.
+    this._issueLensProgram();
 
     this._quad = new QuadGeometry(gl);
     // depth: true so foreign 3D renderers (THREE) can z-test against it
@@ -1537,12 +1541,15 @@ export class WebGL2Renderer implements Renderer {
       && this._batchTakesFlatProgram(baseFrostLod);
     const isBorderless = isFlat && this.DiagBorderlessProgram && this._batchTakesBorderlessProgram();
     const isTwoStop = isBorderless && this.DiagTwoStopGradient && _paintFitsTwoStops(bgPaint);
-    const program = isGlass ? this._panelShaderGlass
+    const isLens = isGlass && this._batchHasLens();
+    const program = isLens ? this._glassLensProgram()
+      : isGlass ? this._panelShaderGlass
       : isTwoStop ? this._panelShaderTwoStop
       : isBorderless ? this._panelShaderBorderless
       : isFlat ? this._panelShaderFlat
       : this._panelShaderNone;
-    const locs = isGlass ? this._panelLocsGlass
+    const locs = isLens ? this._panelLocsGlassLens!
+      : isGlass ? this._panelLocsGlass
       : isTwoStop ? this._panelLocsTwoStop
       : isBorderless ? this._panelLocsBorderless
       : isFlat ? this._panelLocsFlat
@@ -1670,6 +1677,38 @@ export class WebGL2Renderer implements Renderer {
    * scan is five reads per instance on batches that are about to take the flat path and nothing at
    * all on the rest.
    */
+  /** Does any instance in the pending batch take the active-lens path the glass program leaves out? */
+  private _batchHasLens = (): boolean => {
+    const d = this._panelInstanceData;
+    for (let i = 0; i < this._panelInstanceCount; i++) if (d[i * PANEL_FLOATS_PER_INSTANCE + PANEL_OFF_LENS] > 0) return true;
+    return false;
+  };
+
+  // ── The active lens's program: the glass program with ACTIVE_LENS ──
+  // Issued with the boot batch but never collected with it, so the first frame does not wait for it; collected the
+  // first time a lens draws. On D3D it compiles in about ten seconds, the boot glass without it in about one.
+  private _panelShaderGlassLens: ShaderProgram | null = null;
+  private _panelLocsGlassLens: _PanelLocs | null = null;
+  private _lensShaders: ShaderBatch | null = null;
+
+  private _issueLensProgram = (): void => {
+    const late = new ShaderBatch(this._gl);
+    this._panelShaderGlassLens = late.Add(panelVertSrc, panelFragSrc, { MATERIAL_GLASS: true, ACTIVE_LENS: true });
+    this._panelLocsGlassLens = null;
+    this._lensShaders = late;
+  };
+
+  private _glassLensProgram = (): ShaderProgram => {
+    const batch = this._lensShaders;
+    if (batch !== null) {
+      this._lensShaders = null;
+      batch.Resolve();
+      JTrace(`jaui:shaders:lens-linked wait=${JMs(batch.ResolveMs)}ms`);
+      this._panelLocsGlassLens = _extractPanelLocs(this._gl, this._panelShaderGlassLens!.Program);
+    }
+    return this._panelShaderGlassLens!;
+  };
+
   private _batchTakesFlatProgram = (baseFrostLod: number): boolean => {
     const d = this._panelInstanceData;
     const e = PANEL_BACKDROP_FILTER_EPSILON;
