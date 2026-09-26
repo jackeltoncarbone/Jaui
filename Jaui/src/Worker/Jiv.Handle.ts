@@ -335,11 +335,25 @@ export class JivHandle {
   private _takeRect = (box: EmbedBox, scroll: ScrollExtent | null): void => {
     this.X = box.X; this.Y = box.Y; this.Width = box.Width; this.Height = box.Height;
     this.Box = box;
-    if (!scroll) return;
-    this.ScrollX = scroll.X;
-    this.ScrollY = scroll.Y;
-    this.ContentWidth = box.Width + scroll.MaxX;
-    this.ContentHeight = box.Height + scroll.MaxY;
+    if (scroll) {
+      this.ScrollX = scroll.X;
+      this.ScrollY = scroll.Y;
+      this.ContentWidth = box.Width + scroll.MaxX;
+      this.ContentHeight = box.Height + scroll.MaxY;
+    }
+    for (const listener of this._rectListeners) listener();
+  };
+
+  private readonly _rectListeners: Array<() => void> = [];
+
+  /** Calls `listener` after each rect snapshot this handle takes (a changed rect, under a `WatchRect`
+   *  lease), so a main-thread follower can sleep until its node moves. Returns the unsubscribe. */
+  OnRect = (listener: () => void): (() => void) => {
+    this._rectListeners.push(listener);
+    return () => {
+      const i = this._rectListeners.indexOf(listener);
+      if (i >= 0) this._rectListeners.splice(i, 1);
+    };
   };
 
   /** Promote this id to a Janvas with the registered factory at `key`.
