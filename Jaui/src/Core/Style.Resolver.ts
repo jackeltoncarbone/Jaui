@@ -56,13 +56,32 @@ const _parseCornerShape = (raw: string): [CornerShape, CornerShape, CornerShape,
   }
 };
 
+/** CSS-style origin keywords, for `VisualOrigin`/`PerspectiveOrigin` (`TransformOrigin` in author
+ *  docs — the same property, named the way CSS authors expect it). Case-insensitive; a keyword sets
+ *  only the axis it names, same as CSS `transform-origin`. */
+const _ORIGIN_KEYWORDS: Readonly<Record<string, { X?: number; Y?: number }>> = {
+  center: { X: 0.5, Y: 0.5 },
+  top: { Y: 0 },
+  bottom: { Y: 1 },
+  left: { X: 0 },
+  right: { X: 1 },
+};
+
+/** A bare arithmetic operator — never a valid STANDALONE shorthand token, so its presence means the
+ *  whole string is one arithmetic expression that happens to use spaces around its operators
+ *  (`1 + @OverscrollTop / @Height`), not the two-axis shorthand below. Keep the operator INSIDE a
+ *  token (no spaces around it, e.g. `(@ParallaxRate*@ScrollY)`) to use it as one axis of a pair. */
+const _isBareOperator = (tok: string): boolean => tok === '+' || tok === '-' || tok === '*' || tok === '/';
+
 /** Parse a Visual* shorthand string into [X, Y] numbers.
- *  - `'v'`     → [v, v]   (uniform)
- *  - `'x y'`   → [x, y]   (per-axis)
+ *  - `'v'`     → [v, v]   (uniform number) — OR a single origin keyword, which sets only the axis
+ *                it names and leaves the other at 0.5 (CSS's own `transform-origin: bottom` rule).
+ *  - `'x y'`   → [x, y]   (per-axis; either token may be a number or an origin keyword)
+ *  - anything with a bare operator token, or more than two tokens → resolved WHOLE as one
+ *    expression, applied uniformly to both axes (see `_isBareOperator`)
  *  - empty/whitespace → [fallback, fallback]
- *  Each token is resolved as a Length under `ctx` so authors can use
- *  `pt`, `%`, `vw`, etc. — e.g. `VisualTranslate: '0pt 4pt'` lifts the
- *  Jiv 4pt vertically at render time. */
+ *  Numeric tokens resolve as a Length under `ctx` so authors can use `pt`, `%`, `vw`, etc. — e.g.
+ *  `VisualTranslate: '0pt 4pt'` lifts the Jiv 4pt vertically at render time. */
 const _parseVisualPair = (
   raw: string,
   ctx: ResolveContext,
@@ -70,11 +89,21 @@ const _parseVisualPair = (
 ): [number, number] => {
   const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0);
   if (parts.length === 0) return [fallback, fallback];
+  if (parts.length > 2 || parts.some(_isBareOperator)) {
+    const v = Resolve(raw, ctx, 'W');
+    return [v, v];
+  }
   if (parts.length === 1) {
+    const kw = _ORIGIN_KEYWORDS[parts[0].toLowerCase()];
+    if (kw !== undefined) return [kw.X ?? 0.5, kw.Y ?? 0.5];
     const v = Resolve(parts[0], ctx, 'W');
     return [v, v];
   }
-  return [Resolve(parts[0], ctx, 'W'), Resolve(parts[1], ctx, 'H')];
+  const kwX = _ORIGIN_KEYWORDS[parts[0].toLowerCase()];
+  const kwY = _ORIGIN_KEYWORDS[parts[1].toLowerCase()];
+  const x = kwX !== undefined ? (kwX.X ?? 0.5) : Resolve(parts[0], ctx, 'W');
+  const y = kwY !== undefined ? (kwY.Y ?? 0.5) : Resolve(parts[1], ctx, 'H');
+  return [x, y];
 };
 
 /** Resolve `MaxWidth`/`MaxHeight` with CSS-style "none" → Infinity. */

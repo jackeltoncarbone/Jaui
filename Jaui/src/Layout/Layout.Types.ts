@@ -35,6 +35,26 @@ export type Clip = 'Auto' | 'Hidden' | 'Visible';
  *  - `Hidden`: child is clipped to the parent's box even if parent is Visible. */
 export type ParentOverflow = 'Inherit' | 'Visible' | 'Hidden';
 
+/** Per-edge behavior when a scroll gesture pulls past a content bound.
+ *  - `Bounce` (default): content itself moves past the edge under Apple's
+ *    rubber-band resistance, then springs home on release — today's engine
+ *    behavior since scrolling gained real momentum.
+ *  - `Pin`: content never moves past the edge; the overshoot is still tracked
+ *    (same resistance curve, same release spring) and published as
+ *    `@OverscrollTop`/`@OverscrollBottom`/`@OverscrollLeft`/`@OverscrollRight`
+ *    so a consumer (e.g. a stretchy header) can render the effect itself.
+ *  - `None`: a hard stop. No overshoot is tracked or published; the edge
+ *    just clamps, finger feels "stuck." */
+export type OverscrollMode = 'Bounce' | 'Pin' | 'None';
+
+/** Which input sources can drive a scroller past its bounds.
+ *  - `Touch`: only a real touch/pointer drag overscrolls; wheel and trackpad
+ *    always hard-clamp.
+ *  - `Precise` (default): touch AND trackpad pixel-delta wheel events
+ *    overscroll; a line-stepped mouse wheel never does — matches macOS.
+ *  - `All`: every input, including a line-stepped mouse wheel, overscrolls. */
+export type OverscrollInput = 'Touch' | 'Precise' | 'All';
+
 /** Jaui's equivalent of CSS anchor-positioning / SwiftUI `.alignmentGuide`.
  *  Set Position:'Attach' on a Jiv, then its rect is derived from another Jiv's
  *  current layout on every solve pass — so the attached node tracks its target

@@ -571,6 +571,12 @@ export class JivRegistry {
     if (!ep) return;
     if (ep.Overflow !== undefined) core.Overflow = ep.Overflow;
     if (ep.Clip !== undefined) core.Clip = ep.Clip;
+    if (ep.OverscrollTop !== undefined) core.OverscrollTop = ep.OverscrollTop;
+    if (ep.OverscrollBottom !== undefined) core.OverscrollBottom = ep.OverscrollBottom;
+    if (ep.OverscrollLeft !== undefined) core.OverscrollLeft = ep.OverscrollLeft;
+    if (ep.OverscrollRight !== undefined) core.OverscrollRight = ep.OverscrollRight;
+    if (ep.OverscrollResistance !== undefined) core.OverscrollResistance = ep.OverscrollResistance;
+    if (ep.OverscrollInput !== undefined) core.OverscrollInput = ep.OverscrollInput;
     if (ep.Visible !== undefined) core.Visible = ep.Visible;
     if (ep.Interactive !== undefined) core.Interactive = ep.Interactive;
     if (ep.PointerEvents !== undefined) core.PointerEvents = ep.PointerEvents;

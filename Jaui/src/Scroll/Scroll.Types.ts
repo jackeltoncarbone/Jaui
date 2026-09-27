@@ -5,6 +5,10 @@ export interface ScrollConfig {
   Damping: number;
 }
 
+/** Per-edge overscroll mode and allowed input sources — defined in `Layout.Types` (beside `Overflow`,
+ *  the other Element-level scroll config) and re-exported here since scroll code reads them most. */
+export type { OverscrollMode, OverscrollInput } from '../Layout/Layout.Types';
+
 export const DefaultScrollConfig: ScrollConfig = {
   ScrollX: 0,
   ScrollY: 0,

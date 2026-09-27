@@ -11,7 +11,7 @@
  * without carrying glass/material baggage.
  */
 
-import type { LayoutConfig, ChildLayout, Overflow, Clip } from '../Layout/Layout.Types';
+import type { LayoutConfig, ChildLayout, Overflow, Clip, OverscrollMode, OverscrollInput } from '../Layout/Layout.Types';
 import { DefaultLayoutConfig, DefaultChildLayout } from '../Layout/Layout.Types';
 import type { TextStyle, TextMeasurement } from '../Text/Text.Types';
 import { DefaultTextStyle } from '../Text/Text.Types';
@@ -58,6 +58,15 @@ export interface ElementOptions {
   Cursor?: CursorStyle;
   UserSelect?: 'Auto' | 'None';
   PanClaim?: PanClaim;
+  OverscrollTop?: OverscrollMode;
+  OverscrollBottom?: OverscrollMode;
+  OverscrollLeft?: OverscrollMode;
+  OverscrollRight?: OverscrollMode;
+  /** `Auto` | a numeric string multiplier on Apple's resistance formula's `size` term (Scroll.Manager
+   *  `_rubberResistance`). `Auto` (default) is Apple's curve; a number scales how far the same drag
+   *  stretches — greater than 1 is softer, less than 1 stiffer. */
+  OverscrollResistance?: string;
+  OverscrollInput?: OverscrollInput;
 }
 
 /** Which vertical pans a node takes from the scrollers inside it: `Down` takes a downward pan when nothing under
@@ -191,6 +200,18 @@ export class Element {
   Overflow: Overflow = 'Visible';
   /** Clip override; `Auto` derives from Overflow. See `ClipsChildren`. */
   Clip: Clip = 'Auto';
+
+  /** Per-edge overscroll behavior for an `Overflow: Scroll` node (`Layout.Types.OverscrollMode`).
+   *  Default `Bounce` on every edge — unconfigured containers behave exactly as before this feature. */
+  OverscrollTop: OverscrollMode = 'Bounce';
+  OverscrollBottom: OverscrollMode = 'Bounce';
+  OverscrollLeft: OverscrollMode = 'Bounce';
+  OverscrollRight: OverscrollMode = 'Bounce';
+  /** `Auto` | numeric string multiplier. See `ElementOptions.OverscrollResistance`. */
+  OverscrollResistance: string = 'Auto';
+  /** Which input devices may overscroll this scroller. Default `Precise` — touch and trackpad
+   *  pixel-mode wheel deltas rubber-band; a line-stepped mouse wheel never does, matching macOS. */
+  OverscrollInput: OverscrollInput = 'Precise';
 
   /** Single source of truth for "does this node clip its descendants" — every
    *  clip site (render clip-stack cascade, viewport cull, hit-test) reads this
@@ -337,6 +358,12 @@ export class Element {
     this.Cursor = options?.Cursor ?? 'Default';
     this.UserSelect = options?.UserSelect ?? 'Auto';
     this.PanClaim = options?.PanClaim ?? 'None';
+    this.OverscrollTop = options?.OverscrollTop ?? 'Bounce';
+    this.OverscrollBottom = options?.OverscrollBottom ?? 'Bounce';
+    this.OverscrollLeft = options?.OverscrollLeft ?? 'Bounce';
+    this.OverscrollRight = options?.OverscrollRight ?? 'Bounce';
+    this.OverscrollResistance = options?.OverscrollResistance ?? 'Auto';
+    this.OverscrollInput = options?.OverscrollInput ?? 'Precise';
 
     this.Layout = { ...DefaultLayoutConfig, ...options?.Layout };
 

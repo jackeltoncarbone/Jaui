@@ -258,6 +258,12 @@ export interface JivApplyOpts {
     UserSelect?: 'Auto' | 'None';
     PanClaim?: 'None' | 'Down' | 'Vertical';
     PointScale?: string;
+    OverscrollTop?: 'Bounce' | 'Pin' | 'None';
+    OverscrollBottom?: 'Bounce' | 'Pin' | 'None';
+    OverscrollLeft?: 'Bounce' | 'Pin' | 'None';
+    OverscrollRight?: 'Bounce' | 'Pin' | 'None';
+    OverscrollResistance?: string;
+    OverscrollInput?: 'Touch' | 'Precise' | 'All';
     /** When true, the next layout commit snaps to the resolved rect with no
      *  spring animation. Set on jinput text segments so paste / token-driven
      *  re-segmentation lands at the final X/Y instantly instead of drifting

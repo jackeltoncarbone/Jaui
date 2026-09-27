@@ -2,7 +2,7 @@ import type { JivStyle, JivRenderStyle } from './Jiv.Types';
 import type { FlexMotion } from '../Core/Flex';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { DefaultJivStyle } from './Jiv.Defaults';
-import type { LayoutConfig, ChildLayout, Overflow, Clip } from '../Layout/Layout.Types';
+import type { LayoutConfig, ChildLayout, Overflow, Clip, OverscrollMode, OverscrollInput } from '../Layout/Layout.Types';
 import type { TextStyle } from '../Text/Text.Types';
 import type { SpringConfig, AnimationApplication, AnimationDefinition } from '../Animation/Animation.Types';
 import { Element, type CursorStyle, type PanClaim } from '../Element/Element';
@@ -327,6 +327,12 @@ export class Jiv extends Element {
     Cursor?: CursorStyle;
     UserSelect?: 'Auto' | 'None';
     PanClaim?: PanClaim;
+    OverscrollTop?: OverscrollMode;
+    OverscrollBottom?: OverscrollMode;
+    OverscrollLeft?: OverscrollMode;
+    OverscrollRight?: OverscrollMode;
+    OverscrollResistance?: string;
+    OverscrollInput?: OverscrollInput;
   }) {
     const mergedStyle: JivStyle = { ...DefaultJivStyle, ...options?.Style };
 
@@ -349,6 +355,12 @@ export class Jiv extends Element {
       Cursor: options?.Cursor,
       UserSelect: options?.UserSelect,
       PanClaim: options?.PanClaim,
+      OverscrollTop: options?.OverscrollTop,
+      OverscrollBottom: options?.OverscrollBottom,
+      OverscrollLeft: options?.OverscrollLeft,
+      OverscrollRight: options?.OverscrollRight,
+      OverscrollResistance: options?.OverscrollResistance,
+      OverscrollInput: options?.OverscrollInput,
     });
 
     this.Style = mergedStyle;

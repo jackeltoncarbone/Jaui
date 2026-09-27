@@ -74,6 +74,31 @@ describe('Length — resolver', () => {
   });
 });
 
+describe('Length — @Height/@Width builtins (JwiftStretchyHeader\'s own-box reference)', () => {
+  it('reads the node\'s own SelfWidth/SelfHeight, not a var table entry', () => {
+    const ctx: ResolveContext = { ...baseCtx, SelfWidth: 731, SelfHeight: 82 };
+    expect(Resolve('@Height', ctx, 'W')).toBe(82);
+    expect(Resolve('@Width', ctx, 'W')).toBe(731);
+    // Bare (no `@`) resolves identically — same builtin-identifier path as Presence/Entering/Exiting.
+    expect(Resolve('Height', ctx, 'W')).toBe(82);
+  });
+
+  it('falls back to 0 when absent (layout-pass / seed contexts)', () => {
+    expect(Resolve('@Height', baseCtx, 'W')).toBe(0);
+    expect(Resolve('@Width', baseCtx, 'W')).toBe(0);
+  });
+
+  it('composes in an expression, e.g. a stretchy header\'s zoom fraction', () => {
+    const ctx: ResolveContext = { ...baseCtx, SelfHeight: 100 };
+    expect(Resolve('1 + 20 / @Height', ctx, 'W')).toBe(1.2);
+  });
+
+  it('never reads a var table entry named the same, even if one is present', () => {
+    const ctx: ResolveContext = { ...baseCtx, SelfHeight: 50, Vars: new Map([['Height', '999']]) };
+    expect(Resolve('@Height', ctx, 'W')).toBe(50);
+  });
+});
+
 describe('Length — string parser', () => {
   it('parses bare numbers and unit literals', () => {
     expect(Resolve('16', baseCtx, 'W')).toBe(16);

@@ -324,10 +324,21 @@ export class Jiv implements OnInit, OnDestroy {
     this._styleRole = typeof styleRole === 'string' ? styleRole : undefined;
     delete styleBag['Semantics'];
     this._backgroundUrl = ExtractBackgroundUrl(styleBag['Background']);
+    // `Overscroll` shorthand sets all four edges; a specific `OverscrollTop`/etc
+    // authored alongside it overrides just that edge (fill only the gaps).
+    if ('Overscroll' in styleBag) {
+      const v = styleBag['Overscroll'];
+      for (const edge of ['OverscrollTop', 'OverscrollBottom', 'OverscrollLeft', 'OverscrollRight']) {
+        if (!(edge in styleBag)) styleBag[edge] = v;
+      }
+      delete styleBag['Overscroll'];
+    }
     const elementProps: JivApplyOpts['ElementProps'] = {};
     for (const key of [
       'Overflow', 'Clip', 'Visible', 'Interactive', 'PointerEvents',
       'Cursor', 'UserSelect', 'PointScale', 'PanClaim',
+      'OverscrollTop', 'OverscrollBottom', 'OverscrollLeft', 'OverscrollRight',
+      'OverscrollResistance', 'OverscrollInput',
     ]) {
       if (key in styleBag) {
         const v = styleBag[key];

@@ -157,3 +157,138 @@ describe('no overflow, no scroll — the drill-sentence bug', () => {
     expect(jiv.ScrollY).toBeGreaterThan(0); // Y moved
   });
 });
+
+describe('OverscrollMode: Pin holds the content at the line, tracks the overshoot', () => {
+  it('a drag past the top never moves ScrollY, but @OverscrollTop grows with the same resistance', () => {
+    const jiv = makeJiv({ OverscrollTop: 'Pin' });
+    const m = makeManager(jiv);
+    m.DragStart(jiv);
+    vi.advanceTimersByTime(8);
+    m.DragMove(jiv, 0, -100, performance.now());
+    expect(jiv.ScrollY).toBe(0); // content held at the line
+    const over = Number(jiv.VarMap.get('OverscrollTop'));
+    expect(over).toBeGreaterThan(0);   // but the overshoot is tracked...
+    expect(over).toBeLessThan(100);    // ...through the same resistance curve as Bounce
+  });
+
+  it('released, the tracked overshoot springs back to 0 (the same release spring as Bounce)', () => {
+    const jiv = makeJiv({ OverscrollTop: 'Pin' });
+    const m = makeManager(jiv);
+    drag(m, jiv, -30, 4);
+    expect(Number(jiv.VarMap.get('OverscrollTop'))).toBeGreaterThan(0);
+    const took = settle(m);
+    expect(Number(jiv.VarMap.get('OverscrollTop'))).toBe(0);
+    expect(jiv.ScrollY).toBe(0);
+    expect(took).toBeLessThan(2); // one soft beat, exactly like Bounce's release
+  });
+
+  it('Pin on Bottom only: dragging past the TOP still bounces (each edge is independent)', () => {
+    const jiv = makeJiv({ OverscrollBottom: 'Pin' }); // Top left at its Bounce default
+    const m = makeManager(jiv);
+    m.DragStart(jiv);
+    vi.advanceTimersByTime(8);
+    m.DragMove(jiv, 0, -100, performance.now());
+    expect(jiv.ScrollY).toBeLessThan(0); // Top is still Bounce — content itself moves
+  });
+});
+
+describe('OverscrollMode: None hard-stops, nothing tracked or published', () => {
+  it('a drag past the top moves nothing, and @OverscrollTop stays 0', () => {
+    const jiv = makeJiv({ OverscrollTop: 'None' });
+    const m = makeManager(jiv);
+    m.DragStart(jiv);
+    vi.advanceTimersByTime(8);
+    m.DragMove(jiv, 0, -100, performance.now());
+    expect(jiv.ScrollY).toBe(0);
+    expect(Number(jiv.VarMap.get('OverscrollTop') ?? 0)).toBe(0);
+  });
+
+  it('a fling into a None wall stops dead, no bounce beat past it', () => {
+    const jiv = makeJiv({ OverscrollBottom: 'None', ContentHeight: 700 }); // maxY = 100
+    const m = makeManager(jiv);
+    const maxY = 700 - 600;
+    m.ScrollTo(jiv, null, maxY - 20, 'Instant');
+    m.Tick(1 / 120);
+    drag(m, jiv, 12.5, 4); // fast fling toward the bottom wall
+    let overshot = false;
+    const dt = 1 / 120;
+    for (let t = 0; t < 10; t += dt) {
+      if (!m.Tick(dt)) break;
+      if (jiv.ScrollY > maxY) overshot = true;
+    }
+    expect(overshot).toBe(false);
+    expect(jiv.ScrollY).toBe(maxY);
+  });
+});
+
+describe('OverscrollResistance: a configured number scales the same curve', () => {
+  it('a softer (larger) resistance stretches further for the identical drag', () => {
+    const auto = makeJiv();
+    const soft = makeJiv({ OverscrollResistance: '4' });
+    const mAuto = makeManager(auto);
+    const mSoft = makeManager(soft);
+    for (const [m, jiv] of [[mAuto, auto], [mSoft, soft]] as const) {
+      m.DragStart(jiv);
+      vi.advanceTimersByTime(8);
+      m.DragMove(jiv, 0, -100, performance.now());
+    }
+    expect(soft.ScrollY).toBeLessThan(auto.ScrollY); // more negative = stretched further
+  });
+});
+
+describe('OverscrollInput: gates which input kinds may overscroll (wheel/trackpad)', () => {
+  it('ApplyDeltaInstant hard-clamps by default (allowOverscroll defaults false)', () => {
+    const jiv = makeJiv();
+    const m = makeManager(jiv);
+    m.ApplyDeltaInstant(jiv, 0, -50);
+    m.Tick(1 / 120);
+    expect(jiv.ScrollY).toBe(0);
+  });
+
+  it('ApplyDeltaInstant rubber-bands (and gets the release spring) when allowed', () => {
+    const jiv = makeJiv();
+    const m = makeManager(jiv);
+    m.ApplyDeltaInstant(jiv, 0, -50, true);
+    m.Tick(1 / 120);
+    expect(jiv.ScrollY).toBeLessThan(0);
+    expect(jiv.ScrollY).toBeGreaterThan(-50);
+    const took = settle(m);
+    expect(jiv.ScrollY).toBe(0); // springs home exactly like a touch release
+    expect(took).toBeLessThan(2);
+  });
+
+  it("ApplyDelta only overscrolls a line-stepped wheel under OverscrollInput: 'All'", () => {
+    const jiv = makeJiv({ OverscrollInput: 'Precise' });
+    const m = makeManager(jiv);
+    m.ApplyDelta(jiv, 0, -50);
+    m.Tick(1 / 120);
+    expect(jiv.ScrollY).toBe(0); // Precise never lets ApplyDelta's own (line-wheel) path overscroll
+
+    const jivAll = makeJiv({ OverscrollInput: 'All' });
+    const mAll = makeManager(jivAll);
+    mAll.ApplyDelta(jivAll, 0, -50);
+    mAll.Tick(1 / 120);
+    expect(jivAll.ScrollY).toBeLessThan(0);
+    expect(jivAll.ScrollY).toBeGreaterThan(-50);
+  });
+});
+
+describe('ScrollProgress: the fraction along whichever axis actually scrolls', () => {
+  it('tracks the vertical fraction for a vertically-scrolling container', () => {
+    const jiv = makeJiv(); // maxY = 2000 - 600 = 1400
+    const m = makeManager(jiv);
+    m.ScrollTo(jiv, null, 700, 'Instant'); // halfway
+    m.Tick(1 / 120);
+    expect(Number(jiv.VarMap.get('ScrollProgress'))).toBeCloseTo(0.5, 2);
+  });
+
+  it('is 0 at the top and 1 at the bottom', () => {
+    const jiv = makeJiv();
+    const m = makeManager(jiv);
+    m.Tick(1 / 120);
+    expect(Number(jiv.VarMap.get('ScrollProgress'))).toBe(0);
+    m.ScrollTo(jiv, null, 1400, 'Instant');
+    m.Tick(1 / 120);
+    expect(Number(jiv.VarMap.get('ScrollProgress'))).toBe(1);
+  });
+});

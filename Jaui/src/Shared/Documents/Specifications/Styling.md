@@ -418,6 +418,114 @@ One property:
 
 Renders as a single shader pass. Not 7 stacked layers.
 
+## Scroll Containers
+
+An `Overflow: Scroll` node gets Apple's physics for free — momentum, rubber-band, a release
+spring — and publishes what it's doing as vars its subtree can style against. Everything about
+what happens PAST an edge is configurable per scroller, per edge.
+
+### Overscroll mode
+
+```jss
+.Page {
+  Overflow: Scroll
+  OverscrollTop: Pin        // this edge only
+  Overscroll: Bounce        // shorthand: all four edges (Top/Bottom/Left/Right)
+}
+```
+
+`OverscrollTop` / `OverscrollBottom` / `OverscrollLeft` / `OverscrollRight` each take:
+
+- **`Bounce`** (the default) — content itself moves past the edge, through Apple's rubber-band
+  resistance curve, and springs back on release. This is what every scroller already did once
+  scrolling gained real momentum; it is now a choice rather than the only option.
+- **`Pin`** — the content never visibly moves past the edge, but the overshoot is still tracked
+  through the exact same resistance curve and release spring, published as `@OverscrollTop` (etc,
+  below) so something else can render an effect from it. This is what a stretchy header needs
+  (see `JwiftStretchyHeader` in Jwift.Glass.jss).
+- **`None`** — a hard stop. No give, nothing published for that edge.
+
+`OverscrollResistance: Auto | <number>` scales how far the same drag stretches: `Auto` is Apple's
+curve; a number softens (> 1) or stiffens (< 1) it.
+
+`OverscrollInput: Touch | Precise | All` (default `Precise`) decides which input DEVICES may
+overscroll at all: `Touch` is touch/pointer drags only; `Precise` adds trackpad / precise-pointer
+wheel deltas (a line-stepped mouse wheel still hard-clamps, matching macOS); `All` includes the
+line-stepped wheel too.
+
+### Published vars
+
+Every scroller publishes these, live, to itself and its whole subtree — a scrollbar, a minimap,
+an edge-fade, a progress pill, and a stretchy header are all just JSS reading them, not engine
+features:
+
+| Var                                            | Meaning                                             |
+|-------------------------------------------------|------------------------------------------------------|
+| `@ScrollY` / `@ScrollX`                          | Current scroll offset, points                        |
+| `@ScrollMaxY` / `@ScrollMaxX`                    | Maximum offset (content − viewport), points           |
+| `@ScrollFracY` / `@ScrollFracX`                  | `ScrollY / ScrollMaxY` etc, 0..1                       |
+| `@ScrollProgress`                                | 0..1 along whichever axis actually scrolls (Y wins)   |
+| `@ScrollActive`                                  | 1 while moving (+ a 900ms fade tail), else 0           |
+| `@ViewportH` / `@ViewportW`                      | The scroller's own box, points                        |
+| `@ContentH` / `@ContentW`                        | The scrollable content's box, points                  |
+| `@OverscrollTop` / `@OverscrollBottom` / `@OverscrollLeft` / `@OverscrollRight` | Current overshoot, points, always ≥ 0 — includes `Pin`'s tracked (but not shown) overshoot and its release spring |
+
+`@Height` / `@Width` (no scroller needed — every node has these) resolve to THIS node's own
+current render-time box, e.g. `VisualScale: 1 + @OverscrollTop / @Height`.
+
+**Performance**: a scroll frame that only moves render-time properties (`VisualScale`,
+`VisualTranslate`, `Opacity`, `Tint`, colors) in a descendant's Style does not trigger a layout
+re-solve for that descendant — only its render style re-resolves. A var reached through a
+`Layout`/`ChildLayout`/`TextStyle`/`PointScale` property (a `Width` or `Padding` keyed on
+`@ScrollY`, say) still gets a real solve, because the geometry itself has to change.
+
+### Examples
+
+**Bounce (default)** — a settings list, unconfigured:
+
+```jss
+.Settings {
+  Overflow: Scroll
+}
+```
+
+**Pin with a stretchy header**:
+
+```jss
+.Page {
+  Overflow: Scroll
+  OverscrollTop: Pin
+}
+.Hero : JwiftStretchyHeader {
+  Position: Placed
+  Width: 100%
+  Height: 100%
+}
+```
+
+`JwiftStretchyHeader` (Jwift.Glass.jss) is `VisualOrigin: Bottom` + `VisualScale: 1 +
+(@OverscrollTop / @Height) * @OverscrollZoom`, with `@OverscrollZoom` (default 1, exact cover) and
+`@ParallaxRate` (default 0) as plain vars a consumer overrides per-node.
+
+**None** — a fixed-height picker wheel that should never show any give:
+
+```jss
+.Wheel {
+  Overflow: Scroll
+  Overscroll: None
+}
+```
+
+**A parallax header**, translating at a fraction of scroll during normal (non-overscrolled)
+scrolling — the same mixin, just with `@ParallaxRate` set above 0 on the consuming node:
+
+```jss
+.Hero : JwiftStretchyHeader { }
+```
+```
+<hero [vars]="{ ParallaxRate: 0.3 }">
+```
+
 ## States
 
 Built-in states, cleaner than CSS pseudo-classes:

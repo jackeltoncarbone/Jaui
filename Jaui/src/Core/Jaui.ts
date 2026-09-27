@@ -7902,9 +7902,10 @@ export class Canvas implements DirtyTracker {
   };
 
 
-  /** Wheel + touch/pointer drag — both route through ScrollManager which
-   *  handles physics (momentum, rubber-band for drag). Wheel clamps; drag
-   *  rubber-bands past bounds. */
+  /** Wheel + touch/pointer drag — both route through ScrollManager which handles physics (momentum,
+   *  rubber-band, per-edge OverscrollMode). Touch always rubber-bands per its target's config; wheel
+   *  does too, but only when the target's `OverscrollInput` allows this delta's input kind
+   *  (Scroll.Types) — otherwise it hard-clamps, as every wheel did before this feature. */
   private _listenForScroll = (): void => {
     // ─── Wheel ───
     this._on('wheel', (e: WheelEvent) => {
@@ -7951,9 +7952,16 @@ export class Canvas implements DirtyTracker {
       const ad = Math.max(Math.abs(e.deltaX), Math.abs(e.deltaY));
       const precise = e.deltaMode === 0
         && (ad < 40 || (e.deltaY % 1 !== 0) || (e.deltaX % 1 !== 0));
-      const apply = precise
-        ? this._scrollManager.ApplyDeltaInstant
-        : this._scrollManager.ApplyDelta;
+      // `OverscrollInput` (Scroll.Types) gates whether THIS delta may rubber-band past bounds:
+      // `Precise` (the default) allows a trackpad/precise delta but never a line-stepped wheel;
+      // `All` allows both (ApplyDelta checks `All` itself for the line-stepped path); `Touch`
+      // allows neither. Only the precise/instant path needs deciding here.
+      const preciseAllowed = (target: Jiv | null): boolean =>
+        target !== null && precise && target.OverscrollInput !== 'Touch';
+      const apply = (target: Jiv, ddx: number, ddy: number): void => {
+        if (precise) this._scrollManager.ApplyDeltaInstant(target, ddx, ddy, preciseAllowed(target));
+        else this._scrollManager.ApplyDelta(target, ddx, ddy);
+      };
       if (xTarget && xTarget === yTarget) {
         apply(xTarget, dx, dy);
       } else {

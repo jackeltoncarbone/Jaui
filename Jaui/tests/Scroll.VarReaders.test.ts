@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Jiv } from '../src/Jiv/Jiv';
-import { SubtreeReadsScrollVars } from '../src/Scroll/Scroll.VarReaders';
+import { SubtreeReadsScrollVars, AnalyzeScrollVarUsage, SCROLL_VARS } from '../src/Scroll/Scroll.VarReaders';
 
 // A scroller re-solves its subtree when it moves only when something under it can read what it publishes.
 
@@ -45,5 +45,50 @@ describe('SubtreeReadsScrollVars', () => {
     child.ChildLayout.Top = '@ScrollY';
     child.AuthoredVersion++;
     expect(SubtreeReadsScrollVars(s, none)).toBe(true);
+  });
+});
+
+describe('AnalyzeScrollVarUsage', () => {
+  const changed = new Set(['OverscrollTop']);
+
+  it('classifies a Style-only reference as render-only, no layout needed', () => {
+    const header = new Jiv({ Style: { VisualScale: '1 + @OverscrollTop / @Height' } });
+    const usage = AnalyzeScrollVarUsage(scroller(header), changed, none);
+    expect(usage.NeedsLayout).toBe(false);
+    expect(usage.RenderOnly).toEqual([header]);
+  });
+
+  it('forces NeedsLayout when a Layout/ChildLayout bag reaches the same var', () => {
+    const stickyChild = new Jiv({ ChildLayout: { Top: '@OverscrollTop' } });
+    const usage = AnalyzeScrollVarUsage(scroller(stickyChild), changed, none);
+    expect(usage.NeedsLayout).toBe(true);
+    expect(usage.RenderOnly).toEqual([]);
+  });
+
+  it('ignores @Height/@Width — the node\'s own box, never scroll state', () => {
+    const header = new Jiv({ Style: { VisualScale: '1 + @Height / 100' } });
+    const usage = AnalyzeScrollVarUsage(scroller(header), changed, none);
+    expect(usage.NeedsLayout).toBe(false);
+    expect(usage.RenderOnly).toEqual([]);
+  });
+
+  it('follows an indirect var chain into a Style bag', () => {
+    const header = new Jiv({ Style: { VisualScale: '1 + @HeaderPull' } });
+    const usage = AnalyzeScrollVarUsage(scroller(header), changed, new Map([['HeaderPull', '@OverscrollTop / 100']]));
+    expect(usage.NeedsLayout).toBe(false);
+    expect(usage.RenderOnly).toEqual([header]);
+  });
+
+  it('a node reaching neither bag is left out of both', () => {
+    const plain = new Jiv({ Style: { Opacity: '0.5' } });
+    const usage = AnalyzeScrollVarUsage(scroller(plain), changed, none);
+    expect(usage.NeedsLayout).toBe(false);
+    expect(usage.RenderOnly).toEqual([]);
+  });
+
+  it('publishes ScrollProgress and the four Overscroll* vars', () => {
+    for (const name of ['ScrollProgress', 'OverscrollTop', 'OverscrollBottom', 'OverscrollLeft', 'OverscrollRight']) {
+      expect(SCROLL_VARS.has(name)).toBe(true);
+    }
   });
 });

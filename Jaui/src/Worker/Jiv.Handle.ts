@@ -87,6 +87,12 @@ export class JivHandle {
   private _clip: 'Auto' | 'Hidden' | 'Visible' = 'Auto';
   private _pointScale = '';
   private _snapLayout = false;
+  private _overscrollTop: 'Bounce' | 'Pin' | 'None' = 'Bounce';
+  private _overscrollBottom: 'Bounce' | 'Pin' | 'None' = 'Bounce';
+  private _overscrollLeft: 'Bounce' | 'Pin' | 'None' = 'Bounce';
+  private _overscrollRight: 'Bounce' | 'Pin' | 'None' = 'Bounce';
+  private _overscrollResistance = 'Auto';
+  private _overscrollInput: 'Touch' | 'Precise' | 'All' = 'Precise';
 
   // ─── Style buckets — Proxy objects so imperative writes are captured ──
   private _styleState: Record<string, unknown> = {};
@@ -169,6 +175,19 @@ export class JivHandle {
   get Overflow(): 'Visible' | 'Hidden' | 'Scroll' { return this._overflow; }
   get Clip(): 'Auto' | 'Hidden' | 'Visible' { return this._clip; }
   set Overflow(v: 'Visible' | 'Hidden' | 'Scroll') { if (this._overflow !== v) { this._overflow = v; this._markDirty(); } }
+
+  get OverscrollTop(): 'Bounce' | 'Pin' | 'None' { return this._overscrollTop; }
+  set OverscrollTop(v: 'Bounce' | 'Pin' | 'None') { if (this._overscrollTop !== v) { this._overscrollTop = v; this._markDirty(); } }
+  get OverscrollBottom(): 'Bounce' | 'Pin' | 'None' { return this._overscrollBottom; }
+  set OverscrollBottom(v: 'Bounce' | 'Pin' | 'None') { if (this._overscrollBottom !== v) { this._overscrollBottom = v; this._markDirty(); } }
+  get OverscrollLeft(): 'Bounce' | 'Pin' | 'None' { return this._overscrollLeft; }
+  set OverscrollLeft(v: 'Bounce' | 'Pin' | 'None') { if (this._overscrollLeft !== v) { this._overscrollLeft = v; this._markDirty(); } }
+  get OverscrollRight(): 'Bounce' | 'Pin' | 'None' { return this._overscrollRight; }
+  set OverscrollRight(v: 'Bounce' | 'Pin' | 'None') { if (this._overscrollRight !== v) { this._overscrollRight = v; this._markDirty(); } }
+  get OverscrollResistance(): string { return this._overscrollResistance; }
+  set OverscrollResistance(v: string) { if (this._overscrollResistance !== v) { this._overscrollResistance = v; this._markDirty(); } }
+  get OverscrollInput(): 'Touch' | 'Precise' | 'All' { return this._overscrollInput; }
+  set OverscrollInput(v: 'Touch' | 'Precise' | 'All') { if (this._overscrollInput !== v) { this._overscrollInput = v; this._markDirty(); } }
 
   get PointScale(): string { return this._pointScale; }
   set PointScale(v: string) { if (this._pointScale !== v) { this._pointScale = v; this._markDirty(); } }
@@ -444,6 +463,12 @@ export class JivHandle {
       if (ep.Overflow !== undefined) this._overflow = ep.Overflow;
       if (ep.Clip !== undefined) this._clip = ep.Clip;
       if (ep.PointScale !== undefined) this._pointScale = ep.PointScale;
+      if (ep.OverscrollTop !== undefined) this._overscrollTop = ep.OverscrollTop;
+      if (ep.OverscrollBottom !== undefined) this._overscrollBottom = ep.OverscrollBottom;
+      if (ep.OverscrollLeft !== undefined) this._overscrollLeft = ep.OverscrollLeft;
+      if (ep.OverscrollRight !== undefined) this._overscrollRight = ep.OverscrollRight;
+      if (ep.OverscrollResistance !== undefined) this._overscrollResistance = ep.OverscrollResistance;
+      if (ep.OverscrollInput !== undefined) this._overscrollInput = ep.OverscrollInput;
     }
     this._bridge.Enqueue({ K: 'apply', Id: this.Id, Opts: this._unsent(opts) });
   };
@@ -521,6 +546,12 @@ export class JivHandle {
       Overflow: this._overflow,
       Clip: this._clip,
       SnapLayout: this._snapLayout,
+      OverscrollTop: this._overscrollTop,
+      OverscrollBottom: this._overscrollBottom,
+      OverscrollLeft: this._overscrollLeft,
+      OverscrollRight: this._overscrollRight,
+      OverscrollResistance: this._overscrollResistance,
+      OverscrollInput: this._overscrollInput,
     };
     if (this._pointScale) ep.PointScale = this._pointScale;
     const opts: JivApplyOpts = {

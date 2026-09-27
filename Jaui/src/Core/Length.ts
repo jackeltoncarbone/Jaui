@@ -89,6 +89,12 @@ export interface ResolveContext {
   /** 1 while the Jiv is leaving (Presence > 0 AND spring target === 0);
    *  0 otherwise. Symmetric counterpart to `Entering`. */
   Exiting?: number;
+  /** This node's OWN current render-plane box, for `@Height`/`@Width` references (e.g.
+   *  `VisualScale: 1 + @OverscrollTop / @Height`, `JwiftStretchyHeader`). Populated by the style
+   *  animator each tick from the Jiv's live Width/Height; absent in layout-pass / seed contexts,
+   *  where the node's own box isn't settled yet (falls back to 0, same as Presence). */
+  SelfWidth?: number;
+  SelfHeight?: number;
   /** The laid-out node this resolve is for — supplies Self/Parent/Ancestor
    *  size + ancestry to inline-ternary conditions. The solver stashes the raw
    *  node (no alloc); `ResolveTernary` adapts it lazily. Absent in seed /
@@ -209,7 +215,7 @@ type _Parsed = number | _Relative | _Expr | _VarRef;
  *  a value (layout pass, seed context, imperative callers), they fall
  *  back to 0 — which matches the "nothing is present yet" default and
  *  keeps layout-time resolutions deterministic. */
-const _BUILTIN_IDENTS = new Set(['Presence', 'Entering', 'Exiting']);
+const _BUILTIN_IDENTS = new Set(['Presence', 'Entering', 'Exiting', 'Height', 'Width']);
 
 const _parseCache = new Map<string, _Parsed>();
 
@@ -255,6 +261,8 @@ const _resolveParsed = (
       if (name === 'Presence') return ctx.Presence ?? 0;
       if (name === 'Entering') return ctx.Entering ?? 0;
       if (name === 'Exiting')  return ctx.Exiting  ?? 0;
+      if (name === 'Height')   return ctx.SelfHeight ?? 0;
+      if (name === 'Width')    return ctx.SelfWidth  ?? 0;
       return 0;
     }
     if (!ctx.Vars) {

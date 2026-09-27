@@ -346,6 +346,11 @@ export class JivStyleAnimator implements Animatable {
       Presence: p,
       Entering: (spring.Target === 1 && p < 1) ? 1 : 0,
       Exiting:  (spring.Target === 0 && p > 0) ? 1 : 0,
+      // `@Height`/`@Width` (Core/Length.ts) — this node's OWN current render-plane box, live every
+      // tick so a scroll-driven `VisualScale: 1 + @OverscrollTop / @Height` (JwiftStretchyHeader)
+      // tracks it exactly even while Height itself is mid-spring.
+      SelfWidth: this._jiv.Width,
+      SelfHeight: this._jiv.Height,
     };
   };
 

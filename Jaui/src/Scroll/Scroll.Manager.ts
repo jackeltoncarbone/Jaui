@@ -4,6 +4,7 @@ import { type Mat2x3, MAT_IDENTITY, matMul, matInvApply } from '../Transform/Mat
 import { PageTarget, type PageSpan } from './Scroll.Page';
 import { AlignTarget } from './Scroll.Align';
 import type { ScrollAlign, ScrollAxis, ScrollMotion } from './Scroll.Types';
+import type { OverscrollMode } from '../Layout/Layout.Types';
 import {
   ComputeReleaseVelocity,
   PruneReleaseSamples,
@@ -12,7 +13,7 @@ import {
 import { JTrace, JauiTracing, JMs } from '../Diagnostics/Jaui.Trace';
 import { LAYER_TOP } from '../Jiv/Jiv.Types';
 import { Element } from '../Element/Element';
-import { SubtreeReadsScrollVars } from './Scroll.VarReaders';
+import { SCROLL_VARS, SubtreeReadsScrollVars, AnalyzeScrollVarUsage } from './Scroll.VarReaders';
 
 /**
  * Scroll physics for Overflow:Scroll Jivs. Two behaviors share the same state:
@@ -118,14 +119,33 @@ export class ScrollManager implements Animatable {
    *  smooth-scroll feel (rapid wheels stack because deltas accumulate on
    *  the target, not the current position).
    *
-   *  Rubber-band and momentum are TOUCH-only; wheel always clamps at bounds
-   *  and produces zero velocity. */
+   *  Rubber-band and momentum are the TOUCH default; wheel always hard-clamps
+   *  here UNLESS the target's `OverscrollInput` is `All` (Scroll.Types), which
+   *  is the one policy that lets a line-stepped wheel overscroll too — then
+   *  this takes the same resistance-integrated path DragMove does, and the
+   *  release spring in Tick() picks it up exactly like a touch release. */
   ApplyDelta = (jiv: Jiv, dx: number, dy: number): void => {
     const s = this._ensureState(jiv);
     const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
     const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
-    s.targetX = Math.max(0, Math.min(maxX, s.targetX + dx));
-    s.targetY = Math.max(0, Math.min(maxY, s.targetY + dy));
+    if (jiv.OverscrollInput === 'All') {
+      const r = _resistanceMultiplier(jiv.OverscrollResistance);
+      s.targetX = maxX > 0
+        ? _integrateRubber(s.targetX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight)
+        : Math.max(0, Math.min(maxX, s.targetX + dx));
+      s.targetY = maxY > 0
+        ? _integrateRubber(s.targetY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom)
+        : Math.max(0, Math.min(maxY, s.targetY + dy));
+      // No pending ease once overscrolling — land the same frame, like DragMove/
+      // ApplyDeltaInstant, so the release spring (not the wheel-ease decay) is
+      // what carries it home; the two easers fighting over an out-of-bounds
+      // target would otherwise fight each other.
+      s.posX = s.targetX;
+      s.posY = s.targetY;
+    } else {
+      s.targetX = Math.max(0, Math.min(maxX, s.targetX + dx));
+      s.targetY = Math.max(0, Math.min(maxY, s.targetY + dy));
+    }
     // Wheel cancels any leftover drag-flick momentum so the two inputs don't
     // fight each other (e.g. user flicks then immediately wheels — wheel wins).
     s.velX = 0;
@@ -136,15 +156,31 @@ export class ScrollManager implements Animatable {
    *  streams smoothed momentum deltas, so we move the position 1:1 with ZERO
    *  ease for a fully-responsive, native feel. Position and target advance
    *  together (no pending ease); _syncJiv commits it on the kicked tick.
-   *  Mouse wheels use ApplyDelta's smooth path instead. */
-  ApplyDeltaInstant = (jiv: Jiv, dx: number, dy: number): void => {
+   *  Mouse wheels use ApplyDelta's smooth path instead.
+   *
+   *  `allowOverscroll` — false (the default) hard-clamps, exactly as before
+   *  this feature. The wheel handler passes true once it has decided (via
+   *  the target's `OverscrollInput`) that this precise/trackpad delta is
+   *  allowed to rubber-band; DragMove never calls this (it has its own path)
+   *  so touch is unaffected either way. */
+  ApplyDeltaInstant = (jiv: Jiv, dx: number, dy: number, allowOverscroll: boolean = false): void => {
     const s = this._ensureState(jiv);
     const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
     const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
-    s.targetX = Math.max(0, Math.min(maxX, s.targetX + dx));
-    s.targetY = Math.max(0, Math.min(maxY, s.targetY + dy));
-    s.posX = s.targetX;
-    s.posY = s.targetY;
+    if (allowOverscroll) {
+      const r = _resistanceMultiplier(jiv.OverscrollResistance);
+      s.posX = maxX > 0
+        ? _integrateRubber(s.posX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight)
+        : Math.max(0, Math.min(maxX, s.posX + dx));
+      s.posY = maxY > 0
+        ? _integrateRubber(s.posY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom)
+        : Math.max(0, Math.min(maxY, s.posY + dy));
+    } else {
+      s.posX = Math.max(0, Math.min(maxX, s.posX + dx));
+      s.posY = Math.max(0, Math.min(maxY, s.posY + dy));
+    }
+    s.targetX = s.posX;
+    s.targetY = s.posY;
     s.velX = 0;
     s.velY = 0;
   };
@@ -244,11 +280,9 @@ export class ScrollManager implements Animatable {
     s.lastSampleT = -1;
   };
 
-  /** Direct positional update during a drag — position tracks the finger 1:1
-   *  inside bounds, and is hard-clamped at the edges (no rubber-band overshoot:
-   *  exposing whitespace past the content bounds reveals chrome that's only
-   *  ever supposed to be visible inside the scroll, so we'd rather the finger
-   *  feel "stuck" at the edge than peel back the curtain).
+  /** Direct positional update during a drag — position tracks the finger 1:1 inside bounds; past an
+   *  edge it takes that edge's `OverscrollMode` (Bounce stretches and shows it, Pin stretches but
+   *  holds the content at the line, None hard-clamps with no give at all — Scroll.Types).
    *  Also records the move into the trailing window so DragEnd can derive
    *  release velocity from the most recent ~RELEASE_WINDOW_MS only.
    *
@@ -276,9 +310,16 @@ export class ScrollManager implements Animatable {
     // depends on how far over you already are, and one fast 60px event
     // evaluated at its start would tunnel straight through the curve.
     // Rubber-band only an axis that actually scrolls; a fixed axis clamps hard
-    // (no bounce on a direction with nowhere to go — the iOS/web rule).
-    s.posX = maxX > 0 ? _integrateRubber(s.posX, dx, 0, maxX) : Math.max(0, Math.min(maxX, s.posX + dx));
-    s.posY = maxY > 0 ? _integrateRubber(s.posY, dy, 0, maxY) : Math.max(0, Math.min(maxY, s.posY + dy));
+    // (no bounce on a direction with nowhere to go — the iOS/web rule). Touch
+    // is always eligible for whatever each edge's OverscrollMode allows
+    // (OverscrollInput only gates wheel/trackpad — see ApplyDelta/Instant).
+    const r = _resistanceMultiplier(jiv.OverscrollResistance);
+    s.posX = maxX > 0
+      ? _integrateRubber(s.posX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight)
+      : Math.max(0, Math.min(maxX, s.posX + dx));
+    s.posY = maxY > 0
+      ? _integrateRubber(s.posY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom)
+      : Math.max(0, Math.min(maxY, s.posY + dy));
     // Momentum is still charged only from IN-BOUNDS travel: overscroll
     // stretch is the spring's business, not the fling's.
     const scaledDx = Math.max(0, Math.min(maxX, s.posX)) - Math.max(0, Math.min(maxX, prevX));
@@ -528,6 +569,14 @@ export class ScrollManager implements Animatable {
         if (overY < 0 && s.posY >= 0) { s.posY = 0; s.velY = 0; }
         if (overY > 0 && s.posY <= maxY) { s.posY = maxY; s.velY = 0; }
 
+        // A `None` edge takes no bounce at all: once momentum (a fresh coast, or
+        // the spring above) carries it past that edge, stop dead exactly at the
+        // line rather than let the frame's residual travel push it into the wall.
+        if (jiv.OverscrollLeft === 'None' && s.posX < 0) { s.posX = 0; s.velX = 0; }
+        if (jiv.OverscrollRight === 'None' && s.posX > maxX) { s.posX = maxX; s.velX = 0; }
+        if (jiv.OverscrollTop === 'None' && s.posY < 0) { s.posY = 0; s.velY = 0; }
+        if (jiv.OverscrollBottom === 'None' && s.posY > maxY) { s.posY = maxY; s.velY = 0; }
+
         // Keep wheel-ease target tracking pos so an incoming wheel event
         // doesn't yank position back to a stale value.
         s.targetX = Math.max(0, Math.min(maxX, s.posX));
@@ -618,12 +667,27 @@ export class ScrollManager implements Animatable {
   };
 
   private _syncJiv = (jiv: Jiv, s: ScrollState): void => {
-    jiv.ScrollX = s.posX;
-    jiv.ScrollY = s.posY;
-    // Keep Target in sync so external code inspecting targets sees the real pos
-    jiv.ScrollTargetX = s.posX;
-    jiv.ScrollTargetY = s.posY;
-    this._publishVars(jiv, s);
+    const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
+    const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
+    // The VISIBLE content offset: `Bounce` lets the raw physics position show past its bound;
+    // `Pin` (and `None`, which never carries an overshoot to begin with — see Tick/DragMove/
+    // ApplyDelta*'s per-edge clamps) holds the visible content at the line while the raw
+    // position keeps tracking the overshoot for `@OverscrollTop`/etc below.
+    // Default (undefined — e.g. an older fixture, or a Jiv built before this feature) is `Bounce`,
+    // same as the engine field's own default (Element.ts): only an EXPLICIT Pin/None holds the line.
+    let visualX = s.posX;
+    if (visualX < 0 && (jiv.OverscrollLeft ?? 'Bounce') !== 'Bounce') visualX = 0;
+    else if (visualX > maxX && (jiv.OverscrollRight ?? 'Bounce') !== 'Bounce') visualX = maxX;
+    let visualY = s.posY;
+    if (visualY < 0 && (jiv.OverscrollTop ?? 'Bounce') !== 'Bounce') visualY = 0;
+    else if (visualY > maxY && (jiv.OverscrollBottom ?? 'Bounce') !== 'Bounce') visualY = maxY;
+
+    jiv.ScrollX = visualX;
+    jiv.ScrollY = visualY;
+    // Keep Target in sync so external code inspecting targets sees the real (visible) pos.
+    jiv.ScrollTargetX = visualX;
+    jiv.ScrollTargetY = visualY;
+    this._publishVars(jiv, s, visualX, visualY, maxX, maxY);
   };
 
   /** The container's scroll FACTS, published as element vars that cascade to
@@ -632,28 +696,73 @@ export class ScrollManager implements Animatable {
    *  progress label, a back-to-top pill are others, and none of them need the
    *  engine to know they exist. Values are rounded so a sub-pixel ease step
    *  doesn't churn re-resolves; SetVar no-ops on equal values. */
-  private _publishVars = (jiv: Jiv, s: ScrollState): void => {
-    const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
-    const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
-    const before = jiv.VarMap.get('ScrollY');
-    jiv.SetVar('ScrollY', Math.round(s.posY));
-    jiv.SetVar('ScrollX', Math.round(s.posX));
+  private _publishVars = (
+    jiv: Jiv, s: ScrollState, visualX: number, visualY: number, maxX: number, maxY: number,
+  ): void => {
+    jiv.SetVar('ScrollY', Math.round(visualY));
+    jiv.SetVar('ScrollX', Math.round(visualX));
     jiv.SetVar('ScrollMaxY', Math.round(maxY));
     jiv.SetVar('ScrollMaxX', Math.round(maxX));
-    jiv.SetVar('ScrollFracY', maxY > 0 ? Math.round((s.posY / maxY) * 1000) / 1000 : 0);
-    jiv.SetVar('ScrollFracX', maxX > 0 ? Math.round((s.posX / maxX) * 1000) / 1000 : 0);
+    jiv.SetVar('ScrollFracY', maxY > 0 ? Math.round((visualY / maxY) * 1000) / 1000 : 0);
+    jiv.SetVar('ScrollFracX', maxX > 0 ? Math.round((visualX / maxX) * 1000) / 1000 : 0);
+    // The fraction along whichever axis actually scrolls (0..1) — vertical wins when a container
+    // scrolls both, since that is the common page-scroll reading a header/rail wants.
+    const progress = maxY > 0 ? visualY / maxY : maxX > 0 ? visualX / maxX : 0;
+    jiv.SetVar('ScrollProgress', Math.round(Math.max(0, Math.min(1, progress)) * 1000) / 1000);
     jiv.SetVar('ViewportH', Math.round(jiv.Height));
     jiv.SetVar('ViewportW', Math.round(jiv.Width));
     jiv.SetVar('ContentH', Math.round(Math.max(1, jiv.ContentHeight)));
     jiv.SetVar('ContentW', Math.round(Math.max(1, jiv.ContentWidth)));
+    // The RAW physics position carries the overshoot even in `Pin` mode, where the visible
+    // position above stays clamped; `None` never leaves bounds so these are always 0 there.
+    jiv.SetVar('OverscrollTop', Math.round(Math.max(0, -s.posY)));
+    jiv.SetVar('OverscrollBottom', Math.round(Math.max(0, s.posY - maxY)));
+    jiv.SetVar('OverscrollLeft', Math.round(Math.max(0, -s.posX)));
+    jiv.SetVar('OverscrollRight', Math.round(Math.max(0, s.posX - maxX)));
     const active = s.dragging || s.velX !== 0 || s.velY !== 0
       || s.posX !== s.targetX || s.posY !== s.targetY;
     if (active) s.lastActiveAt = performance.now();
     // 0/1 — the FADE is the stylesheet's business (`@Transition Opacity`).
     jiv.SetVar('ScrollActive', active || performance.now() - s.lastActiveAt < 900 ? 1 : 0);
-    // Var-driven LENGTHS in the overlay subtree re-resolve on the next solve;
-    // SetVar wakes styles but not layout, so say it moved.
-    if (jiv.VarMap.get('ScrollY') !== before && this._readsScrollVars(jiv)) jiv.MarkLayoutDirty();
+
+    if (!this._readsScrollVars(jiv)) return;
+
+    if (!Element.AuthoredTracked) {
+      // No reliable per-node authoring tracking to classify by — always take the correct
+      // (expensive) path rather than risk a stale render-only node.
+      jiv.MarkLayoutDirty();
+      return;
+    }
+
+    // PERFORMANCE: keep the shared, already-cascaded vars map in sync IN PLACE — a descendant with
+    // no `[vars]` of its own shares this exact Map object BY REFERENCE with this scroller
+    // (Layout.Solver's `_buildChildCtx`/`_mergeVars` short-circuits to the same reference when a
+    // node has nothing of its own to merge). Mutating it lets a style-only wake below see the fresh
+    // value on its very next Tick with NO fresh layout solve. Guarded against the map still being
+    // the bare global vars table — that one isn't scoped to this node (pre-first-solve, or this
+    // scroller hasn't been visited by one since it started publishing) and must never be written.
+    const ctxVars = jiv.ResolveCtx?.Vars;
+    const globalVars = this.GlobalVars();
+    const ownsMergedMap = ctxVars !== undefined && ctxVars !== globalVars;
+    if (ownsMergedMap) {
+      const m = ctxVars as Map<string, string>;
+      for (const name of SCROLL_VARS) {
+        const v = jiv.VarMap.get(name);
+        if (v !== undefined) m.set(name, String(v));
+      }
+    }
+
+    const usage = AnalyzeScrollVarUsage(jiv, SCROLL_VARS, globalVars);
+    if (usage.NeedsLayout || !ownsMergedMap) {
+      // A Layout/ChildLayout/TextStyle/PointScale bag depends on a scroll var — a real re-solve is
+      // required regardless (it re-resolves everyone's style too, layout or not) — OR the shared map
+      // isn't scoped to this node yet: MarkLayoutDirty bootstraps it (the next solve's
+      // `_buildChildCtx` merges this scroller's VarMap into its own dedicated map, so subsequent
+      // ticks take the cheap branch above).
+      jiv.MarkLayoutDirty();
+    } else {
+      for (const node of usage.RenderOnly) node.MarkStyleDirty();
+    }
   };
 
   /** The canvas's global JSS vars, which a subtree's var references resolve through. */
@@ -743,27 +852,47 @@ export class ScrollManager implements Animatable {
   };
 }
 
+/** `OverscrollResistance` string ('Auto' | numeric) to a multiplier on the resistance formula's
+ *  `size` term: `Auto` (or anything non-positive/unparseable) is Apple's curve unscaled (1); a
+ *  number N makes the same drag stretch further for N > 1 (softer) or less for N < 1 (stiffer). */
+const _resistanceMultiplier = (raw: string): number => {
+  const n = parseFloat(raw);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+};
+
 /** Rubber-band drag resistance: 1 inside bounds, drops off past bounds so the
- *  content feels elastic — dragging 100 px past the edge only moves ~50 px. */
-/** Advance `pos` by `delta` through the resistance curve, a few px at a time,
- *  so the curve is honored across the whole travel and not just its start. */
-const _integrateRubber = (pos: number, delta: number, minBound: number, maxBound: number): number => {
+ *  content feels elastic — dragging 100 px past the edge only moves ~50 px.
+ *  Advance `pos` by `delta` through the resistance curve, a few px at a time, so the curve is
+ *  honored across the whole travel and not just its start. `lowMode`/`highMode` are the edge's
+ *  own `OverscrollMode` (Scroll.Types): `None` hard-clamps that side (no resistance, no overshoot —
+ *  the finger/wheel feels stuck at the line); `Bounce`/`Pin` both take the resistance curve — they
+ *  differ only in whether `ScrollManager._syncJiv` shows the resulting overshoot as a moved content
+ *  position (`Bounce`) or holds it at the line while still publishing it (`Pin`). */
+const _integrateRubber = (
+  pos: number, delta: number, minBound: number, maxBound: number,
+  resistance: number, lowMode: OverscrollMode, highMode: OverscrollMode,
+): number => {
   const STEP = 4;
   let remaining = delta;
   while (remaining !== 0) {
     const step = Math.abs(remaining) <= STEP ? remaining : Math.sign(remaining) * STEP;
-    pos += step * _rubberResistance(pos, minBound, maxBound);
+    pos += step * _rubberResistance(pos, minBound, maxBound, resistance);
     remaining -= step;
   }
+  // A `None` edge takes no overshoot at all — a fast single-step delta that would otherwise cross
+  // the line before the loop above ever re-checked it lands exactly on the line instead.
+  if (lowMode === 'None' && pos < minBound) pos = minBound;
+  if (highMode === 'None' && pos > maxBound) pos = maxBound;
   return pos;
 };
 
-const _rubberResistance = (pos: number, minBound: number, maxBound: number): number => {
+const _rubberResistance = (pos: number, minBound: number, maxBound: number, resistance: number): number => {
   let over = 0;
   if (pos < minBound) over = minBound - pos;
   else if (pos > maxBound) over = pos - maxBound;
   if (over <= 0) return 1;
-  // 1 / (1 + over/size) — standard Apple rubber-band formula
-  const size = Math.max(1, maxBound - minBound);
+  // 1 / (1 + over/size) — standard Apple rubber-band formula; `resistance` scales `size` so a
+  // configured value softens (>1) or stiffens (<1) the same curve.
+  const size = Math.max(1, (maxBound - minBound) * resistance);
   return 1 / (1 + over / size);
 };
