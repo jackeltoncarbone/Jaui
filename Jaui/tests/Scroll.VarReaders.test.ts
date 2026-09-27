@@ -65,6 +65,39 @@ describe('AnalyzeScrollVarUsage', () => {
     expect(usage.RenderOnly).toEqual([]);
   });
 
+  it('a PredicateStyle entry with a Style-only patch stays render-only', () => {
+    const header = new Jiv({});
+    header.SetPredicateStyles([{
+      Predicate: { Kind: 'State', Name: 'Hover' },
+      Style: { VisualScale: '1 + @OverscrollTop / @Height' },
+    }]);
+    const usage = AnalyzeScrollVarUsage(scroller(header), changed, none);
+    expect(usage.NeedsLayout).toBe(false);
+    expect(usage.RenderOnly).toEqual([header]);
+  });
+
+  it('a PredicateStyle entry with a Layout/ChildLayout patch (an @If block) forces NeedsLayout', () => {
+    const responsive = new Jiv({});
+    responsive.SetPredicateStyles([{
+      Predicate: { Kind: 'Compare', Metric: 'Width', Op: '<', Value: 700 },
+      ChildLayout: { Top: '@OverscrollTop' },
+    }]);
+    const usage = AnalyzeScrollVarUsage(scroller(responsive), changed, none);
+    expect(usage.NeedsLayout).toBe(true);
+    expect(usage.RenderOnly).toEqual([]);
+  });
+
+  it('one entry with only Style stays render-only even when a DIFFERENT entry on the same node has Layout', () => {
+    const mixed = new Jiv({});
+    mixed.SetPredicateStyles([
+      { Predicate: { Kind: 'State', Name: 'Hover' }, Style: { Opacity: '0.5' } },
+      { Predicate: { Kind: 'Compare', Metric: 'Width', Op: '<', Value: 700 }, ChildLayout: { Top: '@OverscrollTop' } },
+    ]);
+    const usage = AnalyzeScrollVarUsage(scroller(mixed), changed, none);
+    // The node as a WHOLE is layout-affecting (one of its entries is) — conservative, correct.
+    expect(usage.NeedsLayout).toBe(true);
+  });
+
   it('ignores @Height/@Width — the node\'s own box, never scroll state', () => {
     const header = new Jiv({ Style: { VisualScale: '1 + @Height / 100' } });
     const usage = AnalyzeScrollVarUsage(scroller(header), changed, none);

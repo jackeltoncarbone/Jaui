@@ -145,13 +145,39 @@ interface _VarRefSplit {
 const _splitCache = new WeakMap<Jiv, _VarRefSplit>();
 const _skipElement = (o: object): boolean => o instanceof Element;
 
+/** A `PredicateStyle` entry (a `:Foo`/`:(expr)` rule, or an `@If` responsive block) carries its OWN
+ *  Layout/ChildLayout patch alongside Style/TextStyle — `@If (Width < 700) { Padding: ...; Color:
+ *  ... }` sets both from ONE entry. Bucket each entry (predicate condition included, since a var the
+ *  CONDITION reads governs whichever patch it applies) by what it can actually change: any
+ *  Layout/ChildLayout/TextStyle patch present taints the whole entry as layout-affecting; a
+ *  Style-or-TextStyle-only entry is render-only. */
+const _predicateParts = (jiv: Jiv): { Layout: unknown[]; Style: unknown[] } => {
+  const layout: unknown[] = [];
+  const style: unknown[] = [];
+  const list = jiv.PredicateStyles as unknown as ReadonlyArray<{
+    Predicate?: unknown; Style?: unknown; TextStyle?: unknown; Layout?: unknown; ChildLayout?: unknown;
+  }> | null;
+  if (!list) return { Layout: layout, Style: style };
+  for (const p of list) {
+    const hasLayout = p.Layout !== undefined || p.ChildLayout !== undefined;
+    if (hasLayout) layout.push(p.Predicate, p.Layout, p.ChildLayout, p.TextStyle, p.Style);
+    else { style.push(p.Predicate, p.Style, p.TextStyle); }
+  }
+  return { Layout: layout, Style: style };
+};
+
 const _cachedSplit = (jiv: Jiv): _VarRefSplit => {
   const hit = _splitCache.get(jiv);
   if (hit !== undefined && hit.Version === jiv.AuthoredVersion) return hit;
+  const predicateParts = _predicateParts(jiv);
   const split: _VarRefSplit = {
     Version: jiv.AuthoredVersion,
-    LayoutRefs: CollectVarRefs([jiv.Layout, jiv.ChildLayout, jiv.TextStyle, jiv.PointScale], _skipElement),
-    StyleRefs: CollectVarRefs([jiv.Style, jiv.PredicateStyles, jiv.TextSelectionStyle, jiv.Springs], _skipElement),
+    LayoutRefs: CollectVarRefs(
+      [jiv.Layout, jiv.ChildLayout, jiv.TextStyle, jiv.PointScale, ...predicateParts.Layout], _skipElement,
+    ),
+    StyleRefs: CollectVarRefs(
+      [jiv.Style, jiv.TextSelectionStyle, jiv.Springs, ...predicateParts.Style], _skipElement,
+    ),
   };
   _splitCache.set(jiv, split);
   return split;
