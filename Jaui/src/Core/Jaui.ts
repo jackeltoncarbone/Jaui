@@ -7933,7 +7933,13 @@ export class Canvas implements DirtyTracker {
       // vertical wheel fall through to the page scroll behind it, and a maxed-
       // out inner list chains to its parent — browser/Apple behavior, instead
       // of the innermost Scroll swallowing the wheel.
-      const { xTarget, yTarget } = this._scrollManager.ResolveScrollChain(cssX, cssY, dx, dy);
+      // Input-type routing is decided BEFORE the chain (see below): whether this delta may rubber-band
+      // decides which scroller an edge pull lands on when nothing can really move
+      // (Scroll.Manager.ScrollChainFrom).
+      const ad = Math.max(Math.abs(e.deltaX), Math.abs(e.deltaY));
+      const precise = e.deltaMode === 0
+        && (ad < 40 || (e.deltaY % 1 !== 0) || (e.deltaX % 1 !== 0));
+      const { xTarget, yTarget } = this._scrollManager.ResolveScrollChain(cssX, cssY, dx, dy, precise);
       if (!xTarget && !yTarget) return;
 
       if (e.deltaMode === 2) {
@@ -7949,9 +7955,7 @@ export class Canvas implements DirtyTracker {
       //     Chrome/Mac). Smooth the discrete jump so it animates instead of
       //     teleporting. Bias is intentional: large+integer ⇒ never mistaken
       //     for trackpad, so wheel always smooths and trackpad stays instant.
-      const ad = Math.max(Math.abs(e.deltaX), Math.abs(e.deltaY));
-      const precise = e.deltaMode === 0
-        && (ad < 40 || (e.deltaY % 1 !== 0) || (e.deltaX % 1 !== 0));
+      //   (`ad` / `precise` are computed above the chain.)
       // `OverscrollInput` (Scroll.Types) gates whether THIS delta may rubber-band past bounds:
       // `Precise` (the default) allows a trackpad/precise delta but never a line-stepped wheel;
       // `All` allows both (ApplyDelta checks `All` itself for the line-stepped path); `Touch`

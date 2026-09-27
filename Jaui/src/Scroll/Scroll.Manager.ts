@@ -451,17 +451,35 @@ export class ScrollManager implements Animatable {
     cssY: number,
     dx: number,
     dy: number,
+    precise: boolean = false,
+  ): { xTarget: Jiv | null; yTarget: Jiv | null } =>
+    this.ScrollChainFrom(this.HitTopmost(cssX, cssY), dx, dy, precise);
+
+  /** The chain walk itself, from an already-hit node up. A scroller that can really move on an axis
+   *  always wins it, innermost first -- that is the chaining. Only when NOTHING on the chain can move
+   *  does the axis fall back to the innermost scroller allowed to overscroll there for this input
+   *  (`WheelMayOverscroll`). Without the fallback a wheel or trackpad pull at an edge found no target
+   *  and was dropped before the rubber band ever saw it, so `Pin`'s `@OverscrollTop` stayed 0 and a
+   *  stretchy header never stretched (measured 2026-09-27, Chromium and Safari: 0 throughout a pull). */
+  ScrollChainFrom = (
+    hit: Jiv | null,
+    dx: number,
+    dy: number,
+    precise: boolean = false,
   ): { xTarget: Jiv | null; yTarget: Jiv | null } => {
-    const hit = this.HitTopmost(cssX, cssY);
     let xTarget: Jiv | null = null;
     let yTarget: Jiv | null = null;
+    let xEdge: Jiv | null = null;
+    let yEdge: Jiv | null = null;
     for (let cur: Jiv | null = hit; cur; cur = cur.Parent as Jiv | null) {
       if (cur.Overflow !== 'Scroll') continue;
       if (!xTarget && this._canScrollAxis(cur, 'x', dx)) xTarget = cur;
       if (!yTarget && this._canScrollAxis(cur, 'y', dy)) yTarget = cur;
+      if (!xEdge && WheelMayOverscroll(cur, 'x', dx, precise)) xEdge = cur;
+      if (!yEdge && WheelMayOverscroll(cur, 'y', dy, precise)) yEdge = cur;
       if (xTarget && yTarget) break;
     }
-    return { xTarget, yTarget };
+    return { xTarget: xTarget ?? xEdge, yTarget: yTarget ?? yEdge };
   };
 
   /** Whether `jiv` has room to move in `delta`'s direction on `axis`. Uses the
@@ -895,4 +913,21 @@ const _rubberResistance = (pos: number, minBound: number, maxBound: number, resi
   // configured value softens (>1) or stiffens (<1) the same curve.
   const size = Math.max(1, (maxBound - minBound) * resistance);
   return 1 / (1 + over / size);
+};
+
+/** May a wheel or trackpad delta push `jiv` past the edge it points at? The same gates the wheel path
+ *  applies once it has a target: `OverscrollInput` (`Touch` never; a line-stepped wheel only under
+ *  `All`; a precise/trackpad delta under the `Precise` default), the edge's `OverscrollMode` (not
+ *  `None`), and an axis that scrolls at all, since the rubber band integrates only where there is
+ *  extent (`ApplyDeltaInstant`). */
+export const WheelMayOverscroll = (jiv: Jiv, axis: 'x' | 'y', delta: number, precise: boolean): boolean => {
+  if (delta === 0) return false;
+  const input = jiv.OverscrollInput ?? 'Precise';
+  if (input === 'Touch' || (!precise && input !== 'All')) return false;
+  const extent = axis === 'y' ? jiv.ContentHeight - jiv.Height : jiv.ContentWidth - jiv.Width;
+  if (extent <= 0) return false;
+  const mode = axis === 'y'
+    ? (delta < 0 ? jiv.OverscrollTop : jiv.OverscrollBottom)
+    : (delta < 0 ? jiv.OverscrollLeft : jiv.OverscrollRight);
+  return (mode ?? 'Bounce') !== 'None';
 };
