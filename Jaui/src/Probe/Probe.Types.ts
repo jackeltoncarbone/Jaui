@@ -54,7 +54,11 @@ export interface ProbeNode {
   Clip: string;
   ClipsChildren: boolean;
   ParentOverflow: string;
-  Scroll: { X: number; Y: number; ContentWidth: number; ContentHeight: number } | null;
+  /** `OverscrollTop` is the `@OverscrollTop` var the scroller publishes (Scroll.Manager): how far past
+   *  the top a `Pin` scroller has been pulled, while its content stays put. */
+  Scroll: { X: number; Y: number; ContentWidth: number; ContentHeight: number; OverscrollTop: number } | null;
+  /** The render plane's VisualScale, X then Y: what a `JwiftStretchyHeader` grows by during a pull. */
+  VisualScale: [number, number];
   Layer: number;
   ZIndex: number | 'Auto';
   /** The drawn corner radius, which carries the superellipse compensation. */
