@@ -82,7 +82,12 @@ export const SolveLayout = (
       RootPointScale: priorCtx.RootPointScale,
       ViewportWidth: viewport.Width,
       ViewportHeight: viewport.Height,
-      Vars: vars,
+      // THE CASCADE, not the global table: exactly what a full solve's `_buildChildCtx` gives this node,
+      // the parent's already-cascaded map with this node's own `[vars]` merged over it. Seeding the
+      // global table here dropped every var an ancestor cascades -- a scroller's `@OverscrollTop` among
+      // them, so Home's stretchy header lost its zoom on any re-layout under the scroller, and kept it
+      // lost while a finger held the pull still (tests/Layout.SubtreeVars.test.ts).
+      Vars: _mergeVars(parentCtx.Vars ?? vars, (root as { VarMap?: ReadonlyMap<string, string | number | boolean> }).VarMap),
     };
     root.ResolveCtx = rootCtx;
     rootPointScale = rootCtx.RootPointScale;
@@ -225,8 +230,9 @@ const _resolveAttachPass = (
         // set (from main pass); otherwise synthesize from the parent chain.
         const parentCtx = node.Parent?.ResolveCtx ?? node.ResolveCtx;
         const parentPointScale = parentCtx?.PointScale ?? rootPointScale;
+        // The parent's cascaded vars, as the main pass would pass them (see the subtree root above).
         const ctx = _buildChildCtx(node, rect.Width, rect.Height,
-                                    parentPointScale, rootPointScale, viewport, vars);
+                                    parentPointScale, rootPointScale, viewport, parentCtx?.Vars ?? vars);
         node.ResolveCtx = ctx;
         _solveSubtree(node, rect.Width, rect.Height, rect.X, rect.Y, results, ctx, viewport, rootPointScale, vars);
         changed = true;
