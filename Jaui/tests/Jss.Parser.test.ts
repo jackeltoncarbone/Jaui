@@ -40,6 +40,20 @@ describe('JSS — parser', () => {
     expect(r.TextStyle?.Color).toBe('rgba(255, 255, 255, 1)');
   });
 
+  it('routes BackdropRoot and BackdropScope to the Style slot (Core/Glass.Jss.md 5)', () => {
+    const { Sheet: sheet } = ParseJss(`
+      ScrollHost {
+        BackdropRoot: true
+      }
+      Bar {
+        BackdropFilter: Blur(16pt)
+        BackdropScope: Root
+      }
+    `);
+    expect(sheet.ScrollHost.Style?.BackdropRoot).toBe('true');
+    expect(sheet.Bar.Style?.BackdropScope).toBe('Root');
+  });
+
   it('accepts commas inside values (rgba, transforms)', () => {
     const { Sheet: sheet } = ParseJss(`
       Panel {

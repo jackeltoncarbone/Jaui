@@ -196,6 +196,8 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.ProgressiveBlurKind = target.ProgressiveBlurKind;
   render.CornerShape = target.CornerShape;
   render.BackdropFrostAuto = target.BackdropFrostAuto;
+  render.BackdropRoot = target.BackdropRoot;
+  render.BackdropScope = target.BackdropScope;
   // Vibrancy's declaration and zone COLORS snap: a hue is not a spring, and the declaration is a
   // tagged value, not a number.
   render.VibrancyDeclaration = target.VibrancyDeclaration;

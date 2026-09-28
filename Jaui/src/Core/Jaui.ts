@@ -56,7 +56,7 @@ import {
 import { PassWindowOf, PassWindowText, type PassProfile } from './Pass.Timers';
 import {
   PaintLedger, GuardedRect, UnionRect, BLUR_READ_GUARD_PX, BLUR_CACHE_BUDGET_BYTES, DAMAGE_MAX_PIECES,
-  RECORD_NODE, RECORD_EDGE, RECORD_JANVAS, READER_FILL, READER_PROBE, READER_PBLUR, type ReaderWhy,
+  RECORD_NODE, RECORD_EDGE, RECORD_JANVAS, READER_FILL, READER_PROBE, READER_PBLUR, READER_SCOPED, Sig, type ReaderWhy,
 } from './Blur.Cache';
 import { PyramidSampleReach } from './Pyramid.Reach';
 import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICKS, type PaceGate, type PaceCensus, type PaceWaited, type TickPaceMode } from './Tick.Pace';
@@ -66,7 +66,7 @@ import { TickPace, ParseTickPace, TickPaceDefault, TickPaceText, PACE_STALL_TICK
 // which backend is running underneath it.
 import { ImageCache } from '../Image/Image.Cache';
 import { BrowserPlatform, type Platform } from './Platform';
-import type { MaterialType } from '../Jiv/Jiv.Types';
+import type { MaterialType, BackdropScopeKind } from '../Jiv/Jiv.Types';
 import { LAYER_TOP } from '../Jiv/Jiv.Types';
 import { SetPredicateViewport } from '../Jss/Jss.Predicate';
 
@@ -438,7 +438,7 @@ import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer, PANEL_PROGRAM_COUNT } from './WebGL2.Renderer';
 import type { ShadowProbe, BlurCacheSlot } from './WebGL2.Renderer';
-import { Framebuffer } from './Framebuffer';
+import { Framebuffer, FramebufferPool } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
 import { FocusManager } from './Focus/FocusManager';
@@ -2002,6 +2002,12 @@ export class Canvas implements DirtyTracker {
   private _damageRectCss: { x: number; y: number; w: number; h: number } | null = null;
   /** An active lens's lifted content, the bar's items drawn again (liftLensItems in the walk). */
   private _lensItems: Framebuffer | null = null;
+  /** Region-sized RGBA8 targets for a `BackdropScope` capture (`scopeCapture` in the walk) — its own
+   *  pool, never the card pool: a card's lifetime is the frame, a scoped capture's is one function
+   *  call (captured, resolved to canvas size, released, all before the walk moves on). */
+  private _scopePool: FramebufferPool | null = null;
+  /** `BackdropScope` refusal reasons already printed once (session lifetime, not per frame). */
+  private _scopeRefusalsLogged = new Set<string>();
   /** True while the lens's lifted twins draw (liftLensItems): their text draws as ordinary ink at full coverage. */
   private _liftingTwins = false;
   private _layerCache = new Map<Jiv, { Fbo: Framebuffer; Valid: boolean; DX: number; DY: number; DW: number; DH: number }>();
@@ -3162,6 +3168,55 @@ export class Canvas implements DirtyTracker {
       if (!edgeEmitted) emitEdge();
     };
 
+    // ── BackdropScope (Core/Glass.Jss.md 5) — bookkeeping the wrapper below keeps on EVERY node,
+    // so a scoped read (rare, opt-in) can answer "what was root R's own incoming call" and "has
+    // anything painted under root R since" without a second walk. ──
+    //
+    // Every node's OWN incoming (m, stack, mH, persp) — exactly renderNode's own params — so a
+    // scoped read can re-invoke `renderNode(root, ...)` with the SAME state root itself was
+    // called with. Set, never deleted: an ancestor is necessarily visited before the descendant
+    // that looks it up here, so last-write is always this frame's.
+    const scopeAncestor = new Map<Jiv, { M: Mat2x3; Stack: ClipStack; MH: Mat3x3 | null; Persp: PerspCtx | null }>();
+    // One running signature per node CURRENTLY inside a `BackdropRoot: true` subtree (nested roots
+    // stack; the wrapper pushes on entry, pops on exit). Mixed into by `PaintLedger.Close`
+    // (`_bc.ScopedSigs`) whenever a record closes underneath, so at any instant it holds "everything
+    // painted so far in this root's subtree" — the scoped analog of the ledger's own whole-canvas
+    // running prefix, and what makes a scoped read's cache narrower than Page's.
+    const activeRootSigs: { Root: Jiv; Sig: Sig }[] = [];
+    // Same-FRAME reuse: a scoped element under root R, once captured, is good for any LATER scoped
+    // element under the SAME root whose region fits inside it, as long as nothing painted under R
+    // since (the signature snapshot at capture time still matches). Unlike `_bcBuild`'s cross-frame
+    // cache (kept per scoped ELEMENT), this is kept per ROOT and never survives past this frame.
+    const scopeFrameCache = new Map<Jiv, { X: number; Y: number; W: number; H: number; SigA: number; SigB: number; Handle: GpuTextureHandle }[]>();
+    // The re-walk gate a scoped capture opens: while set, `renderNode` paints normally until it
+    // reaches `scopeStopNode` (returns without painting it or anything under it, and marks
+    // `scopeStopReached`) and paints NOTHING once that flag is set — the walk's own DFS order is
+    // "paint order", so this is exactly "everything before the scoped element, nothing at or after".
+    let scopeStopNode: Jiv | null = null;
+    let scopeStopReached = false;
+
+    // The real entry point: every recursive descent calls THIS, never `renderNodeInner` by name, so
+    // every node (not only the ones a scoped read cares about) gets the bookkeeping above and the
+    // stop gate below. A thin wrapper rather than folding the two into `renderNodeInner` itself
+    // keeps that already-enormous function's own body untouched — this is the whole of the diff a
+    // node with no `BackdropRoot`/`BackdropScope` authored ever sees, and it is unconditional
+    // (a Map.set, a style-flag read, no allocation on the common path) rather than a branch on
+    // whether scoping is in play, which is what keeps it provably the same for every other node.
+    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
+      if (scopeStopNode !== null) {
+        if (node === scopeStopNode) { scopeStopReached = true; return; }
+        if (scopeStopReached) return;
+      }
+      scopeAncestor.set(node, { M: m, Stack: stack, MH: mH, Persp: persp });
+      const isScopeRoot = node.RenderStyle.BackdropRoot;
+      if (isScopeRoot) activeRootSigs.push({ Root: node, Sig: new Sig() });
+      try {
+        renderNodeInner(node, m, stack, scope, mH, persp);
+      } finally {
+        if (isScopeRoot) activeRootSigs.pop();
+      }
+    };
+
     // Single tree walk — renders everything in z-order. The (cx, cy,
     // ox, oy) tuple is the affine map from this Jiv's natural
     // (post-layout, pre-Visual-transform) coords to canvas px:
@@ -3170,7 +3225,7 @@ export class Canvas implements DirtyTracker {
     // Identity (cx=cy=1, ox=oy=0) at the root is the no-transform path.
     // VisualScale on an ancestor composes into the effective tuple so
     // descendants ride along, just like CSS transform on a parent.
-    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
+    const renderNodeInner = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
       // `?blur-phased` pass 1 paints the bed and stops at the FIRST surface that would build a
       // pyramid. Once it has, nothing further in the tree paints in this pass -- the stop is here,
       // at the top, rather than at the paint site, because the stopping node's own children have
@@ -3434,12 +3489,19 @@ export class Canvas implements DirtyTracker {
           // eslint-disable-next-line no-console
           console.log(`[Jaui.surf] PBLUR rect=${Math.round(pw)}x${Math.round(ph)} region=${region.w}x${region.h} (${(region.w * region.h / 1e6).toFixed(2)}Mpx) frost=${maxFeatherSigma}pt dir=${dir} maxLod=${maxLod.toFixed(1)} bgOpaque=${bgOpaque}`);
         }
+        // BackdropScope (Core/Glass.Jss.md 5): a scoped read replaces the raw-scene snapshot AND
+        // the sharp-root pyramid built from it with one already-scoped, already-cached build.
+        // Radius is 0 either way here, so mip 0 is the raw (scoped) scene whichever path is taken --
+        // `u_Scene` and the pyramid's own LOD 0 read the identical texels a Page-scoped
+        // `SnapshotScreen` + `ComputeBlur` would have produced, just bounded to the scope. `null`
+        // (the overwhelmingly common case, no `BackdropScope` authored) takes the exact prior path.
+        const scoped = node.RenderStyle.BackdropScope !== 'Page' ? scopedBackdrop(node, region, 0, maxLod) : null;
         // Snapshot only this pblur's footprint + blur margin (same region the pyramid is built
         // over) instead of the whole canvas — the shader samples the pyramid only within the
         // panel, so the rest of the snapshot is never read. The pyramid is built FROM this
         // snapshot, so the region it is given must not reach past what was copied: at radius 0
         // the grid phase is 1 and BlurPass grows it by nothing, which is what makes that safe.
-        const sceneSnap = r.SnapshotScreen(region);
+        const sceneSnap = scoped ?? r.SnapshotScreen(region);
         // Sharp-root pyramid: radius 0 makes BlurPass seed mip 0 with the RAW
         // scene (a 1-tap copy, no dual-filter pre-blur), then GenerateBlurMipmap
         // builds the Gaussian stack from it. The shader samples ONE continuous
@@ -3455,7 +3517,7 @@ export class Canvas implements DirtyTracker {
         // `?blur-cache`: the pyramid is the whole mip chain of the region, so a clean region skips all
         // of it. The snapshot above still runs -- the draw below reads it as `u_Scene` -- and it is the
         // same scene state the reader was judged on.
-        lastBackdrop = this._bcBuild(node, READER_PBLUR, region, 0, maxLod, false, false, w, h, () => {
+        lastBackdrop = scoped ?? this._bcBuild(node, READER_PBLUR, region, 0, maxLod, false, false, w, h, () => {
           const built = r.ComputeBlur(sceneSnap, w, h, 0, undefined, region);
           r.GenerateBlurMipmap(maxLod);
           return built;
@@ -3610,7 +3672,25 @@ export class Canvas implements DirtyTracker {
         // An active lens builds from the scene under the lifted content its parent copied, never a shared one.
         const below = lensBelow !== null && lensBelow.Lens === node ? lensBelow.Handle : null;
         const lensItems = lensBelow !== null && lensBelow.Lens === node ? lensBelow.Items : null;
-        if (this._sharedBackdrop) {
+        // BackdropScope (Core/Glass.Jss.md 5): a lens takes priority (below === null guards it here
+        // exactly as it already guards edgeFill/groupFill/preFill below) since the two are on
+        // different axes and vanishingly unlikely to both be authored on one node.
+        const scoped = below === null && node.RenderStyle.BackdropScope !== 'Page'
+          ? scopedBackdrop(node, region, plan.Radius, plan.MaxLod) : null;
+        if (scoped !== null) {
+          // The scoped build already IS the final pyramid (capture, resolve, ComputeBlur,
+          // GenerateBlurMipmap, cached under READER_SCOPED) — none of the Page decision tree below
+          // applies, because shared/group/edge/pre-fill all assume "the whole scene so far", which
+          // is exactly what scoping opts out of. `sceneSnap` takes the same handle: on a surface
+          // that ALSO reads the sharp scene as a fallback (`instFrostLod < SCENE_TAP_FROST_LOD`) it
+          // can read a hair softer than Page's separate raw snapshot at level 0 of a real (> 0)
+          // radius pyramid — a narrow, documented trade for a cache hit skipping the capture too.
+          lastBackdrop = scoped;
+          sceneSnap = scoped;
+          // Built AT this panel's own frost sigma (`plan.Radius`), exactly as the plain (non-shared,
+          // non-group/edge/pre-fill) build is — same base-LOD relationship as that path.
+          lastBaseFrostLod = plan.BaseFrostLod;
+        } else if (this._sharedBackdrop) {
           // ── Shared backdrop (fire once, sample many) ──
           // Build ONE sharp-root pyramid per frame and let every glass surface
           // sample it at its own frost LOD (frost-as-LOD — exactly how the pblur
@@ -4266,6 +4346,116 @@ export class Canvas implements DirtyTracker {
       r2.BlitTextureRegion(entry.Fbo.Texture, adx, h - ady - adh, adw, adh);
       r2.RebindSceneTarget();
       this._counts.Panels++;
+    };
+
+    // ── BackdropScope (Core/Glass.Jss.md 5) ──
+    //
+    // `scopeCapture`: a scope root's re-walk, gated by `scopeStopNode`/`scopeStopReached` so only
+    // what paints BEFORE the scoped element actually draws — `compositeOrCapture`'s own capture
+    // (region-sized, `SetCaptureViewOffset`, cleared transparent), except from `_scopePool` (its
+    // own pool: an RGBA8 target, since this capture's transparency has to survive being read as a
+    // backdrop, and a card/layer-cache target's RGB10_A2 cannot hold it) rather than a per-node FBO.
+    const scopeCapture = (
+      root: Jiv, anchor: { M: Mat2x3; Stack: ClipStack; MH: Mat3x3 | null; Persp: PerspCtx | null },
+      stopAt: Jiv, region: { x: number; y: number; w: number; h: number },
+    ): Framebuffer | null => {
+      if (this._capturing) return null; // re-entrant: a scoped element captured FROM this capture. Page.
+      const cgl = r2.GetGL();
+      if (!cgl) return null;
+      flushPanels();
+      flushText();
+      const pool = this._scopePool ??= new FramebufferPool(cgl);
+      const fbo = pool.Acquire(region.w, region.h, false);
+      fbo.Bind();
+      cgl.viewport(0, 0, fbo.Width, fbo.Height);
+      cgl.clearColor(0, 0, 0, 0);
+      cgl.clear(cgl.COLOR_BUFFER_BIT);
+      r2.SetCaptureViewOffset(region.x, region.y);
+      const savedW = flushW, savedH = flushH;
+      flushW = fbo.Width; flushH = fbo.Height;
+      const capScope: TeleportScope = { Deferred: [], Stack: anchor.Stack };
+      this._capturing = true;
+      scopeStopNode = stopAt;
+      scopeStopReached = false;
+      renderNode(root, anchor.M, anchor.Stack, capScope, anchor.MH, anchor.Persp);
+      replayScope(capScope);
+      flushPanels();
+      flushText();
+      scopeStopNode = null;
+      this._capturing = false;
+      flushW = savedW; flushH = savedH;
+      r2.SetCaptureViewOffset(0, 0);
+      r2.RebindSceneTarget();
+      return fbo;
+    };
+
+    /** Reasons a scoped element fell back to `Page`, printed once EVER (not once a frame): the four
+     *  named in the spec (a shared/pre-built/phased backdrop has no per-surface capture point to
+     *  hook, and a capture already in flight can't nest one) — never for "no root" or "not WebGL2",
+     *  which are the documented fallback, not a refusal. */
+    const scopeRefuse = (reason: string): void => {
+      if (this._scopeRefusalsLogged.has(reason)) return;
+      this._scopeRefusalsLogged.add(reason);
+      // eslint-disable-next-line no-console
+      console.info(`[Jaui] BackdropScope refused, falling back to Page: ${reason}`);
+    };
+
+    /** THE scoped read: `node`'s `BackdropFilter` sees only what `_scopeRootOf` bounds, instead of
+     *  the whole scene so far. Returns a canvas-sized, screen-addressed `GpuTextureHandle` (the same
+     *  shape a Page-scoped `SnapshotScreen`/`ComputeBlur` already hands its two call sites) or
+     *  `null` to mean "take the Page path instead", which both call sites already know how to read. */
+    const scopedBackdrop = (
+      node: Jiv, region: { x: number; y: number; w: number; h: number }, radius: number, maxLod: number,
+    ): GpuTextureHandle | null => {
+      const scope = node.RenderStyle.BackdropScope;
+      if (scope === 'Page') return null;
+      if (!(r2 instanceof WebGL2Renderer)) return null;
+      if (this._capturing) { scopeRefuse('capturing'); return null; }
+      if (this._sharedBackdrop) { scopeRefuse('shared-backdrop'); return null; }
+      if (this._blurFirst) { scopeRefuse('blur-first'); return null; }
+      if (this._phasedWalk) { scopeRefuse('blur-phased'); return null; }
+      const root = this._scopeRootOf(node, scope);
+      if (root === null) return null; // Root, no BackdropRoot ancestor: Page, per spec.
+      const anchor = scopeAncestor.get(root);
+      if (anchor === undefined) return null; // root did not render this frame (culled away): Page.
+      const rootSig = activeRootSigs.find((e) => e.Root === root)?.Sig ?? null;
+
+      // ── Same-frame reuse: any earlier scoped element under this root, unchanged since ──
+      const shared = scopeFrameCache.get(root);
+      if (shared !== undefined && rootSig !== null) {
+        for (const entry of shared) {
+          if (entry.SigA === rootSig.A && entry.SigB === rootSig.B
+              && entry.X <= region.x && entry.Y <= region.y
+              && entry.X + entry.W >= region.x + region.w && entry.Y + entry.H >= region.y + region.h) {
+            return entry.Handle;
+          }
+        }
+      }
+
+      // ── Cross-frame cache (`_bcBuild`, exactly `READER_FILL`/`READER_PBLUR`'s own machinery): a
+      // hit skips the capture AND the blur below, not merely the recapture. ──
+      const keyExtra = `${scope === 'Parent' ? 'p' : 'r'}${this._bc.Id(root)}|`;
+      const prefix = rootSig !== null ? { A: rootSig.A, B: rootSig.B } : undefined;
+      const handle = this._bcBuild(node, READER_SCOPED, region, radius, maxLod, false, false, w, h, () => {
+        const captured = scopeCapture(root, anchor, node, region);
+        const resolved = captured !== null
+          ? r2.ResolveScopedCapture(captured, region.x, region.y, region.w, region.h)
+          : r2.SceneTexture; // unreachable in practice (see scopeCapture); Page-shaped, not wrong.
+        if (captured !== null) this._scopePool!.Release(captured);
+        // No presample/separable plan threaded through here — a scoped read always takes the
+        // default dual-filter build, whatever `?glass-presample`/`?glass-gaussian` ask elsewhere.
+        // Same pixels either way; only the perf lanes those flags measure don't reach a scoped read.
+        const built = r2.ComputeBlur(resolved, w, h, radius, undefined, region);
+        r2.GenerateBlurMipmap(maxLod);
+        return built;
+      }, keyExtra, prefix);
+
+      if (rootSig !== null) {
+        let list = scopeFrameCache.get(root);
+        if (list === undefined) { list = []; scopeFrameCache.set(root, list); }
+        list.push({ X: region.x, Y: region.y, W: region.w, H: region.h, SigA: rootSig.A, SigB: rootSig.B, Handle: handle });
+      }
+      return handle;
     };
 
     this._textBuffer.Begin();
@@ -5035,13 +5225,19 @@ export class Canvas implements DirtyTracker {
     owner: Jiv, kind: number, region: { x: number; y: number; w: number; h: number },
     radius: number, maxLod: number, presample: boolean, gaussian: boolean, w: number, h: number,
     build: () => GpuTextureHandle,
+    // `keyExtra`/`prefix`: READER_SCOPED only. `keyExtra` folds the scope root's identity into the
+    // key (two different roots at the same region/radius are not the same reader); `prefix`
+    // replaces the whole-canvas running signature with the root-scoped one (`activeRootSigs`), so a
+    // change outside the root's subtree cannot miss this reader. Omitted, both are every other
+    // reader's byte-for-byte prior behavior.
+    keyExtra?: string, prefix?: { A: number; B: number },
   ): GpuTextureHandle => {
     if (!this._bcOn) return build();
     const r = this._renderer as WebGL2Renderer;
     const bc = this._bc;
-    const key = `build|${region.x},${region.y},${region.w},${region.h}|${radius}|${maxLod}`
+    const key = `build|${keyExtra ?? ''}${region.x},${region.y},${region.w},${region.h}|${radius}|${maxLod}`
       + `|${presample ? 1 : 0}${gaussian ? 1 : 0}|${w}x${h}`;
-    const v = bc.Reader(owner, kind, key, GuardedRect(region.x, region.y, region.w, region.h, BLUR_READ_GUARD_PX));
+    const v = bc.Reader(owner, kind, key, GuardedRect(region.x, region.y, region.w, region.h, BLUR_READ_GUARD_PX), prefix);
     bc.Sig.Number(v.Token);
     if (kind === READER_FILL) { this._bcFillClean = v.Why === 'clean' ? owner : null; this._bcFillKey = key; }
     const st = v.State;
@@ -5057,7 +5253,7 @@ export class Canvas implements DirtyTracker {
       const texels = r.BlurCacheCompare(slot.Handle, fresh);
       r.NoteBlurCacheVerify(texels !== 0);
       if (texels !== 0) {
-        JTrace(`jaui:blur-cache mismatch kind=${kind === READER_FILL ? 'fill' : 'pblur'}`
+        JTrace(`jaui:blur-cache mismatch kind=${kind === READER_FILL ? 'fill' : kind === READER_SCOPED ? 'scoped' : 'pblur'}`
           + ` node=${bc.Id(owner)} classes=${owner.Classes.length > 0 ? owner.Classes.join('.') : '-'}`
           + ` region=${region.x},${region.y},${region.w}x${region.h} texels=${texels} maxDelta=${r.BlurCacheLastMaxDelta} frame=${bc.Frame}`
           + ` read=${r.BlurCacheReadKind}`);
@@ -5786,6 +5982,20 @@ export class Canvas implements DirtyTracker {
     for (const child of node.Children as Jiv[]) {
       const rs = child.RenderStyle;
       if (child.Visible && GlassIsActiveLens(rs.Lens, rs.Material)) return child;
+    }
+    return null;
+  };
+
+  /** The node whose subtree bounds a `BackdropScope: Parent | Root` read (Core/Glass.Jss.md 5):
+   *  `node.Parent` for `Parent`; the nearest `BackdropRoot: true` ancestor for `Root`, `null` with
+   *  none (falls back to `Page`, per spec) or with no parent at all. Never the scoped element
+   *  itself, and never cascades — each call walks from `node` fresh. */
+  private _scopeRootOf = (node: Jiv, scope: BackdropScopeKind): Jiv | null => {
+    if (scope === 'Parent') return node.Parent as Jiv | null;
+    let p = node.Parent as Jiv | null;
+    while (p !== null) {
+      if (p.RenderStyle.BackdropRoot) return p;
+      p = p.Parent as Jiv | null;
     }
     return null;
   };

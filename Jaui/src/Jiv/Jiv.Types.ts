@@ -84,6 +84,9 @@ export type GlassVariant = 'Regular' | 'Clear';
  *    • ScrollEdge: chrome's strip over content. Glass in it reads the content before the strip, undimmed. */
 export type ProgressiveBlurKind = 'Surface' | 'ScrollEdge';
 
+/** How far a `BackdropFilter` looks back through the paint order (Core/Glass.Jss.md 5). */
+export type BackdropScopeKind = 'Page' | 'Parent' | 'Root';
+
 /**
  * Authorable style — every numeric / dimensional / color / transform field is
  * a CSS-style string (or a bare number as a convenience fast-path for simple
@@ -191,6 +194,17 @@ export interface JivStyle {
    *  inside this box's shape and never this element's own ink
    *  (Core/Vibrancy.ts). */
   BackdropFilter: string;
+  /** Bounds what a descendant's `BackdropScope: Root` can see: the nearest `BackdropRoot: true`
+   *  ancestor is where its scoped backdrop starts. `false` (the default) is not a bound. Per-node,
+   *  never inherits — a container opts in once and every scoped descendant below it (until a
+   *  nested `BackdropRoot`) resolves to it. */
+  BackdropRoot: string;
+  /** How far a `BackdropFilter` sees, on an element that has one: `Page` (the default, today's
+   *  behavior) is the whole scene, painted so far; `Parent` is only this element's direct parent's
+   *  children painted before it; `Root` is everything painted since the nearest `BackdropRoot`
+   *  ancestor (falls back to `Page` with no such ancestor). Per-node, never inherits — narrowing
+   *  what a backdrop samples never changes an element with no `BackdropFilter`. */
+  BackdropScope: string;
   /** THE INK ZONE: only the element's TEXT, nothing else (Core/Vibrancy.ts):
    *
    *      TextFilter: Vibrancy(255, @JwiftVibrancyLabel)   // Apple's label vibrancy
@@ -405,6 +419,11 @@ export interface JivRenderStyle {
   BackdropFrostBlur: number;
   /** `BackdropFilter: Blur(Auto)`: the frost follows the panel's size (`JivFrostCssPx`). */
   BackdropFrostAuto: boolean;
+  /** `BackdropRoot: true`: bounds a descendant's `BackdropScope: Root`. Per-node, never inherits. */
+  BackdropRoot: boolean;
+  /** `BackdropScope: Page | Parent | Root` (Core/Glass.Jss.md 5), resolved. Per-node, never
+   *  inherits — read only on an element that also has a `BackdropFilter`. */
+  BackdropScope: BackdropScopeKind;
   Thickness: number;
   Refraction: number;
   Glass: GlassKind;

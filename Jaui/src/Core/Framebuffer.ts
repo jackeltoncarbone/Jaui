@@ -202,6 +202,10 @@ export class Framebuffer {
   get MaxLevel(): number { return this._maxLevel; }
   /** The colour texture's sized format: an unsized RGBA/UNSIGNED_BYTE level is RGBA8. */
   get InternalFormat(): number { return this._highPrecision ? this._gl.RGB10_A2 : this._gl.RGBA8; }
+  /** Whether this FBO stores RGB10_A2 (10-bit colour, 2-bit alpha) rather than plain RGBA8. A
+   *  `FramebufferPool` bucket keys on this, since the two are not interchangeable: RGB10_A2's
+   *  2-bit alpha cannot hold real transparency. */
+  get HighPrecision(): boolean { return this._highPrecision; }
 
   /** Deepest mip level a full chain would have at the current size. */
   private _mipDepth = (): number => {
@@ -247,24 +251,27 @@ export class FramebufferPool {
   get Live(): number { return this._live; }
   get Peak(): number { return this._peak; }
 
-  Acquire = (width: number, height: number): Framebuffer => {
-    const key = `${width}x${height}`;
+  /** `highPrecision` (the default, `true`) is RGB10_A2 to match the scene target exactly: the seed,
+   *  the replay and the write-back are all 1:1 same-format blits, and a format conversion would put
+   *  every one of them on a render path instead of a copy. No depth — nothing in this renderer
+   *  tests it, and a foreign 3D pass draws into the scene in the janvas pre-pass, never into a card.
+   *  `false` is RGBA8, for a caller whose target has to hold REAL transparency (RGB10_A2's alpha is
+   *  2 bits — 4 levels — which a scoped backdrop capture's mostly-transparent footprint needs more
+   *  than 4 of): a same-size bucket keyed by format, so the two never hand each other's target back. */
+  Acquire = (width: number, height: number, highPrecision: boolean = true): Framebuffer => {
+    const key = `${width}x${height}:${highPrecision ? 'p' : 'r'}`;
     const bucket = this._free.get(key);
     this._live++;
     if (this._live > this._peak) this._peak = this._live;
     if (bucket !== undefined && bucket.length > 0) return bucket.pop()!;
-    // RGB10_A2 to match the scene target exactly: the seed, the replay and the write-back are all
-    // 1:1 same-format blits, and a format conversion would put every one of them on a render path
-    // instead of a copy. No depth — nothing in this renderer tests it, and a foreign 3D pass draws
-    // into the scene in the janvas pre-pass, never into a card.
-    const fb = new Framebuffer(this._gl, { highPrecision: true });
+    const fb = new Framebuffer(this._gl, { highPrecision });
     fb.Resize(width, height);
     return fb;
   };
 
   Release = (fb: Framebuffer): void => {
     this._live--;
-    const key = `${fb.Width}x${fb.Height}`;
+    const key = `${fb.Width}x${fb.Height}:${fb.HighPrecision ? 'p' : 'r'}`;
     const bucket = this._free.get(key);
     if (bucket === undefined) this._free.set(key, [fb]);
     else bucket.push(fb);

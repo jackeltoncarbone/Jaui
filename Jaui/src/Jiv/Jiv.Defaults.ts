@@ -20,6 +20,8 @@ export const DefaultJivStyle: JivStyle = {
   // Filters — identity by default (no grade, no frost). See Jiv.Types.
   Filter: 'None',
   BackdropFilter: 'None',
+  BackdropRoot: 'false',
+  BackdropScope: 'Page',
   // The INK zone. 'None' means the ink covers, which is what ink does -- so the default costs one
   // identity parse per style and reaches no draw.
   TextFilter: 'None',

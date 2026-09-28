@@ -1,4 +1,4 @@
-import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop, GlassKind } from '../Jiv/Jiv.Types';
+import type { JivStyle, JivRenderStyle, CornerShape, MaterialType, ProgressiveBlurDirection, BlurStop, GlassKind, BackdropScopeKind } from '../Jiv/Jiv.Types';
 import { LAYER_TOP } from '../Jiv/Jiv.Types';
 import { ParseProgressiveBlur } from '../ProgressiveBlur/ProgressiveBlur.Stops';
 import type { ResolveContext } from './Length';
@@ -272,6 +272,15 @@ const _resolveGlassSwitch = (name: string, raw: string | undefined, ctx: Resolve
   throw new Error(`[Jaui] ${name}: "${v}" -- expected Auto or None.`);
 };
 
+const _BACKDROP_SCOPES = new Set<BackdropScopeKind>(['Page', 'Parent', 'Root']);
+/** `BackdropScope: Page | Parent | Root` (Core/Glass.Jss.md 5). Per-node, never inherits — an
+ *  unauthored value is the property's own default (`Page`), not an ancestor's. */
+const _resolveBackdropScope = (raw: string | undefined, ctx: ResolveContext): BackdropScopeKind => {
+  const v = ResolveTernary(raw ?? 'Page', ctx).trim() as BackdropScopeKind;
+  if (!_BACKDROP_SCOPES.has(v)) throw new Error(`[Jaui] BackdropScope: "${v}" -- expected Page, Parent or Root.`);
+  return v;
+};
+
 const _GLASS_FROSTS: Record<string, number> = { Inherit: -1, Automatic: 0, Reduced: 1, None: 2 };
 /** `GlassFrost` (Core/Glass.Pipeline.ts, GlassFrostOf): -1 Inherit, 0 Automatic, 1 Reduced, 2 None. */
 const _resolveGlassFrost = (raw: string | undefined, ctx: ResolveContext): number => {
@@ -355,7 +364,15 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // the entire pblur shader + orchestration is reused. A uniform `Blur()` becomes
   // a flat 2-stop ramp (full blur everywhere); the progressive variants ramp
   // toward their edge over the feather. Explicit ProgressiveBlur* props still win.
-  const fgBlur = fg.ForegroundBlur;
+  //
+  // `BackdropFilter: LinearProgressiveBlur()/EdgeProgressiveBlur()` parses to the same
+  // `ForegroundBlur` shape (Filter.Parse.ts only refuses it in the `text` zone) and drives the
+  // IDENTICAL fields — the ProgressiveBlur material always samples what is BEHIND the element, so
+  // authoring the ramp on the backdrop zone instead of the foreground one is the same effect
+  // (a scroll-edge fade) under the property CSS's `backdrop-filter` names for it. `Filter` wins
+  // when a node authors both (rare); nobody in the app authors BackdropFilter's progressive
+  // functions today, so this is additive, not a behavior change.
+  const fgBlur = fg.ForegroundBlur ?? backdrop.ForegroundBlur;
   // Edge mode is the all-around generalization: a SYMMETRIC stops profile
   // (blurred at both ends of the axis, clear in the middle band) realized over
   // the existing pblur Stops machinery. `Edges` selects the axis: Vertical →
@@ -408,6 +425,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     // reads this as the ramp's max blur.
     BackdropFrostBlur: fgBlur ? fgFrost : resolveBlur(backdrop.BlurRaw),
     BackdropFrostAuto: !fgBlur && frostAuto,
+    BackdropRoot: s.BackdropRoot === 'true' || (s.BackdropRoot as unknown) === true,
+    BackdropScope: _resolveBackdropScope(s.BackdropScope, ctx),
     Thickness: thickness,
     Refraction: Resolve(s.Refraction, ctx, 'W'),
     Glass: glass,

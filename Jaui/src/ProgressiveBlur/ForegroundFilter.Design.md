@@ -59,6 +59,11 @@ reused unchanged. A uniform `Blur()` becomes a flat 2-stop ramp (`1@0, 1@1`).
 
 Explicit standalone `ProgressiveBlur*` props still win over `Filter` (back-compat).
 
+**`BackdropFilter`'s own `LinearProgressiveBlur()`/`EdgeProgressiveBlur()`** (`Filter.Parse.ts` never
+refused them in the `backdrop` zone, only `text`) now map onto the SAME fields — closed as part of
+`BackdropScope` (Core/Glass.Jss.md 5), since a scoped read needed the gap in view either way.
+`Filter` still wins when a node authors both zones' progressive functions.
+
 ## Honest limitation — "foreground" vs scene-backed
 
 The existing pblur material samples the **scene snapshot / blur pyramid** (the

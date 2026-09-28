@@ -182,6 +182,10 @@ export const READER_FILL = 1;
 /** An adaptive-shadow probe: the few texels of a pyramid it samples, and the scene they reach. */
 export const READER_PROBE = 2;
 export const READER_PBLUR = 3;
+/** A `BackdropScope: Parent | Root` read — the same shape as `READER_FILL`/`READER_PBLUR`, keyed
+ *  against a caller-supplied SCOPED prefix (`Reader`'s `prefix` arg) instead of the whole canvas's,
+ *  so a change outside the scope root's subtree never misses it. */
+export const READER_SCOPED = 4;
 
 export interface ReaderState<Slot> {
   Key: string;
@@ -234,12 +238,19 @@ export class PaintLedger<Slot> {
   readonly Stats: PaintLedgerFrame = {
     Changed: 0, New: 0, Gone: 0, Fresh: { janvas: 0, shadow: 0, group: 0, edge: 0 }, Untracked: 0, Duplicate: 0, Seeded: false,
   };
+  /** One running signature per node CURRENTLY inside a `BackdropRoot: true` subtree (the walk
+   *  pushes on entry, pops on exit; nested roots stack) — the scoped analog of `_prefix`, mixed
+   *  into by every record this ledger closes while the walk is inside it. A `READER_SCOPED` reads
+   *  its OWN root's entry instead of `_prefix`, which is what keeps a change outside the root's
+   *  subtree from missing it. Owned by the walk, not this class: it only mixes into whatever is
+   *  here when a record closes. */
+  ScopedSigs: Sig[] = [];
 
   private readonly _ids = new WeakMap<object, number>();
   private _nextId = 1;
   private _prev: Map<number, PaintRecord>[] = [new Map(), new Map(), new Map(), new Map()];
   private _cur: Map<number, PaintRecord>[] = [new Map(), new Map(), new Map(), new Map()];
-  private readonly _readers: Map<number, ReaderState<Slot>>[] = [new Map(), new Map(), new Map(), new Map()];
+  private readonly _readers: Map<number, ReaderState<Slot>>[] = [new Map(), new Map(), new Map(), new Map(), new Map()];
   private readonly _prefix = new Sig();
   private readonly _sig = new Sig();
   private readonly _seed = new Sig();
@@ -363,7 +374,10 @@ export class PaintLedger<Slot> {
       if (prev.Painted) this.Region.Add(prev.X0, prev.Y0, prev.X1, prev.Y1);
       if (rec.Painted) this.Region.Add(rec.X0, rec.Y0, rec.X1, rec.Y1);
     }
-    if (rec.Painted) { this._prefix.Word(id); this._prefix.Word(kind); }
+    if (rec.Painted) {
+      this._prefix.Word(id); this._prefix.Word(kind);
+      for (const s of this.ScopedSigs) { s.Word(id); s.Word(kind); }
+    }
   };
 
   /** A record whose whole content is foreign (a `<janvas>`): opened, always changed, closed. */
@@ -383,16 +397,23 @@ export class PaintLedger<Slot> {
    * `rect` is what the caller knows it will read (the plan region, guarded). When the key matches,
    * the stored rect -- widened to the RESOLVED rect after last frame's build -- is the one tested,
    * because an equal key reads exactly what it read then.
+   *
+   * `prefix`, supplied, replaces `_prefix` (the whole canvas's running signature) as what the
+   * reader's own prefix is compared against — a `READER_SCOPED` passes its root's `ScopedSigs`
+   * entry, so a change that never reached the root's subtree cannot miss it. Omitted (every other
+   * reader) is `_prefix`, byte for byte the prior behavior.
    */
-  Reader = (owner: object, kind: number, key: string, rect: PixelRect): ReaderVerdict<Slot> => {
+  Reader = (owner: object, kind: number, key: string, rect: PixelRect, prefix?: { A: number; B: number }): ReaderVerdict<Slot> => {
     const id = this.Id(owner);
     const map = this._readers[kind];
+    const prefixA = prefix !== undefined ? prefix.A : this._prefix.A;
+    const prefixB = prefix !== undefined ? prefix.B : this._prefix.B;
     let st = map.get(id);
     let why: ReaderWhy;
     if (st === undefined) why = 'first';
     else if (st.Frame !== this.Frame - 1) why = 'gap';
     else if (st.Key !== key) why = 'key';
-    else if (st.PrefixA !== this._prefix.A || st.PrefixB !== this._prefix.B) why = 'prefix';
+    else if (st.PrefixA !== prefixA || st.PrefixB !== prefixB) why = 'prefix';
     else if (this.Region.Full) why = 'full';
     else if (this.Region.Hits(st.Rect)) why = 'damage';
     else why = 'clean';
@@ -403,8 +424,8 @@ export class PaintLedger<Slot> {
     }
     if (why !== 'clean') st.Rect = rect;
     st.Key = key;
-    st.PrefixA = this._prefix.A;
-    st.PrefixB = this._prefix.B;
+    st.PrefixA = prefixA;
+    st.PrefixB = prefixB;
     st.Frame = this.Frame;
     st.Token = token;
     return { Why: why, Token: token, State: st };

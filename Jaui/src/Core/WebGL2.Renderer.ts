@@ -3852,6 +3852,10 @@ export class WebGL2Renderer implements Renderer {
   /** The scene as it stood under a lens's lifted content (`SnapshotBelow`): its own texture, so the reads
    *  between it and the lens (the items' own vibrancy, the lens's sharp tap) never overwrite it. */
   private _below: _SceneCopy = { Tex: null, Fbo: null, W: 0, H: 0 };
+  /** Where a `BackdropScope` capture (region-sized, RGBA8) resolves to canvas size (`ResolveScopedCapture`)
+   *  — RGBA8, unlike `_snapshot`/`_below`'s RGB10_A2, because everywhere outside the capture's own
+   *  footprint has to stay REALLY transparent (2-bit alpha cannot). */
+  private _scopeScratch: _SceneCopy = { Tex: null, Fbo: null, W: 0, H: 0 };
 
   /** Copy the scene FBO into the snapshot texture so glass/pblur can sample
    *  it while drawing back into the scene FBO (avoids the read==write feedback
@@ -3892,6 +3896,58 @@ export class WebGL2Renderer implements Renderer {
     // Both flagged textures are canvas-sized with no region, exactly as the snapshot handle is.
     const sub = this._blurSrcSubstitute();
     return sub === null ? snapped : _wrap(sub);
+  };
+
+  /** Allocate (or keep) `_scopeScratch` at the canvas's current size — RGBA8, real alpha, unlike
+   *  `_ensureCopy`'s RGB10_A2: a scoped capture's own transparency (everywhere outside its footprint)
+   *  has to survive being read as `u_Scene`/a pyramid source. */
+  private _ensureScopeScratch = (): WebGLTexture => {
+    const copy = this._scopeScratch;
+    if (copy.Tex && copy.W === this._width && copy.H === this._height) return copy.Tex;
+    const gl = this._gl;
+    if (copy.Tex) gl.deleteTexture(copy.Tex);
+    if (copy.Fbo) gl.deleteFramebuffer(copy.Fbo);
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fbo = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
+    copy.Tex = tex; copy.Fbo = fbo; copy.W = this._width; copy.H = this._height;
+    return tex;
+  };
+
+  /** Resolve a `BackdropScope` capture (region-sized RGBA8, from `capture`'s own `FramebufferPool`
+   *  slot) into the canvas-sized, screen-addressed texture `ComputeBlur` expects — the same shape
+   *  `_below` already hands it for a lens, and (`Core/Renderer.ts`'s `BackdropRegion` doc) the same
+   *  shape every OTHER backdrop source is. A raw framebuffer blit at the capture's screen rect (`x`,
+   *  `y`, GL bottom-left origin math same as `_cardIntoSnapshotTex`), cleared transparent everywhere
+   *  else first — `_scopeScratch` holds only THIS call's rect; nothing carries over frame to frame,
+   *  because the walk calls this once per capture, never speculatively. */
+  ResolveScopedCapture = (capture: Framebuffer, x: number, y: number, w: number, h: number): GpuTextureHandle => {
+    const gl = this._gl;
+    const tex = this._ensureScopeScratch();
+    const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
+    if (scissorOn) gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._scopeScratch.Fbo);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    if (w > 0 && h > 0) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, capture.Framebuffer);
+      const yb = this._height - y - h;
+      gl.blitFramebuffer(0, 0, w, h, x, yb, x + w, yb + h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+    if (scissorOn) gl.enable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._tgt('default');
+    this.RebindSceneTarget();
+    return _wrap(tex);
   };
 
   /** Make a scene copy exist at the canvas's current size. Split out of `_snapshotBlit` because

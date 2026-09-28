@@ -93,6 +93,23 @@ Extra texture reads per fragment:
 The rim pass is not free where it runs: on SwiftShader a library page's 12 glass surfaces at 3x cost 10 ms a frame more through it (24 to 34 ms), about nothing on a desktop GPU. Hence the in-fragment path wherever the content allows it.
 | Probe | 96 taps, one 1x1 draw per glass surface |
 
+### Scope (`BackdropRoot` / `BackdropScope`, Glass.Jss.md 5a)
+
+`BackdropScope: Page` (the default, unauthored) costs nothing beyond what a plain `BackdropFilter`
+already costs — it is the walk's existing whole-scene read, untouched.
+
+`Parent` / `Root` add **+1 region-sized capture per distinct scope root, per frame** (its own
+re-walk of the root's subtree up to the scoped element, resolved to canvas size, then the same
+blur pyramid every backdrop build already pays for): the one extra pass a scoped read can ever
+cost. Two costs come off that baseline:
+
+- **Same-frame sharing.** Every scoped element under the SAME root, in the SAME frame, whose
+  region fits inside an already-captured one reuses it — many scoped elements over one root can
+  still cost exactly one capture.
+- **Cross-frame cache.** A scoped reader's prefix and damage are scoped to the root's own subtree
+  (not the whole canvas'), so a change anywhere else on the page never invalidates it. A HIT costs
+  **0** — no capture, no blur, the previous frame's pyramid handle rebinds as-is.
+
 ## Verification
 
 **SwiftUI reference.** Same inputs as SwiftUI's own render (gpui-liquid-glass `validation/`: `harbour.png`, a 440 x 96 pt capsule, radius 34, 2x, macOS 27). Mean absolute error over the label-free body, 0 to 255:

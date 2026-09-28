@@ -191,6 +191,8 @@ GlassTint: None | <color>
 GlassRim: Auto | None | Rim(<amount>, <height>)
 GlassGroup: None | <name>
 GlassSmoothness: 8 | <n>
+BackdropRoot: false | true
+BackdropScope: Page | Parent | Root
 Lens: None | Tab | Segment
 LensOutset: Auto | <x> <y>
 LensWarp: Auto | <n>
@@ -203,6 +205,32 @@ FlexStretch: Auto | <number>
 ```
 
 `Auto` is Apple's law for the shape's S. Plain `Glass: Regular` is Apple's regular glass.
+
+### 5a. `BackdropRoot` / `BackdropScope` — scoped backdrop sampling
+
+A `BackdropFilter` normally sees the whole scene as painted so far — every element the walk drew
+before this one, anywhere on the page. `BackdropScope` narrows that:
+
+- `Page` (the default) — today's behavior: the whole scene so far.
+- `Parent` — only this element's direct parent's children painted before it.
+- `Root` — everything painted since the nearest `BackdropRoot: true` ancestor (falls back to
+  `Page` with no such ancestor).
+
+`BackdropRoot: true` on an ancestor is what bounds `BackdropScope: Root`; it does nothing on its
+own and does not inherit — a container opts in once, and every scoped descendant below it (until a
+nested `BackdropRoot`) resolves against it.
+
+Apple's iOS 26 scroll edge is the motivating case: a toolbar floats over a scrolling list, and its
+glass should read only the rows behind it, never the chrome around the scroller (a tab bar, a
+sibling panel) that happens to sit earlier in paint order:
+
+```
+ScrollHost { Overflow: Scroll  BackdropRoot: true }
+Bar        { Glass: Regular  BackdropFilter: Blur(16pt)  BackdropScope: Root  Position: Pinned }
+```
+
+`Bar`'s frost now blurs only what `ScrollHost` paints — the rows scrolling under it — and is blind
+to whatever else shares the page with the scroller.
 
 ## 6. How Jwift reads under it
 
