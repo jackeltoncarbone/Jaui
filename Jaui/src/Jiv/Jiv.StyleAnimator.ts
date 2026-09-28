@@ -7,7 +7,7 @@ import type {
   AnimationDefinition,
 } from '../Animation/Animation.Types';
 import type { Jiv } from './Jiv';
-import type { JivStyle, JivRenderStyle } from './Jiv.Types';
+import type { JivStyle, JivRenderStyle, BackdropScopeKind } from './Jiv.Types';
 import { ResolveStyle, SEED_CONTEXT } from '../Core/Style.Resolver';
 import { FlexHeld } from '../Core/Flex';
 import { CascadeEpoch } from '../Core/Cascade.Epoch';
@@ -244,6 +244,13 @@ export class JivStyleAnimator implements Animatable {
    *  the loop parked there is no next tick to be resolved on, so `Wake` has to ask for one. */
   OnWake: (() => void) | null = null;
 
+  /** BackdropScope (Core/Glass.Jss.md 5): fired only on a CHANGE to this node's resolved
+   *  `BackdropRoot`/`BackdropScope` (Canvas keeps a count of nodes either matters for; the walk's
+   *  scoping wrapper installs only while that count is non-zero, and records ancestor args only
+   *  for the nodes the count is actually keyed on — never a per-node cost on a tree that doesn't use
+   *  this at all). Null on every canvas until BackdropScope ships somewhere real. */
+  OnScopeChange: ((prevRoot: boolean, prevScope: BackdropScopeKind, root: boolean, scope: BackdropScopeKind) => void) | null = null;
+
   /** Wake this animator — re-resolve its target on the next Tick. Call from any
    *  mutation that changes what ResolveStyle would produce (state flip, class
    *  swap, var/theme change, layout-affecting change). Cheap + idempotent. */
@@ -463,6 +470,10 @@ export class JivStyleAnimator implements Animatable {
     const target = ResolveStyle(patched, this._ctx());
     const render = this._jiv.RenderStyle;
     const heldLayer = render.Layer;
+    if (this.OnScopeChange !== null
+        && (render.BackdropRoot !== target.BackdropRoot || render.BackdropScope !== target.BackdropScope)) {
+      this.OnScopeChange(render.BackdropRoot, render.BackdropScope, target.BackdropRoot, target.BackdropScope);
+    }
     _copyNonAnimated(render, target);
     let springActive = false;
     for (let i = 0; i < BINDINGS.length; i++) {

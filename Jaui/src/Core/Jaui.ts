@@ -2008,6 +2008,42 @@ export class Canvas implements DirtyTracker {
   private _scopePool: FramebufferPool | null = null;
   /** `BackdropScope` refusal reasons already printed once (session lifetime, not per frame). */
   private _scopeRefusalsLogged = new Set<string>();
+  /** Nodes with `BackdropRoot: true`, RIGHT NOW — kept live by `_noteScopeChange` (the style
+   *  animator's `OnScopeChange`, fired only on a change), never rescanned. Empty on every canvas
+   *  until something authors `BackdropRoot`. */
+  private _scopeRootNodes = new Set<Jiv>();
+  /** Parent -> how many of ITS CHILDREN currently resolve `BackdropScope: 'Parent'` (Core/Glass.Jss.md
+   *  5): a node stays a key only while the count is positive, so two siblings scoping to the same
+   *  parent don't fight over removing it. Empty on every canvas until something authors it. */
+  private _scopeParentNeeded = new Map<Jiv, number>();
+  /** Whether the walk needs ITS `BackdropScope` bookkeeping at all this frame: the ENTRY POINT the
+   *  render loop picks (`renderNode` vs `renderNodeInner` directly) reads this ONCE per frame, so a
+   *  canvas that never authors `BackdropRoot`/`BackdropScope: Parent` never pays a wrapper, a
+   *  Map.set or a try/finally on any node, ever — see the frame kickoff. */
+  private get _scopingActive(): boolean { return this._scopeRootNodes.size > 0 || this._scopeParentNeeded.size > 0; }
+
+  /** `JivStyleAnimator.OnScopeChange`'s handler: keeps `_scopeRootNodes`/`_scopeParentNeeded` (and so
+   *  `_scopingActive`) live off style CHANGES only — never a per-frame scan. A node's own
+   *  `BackdropRoot` is 1:1 (its own flag); `BackdropScope: 'Parent'` marks its PARENT instead (a
+   *  refcount, since more than one child can scope to the same parent), which is the one other node
+   *  the walk's wrapper ever needs to record besides a `BackdropRoot` node itself. */
+  private _noteScopeChange = (
+    node: Jiv, prevRoot: boolean, prevScope: BackdropScopeKind, root: boolean, scope: BackdropScopeKind,
+  ): void => {
+    if (prevRoot !== root) {
+      if (root) this._scopeRootNodes.add(node); else this._scopeRootNodes.delete(node);
+    }
+    if (prevScope !== scope) {
+      const parent = node.Parent as Jiv | null;
+      if (parent !== null) {
+        if (prevScope === 'Parent') {
+          const n = (this._scopeParentNeeded.get(parent) ?? 1) - 1;
+          if (n <= 0) this._scopeParentNeeded.delete(parent); else this._scopeParentNeeded.set(parent, n);
+        }
+        if (scope === 'Parent') this._scopeParentNeeded.set(parent, (this._scopeParentNeeded.get(parent) ?? 0) + 1);
+      }
+    }
+  };
   /** True while the lens's lifted twins draw (liftLensItems): their text draws as ordinary ink at full coverage. */
   private _liftingTwins = false;
   private _layerCache = new Map<Jiv, { Fbo: Framebuffer; Valid: boolean; DX: number; DY: number; DW: number; DH: number }>();
@@ -3168,20 +3204,26 @@ export class Canvas implements DirtyTracker {
       if (!edgeEmitted) emitEdge();
     };
 
-    // ── BackdropScope (Core/Glass.Jss.md 5) — bookkeeping the wrapper below keeps on EVERY node,
-    // so a scoped read (rare, opt-in) can answer "what was root R's own incoming call" and "has
-    // anything painted under root R since" without a second walk. ──
+    // ── BackdropScope (Core/Glass.Jss.md 5) — bookkeeping a scoped read (rare, opt-in) needs to
+    // answer "what was root R's own incoming call" and "has anything painted under root R since"
+    // without a second walk. NONE of it runs, at all, on a canvas that has never had a
+    // `BackdropRoot`/`BackdropScope: Parent` authored (`_scopingActive`, below) — every set here
+    // stays empty and every consts declaration is the only cost paid. ──
     //
-    // Every node's OWN incoming (m, stack, mH, persp) — exactly renderNode's own params — so a
-    // scoped read can re-invoke `renderNode(root, ...)` with the SAME state root itself was
-    // called with. Set, never deleted: an ancestor is necessarily visited before the descendant
-    // that looks it up here, so last-write is always this frame's.
+    // A node's OWN incoming (m, stack, mH, persp) — exactly renderNode's own params — recorded ONLY
+    // for the handful of nodes `_scopeRootNodes`/`_scopeParentNeeded` are keyed on (a `BackdropRoot`
+    // node, or the direct parent of a `BackdropScope: Parent` one — never every node), so a scoped
+    // read can re-invoke `renderNode(root, ...)` with the SAME state root itself was called with.
+    // Set, never deleted: an ancestor is necessarily visited before the descendant that looks it up
+    // here, so last-write is always this frame's.
     const scopeAncestor = new Map<Jiv, { M: Mat2x3; Stack: ClipStack; MH: Mat3x3 | null; Persp: PerspCtx | null }>();
     // One running signature per node CURRENTLY inside a `BackdropRoot: true` subtree (nested roots
-    // stack; the wrapper pushes on entry, pops on exit). Mixed into by `PaintLedger.Close`
-    // (`_bc.ScopedSigs`) whenever a record closes underneath, so at any instant it holds "everything
-    // painted so far in this root's subtree" — the scoped analog of the ledger's own whole-canvas
-    // running prefix, and what makes a scoped read's cache narrower than Page's.
+    // stack; the wrapper pushes on entry, pops on exit — only for a `BackdropRoot` node itself, so
+    // the depth of this stack is the nesting depth of roots, never the tree's). Mixed into by
+    // `PaintLedger.Close` (`_bc.ScopedSigs`) whenever a record closes underneath, so at any instant
+    // it holds "everything painted so far in this root's subtree" — the scoped analog of the
+    // ledger's own whole-canvas running prefix, and what makes a scoped read's cache narrower than
+    // Page's.
     const activeRootSigs: { Root: Jiv; Sig: Sig }[] = [];
     // Same-FRAME reuse: a scoped element under root R, once captured, is good for any LATER scoped
     // element under the SAME root whose region fits inside it, as long as nothing painted under R
@@ -3194,28 +3236,10 @@ export class Canvas implements DirtyTracker {
     // "paint order", so this is exactly "everything before the scoped element, nothing at or after".
     let scopeStopNode: Jiv | null = null;
     let scopeStopReached = false;
-
-    // The real entry point: every recursive descent calls THIS, never `renderNodeInner` by name, so
-    // every node (not only the ones a scoped read cares about) gets the bookkeeping above and the
-    // stop gate below. A thin wrapper rather than folding the two into `renderNodeInner` itself
-    // keeps that already-enormous function's own body untouched — this is the whole of the diff a
-    // node with no `BackdropRoot`/`BackdropScope` authored ever sees, and it is unconditional
-    // (a Map.set, a style-flag read, no allocation on the common path) rather than a branch on
-    // whether scoping is in play, which is what keeps it provably the same for every other node.
-    const renderNode = (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
-      if (scopeStopNode !== null) {
-        if (node === scopeStopNode) { scopeStopReached = true; return; }
-        if (scopeStopReached) return;
-      }
-      scopeAncestor.set(node, { M: m, Stack: stack, MH: mH, Persp: persp });
-      const isScopeRoot = node.RenderStyle.BackdropRoot;
-      if (isScopeRoot) activeRootSigs.push({ Root: node, Sig: new Sig() });
-      try {
-        renderNodeInner(node, m, stack, scope, mH, persp);
-      } finally {
-        if (isScopeRoot) activeRootSigs.pop();
-      }
-    };
+    // Local aliases: read every node, on a canvas that DOES use scoping, so a `this.` property
+    // lookup never rides the hot path either.
+    const scopeRootNodes = this._scopeRootNodes;
+    const scopeParentNeeded = this._scopeParentNeeded;
 
     // Single tree walk — renders everything in z-order. The (cx, cy,
     // ox, oy) tuple is the affine map from this Jiv's natural
@@ -4189,6 +4213,34 @@ export class Canvas implements DirtyTracker {
         (r2 as WebGL2Renderer).EndCardComposite();
       }
     };
+
+    // The entry point every recursive descent and the frame kickoff call — picked ONCE per frame,
+    // right here (`render()` runs once a frame and rebuilds every closure in it, this one included),
+    // never per node. `_scopingActive` (kept live by style CHANGES via `_noteScopeChange`, never
+    // rescanned) is false on every canvas that has never had a `BackdropRoot`/`BackdropScope: Parent`
+    // authored, and there `renderNode` IS `renderNodeInner` — the identical function, not a call
+    // wrapping it, so a node on such a canvas pays literally nothing extra: no Map.set, no
+    // try/finally, no branch, because there is no wrapper for it to reach. Only a canvas that DOES
+    // use scoping pays the wrapper below, and even then only records ancestor args for the handful of
+    // nodes `_scopeRootNodes`/`_scopeParentNeeded` are keyed on — never a Map.set per node.
+    const renderNode: typeof renderNodeInner = !this._scopingActive ? renderNodeInner : (
+      (node: Jiv, m: Mat2x3, stack: ClipStack, scope: TeleportScope, mH: Mat3x3 | null = null, persp: PerspCtx | null = null): void => {
+        if (scopeStopNode !== null) {
+          if (node === scopeStopNode) { scopeStopReached = true; return; }
+          if (scopeStopReached) return;
+        }
+        const isScopeRoot = scopeRootNodes.has(node);
+        if (isScopeRoot || scopeParentNeeded.has(node)) {
+          scopeAncestor.set(node, { M: m, Stack: stack, MH: mH, Persp: persp });
+        }
+        if (isScopeRoot) activeRootSigs.push({ Root: node, Sig: new Sig() });
+        // No try/finally: `renderNodeInner` throwing mid-frame aborts this WHOLE `render()` call (no
+        // catch between here and its caller), and every one of these consts is rebuilt fresh next
+        // frame — a stack entry an exception left unpopped cannot outlive the frame it was pushed in.
+        renderNodeInner(node, m, stack, scope, mH, persp);
+        if (isScopeRoot) activeRootSigs.pop();
+      }
+    );
 
     // THE LENS'S LIFTED CONTENT (Jwift/Apple/LiquidGlass.md 7.1): UIKit's liftedContentPortalView, a portal of the
     // bar's items -- the same layers drawn a second time, where they lie (matches position and transform), into the
@@ -7457,6 +7509,12 @@ export class Canvas implements DirtyTracker {
         if (node instanceof Jiv) {
           const styleAnim = new JivStyleAnimator(node);
           styleAnim.SnapToTargets();
+          // BackdropScope (Core/Glass.Jss.md 5): register this node's just-snapped initial state
+          // (SnapToTargets ran before OnScopeChange exists to fire) once, then keep it live off
+          // every later change. `false`/`'Page'` is the correct "prev" for a brand-new node -- there
+          // is nothing to undo.
+          this._noteScopeChange(node, false, 'Page', node.RenderStyle.BackdropRoot, node.RenderStyle.BackdropScope);
+          styleAnim.OnScopeChange = (prevRoot, prevScope, root, scope) => this._noteScopeChange(node, prevRoot, prevScope, root, scope);
           // A visual-only state flip (`:Hover` changing a Background, nothing metric) marks
           // nothing dirty and Kicks nothing -- Jiv._syncState only wakes the animator. Registered
           // animatables are stepped by StepFrame every tick, so before the park that was enough.
