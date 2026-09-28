@@ -224,7 +224,9 @@ export class JivHandle {
   SetState = (name: string, on: boolean): void => {
     const has = !!this._states[name];
     if (has === on) return;
-    if (on) this._states[name] = true; else delete this._states[name];
+    // An OFF is kept as `false`, not deleted: the worker applies only the names it is sent, so a
+    // deleted state never reached it and stayed on there forever (a field lit after its blur).
+    this._states[name] = on;
     this._markDirty();
   };
 
@@ -448,8 +450,7 @@ export class JivHandle {
       // from the incoming map are left as-is (not cleared) — class-swap
       // applies don't reset user-driven states.
       for (const name of Object.keys(opts.States)) {
-        const on = !!opts.States[name];
-        if (on) this._states[name] = true; else delete this._states[name];
+        this._states[name] = !!opts.States[name];
       }
     }
     if (opts.Text !== undefined) this._text = opts.Text ?? null;
