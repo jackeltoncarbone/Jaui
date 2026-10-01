@@ -72,6 +72,7 @@ uniform vec4 u_PyramidXf;
 uniform float u_MaxLod;                     // max mipmap LOD to sample (maps to ramp = 1.0)
 uniform int u_Direction;                    // 0 ToTop, 1 ToBottom, 2 ToLeft, 3 ToRight
 uniform float u_Feather;                    // ramp length in device px (0 = span whole element)
+uniform float u_BoxFeather;                 // FogProgressiveBlur: two-axis ramp length in device px (0 = off)
 uniform float u_Easing;                     // exponent applied to smoothstep'd ramp (1 = unchanged)
 uniform float u_Opacity;
 uniform vec4 u_Background;                  // tint mixed IN along the ramp (fades clear → authored alpha)
@@ -194,62 +195,72 @@ void main() {
     float clipD = clipStackDistance(v_PixelPos, u_ClipMeta.x, u_ClipMeta.y);
     if (clipD > 1.0) discard;
     float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
-    // t = 0 at the clear end → 1 at the blurred end
-    float t;
-    if (u_Direction == 0)       t = 1.0 - v_Local.y;    // ToTop
-    else if (u_Direction == 1)  t = v_Local.y;          // ToBottom
-    else if (u_Direction == 2)  t = 1.0 - v_Local.x;    // ToLeft
-    else                        t = v_Local.x;          // ToRight
 
-    // u_Feather lets authors cap the ramp distance — past it, stay fully
-    // blurred + fully tinted. Rescale t so the ramp hits 1 at exactly
-    // u_Feather device px from the clear edge. 0 = original behaviour
-    // (ramp spans the whole element on the gradient axis).
-    if (u_Feather > 0.0) {
-        float axisLen = (u_Direction == 0 || u_Direction == 1) ? u_Rect.w : u_Rect.z;
-        // Ceiling the feather at the axis length — a feather longer than the
-        // element can never complete the ramp, so the whole element would read
-        // as a partial gradient that never reaches full blur.
-        float fe = min(u_Feather, axisLen);
-        t = clamp(t * axisLen / fe, 0.0, 1.0);
-    }
-
-    // The blur "ramp" (0 clear → 1 max blur). Two ways to get it:
+    // The blur "ramp" (0 clear → 1 max blur). Three ways to get it, in priority order:
+    //   • u_BoxFeather (FogProgressiveBlur) — clear at EVERY edge of the box at once, from the
+    //     distance to the NEAREST of all four edges. No direction, no axis: it owns its ramp
+    //     entirely and skips the single-axis t/feather/stops machinery below.
     //   • gradient stops (u_HasStops) — sample a piecewise spectrum along the
     //     axis with per-segment easing, so blur cycles + follows a color gradient.
-    //   • linear feather (default) — the smoothstep'd t computed above.
+    //   • linear feather (default) — a smoothstep'd single-axis t.
     float ramp;
-    if (u_HasStops == 1) {
-        // Axis position 0..1 (top→bottom for vertical dirs, left→right for horizontal).
-        float ax = (u_Direction == 0 || u_Direction == 1) ? v_Local.y : v_Local.x;
-        if (ax <= u_StopPos[0]) {
-            ramp = u_StopVal[0];
-        } else if (ax >= u_StopPos[u_StopCount - 1]) {
-            ramp = u_StopVal[u_StopCount - 1];
-        } else {
-            ramp = u_StopVal[u_StopCount - 1];
-            for (int i = 0; i < 12; i++) {
-                if (i + 1 >= u_StopCount) break;
-                float p0 = u_StopPos[i];
-                float p1 = u_StopPos[i + 1];
-                if (ax >= p0 && ax <= p1) {
-                    float seg = (p1 > p0) ? (ax - p0) / (p1 - p0) : 0.0;
-                    seg = clamp(seg, 0.0, 1.0);
-                    // Ease 0 is 'smooth': smootherstep, flat where the segment leaves and arrives.
-                    seg = u_StopEase[i] <= 0.0
-                        ? seg * seg * seg * (seg * (seg * 6.0 - 15.0) + 10.0)
-                        : pow(seg, u_StopEase[i]);
-                    ramp = mix(u_StopVal[i], u_StopVal[i + 1], seg);
-                    break;
+    if (u_BoxFeather > 0.0) {
+        vec2 p = v_Local * u_Rect.zw;
+        float boxD = min(min(p.x, u_Rect.z - p.x), min(p.y, u_Rect.w - p.y));
+        ramp = pow(smoothstep(0.0, 1.0, clamp(boxD / u_BoxFeather, 0.0, 1.0)), u_Easing);
+    } else {
+        // t = 0 at the clear end → 1 at the blurred end
+        float t;
+        if (u_Direction == 0)       t = 1.0 - v_Local.y;    // ToTop
+        else if (u_Direction == 1)  t = v_Local.y;          // ToBottom
+        else if (u_Direction == 2)  t = 1.0 - v_Local.x;    // ToLeft
+        else                        t = v_Local.x;          // ToRight
+
+        // u_Feather lets authors cap the ramp distance — past it, stay fully
+        // blurred + fully tinted. Rescale t so the ramp hits 1 at exactly
+        // u_Feather device px from the clear edge. 0 = original behaviour
+        // (ramp spans the whole element on the gradient axis).
+        if (u_Feather > 0.0) {
+            float axisLen = (u_Direction == 0 || u_Direction == 1) ? u_Rect.w : u_Rect.z;
+            // Ceiling the feather at the axis length — a feather longer than the
+            // element can never complete the ramp, so the whole element would read
+            // as a partial gradient that never reaches full blur.
+            float fe = min(u_Feather, axisLen);
+            t = clamp(t * axisLen / fe, 0.0, 1.0);
+        }
+
+        if (u_HasStops == 1) {
+            // Axis position 0..1 (top→bottom for vertical dirs, left→right for horizontal).
+            float ax = (u_Direction == 0 || u_Direction == 1) ? v_Local.y : v_Local.x;
+            if (ax <= u_StopPos[0]) {
+                ramp = u_StopVal[0];
+            } else if (ax >= u_StopPos[u_StopCount - 1]) {
+                ramp = u_StopVal[u_StopCount - 1];
+            } else {
+                ramp = u_StopVal[u_StopCount - 1];
+                for (int i = 0; i < 12; i++) {
+                    if (i + 1 >= u_StopCount) break;
+                    float p0 = u_StopPos[i];
+                    float p1 = u_StopPos[i + 1];
+                    if (ax >= p0 && ax <= p1) {
+                        float seg = (p1 > p0) ? (ax - p0) / (p1 - p0) : 0.0;
+                        seg = clamp(seg, 0.0, 1.0);
+                        // Ease 0 is 'smooth': smootherstep, flat where the segment leaves and arrives.
+                        seg = u_StopEase[i] <= 0.0
+                            ? seg * seg * seg * (seg * (seg * 6.0 - 15.0) + 10.0)
+                            : pow(seg, u_StopEase[i]);
+                        ramp = mix(u_StopVal[i], u_StopVal[i + 1], seg);
+                        break;
+                    }
                 }
             }
+        } else {
+            // Smoothstep the ramp — linear feels like a hard diagonal line over
+            // uniform content; smoothstep is what the eye reads as "feathered".
+            // u_Easing reshapes the curve: 1.0 = unchanged, <1 biases toward blur
+            // (ramp climbs fast, sharp falloff to clear), >1 biases toward clear.
+            ramp = pow(smoothstep(0.0, 1.0, t), u_Easing);
         }
-    } else {
-        // Smoothstep the ramp — linear feels like a hard diagonal line over
-        // uniform content; smoothstep is what the eye reads as "feathered".
-        // u_Easing reshapes the curve: 1.0 = unchanged, <1 biases toward blur
-        // (ramp climbs fast, sharp falloff to clear), >1 biases toward clear.
-        ramp = pow(smoothstep(0.0, 1.0, t), u_Easing);
     }
 
     // Early-out: fully frosted AND the background is fully opaque → the final

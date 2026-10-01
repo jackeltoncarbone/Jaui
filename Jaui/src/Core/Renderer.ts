@@ -154,6 +154,10 @@ export interface ProgressiveBlurParams {
    *  (original behaviour). Anything else remaps the ramp so only the first
    *  `Feather` pixels from the clear edge transition; the rest is solid. */
   Feather: number;
+  /** `FogProgressiveBlur`'s two-axis feather, in device pixels. 0 = off (the single-axis `Feather`/
+   *  `Stops` ramp runs instead). Non-zero takes over the ramp entirely: clear at every edge of the
+   *  element's own box at once, from the distance to the nearest of all four edges. */
+  BoxFeather: number;
   /** Exponent applied to the smoothstep'd ramp. 1 = unchanged. <1 = blur
    *  dominates with sharp falloff to clear. >1 = clear dominates. */
   Easing: number;

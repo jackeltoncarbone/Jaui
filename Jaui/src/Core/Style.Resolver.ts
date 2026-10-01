@@ -380,11 +380,19 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
   // both-axis vignette = nest a Vertical veil inside a Horizontal one).
   const fgDir: ProgressiveBlurDirection | null =
     fgBlur === null ? null
+      // Box has no axis of its own (it reads the nearest of all four edges in the shader), but still
+      // needs a non-null direction to route Material to ProgressiveBlur below; the value is unread.
+      : fgBlur.Mode === 'box' ? 'ToTop'
       : fgBlur.Mode === 'edge' ? (fgBlur.Edges === 'Horizontal' ? 'ToRight' : 'ToBottom')
         : fgBlur.Direction;
-  const fgFeather = fgBlur && fgBlur.Mode !== 'edge' && fgBlur.FeatherRaw !== null
+  const fgFeather = fgBlur && fgBlur.Mode !== 'edge' && fgBlur.Mode !== 'box' && fgBlur.FeatherRaw !== null
     ? Resolve(fgBlur.FeatherRaw, ctx, 'H')
     : null;
+  // Box's own feather — distinct from `ProgressiveBlurFeather`, which drives the single-axis Stops
+  // ramp Box does not use (its ramp comes from `u_Rect` in the shader, not a Stops profile).
+  const fgBoxFeather = fgBlur && fgBlur.Mode === 'box' && fgBlur.FeatherRaw !== null
+    ? Resolve(fgBlur.FeatherRaw, ctx, 'W')
+    : 0;
   const fgFrost = fgBlur ? Resolve(fgBlur.RadiusRaw, ctx, 'W') : 0;
   const fgStops = fgBlur
     ? (fgBlur.Uniform
@@ -402,6 +410,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     ProgressiveBlurFeather: fgFeather !== null ? fgFeather : Resolve(s.ProgressiveBlurFeather, ctx, 'H'),
     ProgressiveBlurEasing: fgBlur && !fgBlur.Uniform ? fgBlur.Easing : Resolve(s.ProgressiveBlurEasing, ctx, 'W'),
     ProgressiveBlurStops: blurSpec?.Stops ?? fgStops,
+    ProgressiveBlurBoxFeather: fgBoxFeather,
     ProgressiveBlurKind: ResolveTernary(s.ProgressiveBlurKind, ctx) === 'ScrollEdge' ? 'ScrollEdge' : 'Surface',
     PointScale: Resolve(s.PointScale, ctx, 'W', true),
 

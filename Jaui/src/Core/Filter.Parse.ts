@@ -63,13 +63,23 @@ export type EdgeMask = 'All' | 'Vertical' | 'Horizontal';
  *      stays sharp. NO direction. Realized as a symmetric Stops profile
  *      (blurred at both ends of the axis, clear in the middle), so it's the
  *      multi-edge generalization of Linear over the SAME pblur machinery.
+ *    • BOX (`Mode: 'box'`) — the TWO-AXIS generalization of Edge: clear at
+ *      EVERY edge of the box at once (not per-axis), ramping to blurred over
+ *      `FeatherRaw` toward the center. Edge's Stops profile is one-dimensional
+ *      (it reads the element's position on a single axis), so a corner under
+ *      Edge is only as blurred as the nearer of its two edges; Box reads the
+ *      distance to the NEAREST of all four edges, so a corner is exactly as
+ *      blurred as an edge midpoint at the same depth. This is the shape of
+ *      the concept's "fog": a veil that is clear at every edge of its own box,
+ *      with no seam at the corners. No direction, no edge mask: every edge
+ *      fades the same amount, always.
  *
  *  The resolver maps this onto the existing ProgressiveBlur* render fields so
  *  the whole pblur shader + pipeline is reused. `FeatherRaw` is a Length
  *  string (resolved under the live context); `null` = a default soft band.
  *  `Uniform` marks a flat `Blur()` (the entire element blurs evenly). */
 export interface ForegroundBlur {
-  Mode: 'uniform' | 'linear' | 'edge';
+  Mode: 'uniform' | 'linear' | 'edge' | 'box';
   Direction: ProgressiveBlurDirection;
   /** Edge mode only: which edges fade inward (the axis selector). */
   Edges: EdgeMask;
@@ -245,6 +255,12 @@ const _edgeToDirection = (raw: string): ProgressiveBlurDirection | null => {
  *       while the CENTER stays sharp. Takes NO direction — `edges` is "which
  *       edges fade", which is what keeps it distinct from Linear. `feather` is
  *       the band depth from each edge to the sharp center.
+ *
+ * FogProgressiveBlur(<radius>, <feather Length> [, <easing>]) — foreground AND backdrop zones:
+ *   — the TWO-AXIS box ramp: clear at EVERY edge of the element's own box at once (reads the distance
+ *     to the nearest of all four edges, not one axis), ramping to `radius` over `feather` toward the
+ *     center. No direction, no edge mask. `feather` is a Length and REQUIRED. This is the house "fog":
+ *     a veil with no seam at its corners, unlike Edge's per-axis Stops profile.
  */
 export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedFilter => {
   const cache = zone === 'foreground' ? _cacheForeground : zone === 'text' ? _cacheText : _cacheBackdrop;
@@ -316,12 +332,18 @@ export const ParseFilter = (raw: string, zone: FilterZone = 'backdrop'): ParsedF
         if (zone === 'text') throw new Error(_refuseInText('EdgeProgressiveBlur', raw));
         out.ForegroundBlur = _parseEdge(arg, raw);
         break;
+      case 'fogprogressiveblur':
+        if (zone === 'text') throw new Error(_refuseInText('FogProgressiveBlur', raw));
+        out.ForegroundBlur = _parseFog(arg, raw);
+        break;
       default:
         throw new Error(
           zone === 'text'
             ? `[Jaui] Unknown TextFilter function "${f.Name}" in "${raw}". TextFilter takes Vibrancy().`
             : `[Jaui] Unknown filter function "${f.Name}" in "${raw}". Supported: Brightness, Saturate, Contrast, Blur` +
-              (zone === 'foreground' ? ', Vibrancy, LinearProgressiveBlur, EdgeProgressiveBlur.' : ', Vibrancy.'),
+              (zone === 'foreground'
+                ? ', Vibrancy, LinearProgressiveBlur, EdgeProgressiveBlur, FogProgressiveBlur.'
+                : ', Vibrancy, FogProgressiveBlur.'),
         );
     }
   }
@@ -432,6 +454,23 @@ const _parseEdge = (arg: string, raw: string): ForegroundBlur => {
   const feather = tail >= 2 ? parts[1] : null;
   const easing = tail >= 3 ? _num(parts[2], 'EdgeProgressiveBlur easing', raw) : 1;
   return { Mode: 'edge', Direction: 'ToTop', Edges: edges, FeatherRaw: feather, Easing: easing, Uniform: false, RadiusRaw: radius };
+};
+
+/** Parse `<radius>, <feather Length> [, <easing>]` into the two-axis box ramp: clear at every edge of
+ *  the element's own box, ramping to `radius` over `feather` toward the center. No direction, no edge
+ *  mask — Box always fades all four edges the same amount, which is what keeps it a two-argument
+ *  function where Edge needs an edges mask. `feather` is REQUIRED (unlike Edge's optional one): a box
+ *  ramp with no stated band has no sane default, because unlike Edge's single-axis Stops profile, the
+ *  resolver can't fall back to "half the axis" when there are two axes to split it between. */
+const _parseFog = (arg: string, raw: string): ForegroundBlur => {
+  const parts = arg.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
+  if (parts.length < 2) {
+    throw new Error(`[Jaui] FogProgressiveBlur() needs <radius>, <feather> in "${raw}".`);
+  }
+  const radius = parts[0];
+  const feather = parts[1];
+  const easing = parts.length >= 3 ? _num(parts[2], 'FogProgressiveBlur easing', raw) : 1;
+  return { Mode: 'box', Direction: 'ToTop', Edges: 'All', FeatherRaw: feather, Easing: easing, Uniform: false, RadiusRaw: radius };
 };
 
 /** The text zone takes `Vibrancy()` and nothing else. Each refusal names the property that DOES own the

@@ -392,6 +392,10 @@ export interface JivRenderStyle {
   /** Parsed gradient-driven blur spectrum (overrides the linear feather when
    *  non-null). Stops are sorted ascending by Position, normalized to [0,1]. */
   ProgressiveBlurStops: BlurStop[] | null;
+  /** `Filter: FogProgressiveBlur()`'s feather, in device pixels. Distinct from `ProgressiveBlurFeather`
+   *  because Box reads it directly against the element's own rect in the shader rather than through a
+   *  Stops profile; 0 when no Box ramp is authored. */
+  ProgressiveBlurBoxFeather: number;
   ProgressiveBlurKind: ProgressiveBlurKind;
   PointScale: number;
 

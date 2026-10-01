@@ -3490,6 +3490,10 @@ export class Canvas implements DirtyTracker {
           : matScaleX(eff) * node.Width * d;
         const featherRaw = node.RenderStyle.ProgressiveBlurFeather * d;
         const feather = featherRaw > 0 ? Math.min(featherRaw, axisLenDev) : 0;
+        // FogProgressiveBlur's own feather, same DPR scale as `feather`. No axis clamp: unlike the
+        // single-axis ramp, a box ramp reads the distance to the NEAREST edge in the shader, so an
+        // over-long feather naturally stops mattering past the box's own half-extent.
+        const boxFeather = node.RenderStyle.ProgressiveBlurBoxFeather * d;
         // The feather-strip tightening slices one edge off the AXIS-ALIGNED
         // AABB. Under rotation the AABB is larger than (and offset from) the
         // rotated panel, so a tightened strip clips the rotated blur's edge
@@ -3587,6 +3591,7 @@ export class Canvas implements DirtyTracker {
           MaxLod: maxLod,
           Direction: { ToTop: 0, ToBottom: 1, ToLeft: 2, ToRight: 3 }[node.RenderStyle.ProgressiveBlurDirection] ?? 0,
           Feather: feather,
+          BoxFeather: boxFeather,
           Easing: Math.max(0.001, node.RenderStyle.ProgressiveBlurEasing),
           Stops: node.RenderStyle.ProgressiveBlurStops,
           Opacity: node.EffectiveOpacity,

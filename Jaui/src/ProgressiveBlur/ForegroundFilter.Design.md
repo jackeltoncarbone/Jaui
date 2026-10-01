@@ -46,6 +46,41 @@ Composable with the grade functions in one list (`LinearProgressiveBlur(Top,
 24pt) Brightness(0.9)`), merge-by-function / last-occurrence-wins like the other
 filter zones.
 
+### `FogProgressiveBlur` — the two-axis box ramp
+
+```
+Filter:         FogProgressiveBlur(<radius>, <feather Length> [, <easing>])
+BackdropFilter: FogProgressiveBlur(<radius>, <feather Length> [, <easing>])
+```
+
+Edge's vignette is a single-axis Stops profile: `All` picks one axis (vertical) and runs it
+symmetrically, so a corner reads only as blurred as the nearer of that one axis's two edges — the
+other axis's proximity never enters it. A real "fog" veil (clear picture frame, blurred toward the
+center on every side including the corners) needs the distance to the NEAREST of all four edges, not
+one axis's distance. That is `FogProgressiveBlur`, `Mode: 'box'`:
+
+- `<radius>` = heavy-end frost sigma (Length; resolves under live context), same as every other blur
+  function here.
+- `<feather>` = ramp length from each edge toward the center, a Length (so `28pt`, not a fraction).
+  **Required** — unlike Edge's optional feather, Box has no single-axis fallback to default to.
+- `<easing>` = smoothstep exponent (default 1).
+- No direction, no edge mask: every edge fades by the same amount, always.
+- Accepted in BOTH the foreground `Filter` zone and the `BackdropFilter` zone (refused only in
+  `TextFilter`), same as `LinearProgressiveBlur`/`EdgeProgressiveBlur` already were.
+- Example: `Filter: FogProgressiveBlur(9pt, 28pt, 1)` — the house paper fog veil.
+
+**Wiring.** `Style.Resolver.ts` resolves a render field distinct from the single-axis ramp,
+`ProgressiveBlurBoxFeather` (device px, default 0; `ProgressiveBlurStops` stays `null` for Box), and
+still forces `Material: ProgressiveBlur` through the existing direction-presence check (Box's direction
+is set but unread by the shader). `WebGL2.Renderer.ts` carries it to the shader as `u_BoxFeather`,
+set with the same DPR scale as `u_Feather`. In `ProgressiveBlur.Shader.ts`, `u_BoxFeather > 0.0` takes
+over the ramp entirely — `ramp = pow(smoothstep(0.0, 1.0, clamp(d / u_BoxFeather, 0.0, 1.0)), u_Easing)`
+where `d` is the distance from the fragment to the nearest of the element's four edges — and skips the
+single-axis `t`/`u_Feather`/stops branches below it.
+
+`EdgeProgressiveBlur`'s `All` mode stays exactly what it was (vertical only, documented there); Box is
+the new, genuinely two-axis shape, not a fix to Edge.
+
 ### How it's wired (reuse, not reinvent)
 
 `Filter.Parse.ts` gained a `zone` param. In the `foreground` zone, `Blur()` and
@@ -109,3 +144,4 @@ for the filter slice.
   into the glass top rim (`AddDrawer.jss` `DrawerTopFade`) instead of a hard
   scroll-clip cutoff.
 - Unit: `tests/Filter.Foreground.test.ts` (grammar + zone separation).
+- Unit: `tests/Filter.Fog.test.ts` (`FogProgressiveBlur` grammar, text-zone refusal, resolver field).
