@@ -167,6 +167,7 @@ export const BootJauiWorker = (): void => {
         Measure: canvas.MeasureScrollContent,
         PageX: canvas.ScrollPageX,
         ScrollTo: canvas.ScrollTo,
+        ClaimPan: canvas.ClaimPan,
       });
       bridge.AttachRegistry(registry);
 

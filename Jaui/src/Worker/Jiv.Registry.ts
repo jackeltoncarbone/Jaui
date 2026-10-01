@@ -58,6 +58,9 @@ export interface RegistryScroller {
   /** Send a container to an absolute offset, or to `target`'s box. The canvas
    *  resolves padding and geometry; the registry only resolves the ids. */
   ScrollTo: (node: JivCore, target: JivCore | null, to: ScrollToOptions) => void;
+  /** Claim an undecided drag currently under `node`'s `PanClaim`, cancelling any scroller it caught.
+   *  Never fires `node.OnPanClaim` — the caller already knows it won. */
+  ClaimPan: (node: JivCore) => void;
 }
 
 const _scrollExtentsEqual = (a: ScrollExtent | undefined, b: ScrollExtent | undefined): boolean => {
@@ -217,6 +220,14 @@ export class JivRegistry {
     this._scroller.ScrollTo(core, target, to);
   };
 
+  /** `claim-pan`: resolve the node and hand it to the canvas's live drag map. */
+  private _claimPan = (id: number): void => {
+    const core = this._nodes.get(id);
+    if (!core) { console.warn(`[JivRegistry] claim-pan: missing id=${id}`); return; }
+    if (!this._scroller) { console.warn('[JivRegistry] claim-pan: no scroller attached'); return; }
+    this._scroller.ClaimPan(core);
+  };
+
   // ─── Op dispatch ────────────────────────────────────────────────────────
 
   private _apply = (op: JivOp): void => {
@@ -233,6 +244,7 @@ export class JivRegistry {
       case 'svg-clear':     return this._svgClear(op.Id);
       case 'scroll-page':   return this._scrollPage(op.Id, op.Direction);
       case 'scroll-to':     return this._scrollTo(op.Id, op.To);
+      case 'claim-pan':     return this._claimPan(op.Id);
     }
   };
 

@@ -353,6 +353,13 @@ export class JivHandle {
     });
   };
 
+  /** Take an undecided drag currently under this node's `PanClaim` — what a long-press lift calls once
+   *  it decides to take over a `Hold` claimant, so the scroller underneath stops short of the slop it
+   *  would otherwise need to start scrolling. Never fires `OnPanClaim`: the caller already knows it won. */
+  ClaimPan = (): void => {
+    this._bridge.Enqueue({ K: 'claim-pan', Id: this.Id });
+  };
+
   private _takeRect = (box: EmbedBox, scroll: ScrollExtent | null): void => {
     this.X = box.X; this.Y = box.Y; this.Width = box.Width; this.Height = box.Height;
     this.Box = box;

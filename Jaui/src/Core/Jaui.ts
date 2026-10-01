@@ -434,6 +434,7 @@ import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager } from '../Scroll/Scroll.Manager';
 import type { ScrollToOptions } from '../Scroll/Scroll.Types';
+import { PickClaimant } from '../Scroll/Scroll.PanClaim';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer, PANEL_PROGRAM_COUNT } from './WebGL2.Renderer';
@@ -8259,8 +8260,9 @@ export class Canvas implements DirtyTracker {
     const DRAG_SLOP_CSS_PX = 10;
     interface DragCtx {
       candidates: Jiv[]; target: Jiv | null;
-      /** The nearest ancestor with a `PanClaim`, which may take the pan before any scroller does. */
-      claimant: Jiv | null; source: PointerEvent;
+      /** Ancestors with a `PanClaim !== 'None'` under the finger, NEAREST FIRST; any of them may take
+       *  the pan before a scroller does (`PickClaimant` decides which, if any, wins). */
+      claimants: Jiv[]; source: PointerEvent;
       startX: number; startY: number; lastX: number; lastY: number;
     }
     const drags = new Map<number, DragCtx>();
@@ -8270,31 +8272,29 @@ export class Canvas implements DirtyTracker {
       const rect = this._pageRect();
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
-      let claimant: Jiv | null = null;
+      const claimants: Jiv[] = [];
       for (let cur = this._scrollManager.HitTopmost(cssX, cssY); cur; cur = cur.Parent as Jiv | null) {
-        if (cur.PanClaim !== 'None') { claimant = cur; break; }
+        if (cur.PanClaim !== 'None') claimants.push(cur);
       }
       // A mouse drag scrolls nothing (it is reserved for selection); it can only be claimed.
       const candidates = e.pointerType === 'mouse' ? [] : this._scrollManager.ResolveScrollCandidates(cssX, cssY);
-      if (candidates.length === 0 && claimant === null) return;
+      if (candidates.length === 0 && claimants.length === 0) return;
 
       if (candidates.length > 0) this._capturePointer(e.pointerId);
       for (const c of candidates) this._scrollManager.DragStart(c);
       drags.set(e.pointerId, {
-        candidates, target: candidates.length === 1 && claimant === null ? candidates[0] : null,
-        claimant, source: e,
+        candidates, target: candidates.length === 1 && claimants.length === 0 ? candidates[0] : null,
+        claimants, source: e,
         startX: e.clientX, startY: e.clientY, lastX: e.clientX, lastY: e.clientY,
       });
     });
 
-    /** Whether the claimant takes this pan: a vertical one, downward (or upward for `Vertical`), that the
-     *  vertical scroller under the finger cannot use because it rests at its top. iOS's sheet rule. */
-    const claims = (ctx: DragCtx, tx: number, ty: number): boolean => {
-      const owner = ctx.claimant;
-      if (owner === null || Math.abs(ty) <= Math.abs(tx)) return false;
-      if (ty < 0 && owner.PanClaim !== 'Vertical') return false;
+    /** The index into `ctx.claimants` that takes this pan, or -1. See `PickClaimant`. */
+    const claims = (ctx: DragCtx, tx: number, ty: number): number => {
+      if (ctx.claimants.length === 0) return -1;
       const vertical = ctx.candidates.find((c) => c.ContentHeight - c.Height > 0.5);
-      return vertical === undefined || vertical.ScrollY <= 0.5;
+      const verticalAtTop = vertical === undefined || vertical.ScrollY <= 0.5;
+      return PickClaimant(ctx.claimants.map((c) => c.PanClaim), tx, ty, verticalAtTop);
     };
 
     /** Hand an undecided drag to one scroller once it has a direction. The
@@ -8305,12 +8305,13 @@ export class Canvas implements DirtyTracker {
       const tx = clientX - ctx.startX;
       const ty = clientY - ctx.startY;
       if (tx * tx + ty * ty < DRAG_SLOP_CSS_PX * DRAG_SLOP_CSS_PX) return false;
-      if (claims(ctx, tx, ty)) {
+      const claimIndex = claims(ctx, tx, ty);
+      if (claimIndex >= 0) {
         for (const c of ctx.candidates) this._scrollManager.DragCancel(c);
         drags.delete(ctx.source.pointerId);
         if (this._hasCapture(ctx.source.pointerId)) this._releasePointer(ctx.source.pointerId);
         this._flexEnd();
-        ctx.claimant!.OnPanClaim?.(ctx.source);
+        ctx.claimants[claimIndex].OnPanClaim?.(ctx.source);
         return false;
       }
       if (ctx.candidates.length === 0) {
@@ -8399,6 +8400,23 @@ export class Canvas implements DirtyTracker {
     };
     this._on('pointerup', finish);
     this._on('pointercancel', finish);
+
+    // Programmatic claim: a separate gesture (a long press) has decided to take an undecided drag
+    // before the finger ever moves past the slop, rather than waiting for one of `node`'s own motion
+    // rules to fire (the `Hold` claim never fires on its own). Every live drag that still has `node`
+    // among its claimants and has not yet picked a scroll target is cancelled the same way `decide`
+    // cancels a claimed one — except `OnPanClaim` is never called, because the caller already knows
+    // it won: it is the one asking.
+    this.ClaimPan = (node: Jiv): void => {
+      for (const [id, ctx] of drags) {
+        if (ctx.target !== null) continue;
+        if (!ctx.claimants.includes(node)) continue;
+        for (const c of ctx.candidates) this._scrollManager.DragCancel(c);
+        drags.delete(id);
+        if (this._hasCapture(ctx.source.pointerId)) this._releasePointer(ctx.source.pointerId);
+        this._flexEnd();
+      }
+    };
   };
 
   /** Walk the tree, compute ContentWidth/Height for each Overflow:Scroll Jiv from
@@ -8431,6 +8449,12 @@ export class Canvas implements DirtyTracker {
     node.ContentWidth = maxRight + padR;
     node.ContentHeight = maxBottom + padB;
   };
+
+  /** Claim an undecided drag that is currently under `node` in its claimant chain — wired up inside
+   *  `_listenForScroll`, where the live `drags` map lives. Bound to a real function there, before any
+   *  pointer can reach it; this placeholder exists only so the field reads next to `ScrollTo` and
+   *  `ScrollPageX` instead of appearing out of nowhere at the bottom of `_listenForScroll`. */
+  ClaimPan: (node: Jiv) => void = () => {};
 
   /** Page a horizontal scroll row one screen of whole cards, eased like a
    *  wheel: the card cut off at the edge it moves toward lands on the row's

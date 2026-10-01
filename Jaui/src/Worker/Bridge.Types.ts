@@ -256,7 +256,7 @@ export interface JivApplyOpts {
     PointerEvents?: 'Auto' | 'None';
     Cursor?: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
     UserSelect?: 'Auto' | 'None';
-    PanClaim?: 'None' | 'Down' | 'Vertical';
+    PanClaim?: 'None' | 'Down' | 'Vertical' | 'Horizontal' | 'Hold';
     PointScale?: string;
     OverscrollTop?: 'Bounce' | 'Pin' | 'None';
     OverscrollBottom?: 'Bounce' | 'Pin' | 'None';
@@ -301,7 +301,10 @@ export type JivOp =
   | { K: 'scroll-page'; Id: number; Direction: 1 | -1 }
   /** Send a scroll container somewhere — an absolute offset, or an element
    *  resolved on the worker. See `ScrollToOptions`. */
-  | { K: 'scroll-to'; Id: number; To: ScrollToOptions };
+  | { K: 'scroll-to'; Id: number; To: ScrollToOptions }
+  /** Claim an undecided drag currently under this node's `PanClaim` (Canvas.ClaimPan). Fired once a
+   *  separate gesture — a long press — decides to take over, typically from a `Hold` claimant. */
+  | { K: 'claim-pan'; Id: number };
 
 /** Batched Jiv tree ops, flushed once per Angular CD on main. Ordering is
  *  significant: a `create` must precede the `attach` that places it. */
