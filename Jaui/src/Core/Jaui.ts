@@ -10304,6 +10304,13 @@ export { DefaultTextStyle } from '../Text/Text.Types';
 export { MeasureText } from '../Text/Text.Measure';
 export { HashTextKey } from '../Text/Text.Hash';
 export { TextCache } from '../Text/Text.Cache';
+// A consumer measuring text OUTSIDE the engine's own render path (TokenSentence.ts's own main-thread
+// `_measure`, round 13: a digit under `FontVariantNumeric: TabularNums` measured narrower than the
+// worker painted it, because the "tnum" twin face Bridge.Main.ts now also installs on THIS thread's
+// own `document.fonts` was previously nameable only inside the worker) needs the SAME family-stack
+// string `Text.Types.ts` resolves a tabular style to, to ask a plain canvas for the real twin by name
+// rather than reimplementing the stack/quoting rule a second time.
+export { TabularFamilyStack } from '../Text/Text.Tabular';
 
 // Image
 export type { ImageStyle, ObjectFit } from '../Image/Image.Types';

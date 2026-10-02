@@ -34,6 +34,7 @@ import { ContextWatchdog } from './Context.Watchdog';
 import type { ProbeSnapshot } from '../Probe/Probe.Types';
 import { EmbedLayer, IsInsideEmbed } from '../Embed/Embed.Layer';
 import type { EmbedBox } from '../Embed/Embed.Geometry';
+import { RangeCoversDigits, TABULAR_FEATURE_SETTINGS, TabularFamilyName } from '../Text/Text.Tabular';
 
 const ROOT_ID = 0;
 
@@ -865,6 +866,36 @@ export class MainBridge {
           JTrace(`fonts:fetch-failed ${face.Family} ${face.Weight ?? ''} ${why}`);
           traceSummary();
         });
+        // THE MAIN-THREAD TWIN. A face measured here under `FontVariantNumeric: TabularNums`
+        // (TokenSentence.ts's own doc comment names the exact bug this fixes: "1a" read as "1ain",
+        // "16 counts" read as "16countsin" -- a digit's own TABULAR advance is wider than its
+        // PROPORTIONAL one, and the only twin face that carried it lived in the worker's own font
+        // registry, invisible to a measuring `<canvas>` on this thread) now installs the SAME "tnum"
+        // twin here too (`Text.Tabular.ts`'s own `TabularFamilyName`/`TABULAR_FEATURE_SETTINGS` --
+        // the identical feature flag the worker's own `_onFontFace` applies), from the SAME shared
+        // buffer this fetch already holds, so a main-thread `ctx.font` naming the twin family
+        // measures the real tabular advance exactly as the worker paints it, not an estimate of it.
+        // Gated the same way the worker's own twin is (`RangeCoversDigits`) -- building a twin of an
+        // icon font or a face with no digits in its own unicode-range would waste the font's own
+        // decode and never be asked for by name anyway.
+        if (typeof FontFace !== 'undefined' && document.fonts && RangeCoversDigits(face.UnicodeRange)) {
+          const twinFamily = TabularFamilyName(face.Family);
+          pending.then((shared) => shared.slice(0)).then(async (buf) => {
+            const desc: FontFaceDescriptors = { featureSettings: TABULAR_FEATURE_SETTINGS };
+            if (face.Weight) desc.weight = face.Weight;
+            if (face.Style) desc.style = face.Style;
+            if (face.Stretch) desc.stretch = face.Stretch;
+            if (face.UnicodeRange) desc.unicodeRange = face.UnicodeRange;
+            try {
+              const twin = new FontFace(twinFamily, buf, desc);
+              await twin.load();
+              document.fonts.add(twin);
+            } catch {
+              // No main-thread twin: tabular measurement falls through to the proportional face,
+              // the same safe fallback the worker's own install already has for the render side.
+            }
+          }).catch(() => { /* already reported by the worker-bound branch above */ });
+        }
       };
 
       const fetchedSheets = new Set<string>();
