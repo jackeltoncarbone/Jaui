@@ -279,6 +279,13 @@ export type JivOp =
   | { K: 'apply'; Id: number; Opts: JivApplyOpts }
   | { K: 'leave'; Id: number }      // soft (Presence fade)
   | { K: 'destroy'; Id: number }    // hard (immediate remove)
+  /** Unparent a node WITHOUT destroying it — `RemoveChild` with no replacement parent (a closed
+   *  disclosure-row body, say: detached so it is unreachable from Root and not laid out, but kept
+   *  alive to reattach the next time it opens). `attach` already reparents correctly (the worker's
+   *  `AddChild` removes from the old parent first), but until this op existed `RemoveChild` on the
+   *  main-thread `JivHandle` updated only its own mirror and told the worker nothing — the node kept
+   *  rendering under its old parent forever. See SS-Support-FAQ-2. */
+  | { K: 'detach'; Id: number }
   | { K: 'watch-rect'; Id: number; Watch: boolean }
   /** Reorder a child within its parent's Children array. Used by Jwift
    *  Toolbar (compact slot pushed to front), drag-reorder, etc. — any

@@ -272,8 +272,14 @@ export class JivHandle {
     if (i < 0) return;
     this.Children.splice(i, 1);
     child.Parent = null;
-    // Detach is conveyed via a hard `destroy` op when the child wants it.
-    // Here we just keep the tree state consistent on main.
+    // SS-Support-FAQ-2: a plain `detach` op, not just the main-thread mirror update above. A caller that
+    // removes a child with NO replacement parent (disclosure-row's closed body, say — unparented so it is
+    // unreachable from Root and not laid out, but kept alive to reattach the next time it opens) needs the
+    // WORKER'S tree to match, or the node keeps rendering under its old parent forever. `AddChild` already
+    // covers the reparent-to-somewhere-else case (the worker's own `AddChild` removes from the old parent
+    // first) — this op is for "removed and not going anywhere else (yet)", which until now told the worker
+    // nothing at all.
+    this._bridge.Enqueue({ K: 'detach', Id: child.Id });
   };
 
   /** Reorder a child to a new position within this Jiv's Children. Updates

@@ -237,6 +237,7 @@ export class JivRegistry {
       case 'apply':         return this._applyOpts(op.Id, op.Opts);
       case 'leave':         return this._leave(op.Id);
       case 'destroy':       return this._destroy(op.Id);
+      case 'detach':        return this._detach(op.Id);
       case 'watch-rect':    return this._watchRect(op.Id, op.Watch);
       case 'move-child':    return this._moveChild(op.ParentId, op.ChildId, op.NewIndex);
       case 'janvas-attach': return this._janvasAttach(op.Id, op.Key, op.Config);
@@ -471,6 +472,16 @@ export class JivRegistry {
     // hard-remove (so late `apply` ops on a leaving node don't crash);
     // an explicit `destroy` op cleans it up.
     core.RequestLeave();
+  };
+
+  /** Unparent WITHOUT destroying — the node stays registered (so a later `apply`/`attach` for it still
+   *  resolves) and simply has no `Parent`, hence unreachable from Root and not laid out or painted.
+   *  Mirrors `_destroy`'s own `if (core.Parent) ... RemoveChild(core)` line, minus the registry teardown.
+   *  See SS-Support-FAQ-2 / the `detach` JivOp doc. */
+  private _detach = (id: number): void => {
+    const core = this._nodes.get(id);
+    if (!core) { console.warn(`[JivRegistry] detach: missing id=${id}`); return; }
+    if (core.Parent) (core.Parent as JivCore).RemoveChild(core);
   };
 
   private _destroy = (id: number): void => {

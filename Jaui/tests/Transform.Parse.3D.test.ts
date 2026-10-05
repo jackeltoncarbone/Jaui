@@ -43,3 +43,26 @@ describe('Transform.Parse — 3D tokens', () => {
     expect(t.TranslateZ).toBe(0);
   });
 });
+
+// SS-Support-FAQ-2: DisclosureRow's chevron authored `Rotate(180deg)` for its rotation, assuming the
+// `deg` suffix CSS uses was accepted here too (`Length` has no such unit — rotate()'s argument resolves
+// through the same length parser as every other Transform function, UNITLESS, per the composition test
+// above). The throw this produced inside the worker's style resolve (StyleAnimator never got built) left
+// the chevron at the Presence-seeded Opacity of 0 — permanently invisible, open or closed. These pin the
+// unitless form as the only one `rotate()`/`rotateX()`/`rotateY()` accept, so the mistake is caught here
+// rather than live, as a chevron (or anything else) that silently never renders.
+describe('Transform.Parse — rotate() takes a bare number, never a `deg` suffix', () => {
+  it('rejects "deg" on rotate() — the CSS-style suffix this bug authored', () => {
+    expect(() => ResolveTransform('rotate(180deg)', ctx)).toThrow(/Unexpected trailing input/);
+  });
+
+  it('rejects "deg" on rotateX()/rotateY() too — the same length parser, the same mistake', () => {
+    expect(() => ResolveTransform('rotateX(30deg)', ctx)).toThrow(/Unexpected trailing input/);
+    expect(() => ResolveTransform('rotateY(30deg)', ctx)).toThrow(/Unexpected trailing input/);
+  });
+
+  it('the correct, unitless form resolves cleanly at both of the chevron\'s two states', () => {
+    expect(ResolveTransform('rotate(0)', ctx).Rotation).toBe(0);
+    expect(ResolveTransform('rotate(180)', ctx).Rotation).toBe(180);
+  });
+});
