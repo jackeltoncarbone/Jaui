@@ -29,6 +29,7 @@ import { ExtractBackgroundUrl, ResolveSemantics } from '../Seo/Seo.Resolve';
 import { JAUI_NAVIGATE, type SemanticRole } from '../Seo/Seo.Types';
 import { WireTeleportInputs } from '../Teleport/Teleport.Wiring';
 import { LinkTarget } from './Jiv.Link';
+import { DomReorderTarget } from './Jiv.DomOrder';
 
 /**
  * Maps each attached node's worker handle to the Angular host element that owns
@@ -234,28 +235,21 @@ export class Jiv implements OnInit, OnDestroy {
     this._reorderToDomPosition(parentNode);
   }
 
-  /** Reorder this node within its parent's Children to match DOM document order.
-   *  The target index is the count of current siblings whose host element
-   *  precedes ours in the DOM; a no-op when already in order (the common case),
-   *  so statically-ordered children never post a move op. */
+  /** Reorder this node within its parent's Children to match DOM document order — see `Jiv.DomOrder.ts`
+   *  (`DomReorderTarget`) for the math and for SS-Support-FAQ, the bug this guards against: a node that
+   *  mounts disconnected (projected into a closed `disclosure-row`'s body, for instance) has no real
+   *  document order to chase yet, and used to read "no connected preceding sibling" as "I am first",
+   *  moving every such node to the front as it mounted and reversing the whole run. */
   private _reorderToDomPosition(parentNode: JivHandle): void {
     const myEl = this._host.nativeElement;
     const siblings = parentNode.Children;
-    let target = 0;
-    for (const sib of siblings) {
-      if (sib === this.Node) continue;
-      const sibEl = JAUI_HOST_EL.get(sib);
-      // Only order against siblings still in the DOM; a leaving node's element
-      // may be detached and would compare as disconnected.
-      if (!sibEl || !sibEl.isConnected) continue;
-      if (myEl.compareDocumentPosition(sibEl) & Node.DOCUMENT_POSITION_PRECEDING) {
-        target++;
-      }
-    }
     const current = siblings.indexOf(this.Node);
-    if (current !== -1 && current !== target) {
-      parentNode.MoveChildToIndex(this.Node, target);
-    }
+    if (current === -1) return;
+    const otherHosts = siblings
+      .filter((sib) => sib !== this.Node)
+      .map((sib) => JAUI_HOST_EL.get(sib));
+    const target = DomReorderTarget(myEl, otherHosts, current);
+    if (target !== null) parentNode.MoveChildToIndex(this.Node, target);
   }
 
   ngOnDestroy(): void {
