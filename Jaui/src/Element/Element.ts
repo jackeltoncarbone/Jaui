@@ -71,11 +71,14 @@ export interface ElementOptions {
 
 /** Which pans a node takes from the scrollers inside it: `Down` takes a downward pan when nothing under
  *  the finger can scroll up, `Vertical` also takes an upward one from a scroller resting at its top (a
- *  sheet's card). `Horizontal` takes a sideways pan regardless of any scroller (a swipeable row).
- *  `Hold` never claims a pan on its own; it only exists to be claimed programmatically (`Jiv.ClaimPan`)
- *  once a separate gesture (a long press) decides to take over, so the scroller under it stays still
- *  until that happens and scrolls normally if it never does. */
-export type PanClaim = 'None' | 'Down' | 'Vertical' | 'Horizontal' | 'Hold';
+ *  sheet's card). `VerticalAlways` takes every vertical pan whatever the scroller under the finger is
+ *  doing: a bottom sheet resting below its top detent, which moves instead of scrolling its content
+ *  (Apple Maps), so a swipe on the content grows or shrinks the sheet even when a programmatic scroll
+ *  left the content away from its top. `Horizontal` takes a sideways pan regardless of any scroller (a
+ *  swipeable row). `Hold` never claims a pan on its own; it only exists to be claimed programmatically
+ *  (`Jiv.ClaimPan`) once a separate gesture (a long press) decides to take over, so the scroller under it
+ *  stays still until that happens and scrolls normally if it never does. */
+export type PanClaim = 'None' | 'Down' | 'Vertical' | 'VerticalAlways' | 'Horizontal' | 'Hold';
 
 export class Element {
   // ── Computed layout position (set by layout solver or manually) ──

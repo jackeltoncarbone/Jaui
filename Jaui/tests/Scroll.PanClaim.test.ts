@@ -21,6 +21,15 @@ describe('PickClaimant: which ancestor takes a pan', () => {
     expect(PickClaimant(['Vertical'], 0, -20, false)).toBe(-1);
   });
 
+  it('VerticalAlways claims either direction whether or not the scroller is at its top', () => {
+    expect(PickClaimant(['VerticalAlways'], 0, 20, true)).toBe(0);
+    expect(PickClaimant(['VerticalAlways'], 0, -20, true)).toBe(0);
+    expect(PickClaimant(['VerticalAlways'], 0, -20, false)).toBe(0);
+    expect(PickClaimant(['VerticalAlways'], 0, 20, false)).toBe(0);
+    // A sideways pan is never a vertical claim's.
+    expect(PickClaimant(['VerticalAlways'], 20, 4, false)).toBe(-1);
+  });
+
   it('Hold never claims, however it is pushed', () => {
     expect(PickClaimant(['Hold'], 20, 0, true)).toBe(-1);
     expect(PickClaimant(['Hold'], 0, 20, true)).toBe(-1);

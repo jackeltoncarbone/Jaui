@@ -256,7 +256,7 @@ export interface JivApplyOpts {
     PointerEvents?: 'Auto' | 'None';
     Cursor?: 'Default' | 'Pointer' | 'Text' | 'Move' | 'None';
     UserSelect?: 'Auto' | 'None';
-    PanClaim?: 'None' | 'Down' | 'Vertical' | 'Horizontal' | 'Hold';
+    PanClaim?: 'None' | 'Down' | 'Vertical' | 'VerticalAlways' | 'Horizontal' | 'Hold';
     PointScale?: string;
     OverscrollTop?: 'Bounce' | 'Pin' | 'None';
     OverscrollBottom?: 'Bounce' | 'Pin' | 'None';

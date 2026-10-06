@@ -12,6 +12,8 @@ import type { PanClaim } from '../Element/Element';
  *   - `Down` claims a pan whose vertical travel dominates, moving down (`ty > 0`), and only when the
  *     vertical scroller under the finger has nothing above its own top to give up.
  *   - `Vertical` claims the same pan as `Down`, in either vertical direction.
+ *   - `VerticalAlways` claims any pan whose vertical travel dominates, in either direction, whatever the
+ *     scroller under the finger is doing: a sheet below its top detent moves rather than scrolls.
  *   - `Hold` never claims: it exists only to be taken by `Jiv.ClaimPan` once a separate gesture (a
  *     long press) decides to lift, so the scroller underneath it stays live until that happens.
  *
@@ -34,6 +36,9 @@ export function PickClaimant(
         break;
       case 'Vertical':
         if (!horizontal && verticalAtTop) return i;
+        break;
+      case 'VerticalAlways':
+        if (!horizontal) return i;
         break;
       // 'Hold' and 'None' never claim.
     }
