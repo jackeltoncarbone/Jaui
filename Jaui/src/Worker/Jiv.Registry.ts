@@ -116,9 +116,28 @@ export class JivRegistry {
     return out;
   };
 
-  /** Apply a batch of ops in order. */
+  /** Apply a batch of ops in order. `Bridge.Main.ts`'s own `_flushOps` doc comment: "One postMessage per
+   *  CD batch" — every op a single Angular change-detection pass enqueues (a drastic re-render's worth:
+   *  dozens of `create`/`attach`/`apply`/`leave` ops for pieces created, updated and removed all at once)
+   *  lands in ONE `jiv-ops` message, applied here in one plain loop. Before this try/catch, one op
+   *  throwing partway through (any future handler, any edge case this registry's own per-handler guards
+   *  didn't anticipate) silently dropped every op AFTER it in the SAME batch — including a `leave` for a
+   *  piece with no relation at all to whatever threw, which then never reached the worker's own tree: the
+   *  main thread believed it asked the piece to fade away, and nothing ever did, because the op asking for
+   *  it was never actually applied. Exactly the failure mode a piece going stale and staying stale (no
+   *  reload-free recovery) would look like, and exactly what Jiv.Handle.Detach.test.ts's own fake-bridge
+   *  technique (and TokenSentence.Piece.Leave.test.ts, mirroring it) cannot catch on their own — both
+   *  apply ops one at a time, never a REAL many-ops-in-one-batch flush with a thrown op buried inside it.
+   *  Each op gets its own try/catch instead, so a single bad one is contained to itself (logged, not
+   *  silently eaten) and never costs the rest of the batch. */
   ApplyOps = (msg: M2W_JivOps): void => {
-    for (const op of msg.Ops) this._apply(op);
+    for (const op of msg.Ops) {
+      try {
+        this._apply(op);
+      } catch (err) {
+        console.error(`[JivRegistry] op K='${op.K}' threw — contained to this op, the rest of the batch still applies`, { op, err });
+      }
+    }
   };
 
   /** Return the JivCore matching an id, or undefined. Tests use this to
