@@ -14,6 +14,7 @@ function makeRenderer(initImpl: () => Promise<void> = () => Promise.resolve()): 
     Resize: vi.fn(),
     CreateTexture: vi.fn((): GpuTextureHandle => ({} as GpuTextureHandle)),
     UploadSubTexture: vi.fn(),
+    DeleteTexture: vi.fn(),
   } as unknown as Renderer & { Init: ReturnType<typeof vi.fn> };
 }
 

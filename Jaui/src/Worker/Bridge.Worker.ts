@@ -16,6 +16,7 @@ import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { WorkerPlatform, type WorkerPlatformInit } from './Worker.Platform';
 import type { JivRegistry } from './Jiv.Registry';
 import { PrimeFontInSharedCtx } from '../Text/Text.WordLayout';
+import { PrimeFontInRasterCtx } from '../Text/Text.Cache';
 import { BumpFontGeneration, PrimeFontInMeasureCtx, FamilyResolvesInMeasureCtx } from '../Text/Text.Measure';
 import { RangeCoversDigits, TABULAR_FEATURE_SETTINGS, TabularFamilyName } from '../Text/Text.Tabular';
 import {
@@ -235,6 +236,7 @@ export class WorkerBridge {
           fontSet?.add(twin);
           PrimeFontInSharedCtx(twinFamily, weight, style);
           PrimeFontInMeasureCtx(twinFamily, weight, style);
+          PrimeFontInRasterCtx(twinFamily, weight, style);
         } catch { /* no twin: tabular text falls through to the proportional face */ }
       }
       // WebKit (iPad / iOS Safari) workaround: `self.fonts.add(ff)` alone
@@ -257,6 +259,9 @@ export class WorkerBridge {
       // throwaway OffscreenCanvas wouldn't cover them.
       PrimeFontInSharedCtx(m.Family, weight, style);
       PrimeFontInMeasureCtx(m.Family, weight, style);
+      // And the glyph raster context, a third registry: it binds the face at the next frame boundary
+      // and re-rasters what it drew in the fallback (Text.Cache `BeginFrame`).
+      PrimeFontInRasterCtx(m.Family, weight, style);
       BumpFontGeneration();
       // Per-font-face load log used to print here on every webfont arrival —
       // 25+ lines per cold load. Removed unconditionally; if a font fails

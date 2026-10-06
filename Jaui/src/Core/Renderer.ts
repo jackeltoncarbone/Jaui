@@ -410,6 +410,10 @@ export interface Renderer {
    *  decodes sRGB→linear on sample — use for colour images that will be lit/composited in linear space. */
   CreateTexture(width: number, height: number, srgb?: boolean): GpuTextureHandle;
 
+  /** Free a texture `CreateTexture` made. The handle is dead afterwards; a handle whose context was lost
+   *  (and so is already gone) is a no-op. */
+  DeleteTexture(texture: GpuTextureHandle): void;
+
   /** Upload a sub-region of a texture from a canvas, ImageBitmap, or ImageData.
    *  OffscreenCanvas is included so worker-side text/image rasterization can
    *  upload without round-tripping through the main thread. */

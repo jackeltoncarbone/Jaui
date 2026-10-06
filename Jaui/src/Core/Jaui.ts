@@ -9,7 +9,7 @@ import { JivStyleAnimator } from '../Jiv/Jiv.StyleAnimator';
 import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
 import { ComputeIntrinsicSizes, CascadePointScale } from '../Layout/Layout.Intrinsic';
-import { TextCache } from '../Text/Text.Cache';
+import { TextCache, AmbientFontSet, PrimeLoadedFontFaces } from '../Text/Text.Cache';
 import { JTrace, JMs, JauiTracing } from '../Diagnostics/Jaui.Trace';
 import { PerfLevers } from './Perf.Levers';
 import { CascadeEpoch } from './Cascade.Epoch';
@@ -1290,6 +1290,14 @@ export class Canvas implements DirtyTracker {
     this._initDebugFromUrl();
 
     this._textCache = new TextCache(renderer);
+    // Every web face already loaded is bound into the glyph raster context before its first raster
+    // (WebKit draws a face its canvas never referenced in a fallback). One the cache had to ask for
+    // lands after text drew without it: re-measure and re-raster, as a `loadingdone` would.
+    PrimeLoadedFontFaces(AmbientFontSet());
+    this._textCache.OnFontsReady = () => {
+      this._invalidateAllText();
+      this.RequestFrame();
+    };
     this._imageCache = new ImageCache(renderer);
     this._imageCache.OnLoad = () => {
       // `?blur-cache`: every write into an image texture ends here, so this is where its pixels
@@ -3042,6 +3050,13 @@ export class Canvas implements DirtyTracker {
       this._counts.Text += 1; // one flushed batch = one draw call
       this._textBuffer.Begin();
     };
+    // A glyph atlas rebuilt mid-walk replaces the texture every queued glyph's UV indexes, so the
+    // queue drains first, against the texture it was resolved in (Text.Cache keeps that texture alive
+    // to the end of the frame). The glyphs after it read the new atlas, at UVs last frame never had.
+    this._textCache.OnBeforeRebuild = () => {
+      flushText();
+      if (this._bcOn) this._bc.Region.SetFull();
+    };
 
     // The vibrancy shape draw (Core/Vibrancy.ts). One instance of the element's own shape, `Push`ed as
     // 'VibrancyOnly', so the radii, smoothness, clip stack, 3D homography and opacity are the ones its
@@ -4110,8 +4125,10 @@ export class Canvas implements DirtyTracker {
           // Its own batch, because the blend state is per draw; `flushText()` first drains other nodes'
           // glyphs under the ordinary blend, so the vibrancy state cannot leak onto a sibling's text.
           flushText();
-          this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex, zones.TextScale);
+          // Set before the emit, which draws nothing itself: an atlas rebuild inside it drains this
+          // node's glyphs early (`OnBeforeRebuild`), and they belong under the ink's blend too.
           r2.SetVibrancyBlend(inkBlend);
+          this._emitTextFor(node, eff, clipMeta.Offset, clipMeta.Count, xformIndex, zones.TextScale);
           flushText();
           r2.RestoreBlend();
           r2.NoteBlendDraw();
@@ -4630,6 +4647,7 @@ export class Canvas implements DirtyTracker {
     // order than the trailing text, if any).
     flushPanels();
     flushText();
+    this._textCache.OnBeforeRebuild = null;
     // Every draw that can land in a later surface's backdrop has been recorded: the card write-backs
     // below are blits of what the walk already drew, and the janvas masks run after every reader.
     this._bcEndFrame();
@@ -5373,6 +5391,8 @@ export class Canvas implements DirtyTracker {
     const atlas = this._textCache.Atlas;
     seed.Number(atlas ? bc.Id(atlas) : 0);
     seed.Number(this._bcTextEpoch);
+    // Rasters the cache dropped itself (a face bound at `BeginFrame`) re-raster under the same UVs.
+    seed.Number(this._textCache.RasterEpoch);
     bc.BeginFrame(w, h);
     const s = this._bcStats;
     s.Surfaces = 0; s.Hits = 0; s.Misses = 0; s.Cold = 0; s.Stored = 0; s.Grouped = 0;
@@ -8581,6 +8601,8 @@ export class Canvas implements DirtyTracker {
    *  flush stale atlas entries. */
   private _listenForFontLoad = (): void => {
     this._platform.ObserveFontsLoadingDone(() => {
+      // Registered first, so the re-raster the invalidation causes binds the new faces before it draws.
+      PrimeLoadedFontFaces(AmbientFontSet());
       this._invalidateAllText();
     });
   };

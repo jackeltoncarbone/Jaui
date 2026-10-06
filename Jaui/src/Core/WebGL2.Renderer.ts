@@ -4523,6 +4523,13 @@ export class WebGL2Renderer implements Renderer {
     return _wrap(tex);
   };
 
+  DeleteTexture = (texture: GpuTextureHandle): void => {
+    const gl = this._gl;
+    const tex = _unwrap(texture);
+    // A texture from before a context loss is already gone: `isTexture` is false for it.
+    if (gl.isTexture(tex)) gl.deleteTexture(tex);
+  };
+
   UploadSubTexture = (
     texture: GpuTextureHandle, x: number, y: number,
     source: HTMLCanvasElement | OffscreenCanvas | ImageBitmap | ImageData,

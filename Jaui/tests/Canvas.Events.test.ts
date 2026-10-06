@@ -11,6 +11,7 @@ const _renderer = (): Renderer => ({
   Resize: () => {},
   CreateTexture: (): GpuTextureHandle => ({} as GpuTextureHandle),
   UploadSubTexture: () => {},
+  DeleteTexture: () => {},
   // The rest of the Renderer interface is declared `any` here because the
   // event tests don't touch frame-render paths. Vitest's strict mode
   // accepts the cast at the boundary.
