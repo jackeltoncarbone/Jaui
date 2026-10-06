@@ -632,6 +632,7 @@ export class JivRegistry {
       core.MarkLayoutDirty();
     }
     if (ep.SnapLayout !== undefined) core.SnapLayout = ep.SnapLayout;
+    if (ep.SnapText !== undefined) core.SnapText = ep.SnapText;
   };
 
   private _applyMaterialBits = (_core: JivCore, _opts: JivApplyOpts): void => {

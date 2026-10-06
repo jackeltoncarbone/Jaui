@@ -222,6 +222,19 @@ export class TextAnimator implements Animatable {
     return this._reflow(this._maxWidth);
   };
 
+  /** Lands every word where it is going, now: words that left are dropped, words that came stand at full
+   *  opacity, and every position, scale, tint and the weight sit at their targets. For text that is a
+   *  reading which ticks, a count or a clock (`Element.SnapText`), where the per word cross fade drew the
+   *  old value over the new one in the same place. */
+  SnapWords = (): void => {
+    for (let i = this.Words.length - 1; i >= 0; i--) if (this.Words[i].Dying) this.Words.splice(i, 1);
+    for (const w of this.Words) {
+      w.SpringX.Snap(); w.SpringY.Snap(); w.Opacity.Snap(); w.Scale.Snap();
+      w.TintR.Snap(); w.TintG.Snap(); w.TintB.Snap(); w.TintA.Snap();
+    }
+    this._weightSpring.Snap();
+  };
+
   /** The animation manager's hook. Every word and weight spring moves only through Update and Resync,
    *  so once Tick returns false every further Tick is a no-op until one of them changes something. */
   Rouse: (() => void) | null = null;

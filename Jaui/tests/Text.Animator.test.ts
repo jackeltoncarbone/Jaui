@@ -86,6 +86,18 @@ describe('TextAnimator (per-word)', () => {
     expect(dying.map((w) => w.Content)).toEqual(['world']);
   });
 
+  it('SnapWords lands a ticking reading at once: the old count gone, the new one whole, never both', () => {
+    const a = new TextAnimator(DefaultTextStyle);
+    a.Update('M13-20 · 11', DefaultTextStyle, null);
+    a.SnapWords();
+    a.Update('M13-20 · 12', DefaultTextStyle, null);
+    expect(a.Words.some((w) => w.Dying)).toBe(true); // what a cross fade would draw over the new count.
+    a.SnapWords();
+    expect(a.Words.map((w) => w.Content)).toEqual(['M13-20', '·', '12']);
+    expect(a.Words.every((w) => !w.Dying && w.Opacity.Value === 1 && w.SpringX.Value === w.TargetX)).toBe(true);
+    expect(a.HasDying).toBe(false);
+  });
+
   it('dying words are pruned after opacity settles at 0', () => {
     const a = new TextAnimator(DefaultTextStyle);
     a.Update('hello world', DefaultTextStyle, null);

@@ -269,6 +269,8 @@ export interface JivApplyOpts {
      *  re-segmentation lands at the final X/Y instantly instead of drifting
      *  between rows from the previous slot. */
     SnapLayout?: boolean;
+    /** When true, a text change lands at once instead of cross fading word by word (`Element.SnapText`). */
+    SnapText?: boolean;
   };
 }
 

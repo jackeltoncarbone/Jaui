@@ -184,6 +184,12 @@ export class Element {
    *  unless a feature opts out. */
   SnapLayout: boolean = false;
 
+  /** When true, a change of this element's text lands at once: words that left vanish, words that came
+   *  stand at full opacity, rather than cross fading in place (`TextAnimator.SnapWords`). For text that is a
+   *  reading which ticks, a count or a clock, where the cross fade drew the old value over the new one
+   *  ("M13-20 · 11" with its digits overlapping, Show Studio's drill player while playing). Default false. */
+  SnapText: boolean = false;
+
   /** Non-zero while this element is mid-TELEPORT (a live reparent — moved between
    *  parents while already mounted). Stamped monotonically by `AddChild`, cleared
    *  by `JivAnimator` when the rect springs settle. The render walk paints

@@ -87,6 +87,7 @@ export class JivHandle {
   private _clip: 'Auto' | 'Hidden' | 'Visible' = 'Auto';
   private _pointScale = '';
   private _snapLayout = false;
+  private _snapText = false;
   private _overscrollTop: 'Bounce' | 'Pin' | 'None' = 'Bounce';
   private _overscrollBottom: 'Bounce' | 'Pin' | 'None' = 'Bounce';
   private _overscrollLeft: 'Bounce' | 'Pin' | 'None' = 'Bounce';
@@ -194,6 +195,10 @@ export class JivHandle {
 
   get SnapLayout(): boolean { return this._snapLayout; }
   set SnapLayout(v: boolean) { if (this._snapLayout !== v) { this._snapLayout = v; this._markDirty(); } }
+
+  /** A text change lands at once instead of cross fading (`Element.SnapText`). */
+  get SnapText(): boolean { return this._snapText; }
+  set SnapText(v: boolean) { if (this._snapText !== v) { this._snapText = v; this._markDirty(); } }
 
   get Text(): string | null { return this._text; }
   set Text(v: string | null) { if (this._text !== v) { this._text = v; this._markDirty(); } }
@@ -560,6 +565,7 @@ export class JivHandle {
       Overflow: this._overflow,
       Clip: this._clip,
       SnapLayout: this._snapLayout,
+      SnapText: this._snapText,
       OverscrollTop: this._overscrollTop,
       OverscrollBottom: this._overscrollBottom,
       OverscrollLeft: this._overscrollLeft,

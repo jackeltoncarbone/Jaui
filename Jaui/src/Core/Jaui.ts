@@ -7342,16 +7342,17 @@ export class Canvas implements DirtyTracker {
         this._textAnimators.set(node, anim);
         this._animationManager.Register(anim);
       }
-      if (anim.Update(node.Text, resolvedStyle, maxWidth)) {
-        this._animationManager.Kick();
-      }
+      const kick = anim.Update(node.Text, resolvedStyle, maxWidth);
+      // A reading that ticks (`Element.SnapText`) never cross fades its old words over its new ones.
+      if (node.SnapText) anim.SnapWords();
+      if (kick) this._animationManager.Kick();
       if (anim.HasDying) this._textDying.add(node); else this._textDying.delete(node);
     } else {
       const anim = this._textAnimators.get(node);
       if (anim && anim.Content !== '') {
-        if (anim.Update('', resolvedStyle, maxWidth)) {
-          this._animationManager.Kick();
-        }
+        const kick = anim.Update('', resolvedStyle, maxWidth);
+        if (node.SnapText) anim.SnapWords();
+        if (kick) this._animationManager.Kick();
       }
       if (anim?.HasDying) this._textDying.add(node); else this._textDying.delete(node);
     }
