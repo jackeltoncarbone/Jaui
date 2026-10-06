@@ -10301,7 +10301,7 @@ export type { Transform } from '../Transform/Transform.Types';
 // Text
 export type { TextStyle, TextAlign, TextOverflow, FontStyle, TextMeasurement, TextConfig } from '../Text/Text.Types';
 export { DefaultTextStyle } from '../Text/Text.Types';
-export { MeasureText } from '../Text/Text.Measure';
+export { MeasureText, ComposeFontFamily } from '../Text/Text.Measure';
 export { HashTextKey } from '../Text/Text.Hash';
 export { TextCache } from '../Text/Text.Cache';
 // A consumer measuring text OUTSIDE the engine's own render path (TokenSentence.ts's own main-thread
@@ -10311,6 +10311,9 @@ export { TextCache } from '../Text/Text.Cache';
 // string `Text.Types.ts` resolves a tabular style to, to ask a plain canvas for the real twin by name
 // rather than reimplementing the stack/quoting rule a second time.
 export { TabularFamilyStack } from '../Text/Text.Tabular';
+// Same reasoning, for the CJK sans fallback: `ComposeFontFamily` (Text.Measure.ts) is what
+// `ApplyTextStyle` names to a canvas for every Jaui-internal measure/fill, so `TokenSentence._measure`'s
+// own pre-layout canvas measurement composes the IDENTICAL stack by calling this, not by re-typing it.
 
 // Image
 export type { ImageStyle, ObjectFit } from '../Image/Image.Types';

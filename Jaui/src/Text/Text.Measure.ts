@@ -80,11 +80,92 @@ export const BumpFontGeneration = (): void => {
   _measureCache.clear();
 };
 
+/**
+ * System CJK sans families, appended to every FontFamily stack (below) so Han/Kana/Hangul text lands
+ * on a SANS face instead of the platform's serif default. Apple's own system UI faces first (the OS's
+ * own default for each script), then the Windows equivalents, then Noto as a last-resort web-safe face
+ * before the generic keyword.
+ *
+ * Jaui ships one web face, Inter (ShowStudio.App's `index.html` / `Branding/Fonts.ts`), and Inter has no
+ * CJK glyphs. A canvas named only `Inter` (or `Inter, system-ui, sans-serif` — none of those three cover
+ * Han/Kana/Hangul either) falls through every one of them for a Japanese/Chinese/Korean run and lands on
+ * the browser's own per-character fallback, which on every desktop OS is a SERIF face (MS Mincho,
+ * Hiragino Mincho ProN, SimSun, Batang) — a thin serif next to the app's own sans Latin glyphs, live in
+ * the drill editor the moment a sentence, a header ("小節1-4"), or the player pill carries Japanese text.
+ * Naming the OS's CJK SANS faces explicitly, ahead of any generic keyword, makes that same per-character
+ * fallback land on a sans face instead.
+ *
+ * Ordered Japanese-first: Jaui's `TextStyle`/`ResolvedTextStyle` (below) carries no per-element
+ * language/locale, so this is ONE fixed order for every element, not reordered per editor language —
+ * Japanese was the first script this shipped for, live. Chinese and Korean text still renders correctly
+ * (every face here covers Latin too, and the Chinese/Korean families still sit ahead of the generic
+ * fallback), just not with their own REGIONAL glyph shape for the Han characters ja/zh share. A future
+ * per-element language hook should claim that script's own families first, ahead of this list, rather
+ * than reorder it.
+ */
+const CJK_SANS_FAMILIES = [
+  // Japanese
+  'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', 'Yu Gothic', 'Meiryo',
+  // Chinese
+  'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei',
+  // Korean
+  'Apple SD Gothic Neo', 'Malgun Gothic',
+  // Web-safe last resort
+  'Noto Sans CJK JP', 'Noto Sans CJK SC', 'Noto Sans CJK KR',
+  'Noto Sans JP', 'Noto Sans SC', 'Noto Sans KR',
+] as const;
+
+/** CSS generic family keywords — a stack already ending in one of these has its own intentional final
+ *  fallback, so the CJK families are inserted BEFORE it rather than after. Mirrors `Text.Tabular.ts`'s
+ *  own `_GENERIC` set (that one decides which names get a tabular twin; this one decides where "the
+ *  app's own family" stops and a generic fallback begins — same question, two different call sites). */
+const _GENERIC_FAMILIES = new Set([
+  'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'emoji', 'math', 'fangsong',
+  'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', '-apple-system', 'blinkmacsystemfont',
+]);
+
+const _composedFamilyStacks = new Map<string, string>();
+
+/**
+ * Extend `stack` (an authored or already tabular-twinned FontFamily — see `TabularFamilyStack`) with
+ * `CJK_SANS_FAMILIES`, inserted right after the app's own named face(s) and right before the first
+ * generic keyword the stack names (or at the very end, with a trailing `sans-serif`, if it names none).
+ *
+ * THE single place a FontFamily becomes the string a canvas `ctx.font` actually names: `ApplyTextStyle`
+ * (below) calls this for every measure AND every fill the engine does, main thread and worker alike
+ * (this module touches no DOM), so the width `MeasureText`/`LayoutWords` lays a line out against and the
+ * glyphs `Text.Cache` paints into the raster cache are always shaped against the IDENTICAL list — the
+ * lesson of the "1ain" bug (`Worker/Bridge.Main.ts`'s own doc comment on `TabularFamilyName`): a main
+ * thread that measures one font while a worker paints a different one disagrees on word width, and the
+ * disagreement shows up as touching glyphs or a wrong wrap, not a missing letter.
+ *
+ * `Jwift.Angular`'s `TokenSentence` does its own pre-layout canvas measurement on the main thread
+ * (`TokenSentence.ts`'s own `_measure`, ahead of Jaui ever seeing the text) specifically so a sentence's
+ * wrap decision is known before layout — it imports this function (re-exported off the `jaui` package,
+ * `Core/Jaui.ts`, next to `TabularFamilyStack` for the identical cross-package reason) and composes the
+ * SAME stack by hand, so that measurement and this one never drift apart.
+ */
+export const ComposeFontFamily = (stack: string): string => {
+  const cached = _composedFamilyStacks.get(stack);
+  if (cached !== undefined) return cached;
+
+  const tokens = stack.split(',').map((t) => t.trim()).filter((t) => t.length > 0);
+  let headEnd = tokens.findIndex((t) => _GENERIC_FAMILIES.has(t.replace(/^["']|["']$/g, '').toLowerCase()));
+  if (headEnd === -1) headEnd = tokens.length;
+  if (headEnd === 0) headEnd = 1; // keep at least one family as "the app's own", even a bare generic.
+
+  const head = tokens.slice(0, headEnd);
+  const cjk = CJK_SANS_FAMILIES.map((f) => `"${f}"`);
+  const result = [...head, ...cjk, 'sans-serif'].join(', ');
+  _composedFamilyStacks.set(stack, result);
+  return result;
+};
+
 /** Apply style to a 2D context (matches browser font string syntax). */
 export const ApplyTextStyle = (ctx: Ctx2D, style: ResolvedTextStyle, dpr: number = 1): void => {
   const italic = style.FontStyle === 'Italic' ? 'italic ' : '';
   const size = style.FontSize * dpr + _fontGeneration * 1e-4;
-  ctx.font = `${italic}${style.FontWeight} ${size}px ${style.FontFamily}`;
+  ctx.font = `${italic}${style.FontWeight} ${size}px ${ComposeFontFamily(style.FontFamily)}`;
   // 'middle' centers the glyph on the draw y-coordinate using the font's
   // em-square middle (midpoint of ascender + descender). Callers pass
   // `y = lineIndex * lineHeight + lineHeight / 2` so each line's visual

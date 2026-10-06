@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { FitWithEllipsis, MeasureText } from '../src/Text/Text.Measure';
-import { DefaultTextStyle, type TextStyle } from '../src/Text/Text.Types';
+import { ApplyTextStyle, ComposeFontFamily, FitWithEllipsis, MeasureText } from '../src/Text/Text.Measure';
+import { DefaultTextStyle, ResolveTextStyle, type TextStyle } from '../src/Text/Text.Types';
+import { SEED_CONTEXT } from '../src/Core/Style.Resolver';
 
 // Mock 2D context: 8px per character.
 const mockCtx = (): CanvasRenderingContext2D => {
@@ -142,5 +143,65 @@ describe('MeasureText', () => {
       const r = MeasureText('hi\nlonger line', style(), null, mockCtx());
       expect(r.Width).toBe('longer line'.length * 8);
     });
+  });
+});
+
+// The CJK sans fallback (SS drill-sentences, live): Inter has no CJK glyphs, so a canvas named only
+// `Inter`/`Inter, system-ui, sans-serif` fell through to the platform's SERIF default for Japanese,
+// Chinese and Korean text. `ComposeFontFamily` is the one place that stack gets extended, and
+// `ApplyTextStyle` is the one place that composed stack reaches a canvas's own `font` string — for
+// every measure AND every fill, so the two can never drift the way the "1ain" bug once did.
+describe('ComposeFontFamily', () => {
+  it('extends a bare family with the CJK sans stack and ends in sans-serif', () => {
+    const composed = ComposeFontFamily('Inter');
+    expect(composed.startsWith('Inter, ')).toBe(true);
+    expect(composed.endsWith(', sans-serif')).toBe(true);
+    for (const face of [
+      'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic UI', 'Yu Gothic', 'Meiryo',
+      'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei',
+      'Apple SD Gothic Neo', 'Malgun Gothic',
+      'Noto Sans CJK JP', 'Noto Sans CJK SC', 'Noto Sans CJK KR',
+      'Noto Sans JP', 'Noto Sans SC', 'Noto Sans KR',
+    ]) {
+      expect(composed).toContain(`"${face}"`);
+    }
+  });
+
+  it('inserts the CJK stack before an authored generic fallback, not after', () => {
+    const composed = ComposeFontFamily('Inter, system-ui, sans-serif');
+    expect(composed.startsWith('Inter, "Hiragino Sans"')).toBe(true);
+    expect(composed.endsWith(', sans-serif')).toBe(true);
+  });
+
+  it('extends a tabular-twinned stack without dropping the twin or its proportional fallback', () => {
+    const composed = ComposeFontFamily('"Inter JauiTnum", Inter');
+    expect(composed.startsWith('"Inter JauiTnum", Inter, "Hiragino Sans"')).toBe(true);
+    expect(composed.endsWith(', sans-serif')).toBe(true);
+  });
+
+  it('is stable for the same input (memoized)', () => {
+    expect(ComposeFontFamily('Inter')).toBe(ComposeFontFamily('Inter'));
+  });
+});
+
+describe('ApplyTextStyle', () => {
+  it('builds the identical composed font string for a measure context and a fill context', () => {
+    const resolved = ResolveTextStyle({ ...DefaultTextStyle, FontFamily: 'Inter' }, SEED_CONTEXT);
+    const measureCtx = mockCtx();
+    const fillCtx = mockCtx();
+
+    ApplyTextStyle(measureCtx, resolved, 1);
+    ApplyTextStyle(fillCtx, resolved, 1);
+
+    expect(measureCtx.font).toBe(fillCtx.font);
+    expect(measureCtx.font).toContain('"Hiragino Sans"');
+    expect(measureCtx.font.endsWith('sans-serif')).toBe(true);
+  });
+
+  it('composes the CJK fallback into the actual ctx.font string it hands the canvas', () => {
+    const resolved = ResolveTextStyle({ ...DefaultTextStyle, FontFamily: 'Inter' }, SEED_CONTEXT);
+    const ctx = mockCtx();
+    ApplyTextStyle(ctx, resolved, 1);
+    expect(ctx.font).toBe(`${resolved.FontWeight} ${resolved.FontSize}px ${ComposeFontFamily('Inter')}`);
   });
 });
