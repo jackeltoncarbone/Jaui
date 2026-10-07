@@ -207,3 +207,19 @@ export function EmbedBoxesEqual(a: EmbedBox | undefined, b: EmbedBox): boolean {
     && near(a.Radius[0], b.Radius[0]) && near(a.Radius[1], b.Radius[1])
     && near(a.Radius[2], b.Radius[2]) && near(a.Radius[3], b.Radius[3]);
 }
+
+/**
+ * True when a watched node's snapshot would tell its watcher nothing new: the embed placement is the same
+ * (`EmbedBoxesEqual`) AND the node's own rect has not moved.
+ *
+ * An embed has nothing to show while it is hidden, so `EmbedBoxesEqual` calls two hidden boxes equal
+ * wherever they stand. A rect watcher reads geometry, though, and a node scrolled out of its list goes on
+ * moving with the list. Drill Sentences lane JJ1, item 1 (round 14 blind testers: the drill list's pinned
+ * phrase heading named M1-4 over M5-12's rows): every phrase heading watched for the pinned heading stopped
+ * reporting the moment it left the list's window, so a heading carried from below the window to above it by
+ * one jump (a reveal, an undo) still read as below, and the list named the last heading it had seen go by.
+ */
+export function RectSnapshotsEqual(a: EmbedBox | undefined, b: EmbedBox): boolean {
+  return EmbedBoxesEqual(a, b)
+    && near(a!.X, b.X) && near(a!.Y, b.Y) && near(a!.Width, b.Width) && near(a!.Height, b.Height);
+}
