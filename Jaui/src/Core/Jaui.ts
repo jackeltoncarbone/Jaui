@@ -10409,6 +10409,6 @@ export {
   EmbedLayer, EmbedSlot, IsInsideEmbed, EMBED_ATTRIBUTE,
 } from '../Embed/Embed.Layer';
 export {
-  MeasureEmbedBox, EmbedBoxesEqual, HIDDEN_EMBED_BOX,
+  MeasureEmbedBox, EmbedBoxesEqual, RectSnapshotsEqual, HIDDEN_EMBED_BOX,
   type EmbedBox, type EmbedTreeNode,
 } from '../Embed/Embed.Geometry';

@@ -45,7 +45,7 @@ import type {
 } from './Bridge.Types';
 import { LookupJanvasRenderer } from './Worker.RendererRegistry';
 import {
-  EmbedBoxesEqual, MeasureEmbedBox,
+  MeasureEmbedBox, RectSnapshotsEqual,
   type EmbedBox, type EmbedTreeNode,
 } from '../Embed/Embed.Geometry';
 
@@ -172,7 +172,9 @@ export class JivRegistry {
       const scroll = this._scrollExtentOf(n);
       const last = this._lastSnapshot.get(id);
       const lastScroll = this._lastScroll.get(id);
-      if (EmbedBoxesEqual(last, box) && _scrollExtentsEqual(lastScroll, scroll)) continue;
+      // A node scrolled out of view still reports where it moved to (`RectSnapshotsEqual`): its watcher
+      // reads its geometry, not only what an embed over it would show.
+      if (RectSnapshotsEqual(last, box) && _scrollExtentsEqual(lastScroll, scroll)) continue;
       this._lastSnapshot.set(id, box);
       if (scroll) this._lastScroll.set(id, scroll);
       this._post({
