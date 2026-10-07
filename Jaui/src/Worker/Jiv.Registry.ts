@@ -258,7 +258,7 @@ export class JivRegistry {
       case 'destroy':       return this._destroy(op.Id);
       case 'detach':        return this._detach(op.Id);
       case 'watch-rect':    return this._watchRect(op.Id, op.Watch);
-      case 'move-child':    return this._moveChild(op.ParentId, op.ChildId, op.NewIndex);
+      case 'move-child':    return this._moveChild(op.ParentId, op.ChildId, op.AfterId);
       case 'janvas-attach': return this._janvasAttach(op.Id, op.Key, op.Config);
       case 'svg-set':       return this._svgSet(op.Id, op.Paint);
       case 'svg-clear':     return this._svgClear(op.Id);
@@ -345,15 +345,19 @@ export class JivRegistry {
     r?.Input?.(channel, payload);
   };
 
-  private _moveChild = (parentId: number, childId: number, newIndex: number): void => {
+  /** Places `childId` just after its sibling `afterId`, or first for null. A sibling no longer in this
+   *  parent leaves the child where it is. */
+  private _moveChild = (parentId: number, childId: number, afterId: number | null): void => {
     const parent = this._nodes.get(parentId);
     const child = this._nodes.get(childId);
     if (!parent || !child) return;
     const arr = parent.Children as JivCore[];
     const cur = arr.indexOf(child);
     if (cur < 0) return;
+    const after = afterId === null ? null : this._nodes.get(afterId);
+    if (after !== null && (!after || !arr.includes(after))) return;
     arr.splice(cur, 1);
-    arr.splice(Math.max(0, Math.min(arr.length, newIndex)), 0, child);
+    arr.splice(after ? arr.indexOf(after) + 1 : 0, 0, child);
     parent.MarkLayoutDirty();
   };
 

@@ -104,12 +104,43 @@ describe('DomReorderTarget', () => {
     expect(DomReorderTarget(b, [a], 1)).toBeNull();
   });
 
-  it('ignores a disconnected sibling (one that is leaving) when counting preceding nodes', () => {
+  it('ignores a disconnected sibling (one that is leaving), and leaves a node already after its predecessor where it is', () => {
     const parent = document.body.appendChild(document.createElement('div'));
     const leaving = document.createElement('jext'); // detached — e.g. mid fade-out, element already removed
     const a = document.createElement('jext'); parent.appendChild(a);
     const b = document.createElement('jext'); parent.appendChild(b);
-    // `leaving` is first in the Children array (it mounted first) but its element is gone from the DOM.
-    expect(DomReorderTarget(b, [leaving, a], 2)).toBe(1);
+    // `leaving` is first in the Children array (it mounted first) but its element is gone from the DOM. `b`
+    // already sits right after `a`; the old count (one connected predecessor, so index 1) put it AHEAD of `a`.
+    expect(DomReorderTarget(b, [leaving, a], 2)).toBeNull();
+  });
+
+  /**
+   * Drill Sentences lane JJ2, item 1 (a round 14 blind phone tester: the drill editor's selection bar read "Shape ·
+   * Add squads" in one state and "Add squads · Shape" in another). The bar's template order never changes; a
+   * button that comes back from "…" mounts last and asks where it belongs. A sibling whose element is gone still
+   * holds its place in the array, so a count of connected predecessors used as an index fell short of the slot.
+   */
+  it('a returning button lands after its last connected predecessor, however many gone siblings sit in the array', () => {
+    const parent = document.body.appendChild(document.createElement('div'));
+    const el = (label: string, connected = true): HTMLElement => {
+      const e = document.createElement('jext');
+      e.textContent = label;
+      if (connected) parent.appendChild(e);
+      return e;
+    };
+    const name = el('name');
+    const gone = el('Move together', false);
+    const newLine = el('New line');
+    const shape = el('Shape');
+    const addSquads = el('Add squads');
+    const clear = el('Clear');
+    parent.insertBefore(addSquads, clear); // the template's own place for it: after Shape, before Clear.
+    const children = [name, gone, newLine, shape, clear, addSquads];
+    const current = children.indexOf(addSquads);
+    const target = DomReorderTarget(addSquads, children.filter((c) => c !== addSquads), current);
+    expect(target).toBe(4);
+    children.splice(current, 1);
+    children.splice(target!, 0, addSquads);
+    expect(children.filter((c) => c.isConnected).map((c) => c.textContent)).toEqual(['name', 'New line', 'Shape', 'Add squads', 'Clear']);
   });
 });

@@ -26,6 +26,15 @@
  * plain append — construction order, which for a normal (non-permuted) template IS authored order — is
  * already correct. Nothing needs fixing again once the outlet renders: this function runs once, in
  * `ngOnInit`, and by then the array was never wrong.
+ *
+ * Drill Sentences lane JJ2, item 1 (a round 14 blind phone tester saw the drill editor's selection bar read
+ * "Shape · Add squads" in one state and "Add squads · Shape" in another, though its template never moves
+ * them). The target used to be the COUNT of connected siblings that precede this node in the document, used
+ * as an index into the parent's whole Children array. That array also holds siblings whose element is gone (a
+ * button folded into "…" a moment ago, still in Children), so the count landed short of the slot it meant: with
+ * [name, Move together (gone), New line, Shape, Clear], a returning "Add squads" counted three connected siblings
+ * ahead of it and went to index 3, BEFORE Shape. The target is now a position in the array itself: just after
+ * the last connected sibling that precedes this node, wherever the gone ones sit.
  */
 export function DomReorderTarget(
   myEl: Element,
@@ -39,12 +48,13 @@ export function DomReorderTarget(
 ): number | null {
   if (!myEl.isConnected) return null;
   let target = 0;
-  for (const sibEl of otherSiblingHosts) {
+  otherSiblingHosts.forEach((sibEl, i) => {
     // Only order against siblings still in the DOM; a leaving node's element may be detached and would
     // compare as disconnected (and, before this node connected, every sibling mounted alongside it is
-    // "disconnected" too — the case this whole function exists for).
-    if (!sibEl || !sibEl.isConnected) continue;
-    if (myEl.compareDocumentPosition(sibEl) & Node.DOCUMENT_POSITION_PRECEDING) target++;
-  }
+    // "disconnected" too — the case this whole function exists for). A gone sibling keeps its place in the
+    // array, so the target is counted in the array's own positions, never in connected siblings alone.
+    if (!sibEl || !sibEl.isConnected) return;
+    if (myEl.compareDocumentPosition(sibEl) & Node.DOCUMENT_POSITION_PRECEDING) target = i + 1;
+  });
   return target !== currentIndex ? target : null;
 }

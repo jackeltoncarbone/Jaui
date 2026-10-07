@@ -291,8 +291,10 @@ export type JivOp =
   | { K: 'watch-rect'; Id: number; Watch: boolean }
   /** Reorder a child within its parent's Children array. Used by Jwift
    *  Toolbar (compact slot pushed to front), drag-reorder, etc. — any
-   *  consumer that previously did `Node.Children.unshift(...)` directly. */
-  | { K: 'move-child'; ParentId: number; ChildId: number; NewIndex: number }
+   *  consumer that previously did `Node.Children.unshift(...)` directly.
+   *  `AfterId` is the sibling it now follows, null for the first slot: a sibling, never an index, since the
+   *  worker still holds leaving siblings the main thread's mirror has let go (`JivHandle.RequestLeave`). */
+  | { K: 'move-child'; ParentId: number; ChildId: number; AfterId: number | null }
   /** Promote an existing Jiv to a Janvas + bind a registered worker-side
    *  renderer factory to it. The factory is looked up in the worker's
    *  JanvasRendererRegistry (populated at worker boot by show-studio's

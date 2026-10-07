@@ -291,7 +291,12 @@ export class JivHandle {
    *  the local mirror and posts a `move-child` op so the worker's tree
    *  matches. Used by Jwift Toolbar (compact slot to leading position),
    *  drag-reorder, and any consumer that previously mutated
-   *  `Node.Children.unshift(...)` directly. */
+   *  `Node.Children.unshift(...)` directly.
+   *
+   *  The op names the sibling the child now follows (`AfterId`, null for the first slot), never an index:
+   *  the worker's Children still hold a leaving sibling until its fade settles, and this mirror does not
+   *  (`RequestLeave`), so one index means two different slots on the two sides. Drill Sentences lane JJ2,
+   *  item 1: the drill editor's "Add squads" came back BEFORE its "Shape" after a fold that way. */
   MoveChildToIndex = (child: JivHandle, newIndex: number): void => {
     const cur = this.Children.indexOf(child);
     if (cur < 0) return;
@@ -299,7 +304,7 @@ export class JivHandle {
     const idx = Math.max(0, Math.min(this.Children.length, newIndex));
     this.Children.splice(idx, 0, child);
     this._bridge.Enqueue({
-      K: 'move-child', ParentId: this.Id, ChildId: child.Id, NewIndex: idx,
+      K: 'move-child', ParentId: this.Id, ChildId: child.Id, AfterId: idx > 0 ? this.Children[idx - 1].Id : null,
     });
   };
 
@@ -311,8 +316,14 @@ export class JivHandle {
     this._markDirty();
   };
 
-  /** Soft-destroy: trigger the Presence fade-out on the worker. */
+  /** Soft-destroy: trigger the Presence fade-out on the worker. The worker keeps the node in its parent
+   *  until the fade settles; this mirror lets it go at once (Drill Sentences lane JJ2, item 1), so a sibling
+   *  that mounts meanwhile orders itself among the siblings that stay, and `Children` never fills up with
+   *  every node that ever left. */
   RequestLeave = (): void => {
+    const siblings = this.Parent?.Children;
+    const i = siblings ? siblings.indexOf(this) : -1;
+    if (siblings && i >= 0) siblings.splice(i, 1);
     this._bridge.Enqueue({ K: 'leave', Id: this.Id });
   };
 
