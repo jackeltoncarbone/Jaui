@@ -19,7 +19,8 @@ import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
-import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassIsLens, GlassIsActiveLens } from './Glass.Pipeline';
+import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens } from './Glass.Pipeline';
+import { GlassFaceExclusion, PlateSyncRects, type PlateRect } from './Glass.Plate';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
   Vibrancy, VibrancyBlendOf, VibrancyGateLine, VibrancyGraded, VibrancyInkScale, VibrancyIsActive,
@@ -2963,6 +2964,8 @@ export class Canvas implements DirtyTracker {
     // Track whether we've built a blur for the current snapshot
     let lastBackdrop: GpuTextureHandle | null = null;
     let lastBaseFrostLod: number = 0;
+    // Glass never samples glass (`Core/Glass.Plate.ts`): the faces drawn so far this frame, which no later sync takes.
+    this._glassFaces.length = 0;
     // THE SCROLL EDGE'S BACKDROP, for the glass inside it. A scroll edge strip (`ProgressiveBlurKind:
     // ScrollEdge`) builds a sharp-rooted pyramid of the scene as it was BEFORE the strip dims and blurs it,
     // and a bar floating in the strip samples that pyramid at its own frost instead of building one from
@@ -3726,6 +3729,11 @@ export class Canvas implements DirtyTracker {
         // different axes and vanishingly unlikely to both be authored on one node.
         const scoped = below === null && node.RenderStyle.BackdropScope !== 'Page'
           ? scopedBackdrop(node, region, plan.Radius, plan.MaxLod) : null;
+        // GLASS NEVER SAMPLES GLASS (`Core/Glass.Plate.ts`): a glass face's backdrop is the plate, the scene with no
+        // earlier glass face in it, brought up to date over this surface's region first. A flat backdrop panel (a
+        // vibrancy lift on a menu row) still reads the scene as drawn: it treats the glass it sits on.
+        const glassFace = _isGlass(material) && below === null && scoped === null && !cardOpen;
+        const plate = glassFace ? this._syncPlate(region) : null;
         if (scoped !== null) {
           // The scoped build already IS the final pyramid (capture, resolve, ComputeBlur,
           // GenerateBlurMipmap, cached under READER_SCOPED) — none of the Page decision tree below
@@ -3787,7 +3795,8 @@ export class Canvas implements DirtyTracker {
           // A snapshot binds its copy target, so whatever backdrop this surface takes below, the walk must
           // rebind the scene before it draws; a branch that builds nothing would otherwise paint off screen.
           const snapTaken = below === null && instFrostLod < SCENE_TAP_FROST_LOD;
-          sceneSnap = below !== null ? below : snapTaken ? r.SnapshotScreen(region) : null;
+          // A glass face's sharp tap is the plate, as its pyramid is.
+          sceneSnap = below !== null ? below : snapTaken ? plate ?? r.SnapshotScreen(region) : null;
           this._opMs.Snap += performance.now() - _tSnap;
           let leftScene = snapTaken;
           // See the rim site: a snapshot is a scene READ and stays in the walk, so under
@@ -3822,7 +3831,7 @@ export class Canvas implements DirtyTracker {
           //
           // It is asked BEFORE `preFill` rather than after, and the flag parse refuses
           // `?blur-first` and `?blur-phased` by name, so the two can never both answer.
-          const groupFill = below === null && this._glassGroup ? this._glassGroupTake(node, region, w, h, dt) : null;
+          const groupFill = below === null && this._glassGroup ? this._glassGroupTake(node, region, w, h, dt, glassFace) : null;
           if (groupFill !== null) {
             lastBackdrop = groupFill;
             // `?blur-cache`: a group's pyramid is built over the union of its members at the first
@@ -3849,7 +3858,7 @@ export class Canvas implements DirtyTracker {
             const separable = this._maySeparable(plan);
             lastBackdrop = this._bcBuild(node, READER_FILL, region, plan.Radius, plan.MaxLod, presample, separable, w, h, () => {
               const _tBlur = performance.now();
-              const built = r.ComputeBlur(below ?? r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
+              const built = r.ComputeBlur(below ?? plate ?? r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
               const _tMip = performance.now();
               this._opMs.Blur += _tMip - _tBlur;
               r.GenerateBlurMipmap(plan.MaxLod);
@@ -3873,7 +3882,9 @@ export class Canvas implements DirtyTracker {
         // bound and there is no feedback loop to dodge.
         let shadowBackdrop: ShadowBackdrop | undefined;
         const _rs = node.RenderStyle;
-        const _shadowScene = sceneSnap ?? r.SceneTexture;
+        const _shadowScene = sceneSnap ?? plate ?? r.SceneTexture;
+        // This face is drawn next: no later glass takes its box, or its shadow's reach, from the scene.
+        if (plate !== null) this._noteGlassFace(node, eff, px, py, pw, ph, region);
         const preShadow = this._phasedWalk ? this._phasedShadow.get(node) : undefined;
         // `?shadow-probe=group`: measured at the group's capture, beside its one build. See
         // `_shadowProbe` for why that reads the same texels the probe below would read here.
@@ -6992,8 +7003,29 @@ export class Canvas implements DirtyTracker {
    *  reached outside its own group's pyramid would sample a clamped edge texel and read as a
    *  smear rather than as a crash. It falls back to its own build and says so on the gate.
    */
+  /** The glass faces drawn so far this frame, as each one's exclusion (`GlassFaceExclusion`), device px. */
+  private _glassFaces: PlateRect[] = [];
+
+  /** Brings the plate up to date over `region` less every earlier glass face, and returns it (`SyncPlate`). Null off
+   *  the WebGL2 renderer, where every backdrop reads the scene as drawn. */
+  private _syncPlate = (region: PlateRect): GpuTextureHandle | null => {
+    const r = this._renderer;
+    if (!(r instanceof WebGL2Renderer) || r.CardActive) return null;
+    return r.SyncPlate(PlateSyncRects(region, this._glassFaces));
+  };
+
+  /** Keeps a glass face out of every later sync: its box and its drop shadow's reach, within the region it synced. */
+  private _noteGlassFace = (
+    node: Jiv, eff: Mat2x3, px: number, py: number, pw: number, ph: number, region: PlateRect,
+  ): void => {
+    const shadowPx = GlassShadowRadius(JivGlassSpanOf(node, eff)) * this._dpr;
+    const exclusion = GlassFaceExclusion({ x: px, y: py, w: pw, h: ph }, shadowPx, region);
+    if (exclusion !== null) this._glassFaces.push(exclusion);
+  };
+
   private _glassGroupTake = (
     node: Jiv, region: { x: number; y: number; w: number; h: number }, w: number, h: number, dt: number,
+    glassFace: boolean,
   ): GpuTextureHandle | null => {
     const g = this._glassGroups.get(node);
     if (g === undefined) return null;
@@ -7012,9 +7044,11 @@ export class Canvas implements DirtyTracker {
       r.NoteGroupMember();
       return have;
     }
+    // The group's glass reads the plate over its whole union (`Core/Glass.Plate.ts`), as a lone glass face does.
+    const source = (glassFace ? this._syncPlate(g.Plan.Region) : null) ?? r.SceneTexture;
     const t0 = performance.now();
     const handle = r.ComputeBlurGroup(
-      r.SceneTexture, w, h, g.Radius, g.Plan.Region, g.Plan.K, g.Members.length,
+      source, w, h, g.Radius, g.Plan.Region, g.Plan.K, g.Members.length,
     );
     const t1 = performance.now();
     // Every member is a `MaxLod == 0` consumer -- `_planGlassGroups` refuses the rest -- so this
@@ -7026,7 +7060,7 @@ export class Canvas implements DirtyTracker {
     this._opMs.Mip += performance.now() - t1;
     // `?shadow-probe=group`: every member's probe, here, where the build has just ended the scene's
     // encoder and before any member paints. The batch rebinds the scene itself.
-    if (this._shadowProbe !== 'group' || !this._glassGroupProbe(r, g, handle, dt, w, h)) r.RebindSceneTarget();
+    if (this._shadowProbe !== 'group' || !this._glassGroupProbe(r, g, handle, source, dt, w, h)) r.RebindSceneTarget();
     for (const m of g.Members) this._glassGroupHandles.set(m, handle);
     const st = this._glassGroupStats;
     st.Builds++;
@@ -7046,7 +7080,7 @@ export class Canvas implements DirtyTracker {
    *
    *  False when no member qualified, so the caller still owes the scene its rebind. */
   private _glassGroupProbe = (
-    r: WebGL2Renderer, g: GlassGroup, handle: GpuTextureHandle, dt: number, w: number, h: number,
+    r: WebGL2Renderer, g: GlassGroup, handle: GpuTextureHandle, scene: GpuTextureHandle, dt: number, w: number, h: number,
   ): boolean => {
     const d = this._dpr;
     const probes: ShadowProbe[] = [];
@@ -7066,7 +7100,7 @@ export class Canvas implements DirtyTracker {
       nodes.push(g.Members[i]);
     }
     if (probes.length === 0) return false;
-    const slots = r.MeasureShadowBackdrops(probes, handle, r.SceneTexture, dt);
+    const slots = r.MeasureShadowBackdrops(probes, handle, scene, dt);
     for (let i = 0; i < nodes.length; i++) {
       if (slots[i] < 0) continue;
       this._groupShadow.set(nodes[i], { Slot: slots[i], Rect: probes[i].Rect });

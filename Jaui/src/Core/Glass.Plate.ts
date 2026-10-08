@@ -1,0 +1,69 @@
+/**
+ * GLASS NEVER SAMPLES GLASS (Drill Sentences lane WW1, follow up three). Pure, so the rule is spec'd (`Glass.Plate.test.ts`).
+ *
+ * Jack: "we keep stacking them and they keep getting more grey and like darker and more opaque". Measured live on a
+ * phone: the field rgb(71, 86, 54), the sheet over it rgb(35, 41, 30), a menu over the sheet rgb(27, 30, 26). Every glass
+ * surface built its backdrop from the scene as painted so far, so a menu over the sheet blurred and tinted the sheet's
+ * already blurred, already tinted face, and each layer darkened and greyed the one below. In iOS 26 glass cannot sample
+ * glass: a menu over a sheet reads as one layer of glass over the content, the same as the sheet itself.
+ *
+ * So the walk keeps a PLATE: the scene as it stands with no glass face in it. Before a glass surface draws, the plate is
+ * brought up to date from the scene over the surface's sample region, everywhere except where an earlier glass face
+ * stands (`PlateSyncRects`); there the plate keeps what was under that face when it drew. The surface's backdrop (its
+ * pyramid, its sharp tap, its shadow probe) is built from the plate. A glass face excludes its box and the reach of its
+ * own drop shadow (`GlassFaceExclusion`), held to the region it synced, so no lower glass's face, rim or shadow is ever
+ * read by an upper one: where glass touches glass the upper simply replaces the lower, one rim and one shadow.
+ *
+ * THE ONE LIMIT. Content drawn ON a glass face after it (a sheet's own sentences) is under that face's exclusion, so a
+ * menu over the sheet does not see the sentences beneath it, only the field. At the panel glass's frost and tint those
+ * words read as a faint smear at most, and dropping them is what makes the menu over the sheet the menu over the field.
+ */
+
+/** A rect in device px, y down. */
+export interface PlateRect {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+}
+
+/** The most pieces one sync is cut into. Past it the remaining exclusions are not cut (they are taken from the scene). */
+export const PLATE_PIECES_MAX = 64;
+
+const Intersect = (a: PlateRect, b: PlateRect): PlateRect | null => {
+  const x0 = Math.max(a.x, b.x), y0 = Math.max(a.y, b.y);
+  const x1 = Math.min(a.x + a.w, b.x + b.w), y1 = Math.min(a.y + a.h, b.y + b.h);
+  return x1 > x0 && y1 > y0 ? { x: x0, y: y0, w: x1 - x0, h: y1 - y0 } : null;
+};
+
+/** `r` less `cut`: up to four rects (above, below, left, right of the cut), or `r` itself when they miss. */
+const Subtract = (r: PlateRect, cut: PlateRect): PlateRect[] => {
+  const hit = Intersect(r, cut);
+  if (hit === null) return [r];
+  const out: PlateRect[] = [];
+  if (hit.y > r.y) out.push({ x: r.x, y: r.y, w: r.w, h: hit.y - r.y });
+  if (hit.y + hit.h < r.y + r.h) out.push({ x: r.x, y: hit.y + hit.h, w: r.w, h: r.y + r.h - (hit.y + hit.h) });
+  if (hit.x > r.x) out.push({ x: r.x, y: hit.y, w: hit.x - r.x, h: hit.h });
+  if (hit.x + hit.w < r.x + r.w) out.push({ x: hit.x + hit.w, y: hit.y, w: r.x + r.w - (hit.x + hit.w), h: hit.h });
+  return out;
+};
+
+/** What of `region` the plate takes from the scene before a glass surface draws: the region less every earlier glass
+ *  face's exclusion, as disjoint rects. */
+export function PlateSyncRects(region: PlateRect, faces: readonly PlateRect[]): PlateRect[] {
+  let pieces: PlateRect[] = region.w > 0 && region.h > 0 ? [region] : [];
+  for (const face of faces) {
+    const next: PlateRect[] = [];
+    for (const p of pieces) for (const q of Subtract(p, face)) next.push(q);
+    if (next.length > PLATE_PIECES_MAX) break;
+    pieces = next;
+  }
+  return pieces;
+}
+
+/** What a glass face keeps out of every later sync: its box grown by its drop shadow's reach (`shadowPx`), held to the
+ *  region it synced, so all of it holds what lay under the face when it drew. */
+export function GlassFaceExclusion(face: PlateRect, shadowPx: number, synced: PlateRect): PlateRect | null {
+  const grown: PlateRect = { x: face.x - shadowPx, y: face.y - shadowPx, w: face.w + 2 * shadowPx, h: face.h + 2 * shadowPx };
+  return Intersect(grown, synced);
+}

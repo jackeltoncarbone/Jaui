@@ -3872,6 +3872,40 @@ export class WebGL2Renderer implements Renderer {
   /** A canvas-sized texture the engine drew itself (an active lens's lifted items), as a handle screen UV addresses. */
   WrapTexture = (tex: WebGLTexture): GpuTextureHandle => _wrap(tex);
 
+  /** THE GLASS-FREE PLATE (`Core/Glass.Plate.ts`): the scene as it stands with no glass face in it, canvas sized and
+   *  screen addressed like `_snapshot`, and its own texture so no other read overwrites it. */
+  private _plate: _SceneCopy = { Tex: null, Fbo: null, W: 0, H: 0 };
+
+  /** Brings the plate up to date from the scene over `rects` (device px, y down: `PlateSyncRects`, the region a glass
+   *  surface samples less every earlier glass face) and hands it back as that surface's backdrop source. Outside the
+   *  rects it keeps what earlier syncs this frame put there: what lay under each glass face when it drew. Rebinds the
+   *  scene. Not for a card composite, whose surfaces read their card (`CardActive`). */
+  SyncPlate = (rects: readonly { x: number; y: number; w: number; h: number }[]): GpuTextureHandle => {
+    const gl = this._gl;
+    if (this._cardQueue.length !== 0) this._drainCards(true);
+    const plate = this._ensureCopy(this._plate);
+    if (rects.length > 0) {
+      this._sceneLedger.NoteRead();
+      const scissorOn = gl.isEnabled(gl.SCISSOR_TEST);
+      if (scissorOn) gl.disable(gl.SCISSOR_TEST);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this._sceneFbo.Framebuffer);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this._plate.Fbo);
+      this._tgt('snapshot');
+      const W = this._width, H = this._height;
+      for (const r of rects) {
+        // y=0 at the top in, GL's bottom origin out; the same rect both sides, so each texel keeps its place.
+        const x0 = Math.max(0, Math.floor(r.x));
+        const x1 = Math.min(W, Math.ceil(r.x + r.w));
+        const y0 = Math.max(0, Math.floor(H - (r.y + r.h)));
+        const y1 = Math.min(H, Math.ceil(H - r.y));
+        if (x1 > x0 && y1 > y0) gl.blitFramebuffer(x0, y0, x1, y1, x0, y0, x1, y1, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      }
+      if (scissorOn) gl.enable(gl.SCISSOR_TEST);
+    }
+    this.RebindSceneTarget();
+    return _wrap(plate);
+  };
+
   /** The scene as it stands now, over `scissor`, into the lens's own copy (`_below`): what lies under a lens's
    *  lifted content, taken before that content draws (Jwift/Apple/LiquidGlass.md 7.1, the BackdropView's read). */
   SnapshotBelow = (scissor: { x: number; y: number; w: number; h: number }): GpuTextureHandle => {

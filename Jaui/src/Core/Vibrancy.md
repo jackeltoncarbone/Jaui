@@ -56,7 +56,7 @@ The label levels are iOS 26's catalog colors, a color c at alpha a being amount 
 | `label` | `@JwiftVibrancyLabel`, `@JwiftVibrancyLabelCover` | 242, 0.95 | 0, 1 | Apple's own: white at 95% on dark glass, black on light (Core/Glass.md, labels). On glass that tracks its backdrop the ink follows the glass's appearance, not the theme. |
 | `secondaryLabel` | `@JwiftVibrancySecondaryLabel`, `...Cover` | 141, 0.6 | 36, 0.6 | iOS 26's catalog: (235, 235, 245) and (60, 60, 67) at 0.6 (Jwift/Apple/Sizing.md 4). |
 | `tertiaryLabel` | `@JwiftVibrancyTertiaryLabel`, `...Cover` | 70, 0.3 | 18, 0.3 | The same colors at 0.298. |
-| `quaternaryLabel` | none | (37, 0.16) | (11, 0.18) | The catalog's (Sizing.md 4); no Jwift class uses it yet. |
+| `quaternaryLabel` | `@JwiftVibrancyQuaternaryLabel`, `...Cover` | 37, 0.16 | 11, 0.18 | The catalog's (Sizing.md 4); `JwiftQuaternaryLabelVibrancy`. |
 | `separator` | `@JwiftVibrancySeparator`, `...Cover` | 33, 0.13 | -2, 0.11 | Separators on a macOS widget and a macOS menu. |
 | `fill` | `@JwiftVibrancyFill` | +30 | -20 | The selected Liquid Glass tab. The visionOS hover (+29) is this level, because Apple has no hover level. |
 | `secondaryFill` | `@JwiftVibrancySecondaryFill` | +18 | -12 | Three resting fills (16.7, 18 and 19.7). |
