@@ -290,4 +290,24 @@ describe('Text / intrinsic size integration', () => {
     expect(results.get(actions)!.Width).toBe(196);
     expect(results.get(btn1)!.Width).toBe(60);
   });
+
+  // Drill Sentences lane NN2, item 6 (a round 18 blind desktop tester: the problems list's rows stood at uneven
+  // heights). A menu row is a 40pt glyph and its label in a Row: the label wraps in what the glyph leaves, so its
+  // height is measured there, never against the whole row.
+  it('text in a Row wraps in the width its siblings leave it', () => {
+    const height = (words: string, glyph: boolean): number => {
+      const row = new Jiv({ Width: 400, Height: 200, Layout: { Direction: 'Row', Align: 'Start' } });
+      if (glyph) row.AddChild(new Jiv({ ChildLayout: { Width: 40, Height: 20 } }));
+      const label = new Jiv({ ChildLayout: { FlexGrow: 1 } });
+      label.Text = words;
+      label.TextMeasurement = { Width: words.length * 8, MinWidth: 8, Height: 20, Lines: [words] };
+      row.AddChild(label);
+      ComputeIntrinsicSizes(row);
+      return label.IntrinsicHeight;
+    };
+    // 46 characters, 368 px at the test canvas's 8 a character: one line in 400, two in the 360 beside a glyph.
+    const sentence = '12a takes big steps in the stack up in M13-20.';
+    expect(height(sentence, false)).toBe(20);
+    expect(height(sentence, true)).toBeGreaterThan(20);
+  });
 });

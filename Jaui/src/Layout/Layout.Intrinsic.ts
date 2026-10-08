@@ -113,7 +113,11 @@ const _compute = (node: Element): void => {
     // text inside a flex-shrunk container measures as 1 line at viewport
     // width, the box gets sized to 1 line, and the actual rendering wraps
     // many lines past the box.
-    const ancestorBudget = _textWrapBudget(node, true, ctx);
+    // In a Row parent the words wrap in what the siblings leave (`_rowSiblingsMain`), the width the solver hands
+    // them. Drill Sentences lane NN2, item 6 (a round 18 blind desktop tester: the problems list's rows stood at
+    // uneven heights): a menu row's label, beside its 40pt glyph, measured against the whole row, so a sentence
+    // a little wider than the room beside the glyph sized its row for one line while it drew on two.
+    const ancestorBudget = _textWrapBudget(node, true, ctx) - _rowSiblingsMain(node, ctx);
     const wrapBudget = Math.min(
       explicitW !== null ? explicitW : Infinity,
       _boundOf(node.ChildLayout.MaxWidth, ctx, 'W', true),
