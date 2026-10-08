@@ -33,7 +33,21 @@ export interface PredicateElement {
   readonly States: ReadonlySet<string>;
   /** Author-set runtime style vars (`@Name`), read by `Var` predicates. */
   readonly Vars?: ReadonlyMap<string, string | number | boolean>;
+  /** Whether this node is authored as glass (its base `Glass` is not None), read by the `InGlass` state. */
+  readonly IsGlass?: boolean;
 }
+
+/** THE ENGINE'S ANCESTRY STATE (Drill Sentences lane WW1): true while any ancestor of the node is authored as glass. A
+ *  predicate names it like any state, `Foo:InGlass { … }`, and the engine answers it from the live tree rather than from
+ *  anything an author sets: iOS 26 puts no glass on glass, so a glass control inside a glass container wears a vibrant
+ *  fill there (Jwift.Glass.jss, `JwiftGlass:InGlass`) and stays glass where it floats over content. */
+export const IN_GLASS_STATE = 'InGlass';
+
+/** Whether any ancestor of `el` is authored as glass. */
+const _inGlass = (el: PredicateElement | null | undefined): boolean => {
+  for (let n = el?.Parent ?? null; n !== null; n = n.Parent) if (n.IsGlass) return true;
+  return false;
+};
 
 /** Evaluation context: the element's live states + the current viewport
  *  (CSS px) for `Width`/`Height` comparisons, plus the element itself for
@@ -95,7 +109,7 @@ const _scopeMetric = (
 
 const _eval = (expr: PredicateExpr, ctx: PredicateContext): boolean => {
   switch (expr.Kind) {
-    case 'State': return ctx.States.has(expr.Name);
+    case 'State': return expr.Name === IN_GLASS_STATE ? _inGlass(ctx.Element) : ctx.States.has(expr.Name);
     case 'Var': {
       const v = ctx.Vars?.get(expr.Name);
       if (expr.Op === undefined) {

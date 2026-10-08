@@ -9,7 +9,7 @@ import { Element, type CursorStyle, type PanClaim } from '../Element/Element';
 import { DirtyFlag } from '../Core/Types';
 import type { PredicateStyle, PredicateExpr } from '../Jss/Jss.Parser';
 import {
-  EvaluatePredicate, PredicateViewportWidth, PredicateViewportHeight,
+  EvaluatePredicate, IN_GLASS_STATE, PredicateViewportWidth, PredicateViewportHeight,
   type PredicateContext, type PredicateElement,
 } from '../Jss/Jss.Predicate';
 import { AssignStyleWithFilterMerge } from '../Core/Filter.Parse';
@@ -488,6 +488,9 @@ export class Jiv extends Element {
     if (!this._hasScopedPredicates) return;
     this.RecomputeResponsiveLayout();
     this.RecomputeResponsiveText();
+    // An ancestry predicate (`Ancestor(…)`, `InGlass`) may resolve differently under its new parents: a popover
+    // teleported out of the panel that declared it is no longer inside that glass.
+    this.MarkStyleDirty();
   };
 
   RecomputeResponsiveLayout = (): boolean => {
@@ -573,7 +576,8 @@ const _EMPTY_STATES: ReadonlySet<string> = new Set();
  *  element-adapter allocation. */
 const _predicateNeedsElement = (expr: PredicateExpr): boolean => {
   switch (expr.Kind) {
-    case 'State':    return false;
+    // The engine's ancestry state (`InGlass`) is read off the tree.
+    case 'State':    return expr.Name === IN_GLASS_STATE;
     case 'Var':      return false;
     case 'Compare':  return expr.Scope !== undefined;
     case 'Ancestor': return true;
@@ -615,6 +619,7 @@ const _predicateView = (el: Element): PredicateElement => ({
   get Classes() { return (el as { Classes?: readonly string[] }).Classes ?? []; },
   get States() { return (el as { StateSet?: ReadonlySet<string> }).StateSet ?? _EMPTY_STATES; },
   get Vars() { return (el as { VarMap?: ReadonlyMap<string, string | number | boolean> }).VarMap; },
+  get IsGlass() { return ((el as { Style?: { Glass?: string } }).Style?.Glass ?? 'None') !== 'None'; },
 });
 
 const _wrapPredicateElement = (el: Element | null): PredicateElement | null => {

@@ -3731,8 +3731,10 @@ export class Canvas implements DirtyTracker {
           ? scopedBackdrop(node, region, plan.Radius, plan.MaxLod) : null;
         // GLASS NEVER SAMPLES GLASS (`Core/Glass.Plate.ts`): a glass face's backdrop is the plate, the scene with no
         // earlier glass face in it, brought up to date over this surface's region first. A flat backdrop panel (a
-        // vibrancy lift on a menu row) still reads the scene as drawn: it treats the glass it sits on.
-        const glassFace = _isGlass(material) && below === null && scoped === null && !cardOpen;
+        // vibrancy lift on a menu row) still reads the scene as drawn: it treats the glass it sits on. So does clear
+        // glass, a lens (a held toggle's knob): it refracts what it sits on, its track and the panel under it.
+        const glassFace = _isGlass(material) && node.RenderStyle.GlassVariant !== 'Clear'
+          && below === null && scoped === null && !cardOpen;
         const plate = glassFace ? this._syncPlate(region) : null;
         if (scoped !== null) {
           // The scoped build already IS the final pyramid (capture, resolve, ComputeBlur,
