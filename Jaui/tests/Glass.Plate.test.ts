@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { GlassFaceExclusion, PLATE_PIECES_MAX, PlateSyncRects, type PlateRect } from '../src/Core/Glass.Plate';
+import { ResolveStyle, SEED_CONTEXT } from '../src/Core/Style.Resolver';
+import { DefaultJivStyle } from '../src/Jiv/Jiv.Defaults';
+
+describe('GlassReads: what a glass face reads', () => {
+  it('defaults to the content under every glass, and resolves Surface for glass that reads what it sits on', () => {
+    expect(ResolveStyle({ ...DefaultJivStyle }, SEED_CONTEXT).GlassReads).toBe('Content');
+    expect(ResolveStyle({ ...DefaultJivStyle, GlassReads: 'Surface' }, SEED_CONTEXT).GlassReads).toBe('Surface');
+  });
+
+  it('throws on anything else, by name', () => {
+    expect(() => ResolveStyle({ ...DefaultJivStyle, GlassReads: 'Scene' }, SEED_CONTEXT)).toThrow(/GlassReads/);
+  });
+});
 
 // Glass never samples glass: the plate a glass surface reads is the scene less every earlier glass face.
 

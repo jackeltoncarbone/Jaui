@@ -290,6 +290,10 @@ export interface JivStyle {
   /** `GlassBleed: Auto | None`: the edge bleed's reach outward, `inputBleedAmount` and `Height` (LiquidGlass.md 3.4).
    *  None zeroes both and keeps its blur and opacity, as DesignLibrary does when Layers lacks 0x40 (Sheets.md). */
   GlassBleed: string;
+  /** `GlassReads: Content | Surface`: what a glass face's backdrop is (Core/Glass.Plate.ts). Content (the default) is the
+   *  content under every glass, so a glass over glass reads as one layer of glass. Surface is what it sits on, the glass
+   *  under it included: a sheet's own bar buttons over the sheet, a held toggle's clear knob over its track. */
+  GlassReads: string;
   /** `GlassFrost: Inherit | Automatic | Reduced | None`: DesignLibrary's `GlassMaterialProvider.Frost`, the recipe's
    *  blur class (Jwift/Apple/LiquidGlass.md 3.2): Automatic ramps BlurRadius 1.33 to 4 pt on a quarter-scale backdrop,
    *  Reduced is 0.667 pt on a half-scale one, None no blur. Inherited, as UIKit's `GlassFrostTrait`: a bar over
@@ -482,6 +486,8 @@ export interface JivRenderStyle {
   /** Resolved `GlassOuterRefraction` and `GlassBleed`: true for Auto (Apple's reach), false for None. Snap. */
   GlassOuterRefraction: boolean;
   GlassBleed: boolean;
+  /** Resolved `GlassReads`. Snaps. */
+  GlassReads: 'Content' | 'Surface';
   /** Resolved `GlassFrost` declaration: -1 Inherit, 0 Automatic, 1 Reduced, 2 None. The cascade's result is
    *  `EffectiveGlassFrost` on the node. Snaps. */
   GlassFrost: number;

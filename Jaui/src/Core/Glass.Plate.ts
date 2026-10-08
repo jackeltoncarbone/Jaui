@@ -14,6 +14,10 @@
  * own drop shadow (`GlassFaceExclusion`), held to the region it synced, so no lower glass's face, rim or shadow is ever
  * read by an upper one: where glass touches glass the upper simply replaces the lower, one rim and one shadow.
  *
+ * A glass may read its SURFACE instead (`GlassReads: Surface`): a sheet's own bar buttons stand in the sheet's toolbar
+ * layer over its glass, as iOS 26 draws them, and a held toggle's clear knob refracts its track. Those read the scene as
+ * drawn, the glass under them included.
+ *
  * THE ONE LIMIT. Content drawn ON a glass face after it (a sheet's own sentences) is under that face's exclusion, so a
  * menu over the sheet does not see the sentences beneath it, only the field. At the panel glass's frost and tint those
  * words read as a faint smear at most, and dropping them is what makes the menu over the sheet the menu over the field.

@@ -272,6 +272,13 @@ const _resolveGlassSwitch = (name: string, raw: string | undefined, ctx: Resolve
   throw new Error(`[Jaui] ${name}: "${v}" -- expected Auto or None.`);
 };
 
+/** `GlassReads: Content | Surface` (Core/Glass.Plate.ts). */
+const _resolveGlassReads = (raw: string | undefined, ctx: ResolveContext): 'Content' | 'Surface' => {
+  const v = ResolveTernary(raw ?? 'Content', ctx).trim();
+  if (v === 'Content' || v === 'Surface') return v;
+  throw new Error(`[Jaui] GlassReads: "${v}" -- expected Content or Surface.`);
+};
+
 const _BACKDROP_SCOPES = new Set<BackdropScopeKind>(['Page', 'Parent', 'Root']);
 /** `BackdropScope: Page | Parent | Root` (Core/Glass.Jss.md 5). Per-node, never inherits — an
  *  unauthored value is the property's own default (`Page`), not an ancestor's. */
@@ -482,6 +489,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     GlassBlur: _resolveGlassBlur(s.GlassBlur, ctx),
     GlassOuterRefraction: _resolveGlassSwitch('GlassOuterRefraction', s.GlassOuterRefraction, ctx),
     GlassBleed: _resolveGlassSwitch('GlassBleed', s.GlassBleed, ctx),
+    GlassReads: _resolveGlassReads(s.GlassReads, ctx),
     GlassFrost: _resolveGlassFrost(s.GlassFrost, ctx),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),
