@@ -606,7 +606,16 @@ export class MainBridge {
   private _wireDomEvents = (): void => {
     const c = this.Canvas;
     c.style.touchAction = 'none';
-    c.tabIndex = 0; // keyboard focusable
+    // `-1`, not `0`: the canvas still takes real DOM focus (`Jaui.ts`'s own pointerdown handler calls
+    // `SetFocusedScroller` so a click inside a scroll container targets it with the scroll keys — "the
+    // old DOM app bought this with tabindex='0' on every scroll box; the canvas has to say it", same
+    // file) but it is not itself a stop in SEQUENTIAL Tab navigation — a generic content surface isn't
+    // one in any native app either, only the controls on it are. Drill Sentences lane AB2 found this
+    // live: with `0` here, Tab from page load (and every Tab after) landed on the canvas and stayed
+    // there, because it was the only real Tab stop that existed at all; Jwift's own controls are real
+    // stops now (`JivHost._syncFocusableBox`), and `-1` lets Tab reach past the canvas to the first one
+    // instead of resting on it.
+    c.tabIndex = -1;
 
     // Cache page rect on resize / scroll so coordinate translation is
     // correct even when the canvas isn't anchored at (0,0).
