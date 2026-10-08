@@ -3,7 +3,9 @@ precision highp float;
 
 // Measures the backdrop under one glass surface into its texel of the state row, once per frame: G is the
 // mean luma under its footprint, which picks the glass's appearance (Core/Glass.md) and tracks thin glass's
-// face. The renderer blends each write into the previous value, so the reading eases over time.
+// face; R is the luma's spread there (its standard deviation, times GLASS_ADAPT_SPREAD_SCALE), how busy what
+// shows through is, which the glass adapts to (Core/Glass.Pipeline.ts, GlassAdaptOf). The renderer blends each
+// write into the previous value, so the reading eases over time.
 
 // Kept bound by the renderer beside the pyramid; the mean reads the pyramid alone.
 uniform sampler2D u_Scene;
@@ -25,14 +27,20 @@ const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 // regular pattern (lines of text, a grid of cells) cannot fall between them.
 const int PROBE_TAPS = 96;
 const vec2 PROBE_R2 = vec2(0.7548776662, 0.5698402910);
+const float GLASS_ADAPT_SPREAD_SCALE = 4.0;
 
 void main() {
     float sum = 0.0;
+    float squares = 0.0;
     for (int k = 0; k < PROBE_TAPS; k++) {
         vec2 cell = fract(0.5 + float(k + 1) * PROBE_R2);
         vec2 uv = (u_Rect.xy + cell * u_Rect.zw) / u_Resolution;
         uv.y = 1.0 - uv.y;
-        sum += dot(textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, u_DetailLod).rgb, LUMA);
+        float y = dot(textureLod(u_Backdrop, uv * u_BackdropXf.xy + u_BackdropXf.zw, u_DetailLod).rgb, LUMA);
+        sum += y;
+        squares += y * y;
     }
-    fragColor = vec4(0.0, sum / float(PROBE_TAPS), 0.0, 1.0);
+    float mean = sum / float(PROBE_TAPS);
+    float spread = sqrt(max(0.0, squares / float(PROBE_TAPS) - mean * mean));
+    fragColor = vec4(clamp(spread * GLASS_ADAPT_SPREAD_SCALE, 0.0, 1.0), mean, 0.0, 1.0);
 }

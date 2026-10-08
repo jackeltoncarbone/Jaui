@@ -18,6 +18,9 @@
  * layer over its glass, as iOS 26 draws them, and a held toggle's clear knob refracts its track. Those read the scene as
  * drawn, the glass under them included.
  *
+ * A veil (`GlassSeesThrough`, a sheet's dimming view) is kept out of the plate the same way a glass face is: the plate
+ * takes what lies under it before it draws, so an alert's glass over the dim is the same glass as every popover's.
+ *
  * THE ONE LIMIT. Content drawn ON a glass face after it (a sheet's own sentences) is under that face's exclusion, so a
  * menu over the sheet does not see the sentences beneath it, only the field. At the panel glass's frost and tint those
  * words read as a faint smear at most, and dropping them is what makes the menu over the sheet the menu over the field.

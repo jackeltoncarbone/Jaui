@@ -490,6 +490,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     GlassOuterRefraction: _resolveGlassSwitch('GlassOuterRefraction', s.GlassOuterRefraction, ctx),
     GlassBleed: _resolveGlassSwitch('GlassBleed', s.GlassBleed, ctx),
     GlassReads: _resolveGlassReads(s.GlassReads, ctx),
+    GlassSeesThrough: s.GlassSeesThrough === 'true' || (s.GlassSeesThrough as unknown) === true,
     GlassFrost: _resolveGlassFrost(s.GlassFrost, ctx),
 
     Transform: ResolveTransform(ResolveTernary(s.Transform, ctx), ctx),

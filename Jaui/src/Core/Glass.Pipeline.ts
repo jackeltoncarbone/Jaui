@@ -13,6 +13,53 @@ export type GlassVariant = 'Regular' | 'Clear';
  *  source, so glass between the two (the 62 pt tab bar) keeps its settled face. */
 export const GLASS_TRACKS_LUMA_SPAN = 56;
 
+/**
+ * GLASS THAT ADAPTS TO WHAT IS UNDER IT (Drill Sentences lane WW1). Apple's regular material stays legible over busy
+ * content: over high contrast or bright content it frosts and darkens until nothing behind reads as a shape, and over a
+ * quiet one it stays clear. Ours reads the backdrop under each surface with its probe (Jiv.ShadowBackdrop.frag: G the
+ * mean luma, R the luma's spread at the glass's own frost, scaled by `GLASS_ADAPT_SPREAD_SCALE`), and the vertex stage
+ * turns that into one amount, 0 to 1 (`GlassAdaptOf`, mirrored in Jiv.Panel.vert): the spread past a quiet turf's,
+ * handed off by size so the large sheet keeps its look (a menu still adapts), or, on thin glass alone (a toast, a chip,
+ * the selection bar, a heading), a luma past the theme's comfortable band. Over an even backdrop a menu therefore reads
+ * exactly as the sheet does (GlassStack.Render.spec.ts). The fragment stage
+ * blurs up to `1 + GLASS_ADAPT_FROST` times its frost and moves a seeded glass's tint up to `GLASS_ADAPT_TINT_MAX`, never
+ * past it, so the glass never goes a flat grey.
+ */
+export const GLASS_ADAPT_SPREAD_SCALE = 4;
+/** The stored spread at which the glass starts to adapt and where it is fully adapted: a luma std dev of 0.0075 (a turf's
+ *  mowing stripes under the frost) and of 0.0225 (its yard numbers and lines under the frost). */
+export const GLASS_ADAPT_SPREAD = [0.03, 0.09] as const;
+/** The mean luma band past which dark glass darkens (bright content) and light glass lightens (dim content). */
+export const GLASS_ADAPT_LUMA_DARK = [0.45, 0.75] as const;
+export const GLASS_ADAPT_LUMA_LIGHT = [0.25, 0.55] as const;
+/** How much of the adaptation luma alone can ask for. */
+export const GLASS_ADAPT_LUMA_SHARE = 0.6;
+/** The span over which the busy backdrop's adaptation hands off to the large panel's own look, and the span over which
+ *  the glare's hands off to a panel's (the regular glass's `v` ramp), pt. */
+export const GLASS_ADAPT_SPAN = [200, 400] as const;
+export const GLASS_ADAPT_GLARE_SPAN = [64, 160] as const;
+/** At full adaptation the frost is this much more again, and a seeded tint reaches this alpha at most. */
+export const GLASS_ADAPT_FROST = 1.5;
+export const GLASS_ADAPT_TINT_MAX = 0.72;
+
+const _smooth = (e0: number, e1: number, x: number): number => {
+  const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
+
+/** The adaptation amount for a glass `span` pt across over a backdrop of stored spread `spread` and mean luma `mean`. */
+export const GlassAdaptOf = (spread: number, mean: number, span: number, dark: boolean): number => {
+  const busy = _smooth(GLASS_ADAPT_SPREAD[0], GLASS_ADAPT_SPREAD[1], spread);
+  const glare = dark ? _smooth(GLASS_ADAPT_LUMA_DARK[0], GLASS_ADAPT_LUMA_DARK[1], mean)
+    : 1 - _smooth(GLASS_ADAPT_LUMA_LIGHT[0], GLASS_ADAPT_LUMA_LIGHT[1], mean);
+  return Math.max(busy * (1 - _smooth(GLASS_ADAPT_SPAN[0], GLASS_ADAPT_SPAN[1], span)),
+    GLASS_ADAPT_LUMA_SHARE * glare * (1 - _smooth(GLASS_ADAPT_GLARE_SPAN[0], GLASS_ADAPT_GLARE_SPAN[1], span)));
+};
+
+/** A seeded glass's tint alpha at adaptation `adapt` (never lowered, never past `GLASS_ADAPT_TINT_MAX`). */
+export const GlassAdaptedTint = (alpha: number, adapt: number): number =>
+  alpha + (Math.max(alpha, GLASS_ADAPT_TINT_MAX) - alpha) * adapt;
+
 /** `u` ramps over S = 48..160 pt and `v` over 64..160 pt, S being the shape's minor dimension. */
 export const GlassSizeRamps = (span: number): { U: number; V: number } => ({
   U: Math.max(0, Math.min(1, (span - 48) / 112)),
@@ -129,7 +176,9 @@ export interface GlassBlurNeeds {
 export const GlassBlurNeedsOf = (span: number, dpr: number, variant: GlassVariant, lens: boolean, blur: number = 0,
   frost: number = GLASS_FROST_AUTOMATIC): GlassBlurNeeds => {
   const base = lens ? GlassNativeLod(0, variant) : GlassBodyLod(span, 0.5, dpr, variant, blur, frost);
-  let top = GlassBodyLod(span, 1, dpr, variant, blur, frost);
+  // Glass that can adapt (`GlassAdaptOf`) reads up to `1 + GLASS_ADAPT_FROST` times its body blur.
+  const adapts = !lens && span < GLASS_ADAPT_SPAN[1];
+  let top = GlassBodyLod(span, adapts ? 1 + GLASS_ADAPT_FROST : 1, dpr, variant, blur, frost);
   const sigmaPt = (lod: number): number => Math.pow(2, lod) / dpr;
   // The outer sample looks 0.2 S past the outline.
   let reach = 0.2 * span + 3 * sigmaPt(base);

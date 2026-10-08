@@ -49,6 +49,7 @@ export const DefaultJivStyle: JivStyle = {
   GlassOuterRefraction: 'Auto',
   GlassBleed: 'Auto',
   GlassReads: 'Content',
+  GlassSeesThrough: 'false',
   GlassFrost: 'Inherit',
   Transform: '',                         // empty = identity
   // Visual* — render-time, per-element. `VisualScale: '1'` is identity;

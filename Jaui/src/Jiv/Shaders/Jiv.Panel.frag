@@ -20,6 +20,7 @@ flat in vec4 v_Specular;       // rim amount, rim height (pt), chromaticAberrati
 flat in vec4 v_RimEdge;        // glass appearance (1 light), backdrop mean luma, lens magnification, lens ink
 flat in vec4 v_TouchGlow;      // the flex's little glow: centre (fraction of the box), diameter (CSS px), alpha
 flat in vec4 v_Outline;        // dispersion amount + angle, height + inset (packed), clipOffset, clipCount
+flat in float v_Adapt;         // how far the glass adapts to a busy or glaring backdrop, 0 to 1 (Jiv.Panel.vert)
 
 // ── MATERIAL_FLAT: the backdrop's whole apparatus is excluded, not branched over ──
 //
@@ -846,7 +847,8 @@ void main() {
             float lens = v_Refraction.w * glassiness;
             float innerShift = GlassInnerShift(d, glassSpan) * lens;
             float outerShift = glassOuterOff ? 0.0 : GlassShift(d, 0.2 * glassSpan, 0.125 * glassSpan) * lens;
-            float radius = GlassBlurRadius(glassSpan, glassClear, glassBlur, glassFrost);
+            // Over a busy or glaring backdrop the glass frosts further (Core/Glass.Pipeline.ts, GlassAdaptOf).
+            float radius = GlassBlurRadius(glassSpan, glassClear, glassBlur, glassFrost) * (1.0 + GLASS_ADAPT_FROST * v_Adapt);
             float innerLod = GlassNativeLod(radius * GlassBlurScale(d + innerShift, glassSpan), glassDpr, glassClear, glassFrost);
             vec2 innerOffset = nScreen * innerShift * glassDpr;
             // Dispersion, where a class asks for it (the moving selection lens): red at (1 + 0.2 ca) of the
@@ -869,7 +871,8 @@ void main() {
             }
             face = lensed;
             if (GlassSkips(GLASS_SKIP_GRADE)) {} else
-            face = GlassFace(lensed, glassSpan, glassClear, glassLight, v_RimEdge.y);
+            // A seeded glass is a panel at every size: the regular face, never the thin control's fit (Jiv.Panel.vert).
+            face = GlassFace(lensed, v_Tint.a > 0.001 ? max(glassSpan, GLASS_PANEL_FACE_SPAN) : glassSpan, glassClear, glassLight, v_RimEdge.y);
             // The edge bleed of regular glass from 64 pt: the backdrop 0.35 S outward, blurred at 0.35 S,
             // weighted toward the face's own darks on light glass and its lights on dark glass.
             if (ramps.y > 0.0 && glassClear < 1.0 && !GlassSkips(GLASS_SKIP_BLEED)) {
@@ -884,7 +887,8 @@ void main() {
             // A vibrancy that could not be drawn under the element (a press fill) rides the grade lanes.
             face = applyGrading(face, brightness, saturation, contrast);
             // .tint(color): the Background is the seed.
-            if (v_Tint.a > 0.001) face = mix(face, GlassTint(face, v_Tint.rgb), v_Tint.a);
+            // Over a busy or glaring backdrop a seeded glass leans on its tint, to GLASS_ADAPT_TINT_MAX at most.
+            if (v_Tint.a > 0.001) face = mix(face, GlassTint(face, v_Tint.rgb), GlassAdaptedTint(v_Tint.a, v_Adapt));
             // The holding tone: the interior at 97%, the outer one to two points at full.
             face = clamp(face * mix(1.0, 0.97, clamp(-1.0 - d, 0.0, 1.0)), 0.0, 1.0);
             }

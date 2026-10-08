@@ -294,6 +294,9 @@ export interface JivStyle {
    *  content under every glass, so a glass over glass reads as one layer of glass. Surface is what it sits on, the glass
    *  under it included: a sheet's own bar buttons over the sheet, a held toggle's clear knob over its track. */
   GlassReads: string;
+  /** `GlassSeesThrough: true`: a veil the glass drawn over it does not read (Core/Glass.Plate.ts), as a sheet's dimming
+   *  view: an alert's glass over the dim reads the content under the dim, the same glass as every popover's. */
+  GlassSeesThrough: string;
   /** `GlassFrost: Inherit | Automatic | Reduced | None`: DesignLibrary's `GlassMaterialProvider.Frost`, the recipe's
    *  blur class (Jwift/Apple/LiquidGlass.md 3.2): Automatic ramps BlurRadius 1.33 to 4 pt on a quarter-scale backdrop,
    *  Reduced is 0.667 pt on a half-scale one, None no blur. Inherited, as UIKit's `GlassFrostTrait`: a bar over
@@ -488,6 +491,8 @@ export interface JivRenderStyle {
   GlassBleed: boolean;
   /** Resolved `GlassReads`. Snaps. */
   GlassReads: 'Content' | 'Surface';
+  /** Resolved `GlassSeesThrough`. Snaps. */
+  GlassSeesThrough: boolean;
   /** Resolved `GlassFrost` declaration: -1 Inherit, 0 Automatic, 1 Reduced, 2 None. The cascade's result is
    *  `EffectiveGlassFrost` on the node. Snaps. */
   GlassFrost: number;

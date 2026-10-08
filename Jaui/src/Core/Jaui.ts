@@ -4020,8 +4020,9 @@ export class Canvas implements DirtyTracker {
         if (_isGlass(material)) this._counts.Glass++;
         if (_isGlass(material) && shadowBackdrop !== undefined) rimSlotHere = shadowBackdrop.Slot;
         closesEdge = true;
-        // Only glass that tracks its backdrop can take an appearance its theme does not have.
-        if (_isGlass(material) && shadowBackdrop !== undefined
+        // Only glass that tracks its backdrop can take an appearance its theme does not have: a thin control, never a
+        // seeded panel (Jiv.Panel.vert), whose labels keep its theme's ink.
+        if (_isGlass(material) && shadowBackdrop !== undefined && node.RenderStyle.Background.Color.A <= 0.001
             && JivGlassSpanOf(node, eff) <= GLASS_TRACKS_LUMA_SPAN) glassInkHere = shadowBackdrop.Slot;
         else this._counts.Panels++;
         if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
@@ -4041,6 +4042,15 @@ export class Canvas implements DirtyTracker {
         //                bound, then keep accumulating. The panel shader
         //                still does border/shadow/clip — image is just
         //                another fill mode, not a separate draw pipeline.
+        // A veil the glass over it sees through (`GlassSeesThrough`, a sheet's dim): the plate takes what is under it
+        // first and keeps it, so the glass drawn over the veil reads the content, not the veil (Core/Glass.Plate.ts).
+        if (node.RenderStyle.GlassSeesThrough) {
+          flushPanels();
+          const ab = this._nodeAabb(node, eff, effH);
+          const d = this._dpr;
+          const veil = { x: ab.minX * d, y: ab.minY * d, w: (ab.maxX - ab.minX) * d, h: (ab.maxY - ab.minY) * d };
+          if (this._syncPlate(veil) !== null) this._glassFaces.push(veil);
+        }
         flushText();
         // `?occlusion`: the pre-pass ruled on this fill before the walk started. A `Skip` emits
         // nothing at all; a `Carve` emits the pieces the cover left behind, into the same batch,

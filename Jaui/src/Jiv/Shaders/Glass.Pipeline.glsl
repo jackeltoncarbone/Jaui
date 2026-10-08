@@ -220,6 +220,16 @@ vec4 GlassRim(vec3 under, float d, vec2 n, vec2 key, float amount, float height,
 
 // .tint(color): a line in the glassed pixel's luma, the seed at full luma and at none the seed's own luma at
 // 0.35 with its chroma at 1.10, fitted to SwiftUI's own render (Core/Glass.md).
+// GLASS THAT ADAPTS (Core/Glass.Pipeline.ts states the same numbers): at full adaptation the frost is this much more
+// again, and a seeded tint reaches this alpha at most, so the glass never goes a flat grey.
+const float GLASS_ADAPT_FROST = 1.5;
+const float GLASS_ADAPT_TINT_MAX = 0.72;
+float GlassAdaptedTint(float alpha, float adapt) {
+    return alpha + (max(alpha, GLASS_ADAPT_TINT_MAX) - alpha) * adapt;
+}
+// A seeded glass (a panel) takes the regular face at every size: any span past the thin control's fit.
+const float GLASS_PANEL_FACE_SPAN = 57.0;
+
 vec3 GlassTint(vec3 face, vec3 seed) {
     return mix(GlassYcc(seed, 0.35, 0.0, 1.10), seed, dot(face, GLASS_BT709));
 }

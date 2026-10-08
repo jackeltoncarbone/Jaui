@@ -55,6 +55,16 @@ flat out vec4 v_Specular;
 flat out vec4 v_RimEdge;
 flat out vec4 v_Outline;
 flat out vec4 v_TouchGlow;     // the flex's little glow: centre (fraction of the box), diameter (CSS px), alpha
+flat out float v_Adapt;        // how far the glass adapts to a busy or glaring backdrop, 0 to 1 (GlassAdaptOf)
+
+// GLASS THAT ADAPTS (Core/Glass.Pipeline.ts, GlassAdaptOf, which states the same numbers): the probe's spread (R)
+// and mean (G) into one amount, handed off to the large panel's own look by size.
+const vec2 GLASS_ADAPT_SPREAD = vec2(0.03, 0.09);
+const vec2 GLASS_ADAPT_LUMA_DARK = vec2(0.45, 0.75);
+const vec2 GLASS_ADAPT_LUMA_LIGHT = vec2(0.25, 0.55);
+const float GLASS_ADAPT_LUMA_SHARE = 0.6;
+const vec2 GLASS_ADAPT_SPAN = vec2(200.0, 400.0);
+const vec2 GLASS_ADAPT_GLARE_SPAN = vec2(64.0, 160.0);
 
 void main() {
     // Style varyings — identical for 2D and 3D.
@@ -73,9 +83,18 @@ void main() {
     v_TouchGlow.zw = vec2(mod(a_RimEdge.y, 16384.0) * 0.25, floor(a_RimEdge.y / 16384.0) / 1000.0);
     // Unprobed or larger glass takes the theme's appearance, at a mean that puts thin glass on the table's face.
     v_RimEdge = a_Lighting.z > 0.5 ? vec4(0.0, 0.45, a_RimEdge.zw) : vec4(1.0, 0.5, a_RimEdge.zw);
-    if (u_GlassAppearance >= 0.0 && a_Refraction.y <= 56.0) {
-        float mean = texelFetch(u_ShadowState, ivec2(int(u_GlassAppearance), 0), 0).g;
-        v_RimEdge.xy = vec2(smoothstep(0.45, 0.55, mean), mean);
+    // Glass with a seed of its own (a panel's tint: a toast, a heading, the selection bar) is a panel at every size: it
+    // keeps its theme's appearance, as its tint does, where a thin control tracks the luma under it. Over a bright field
+    // a seeded 36 pt heading took the light appearance, and its labels went to light glass's black ink on its dark tint.
+    v_Adapt = 0.0;
+    if (u_GlassAppearance >= 0.0) {
+        vec2 probe = texelFetch(u_ShadowState, ivec2(int(u_GlassAppearance), 0), 0).rg;
+        if (a_Refraction.y <= 56.0 && a_Tint.a <= 0.001) v_RimEdge.xy = vec2(smoothstep(0.45, 0.55, probe.y), probe.y);
+        float busy = smoothstep(GLASS_ADAPT_SPREAD.x, GLASS_ADAPT_SPREAD.y, probe.x);
+        float glare = a_Lighting.z > 0.5 ? smoothstep(GLASS_ADAPT_LUMA_DARK.x, GLASS_ADAPT_LUMA_DARK.y, probe.y)
+            : 1.0 - smoothstep(GLASS_ADAPT_LUMA_LIGHT.x, GLASS_ADAPT_LUMA_LIGHT.y, probe.y);
+        v_Adapt = max(busy * (1.0 - smoothstep(GLASS_ADAPT_SPAN.x, GLASS_ADAPT_SPAN.y, a_Refraction.y)),
+            GLASS_ADAPT_LUMA_SHARE * glare * (1.0 - smoothstep(GLASS_ADAPT_GLARE_SPAN.x, GLASS_ADAPT_GLARE_SPAN.y, a_Refraction.y)));
     }
 
     // cos can only be in [-1, 1]; the CPU stores 2.0 to flag a projective panel.

@@ -217,6 +217,7 @@ const _copyNonAnimated = (render: JivRenderStyle, target: JivRenderStyle): void 
   render.GlassOuterRefraction = target.GlassOuterRefraction;
   render.GlassBleed = target.GlassBleed;
   render.GlassReads = target.GlassReads;
+  render.GlassSeesThrough = target.GlassSeesThrough;
   render.GlassFrost = target.GlassFrost;
 };
 
