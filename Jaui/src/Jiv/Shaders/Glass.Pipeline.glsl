@@ -94,9 +94,9 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
         l = mix(vec4(0.919, 0.319, 1.0, 0.516), vec4(1.03, 0.819, 1.0, 0.266), clamp((mean - 0.45) / 0.5, 0.0, 1.0));
         k = vec4(0.6879, 0.1412, 1.6, 0.25);
     }
-    float large = clamp((span - GLASS_FACE_LARGE_SPAN.x) / (GLASS_FACE_LARGE_SPAN.y - GLASS_FACE_LARGE_SPAN.x), 0.0, 1.0);
-    l = mix(l, GLASS_FACE_APPLE_LIGHT, large);
-    k = mix(k, GLASS_FACE_APPLE_DARK, large);
+    float toApple = clamp((span - GLASS_FACE_LARGE_SPAN.x) / (GLASS_FACE_LARGE_SPAN.y - GLASS_FACE_LARGE_SPAN.x), 0.0, 1.0);
+    l = mix(l, GLASS_FACE_APPLE_LIGHT, toApple);
+    k = mix(k, GLASS_FACE_APPLE_DARK, toApple);
     vec3 lit = GlassYcc(c, l.x, l.y, l.z) * (1.0 - l.w) + vec3(l.w);
     vec3 dim = GlassYcc(c, k.x, k.y, k.z) * (1.0 - k.w);
     // A glass changing kind blends its two faces.

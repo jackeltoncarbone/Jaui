@@ -28,8 +28,8 @@ describe('the CPU face is the shader\'s, number for number', () => {
     expect(vec4Of(PIPELINE, /const vec4 GLASS_FACE_APPLE_LIGHT = vec4\(([^)]*)\);/)).toEqual([...GLASS_FACE_APPLE_LIGHT]);
     expect(vec4Of(PIPELINE, /const vec4 GLASS_FACE_APPLE_DARK = vec4\(([^)]*)\);/)).toEqual([...GLASS_FACE_APPLE_DARK]);
     expect(vec4Of(PIPELINE, /const vec2 GLASS_FACE_LARGE_SPAN = vec2\(([^)]*)\);/)).toEqual([...GLASS_FACE_LARGE_SPAN]);
-    expect(FACE).toContain('l = mix(l, GLASS_FACE_APPLE_LIGHT, large);');
-    expect(FACE).toContain('k = mix(k, GLASS_FACE_APPLE_DARK, large);');
+    expect(FACE).toContain('l = mix(l, GLASS_FACE_APPLE_LIGHT, toApple);');
+    expect(FACE).toContain('k = mix(k, GLASS_FACE_APPLE_DARK, toApple);');
   });
 
   it('the fitted faces it hands off from, and the thin faces', () => {
