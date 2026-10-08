@@ -7189,7 +7189,9 @@ export class Canvas implements DirtyTracker {
       const fScale = Math.sqrt(Math.abs(ft[0] * ft[3] - ft[1] * ft[2])) || 1;
       const sizeDev = run.FontSize * fScale;
       const style: ResolvedTextStyle = {
-        FontFamily: 'Inter', FontSize: sizeDev / this._dpr, FontWeight: run.Weight, FontStyle: 'Normal',
+        // Drill Sentences lane YY3b, item 10: San Francisco first on an Apple device, Inter everywhere else —
+        // ComposeFontFamily (Text.Measure.ts) composes the real fallback tail onto this at paint time.
+        FontFamily: '-apple-system, BlinkMacSystemFont, Inter', FontSize: sizeDev / this._dpr, FontWeight: run.Weight, FontStyle: 'Normal',
         Color: c, LineHeight: 1.2, LetterSpacing: 0, // LineHeight is a multiplier, not px
         TextAlign: 'Left', TextAlignLast: 'Auto', TextOverflow: 'Clip', MaxLines: null,
       };
