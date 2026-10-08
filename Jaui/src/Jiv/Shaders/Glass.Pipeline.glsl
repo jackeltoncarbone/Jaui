@@ -72,10 +72,19 @@ vec3 GlassYcc(vec3 c, float white, float black, float saturation) {
 }
 
 // The face: (white, black, saturation, fill alpha), light filled white and dark filled black, premultiplied.
-// Apple's structure with its parameters FITTED (Core/Glass.md): light and clear to SwiftUI's own render of the
-// same inputs (macOS 27), dark to Apple's native iOS 26 dark captures. Glass 56 pt and under (GLASS_TRACKS_LUMA_SPAN) tracks its
-// backdrop: its light face moves between Apple's observed settled values by the mean luma, its dark face is
-// the one fitted to iOS's small controls.
+// LARGE GLASS TAKES APPLE'S DECOMPILED FACES (Drill Sentences lane GL1; LiquidGlass.md 3.3 [C]): regular light
+// (1.03, 0.5, 1.0, white 0.4), Y -> 0.318 Y + 0.70; regular dark (0.6, 0.2, 1.0, black 0.4), Y -> 0.24 Y + 0.12;
+// chroma x 0.6 both. The fitted faces below (Core/Glass.md) were fitted to glass 64 pt and under (iOS's 62 pt bars and
+// small controls, SwiftUI's capsule), where Apple's glass tracks its backdrop's luma; the dark one, Y -> 0.40 Y + 0.176
+// with chroma x 0.85, carries that adaptive lift, so on a sheet or a panel it lifted every backdrop darker than 0.29 (a
+// dark-theme field, +11 L* live) where Apple's never lifts anything brighter than 0.16. They hold to 64 pt and hand
+// off to Apple's over 64 to 96 pt (GLASS_FACE_LARGE_SPAN), so a pill that grows into its menu never pops. Glass 56 pt
+// and under (GLASS_TRACKS_LUMA_SPAN) tracks its backdrop: its light face moves between Apple's observed settled
+// values by the mean luma, its dark face is the one fitted to iOS's small controls. Core/Glass.Pipeline.ts states the
+// same numbers (GlassFaceParams), and the App's GlassStack.Render.spec.ts reads them out of this file.
+const vec2 GLASS_FACE_LARGE_SPAN = vec2(64.0, 96.0);
+const vec4 GLASS_FACE_APPLE_LIGHT = vec4(1.03, 0.5, 1.0, 0.4);
+const vec4 GLASS_FACE_APPLE_DARK = vec4(0.6, 0.2, 1.0, 0.4);
 vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
     vec3 clearFace = GlassYcc(c, 1.1054, 0.1295, 0.885);
     if (clear >= 1.0) return clearFace;
@@ -85,6 +94,9 @@ vec3 GlassFace(vec3 c, float span, float clear, float light, float mean) {
         l = mix(vec4(0.919, 0.319, 1.0, 0.516), vec4(1.03, 0.819, 1.0, 0.266), clamp((mean - 0.45) / 0.5, 0.0, 1.0));
         k = vec4(0.6879, 0.1412, 1.6, 0.25);
     }
+    float large = clamp((span - GLASS_FACE_LARGE_SPAN.x) / (GLASS_FACE_LARGE_SPAN.y - GLASS_FACE_LARGE_SPAN.x), 0.0, 1.0);
+    l = mix(l, GLASS_FACE_APPLE_LIGHT, large);
+    k = mix(k, GLASS_FACE_APPLE_DARK, large);
     vec3 lit = GlassYcc(c, l.x, l.y, l.z) * (1.0 - l.w) + vec3(l.w);
     vec3 dim = GlassYcc(c, k.x, k.y, k.z) * (1.0 - k.w);
     // A glass changing kind blends its two faces.

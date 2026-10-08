@@ -67,6 +67,108 @@ export const GlassSizeRamps = (span: number): { U: number; V: number } => ({
 });
 
 /**
+ * THE BODY TONE, the CPU mirror of Glass.Pipeline.glsl's `GlassYcc`, `GlassFace` and `GlassBleed` and of Jiv.Panel.frag's
+ * edge-bleed weight and holding tone, so a spec can say what a glass body renders to without a GPU. Colors are sRGB
+ * encoded, 0 to 1: Apple's recipe runs on encoded values (Jwift/Apple/Evidence.md 1.2), and so does Jiv.
+ */
+export type GlassRgb = readonly [number, number, number];
+/** (white, black, saturation, fill alpha): QuartzCore's `set_ycc_composite` (LiquidGlass.md 3.3). Light glass is filled
+ *  white and dark glass black, premultiplied. */
+export type GlassFaceParams = readonly [number, number, number, number];
+
+export const GLASS_BT709: GlassRgb = [0.2126, 0.7152, 0.0722];
+export const GLASS_BLEED_LUMA: GlassRgb = [0.2125, 0.7154, 0.0721];
+export const GlassLuma = (c: GlassRgb, weights: GlassRgb = GLASS_BT709): number =>
+  c[0] * weights[0] + c[1] * weights[1] + c[2] * weights[2];
+
+/** BT.709 luma remapped to (white - black) Y + black, chroma scaled by `saturation`. */
+export const GlassYcc = (c: GlassRgb, white: number, black: number, saturation: number): GlassRgb => {
+  const y = GlassLuma(c);
+  const t = (white - black) * y + black;
+  return [t + saturation * (c[0] - y), t + saturation * (c[1] - y), t + saturation * (c[2] - y)];
+};
+
+/**
+ * APPLE'S DECOMPILED REGULAR FACES, ON LARGE GLASS (Drill Sentences lane GL1; LiquidGlass.md 3.3 [C]). Light: Y -> 0.318 Y
+ * + 0.70; dark: Y -> 0.24 Y + 0.12; chroma x 0.6 both. Dark regular glass never lifts a backdrop brighter than 0.158
+ * (0.12 / 0.76, the line's fixed point) and darkens everything above it.
+ */
+export const GLASS_FACE_APPLE_LIGHT: GlassFaceParams = [1.03, 0.5, 1.0, 0.4];
+export const GLASS_FACE_APPLE_DARK: GlassFaceParams = [0.6, 0.2, 1.0, 0.4];
+/**
+ * The fitted faces (Core/Glass.md), held on glass 64 pt and under, where they were fitted: iOS's 62 pt bars and small
+ * controls (dark) and SwiftUI's capsule (light). Apple's glass that size tracks its backdrop's luma, and the dark fit
+ * (Y -> 0.40 Y + 0.176, chroma x 0.85) carries that adaptive lift; on a sheet it lifted a dark field by +11 L*.
+ */
+export const GLASS_FACE_FITTED_LIGHT: GlassFaceParams = [1.0054, 0.0829, 1.2246, 0.4];
+export const GLASS_FACE_FITTED_DARK: GlassFaceParams = [0.9608, 0.2941, 1.4167, 0.4];
+/** Glass 56 pt and under: the light face between Apple's observed settled values by the mean luma (0.45 to 0.95), and
+ *  the dark face fitted to iOS's small controls. */
+export const GLASS_FACE_THIN_LIGHT: readonly [GlassFaceParams, GlassFaceParams] = [[0.919, 0.319, 1.0, 0.516], [1.03, 0.819, 1.0, 0.266]];
+export const GLASS_FACE_THIN_DARK: GlassFaceParams = [0.6879, 0.1412, 1.6, 0.25];
+/** The span over which the fitted faces hand off to Apple's, pt: 64 is Apple's adaptive line, and from 96 every regular
+ *  glass wears Apple's faces exactly. */
+export const GLASS_FACE_LARGE_SPAN = [64, 96] as const;
+
+const _mix = (a: number, b: number, t: number): number => a + (b - a) * t;
+const _mixFace = (a: GlassFaceParams, b: GlassFaceParams, t: number): GlassFaceParams =>
+  [_mix(a[0], b[0], t), _mix(a[1], b[1], t), _mix(a[2], b[2], t), _mix(a[3], b[3], t)];
+
+/** The light and dark face parameters regular glass `span` pt across wears (`mean` is the probe's luma, read only at
+ *  56 pt and under). */
+export const GlassFaceParamsOf = (span: number, mean: number = 0.5): { Light: GlassFaceParams; Dark: GlassFaceParams } => {
+  let light = GLASS_FACE_FITTED_LIGHT;
+  let dark = GLASS_FACE_FITTED_DARK;
+  if (span <= 56) {
+    light = _mixFace(GLASS_FACE_THIN_LIGHT[0], GLASS_FACE_THIN_LIGHT[1], Math.max(0, Math.min(1, (mean - 0.45) / 0.5)));
+    dark = GLASS_FACE_THIN_DARK;
+  }
+  const large = Math.max(0, Math.min(1, (span - GLASS_FACE_LARGE_SPAN[0]) / (GLASS_FACE_LARGE_SPAN[1] - GLASS_FACE_LARGE_SPAN[0])));
+  return { Light: _mixFace(light, GLASS_FACE_APPLE_LIGHT, large), Dark: _mixFace(dark, GLASS_FACE_APPLE_DARK, large) };
+};
+
+/** Regular glass's face over the lensed read `c`, `light` its appearance 0 (dark) to 1 (light). */
+export const GlassFaceOf = (c: GlassRgb, span: number, light: number, mean: number = 0.5): GlassRgb => {
+  const { Light, Dark } = GlassFaceParamsOf(span, mean);
+  const lit = GlassYcc(c, Light[0], Light[1], Light[2]);
+  const dim = GlassYcc(c, Dark[0], Dark[1], Dark[2]);
+  const at = (i: number): number => _mix(dim[i] * (1 - Dark[3]), lit[i] * (1 - Light[3]) + Light[3], light);
+  return [at(0), at(1), at(2)];
+};
+
+/** The edge bleed's own matrix: light (1, 0.9, 1.2), Y -> 0.9 + 0.1 Y; dark (0.5, 0, 1), Y -> 0.5 Y (LiquidGlass.md 3.4). */
+export const GlassBleedOf = (c: GlassRgb, light: number): GlassRgb => {
+  const dim = GlassYcc(c, 0.5, 0, 1);
+  const lit = GlassYcc(c, 1, 0.9, 1.2);
+  return [_mix(dim[0], lit[0], light), _mix(dim[1], lit[1], light), _mix(dim[2], lit[2], light)];
+};
+/** The bleed's opacity, iOS 26.1's recipe: 0.5 light, 0.8 dark, times `v`. */
+export const GLASS_BLEED_OPACITY = { Light: 0.5, Dark: 0.8 } as const;
+/** The holding tone: the interior at 97% (LiquidGlass.md 3.6). */
+export const GLASS_HOLDING_TONE = 0.97;
+
+/**
+ * The body of regular glass over an even backdrop `c`, inside its bezel and its rim band: the face, the edge bleed (whose
+ * read is that same backdrop: everywhere on a sheet, whose subvariant has no bleed reach, and deep inside any panel), and
+ * the holding tone, clamped, in the order Jiv.Panel.frag runs them. Nothing in it depends on where in the body it is.
+ */
+export const GlassBodyOf = (c: GlassRgb, span: number, light: number, mean: number = 0.5): GlassRgb => {
+  const face = GlassFaceOf(c, span, light, mean);
+  const { V } = GlassSizeRamps(span);
+  let out: GlassRgb = face;
+  if (V > 0) {
+    const bleed = GlassBleedOf(c, light);
+    const lum = GlassLuma(face, GLASS_BLEED_LUMA);
+    let weight = _mix(1 - lum, lum, light);
+    weight = weight * weight;
+    const amount = Math.max(0, Math.min(1, weight * weight * V * _mix(GLASS_BLEED_OPACITY.Dark, GLASS_BLEED_OPACITY.Light, light)));
+    out = [_mix(face[0], bleed[0], amount), _mix(face[1], bleed[1], amount), _mix(face[2], bleed[2], amount)];
+  }
+  const hold = (x: number): number => Math.max(0, Math.min(1, x * GLASS_HOLDING_TONE));
+  return [hold(out[0]), hold(out[1]), hold(out[2])];
+};
+
+/**
  * `GlassFrost`, DesignLibrary's `GlassMaterialProvider.Frost` (Jwift/Apple/LiquidGlass.md 3.2): the regular recipe's blur
  * class. 0 Automatic: BlurRadius 1.33 to 4 pt on a quarter-scale backdrop. 1 Reduced: 0.667 pt on a half-scale one.
  * 2 None: no blur, the quarter-scale capture alone. UIKit sets it from the scroll pocket a glass sits in. Clear glass

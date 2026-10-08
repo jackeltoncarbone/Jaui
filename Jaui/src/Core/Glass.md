@@ -30,6 +30,10 @@ Every glass surface (`Thickness > 0`, material `LiquidGlass`) runs Apple's pipel
 | regular, dark | 0.9608 | 0.2941 | 1.4167 | black 0.4 | Y -> 0.40 Y + 0.176, chroma x 0.85 | iOS bars |
 | regular, dark, 56 pt and under | 0.6879 | 0.1412 | 1.6 | black 0.25 | Y -> 0.41 Y + 0.106, chroma x 1.2 | iOS small controls |
 | clear, both | 1.1054 | 0.1295 | 0.885 | none | Y -> 0.976 Y + 0.130, chroma x 0.885 | SwiftUI clear, macOS 27 |
+| **regular, light, 96 pt and up** | 1.03 | 0.5 | 1.0 | white 0.4 | Y -> 0.318 Y + 0.70, chroma x 0.6 | Apple's recipe [C] |
+| **regular, dark, 96 pt and up** | 0.6 | 0.2 | 1.0 | black 0.4 | Y -> 0.24 Y + 0.12, chroma x 0.6 | Apple's recipe [C] |
+
+**Large glass wears Apple's recipe (Drill Sentences lane GL1, 2026-10-08).** The fitted regular faces were fitted to glass 64 pt and under (iOS's 62 pt bars and small controls; SwiftUI's capsule), where Apple's glass tracks its backdrop's luma (LiquidGlass.md 3.3), and they hold there. Above, they hand off over 64 to 96 pt (`GLASS_FACE_LARGE_SPAN`, a continuous mix, so a pill growing into its menu never pops) to the recipe exactly. The dark fit's line, 0.40 Y + 0.176, has its fixed point at 0.294: on a sheet or a panel it lifted every backdrop darker than that, a dark-theme field by +11 L* (live, the phone's count sheet: the field rgb(71, 86, 54) read under the dim drew (61, 73, 46), and this file's CPU mirror, `GlassBodyOf`, predicts (60, 73, 46) from it). The recipe's line has its fixed point at 0.158 and darkens everything brighter: the same sheet draws (39, 49, 26). Light moves the other way, from the fit's (153, 164, 140) to the recipe's (198, 209, 186); dark and light then sit 19 and 18 L* from black and white. `Core/Glass.Pipeline.ts` (`GlassFaceParamsOf`, `GlassFaceOf`, `GlassBodyOf`) states the shader's numbers and `tests/Glass.Face.test.ts` holds the two together.
 
 **Edge bleed**: LiquidGlass.md 3.4 as written.
 
