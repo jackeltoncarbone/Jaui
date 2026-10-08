@@ -182,6 +182,24 @@ describe('ComposeFontFamily', () => {
   it('is stable for the same input (memoized)', () => {
     expect(ComposeFontFamily('Inter')).toBe(ComposeFontFamily('Inter'));
   });
+
+  // Drill Sentences lane YY3b, item 10: `-apple-system`/`BlinkMacSystemFont` read like generics ("pick
+  // whatever the OS wants") but are not — they only resolve to San Francisco on Apple platforms, with
+  // every other browser silently skipping the unknown name. An authored stack that names the app's own web
+  // font AFTER them as a real fallback needs that name to survive composition, not be read as "past the
+  // generic, drop it" the way an actual CSS generic (`system-ui`, `sans-serif`) correctly is.
+  it('keeps a real fallback named after -apple-system/BlinkMacSystemFont, so Apple devices get San Francisco and everyone else still gets the web font', () => {
+    const composed = ComposeFontFamily('-apple-system, BlinkMacSystemFont, Inter');
+    expect(composed.startsWith('-apple-system, BlinkMacSystemFont, Inter, "Hiragino Sans"')).toBe(true);
+    expect(composed.endsWith(', sans-serif')).toBe(true);
+  });
+
+  it('still truncates at a real CSS generic (system-ui) named after -apple-system', () => {
+    const composed = ComposeFontFamily('-apple-system, BlinkMacSystemFont, Inter, system-ui, sans-serif');
+    expect(composed.startsWith('-apple-system, BlinkMacSystemFont, Inter, "Hiragino Sans"')).toBe(true);
+    expect(composed).not.toContain('system-ui');
+    expect(composed.endsWith(', sans-serif')).toBe(true);
+  });
 });
 
 describe('ApplyTextStyle', () => {

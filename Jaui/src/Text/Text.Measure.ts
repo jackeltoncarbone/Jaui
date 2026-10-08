@@ -118,10 +118,20 @@ const CJK_SANS_FAMILIES = [
 /** CSS generic family keywords — a stack already ending in one of these has its own intentional final
  *  fallback, so the CJK families are inserted BEFORE it rather than after. Mirrors `Text.Tabular.ts`'s
  *  own `_GENERIC` set (that one decides which names get a tabular twin; this one decides where "the
- *  app's own family" stops and a generic fallback begins — same question, two different call sites). */
+ *  app's own family" stops and a generic fallback begins — same question, two different call sites).
+ *
+ *  `-apple-system` and `blinkmacsystemfont` do NOT belong here (Drill Sentences lane YY3b, item 10). They
+ *  read like generics — "pick whatever the OS wants" — but `ComposeFontFamily`'s own job below ends the
+ *  HEAD at the first entry in this set and drops everything after it but a trailing `sans-serif`: an
+ *  authored stack meant to read San Francisco first and fall back to the app's own web font second,
+ *  `-apple-system, BlinkMacSystemFont, Inter`, had `Inter` silently discarded — the ONE stack shape this
+ *  whole fix exists to make possible was the one shape this set could never carry. `system-ui` keeps its
+ *  spot: unlike the two platform keywords, it is the one CSS generic actually meant to terminate a stack on
+ *  its own, so a plain `Inter, system-ui, sans-serif` (every existing caller, before this lane) still
+ *  truncates exactly where it always has. */
 const _GENERIC_FAMILIES = new Set([
   'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'emoji', 'math', 'fangsong',
-  'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', '-apple-system', 'blinkmacsystemfont',
+  'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded',
 ]);
 
 const _composedFamilyStacks = new Map<string, string>();
