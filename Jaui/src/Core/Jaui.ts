@@ -4,7 +4,8 @@
  */
 
 import { FlexMotion } from './Flex';
-import { JivAnimator } from '../Jiv/Jiv.Animator';
+import { JivAnimator, SpringFromOrigin } from '../Jiv/Jiv.Animator';
+import { StepSpan } from '../Animation/Step.Span';
 import { JivStyleAnimator } from '../Jiv/Jiv.StyleAnimator';
 import { AnimationManager } from '../Animation/Animation.Manager';
 import { SolveLayout } from '../Layout/Layout.Solver';
@@ -77,8 +78,6 @@ const _isGlass = (m: MaterialType): boolean => m === 'LiquidGlass';
 /** The finest blur (pt) an adaptive shadow compares the sharp backdrop against, so clear glass still sees
  *  its text as detail. */
 const SHADOW_DETAIL_MIN_PT = 4;
-/** The most wall time one tick steps the springs through (in 33ms substeps). See `_tickInner`. */
-const STEP_BUDGET_S = 0.25;
 /** `?ablate`: the arms it knows, the rendered frames each holds for, and the render-to-render gap
  *  past which the page was idle rather than slow. */
 const ABLATE_ARMS = ['control', 'no-blur', 'no-pblur', 'no-panels', 'no-glass-draw', 'no-shadow', 'no-occlusion', 'no-ui',
@@ -2324,7 +2323,8 @@ export class Canvas implements DirtyTracker {
 
     // `dt` stays capped at one 30Hz step: it is what a single spring integration and `_render` can
     // take without going unstable. `elapsed` is the wall time the frame actually covered, and the
-    // springs below are stepped through ALL of it (up to STEP_BUDGET_S) in `dt`-sized substeps.
+    // springs below are stepped through ALL of it (up to `StepSpan`'s budget, Animation/Step.Span.ts) in
+    // `dt`-sized substeps.
     // Stepping them by the capped `dt` alone ran every animation in slow motion whenever a frame
     // took longer than 33ms: WebKit on the M4 draws /explore's entry at ~9fps, so its springs
     // advanced a third of real time per frame and the page settled at 9.8s instead of 5.8s.
@@ -2349,7 +2349,10 @@ export class Canvas implements DirtyTracker {
     if (awake !== null) this._animationManager.ActiveNames = [];
     // A tab back from the background reports seconds of elapsed time: the budget bounds the
     // catch-up to a handful of substeps rather than simulating the whole absence.
-    for (let left = Math.min(elapsed, STEP_BUDGET_S); ;) {
+    // The tick after a morph began steps one frame, not the time its first, slowest frame took (`StepSpan`).
+    const span = StepSpan(elapsed, this._morphBegan);
+    this._morphBegan = false;
+    for (let left = span; ;) {
       const step = Math.min(left, 0.033);
       this._animationManager.StepFrame(step);
       left -= step;
@@ -7482,6 +7485,17 @@ export class Canvas implements DirtyTracker {
     return this.Root;
   };
 
+  /** Set when a box began a morph (`Element.MorphFrom`) this tick; the next tick steps one frame (`StepSpan`). */
+  private _morphBegan = false;
+
+  /** Starts a box waiting on an origin there (`SpringFromOrigin`), and marks the morph begun. */
+  private _springFromOrigin = (node: JauiElement, animator: JivAnimator): void => {
+    const moves = SpringFromOrigin(node, animator);
+    if (moves === null) return;
+    this._morphBegan = true;
+    if (moves) this._animationManager.Kick();
+  };
+
   private _solveAndAnimate = (subtreeRoot: JauiElement = this.Root): void => {
     if (subtreeRoot === this.Root) {
       // Root fills the canvas (only meaningful on full-tree solves; in
@@ -7532,10 +7546,7 @@ export class Canvas implements DirtyTracker {
         this._animators.set(node, animator);
         this._animationManager.Register(animator);
         // A box born with an origin (`Element.MorphFrom`) springs from it rather than standing where it was born.
-        if (node.MorphFrom) {
-          if (animator.SpringFrom(node.MorphFrom)) this._animationManager.Kick();
-          node.MorphFrom = null;
-        }
+        this._springFromOrigin(node, animator);
 
         // Style animator is Jiv-specific, it springs every animatable
         // JivStyle field toward EffectiveStyle. Only created for Jivs.
@@ -7592,8 +7603,7 @@ export class Canvas implements DirtyTracker {
         if (needsKick && node instanceof Jiv && node.HasScopedPredicates) node.MarkStyleDirty();
         if (node.MorphFrom) {
           // `Element.MorphFrom`: this commit springs from the given origin, over a snap and over the spring's own.
-          if (animator.SpringFrom(node.MorphFrom)) this._animationManager.Kick();
-          node.MorphFrom = null;
+          this._springFromOrigin(node, animator);
         } else if (node.SnapLayout) {
           animator.SnapToTargets();
         } else if (needsKick) {

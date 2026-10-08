@@ -20,6 +20,15 @@ const _mkSpring = (
   override?.Mass     ?? DEFAULT_MASS,
 );
 
+/** The rect commit's origin rule (`Element.MorphFrom`): a box with an origin waiting starts there and springs to the
+ *  target its commit just gave it, and the origin is spent. Null when none was waiting, else whether the box moves. */
+export const SpringFromOrigin = (element: Element, animator: JivAnimator): boolean | null => {
+  const from = element.MorphFrom;
+  if (!from) return null;
+  element.MorphFrom = null;
+  return animator.SpringFrom(from);
+};
+
 export class JivAnimator implements Animatable {
   readonly Springs: {
     X: Spring;
