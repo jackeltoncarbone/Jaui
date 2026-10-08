@@ -600,7 +600,7 @@ export class MainBridge {
   private _keyPayload = (e: KeyboardEvent): KeyPayload => ({
     Key: e.key, Code: e.code, Repeat: e.repeat,
     Shift: e.shiftKey, Ctrl: e.ctrlKey, Alt: e.altKey, Meta: e.metaKey,
-    TimeStamp: e.timeStamp,
+    TimeStamp: e.timeStamp, DefaultPrevented: e.defaultPrevented,
   });
 
   private _wireDomEvents = (): void => {
@@ -711,10 +711,12 @@ export class MainBridge {
       });
     });
 
-    // window-level keydown for selection shortcuts (Cmd/Ctrl+A, Esc).
+    // window-level keydown for selection shortcuts (Cmd/Ctrl+A, Esc) and the scroll keys. Heard last, in the window's
+    // bubble phase, so a key the page took for a shortcut of its own (`preventDefault`) reaches the engine marked taken
+    // and does nothing more there: a drill editor's Space plays and pauses, and never also pages its list.
     window.addEventListener('keydown', (e: KeyboardEvent) => {
       this.PostMessage({ T: 'keydown', Payload: this._keyPayload(e) });
-    }, { capture: true });
+    });
 
     // Native clipboard for display-text selection. The worker mirrors the
     // current selected plaintext on every selection change via the

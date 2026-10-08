@@ -125,7 +125,7 @@ describe('WorkerPlatform — keydown listener', () => {
       Payload: {
         Key: 'a', Code: 'KeyA', Repeat: false,
         Shift: false, Ctrl: false, Alt: false, Meta: true,
-        TimeStamp: 12345,
+        TimeStamp: 12345, DefaultPrevented: false,
       },
     };
     p.IngestMessage(msg);
@@ -140,6 +140,21 @@ describe('WorkerPlatform — keydown listener', () => {
     expect(() => e.preventDefault()).not.toThrow();
   });
 
+  it('carries whether the page already took the key, so the engine leaves a taken key alone', () => {
+    const p = new WorkerPlatform(_init);
+    const handler = vi.fn<(e: KeyboardEvent) => void>();
+    p.AddKeydownListener(handler);
+    p.IngestMessage({
+      T: 'keydown',
+      Payload: {
+        Key: ' ', Code: 'Space', Repeat: false,
+        Shift: false, Ctrl: false, Alt: false, Meta: false,
+        TimeStamp: 0, DefaultPrevented: true,
+      },
+    });
+    expect(handler.mock.calls[0][0].defaultPrevented).toBe(true);
+  });
+
   it('multiple listeners all fire', () => {
     const p = new WorkerPlatform(_init);
     const a = vi.fn(); const b = vi.fn();
@@ -150,7 +165,7 @@ describe('WorkerPlatform — keydown listener', () => {
       Payload: {
         Key: 'Escape', Code: 'Escape', Repeat: false,
         Shift: false, Ctrl: false, Alt: false, Meta: false,
-        TimeStamp: 0,
+        TimeStamp: 0, DefaultPrevented: false,
       },
     });
     expect(a).toHaveBeenCalledOnce();
@@ -168,7 +183,7 @@ describe('WorkerPlatform — keydown listener', () => {
       Payload: {
         Key: 'a', Code: 'KeyA', Repeat: false,
         Shift: false, Ctrl: false, Alt: false, Meta: false,
-        TimeStamp: 0,
+        TimeStamp: 0, DefaultPrevented: false,
       },
     });
     expect(a).not.toHaveBeenCalled();
@@ -188,7 +203,7 @@ describe('WorkerPlatform — keydown listener', () => {
       Payload: {
         Key: 'a', Code: 'KeyA', Repeat: false,
         Shift: false, Ctrl: false, Alt: false, Meta: false,
-        TimeStamp: 0,
+        TimeStamp: 0, DefaultPrevented: false,
       },
     });
     errSpy.mockRestore();
