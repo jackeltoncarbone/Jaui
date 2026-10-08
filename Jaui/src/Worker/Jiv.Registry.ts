@@ -688,6 +688,7 @@ export class JivRegistry {
     core.OnContextMenu = (src) => this._postHit(id, 'contextmenu', _payloadFromMouseEvent(src));
     core.OnPointerDown = (e) => this._postHit(id, 'pointerdown', _payloadFromPointerEvent(e));
     core.OnPointerMove = (e) => this._postHit(id, 'pointermove', _payloadFromPointerEvent(e));
+    core.OnPointerLeave = (e) => this._postHit(id, 'pointerleave', _payloadFromPointerEvent(e));
     core.OnPointerUp = (e) => this._postHit(id, 'pointerup', _payloadFromPointerEvent(e));
     core.OnWheel = (e) => this._postHit(id, 'wheel', _payloadFromWheelEvent(e));
     core.OnPanClaim = (e) => this._postHit(id, 'panclaim', _payloadFromPointerEvent(e));
@@ -695,7 +696,7 @@ export class JivRegistry {
 
   private _postHit = (
     jivId: number,
-    kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerup' | 'wheel' | 'panclaim',
+    kind: 'click' | 'contextmenu' | 'pointerdown' | 'pointermove' | 'pointerleave' | 'pointerup' | 'wheel' | 'panclaim',
     source: PointerPayload,
   ): void => {
     this._post({ T: 'hit', JivId: jivId, Kind: kind, Source: source });

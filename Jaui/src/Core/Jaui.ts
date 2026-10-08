@@ -445,6 +445,7 @@ import { Janvas } from '../Janvas/Janvas';
 import { FocusManager } from './Focus/FocusManager';
 import { InputRouter } from './Input/InputRouter';
 import { InertUnderDisabled } from './Pointer.Inert';
+import { LeftChain } from './Pointer.Leave';
 
 /** A perspective viewing context established by an ancestor (CSS `perspective`).
  *  D = viewing distance, (Ox, Oy) = vanishing point — both in CANVAS px (the same frame as the
@@ -7870,12 +7871,8 @@ export class Canvas implements DirtyTracker {
       oldTopmost: Jiv | null,
       flag: 'Hover' | 'Active',
     ): void => {
-      const newPath = new Set<Jiv>();
-      for (let n = newTopmost; n; n = n.Parent as Jiv | null) newPath.add(n);
-      for (let n = oldTopmost; n; n = n.Parent as Jiv | null) {
-        if (!newPath.has(n)) n[flag] = false;
-      }
-      newPath.forEach(n => { n[flag] = true; });
+      for (const n of LeftChain(newTopmost, oldTopmost)) n[flag] = false;
+      for (let n = newTopmost; n; n = n.Parent as Jiv | null) n[flag] = true;
     };
 
     const fanOutGroupHover = (newJiv: Jiv | null, oldJiv: Jiv | null): void => {
@@ -7886,31 +7883,43 @@ export class Canvas implements DirtyTracker {
       newPeers.forEach(p => { p.GroupHover = true; });
     };
 
+    // `OnPointerLeave`, the DOM's `pointerleave`: each node the pointer's chain left, deepest first, once the hover
+    // has moved (`LeftChain`). Without it a `(pointerleave)` bound on a node never fired, so a page that cleared
+    // its own hover there (the drill field's hovered squad) kept it when the pointer went straight onto chrome
+    // standing over that node, with no move over the node itself to say it had gone.
+    const leave = (newTopmost: Jiv | null, oldTopmost: Jiv | null, e: PointerEvent): void => {
+      for (const n of LeftChain(newTopmost, oldTopmost)) n.OnPointerLeave?.(e);
+    };
+
     this._on('pointermove', (e: PointerEvent) => {
       const hit = topmostAt(e.clientX, e.clientY);
-      if (hit !== this._hoveredJiv) {
-        setStateChain(hit, this._hoveredJiv, 'Hover');
-        fanOutGroupHover(hit, this._hoveredJiv);
+      const old = this._hoveredJiv;
+      if (hit !== old) {
+        setStateChain(hit, old, 'Hover');
+        fanOutGroupHover(hit, old);
         this._hoveredJiv = hit;
         this._setCursor(_resolveCursor(hit));
         this._animationManager.Kick();
+        leave(hit, old, e);
       }
       if (hit?.OnPointerMove) hit.OnPointerMove(e);
     });
 
-    const clearHover = (): void => {
-      if (this._hoveredJiv) {
-        setStateChain(null, this._hoveredJiv, 'Hover');
-        fanOutGroupHover(null, this._hoveredJiv);
+    const clearHover = (e: PointerEvent): void => {
+      const old = this._hoveredJiv;
+      if (old) {
+        setStateChain(null, old, 'Hover');
+        fanOutGroupHover(null, old);
         this._hoveredJiv = null;
         this._setCursor('');
         this._animationManager.Kick();
+        leave(null, old, e);
       }
     };
     this._on('pointerleave', clearHover);
     // A finger has no hover once it lifts, and the bridge never forwards a touch's pointerleave, so a row
     // swiped or tapped kept its hover lift until the next touch landed somewhere else.
-    const liftTouch = (e: PointerEvent): void => { if (e.pointerType !== 'mouse') clearHover(); };
+    const liftTouch = (e: PointerEvent): void => { if (e.pointerType !== 'mouse') clearHover(e); };
     this._on('pointerup', liftTouch);
     this._on('pointercancel', liftTouch);
 

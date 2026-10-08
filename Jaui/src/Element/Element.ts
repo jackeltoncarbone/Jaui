@@ -297,6 +297,11 @@ export class Element {
    *  so the drag continues even when the pointer leaves the Jiv. */
   OnPointerMove: ((e: PointerEvent) => void) | null = null;
 
+  /** Pointer-leave handler, the DOM's `pointerleave`: fires once the pointer is no longer over this Jiv or any
+   *  of its descendants (the topmost hit moved off its subtree, or the pointer left the canvas). Never bubbles:
+   *  every node the pointer left gets its own. Angular binding bridges it to a DOM `pointerleave` event. */
+  OnPointerLeave: ((e: PointerEvent) => void) | null = null;
+
   /** Pointer-up handler — fires on the topmost-hit Jiv at release. Note
    *  the up-Jiv may differ from the down-Jiv if the pointer moved during
    *  the press; for the standard click semantics use OnClick instead. */

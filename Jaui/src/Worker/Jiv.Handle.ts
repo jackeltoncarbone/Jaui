@@ -253,6 +253,10 @@ export class JivHandle {
     this._hit.OnPointerMove = cb ?? undefined;
     this._refreshHit();
   }
+  set OnPointerLeave(cb: ((src: PointerPayload) => void) | null | undefined) {
+    this._hit.OnPointerLeave = cb ?? undefined;
+    this._refreshHit();
+  }
   set OnPointerUp(cb: ((src: PointerPayload) => void) | null | undefined) {
     this._hit.OnPointerUp = cb ?? undefined;
     this._refreshHit();

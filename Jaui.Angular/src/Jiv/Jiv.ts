@@ -199,6 +199,8 @@ export class Jiv implements OnInit, OnDestroy {
       },
       OnPointerDown: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerdown', src)),
       OnPointerMove: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointermove', src)),
+      // The DOM's own pointerleave never bubbles: an ancestor's `(pointerleave)` hears its own leave, never a child's.
+      OnPointerLeave: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerleave', src, false)),
       OnPointerUp: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('pointerup', src)),
       OnWheel: (src) => this._host.nativeElement.dispatchEvent(_cloneWheelEvent(src)),
       OnPanClaim: (src) => this._host.nativeElement.dispatchEvent(_clonePointerEvent('panclaim', src)),
@@ -398,9 +400,9 @@ export class Jiv implements OnInit, OnDestroy {
   }
 }
 
-function _clonePointerEvent(type: string, src: PointerPayload): PointerEvent {
+function _clonePointerEvent(type: string, src: PointerPayload, bubbles = true): PointerEvent {
   const evt = new PointerEvent(type, {
-    bubbles: true,
+    bubbles,
     cancelable: true,
     clientX: src.ClientX,
     clientY: src.ClientY,

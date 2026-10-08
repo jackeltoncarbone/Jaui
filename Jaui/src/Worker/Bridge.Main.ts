@@ -99,6 +99,8 @@ export interface JivHitHandlers {
   OnContextMenu?: (src: PointerPayload) => void;
   OnPointerDown?: (src: PointerPayload) => void;
   OnPointerMove?: (src: PointerPayload) => void;
+  /** The pointer left this Jiv and everything inside it (`Jiv.OnPointerLeave`). */
+  OnPointerLeave?: (src: PointerPayload) => void;
   OnPointerUp?: (src: PointerPayload) => void;
   /** Wheel over this Jiv when it's the topmost hit. Source carries the
    *  delta fields (WheelPayload) so main can rebuild a faithful WheelEvent. */
@@ -540,6 +542,7 @@ export class MainBridge {
       case 'contextmenu':   h.OnContextMenu?.(m.Source); break;
       case 'pointerdown':   h.OnPointerDown?.(m.Source); break;
       case 'pointermove':   h.OnPointerMove?.(m.Source); break;
+      case 'pointerleave':  h.OnPointerLeave?.(m.Source); break;
       case 'pointerup':     h.OnPointerUp?.(m.Source); break;
       case 'wheel':         h.OnWheel?.(m.Source as WheelPayload); break;
       case 'panclaim':      h.OnPanClaim?.(m.Source); break;
