@@ -12,7 +12,9 @@ const LINE_PX = 40;
  *  (Cmd/Ctrl+A, Esc) with no behavior change, and adds scroll-key routing
  *  (Arrow / PageUp/Down / Space / Home / End / Ctrl+Home/End) to the focused
  *  scroller, falling back to the page-level scroll container when nothing
- *  is explicitly focused — matching browser behavior. */
+ *  is explicitly focused — matching browser behavior. A key the page already
+ *  took (`defaultPrevented`, heard in the window's bubble phase, after the
+ *  page's own listeners) is the page's, as the browser leaves a prevented key. */
 export class InputRouter {
   constructor(
     private readonly _platform: Platform,
@@ -26,9 +28,9 @@ export class InputRouter {
   /** Attach the keydown listener; returns a disposer. */
   Listen = (): (() => void) => {
     return this._platform.AddKeydownListener((e: KeyboardEvent) => {
-      if (this._platform.IsTextInputFocused()) return;
+      if (e.defaultPrevented || this._platform.IsTextInputFocused()) return;
       this._route(e);
-    }, { capture: true });
+    });
   };
 
   private _route = (e: KeyboardEvent): void => {

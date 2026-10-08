@@ -176,6 +176,7 @@ export class WorkerPlatform implements Platform {
       altKey: msg.Payload.Alt,
       metaKey: msg.Payload.Meta,
       timeStamp: msg.Payload.TimeStamp,
+      defaultPrevented: msg.Payload.DefaultPrevented,
       preventDefault: () => { prevented = true; },
       stopPropagation: () => {},
     };

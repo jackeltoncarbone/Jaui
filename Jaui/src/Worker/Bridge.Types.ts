@@ -93,6 +93,8 @@ export interface KeyPayload {
   Alt: boolean;
   Meta: boolean;
   TimeStamp: number;
+  /** The page already took the key (a shortcut of its own called `preventDefault`), so the engine leaves it alone. */
+  DefaultPrevented: boolean;
 }
 
 /** A batched pointer-input message — one per main-thread event tick.
