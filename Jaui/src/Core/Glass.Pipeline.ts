@@ -246,6 +246,97 @@ export const GlassShadowLod = (dpr: number, variant: GlassVariant, frost: number
 /** How far the colored shadow's read reaches outward: min(0.625 S, 75) pt. */
 export const GlassShadowAmount = (span: number): number => Math.min(0.625 * span, 75);
 
+/** Glass.Pipeline.glsl's `GlassShadowFall`, Apple's polynomial (LiquidGlass.md 3.5), on the CPU: 1 at `reach` inside
+ *  the shifted outline to 0 at `reach` outside it, 0.5 on it. `sd` and `reach` in one unit; `reach` is two shadow radii.
+ *  It reads as a Gaussian edge of sigma reach / (2 sqrt 2): x = 2 sd / reach and the polynomial is 0.5 erfc(x) to 0.002. */
+export const GlassShadowFall = (sd: number, reach: number): number => {
+  const x = 4 * Math.min(1, Math.max(0, sd / (2 * Math.max(reach, 1e-4)) + 0.5)) - 2;
+  const x2 = x * x;
+  return 0.5 + x * (-0.560547 + x2 * (0.168213 + x2 * (-0.034454 + 0.002954 * x2)));
+};
+
+/**
+ * `GlassShadow: Auto | Platter | None` (Core/Glass.Jss.md). Auto is glassBackground's own drop shadow (LiquidGlass.md
+ * 3.5) and nothing else; None casts none; Platter is that shadow and, under it, the platter's: menus, popovers, sheets
+ * and dialogs only.
+ *
+ * WHY A PLATTER SHADOW (Drill Sentences lane GL2). The decompiled law, worked through for a 250 pt menu over an even
+ * backdrop of luma 0.3: peak alpha 0.25 (opacity 0.5 - 0.25u at u = 1, the colored read at v = 1), a fall of sigma
+ * 24 / sqrt 2 = 17 pt offset 8 pt down, and a color of M_shadow times the backdrop: dark Y -> 0.5 Y, light Y -> Y. So
+ * dark large glass darkens what is below it 7.4% at 4 pt, 5.1% at 12, 2.1% at 24, 0.4% at 40; light large glass darkens
+ * nothing at all (it saturates). Ours draws exactly that (measured live in dark: 3% at 14 to 20 pt, gone by 40), and
+ * a blind tester twice read it as "no visible shadow". iOS 26's menus and popovers stand on a soft, wide shadow that the
+ * law does not make, so it is UIKit's platter's own, drawn beside glassBackground [I]: the context menu platter's and
+ * the sheet's drop shadow views. Its values are [I], not read: a black shadow of CA radius 30 pt (read as sigma), 10 pt
+ * down, opacity 0.18 light and 0.35 dark, ramped over Apple's thick-glass ramp `v` (64 to 160 pt), so glass 64 pt and
+ * under casts none of it (Jwift/Apple/LiquidGlass.md 3.5, the [I] note).
+ */
+export type GlassShadowKind = 'Auto' | 'Platter' | 'None';
+export const GLASS_PLATTER_SHADOW = { Sigma: 30, OffsetY: 10, OpacityLight: 0.18, OpacityDark: 0.35 } as const;
+
+export interface GlassPlatterShadow {
+  /** The Gaussian's sigma, pt. */
+  Sigma: number;
+  /** Down, pt. */
+  OffsetY: number;
+  /** The black's alpha under the face. */
+  Opacity: number;
+  /** `GlassShadowFall`'s reach for that sigma (2 sqrt 2 sigma), pt. */
+  Reach: number;
+}
+
+/** The platter shadow of glass `span` pt across in its theme: half its sigma and offset at 64 pt growing to the full ones
+ *  at 160, its opacity over `v` (0 at 64 pt and under). */
+export const GlassPlatterShadowOf = (span: number, dark: boolean): GlassPlatterShadow => {
+  const { V } = GlassSizeRamps(span);
+  const sigma = GLASS_PLATTER_SHADOW.Sigma * (0.5 + 0.5 * V);
+  return {
+    Sigma: sigma,
+    OffsetY: GLASS_PLATTER_SHADOW.OffsetY * (0.5 + 0.5 * V),
+    Opacity: V * (dark ? GLASS_PLATTER_SHADOW.OpacityDark : GLASS_PLATTER_SHADOW.OpacityLight),
+    Reach: 2 * Math.SQRT2 * sigma,
+  };
+};
+
+/** How far past the outline glass `span` pt across can put shadow, pt: two radii plus the offset for Apple's, and the
+ *  platter's reach plus its offset when it casts one. What a draw rect, a card's paint rect and a cached layer must hold. */
+export const GlassShadowExtent = (span: number, kind: GlassShadowKind): number => {
+  if (kind === 'None') return 0;
+  const own = 2 * GlassShadowRadius(span) + GLASS_SHADOW_OFFSET_Y;
+  if (kind !== 'Platter' || GlassSizeRamps(span).V <= 0) return own;
+  const p = GlassPlatterShadowOf(span, true);
+  return Math.max(own, p.Reach + p.OffsetY);
+};
+
+/**
+ * THE SHADOW OVER AN EVEN BACKDROP, the CPU mirror of the two draws (Jiv.Panel.frag's flat shadow and its colored one,
+ * Glass.Pipeline.glsl `GlassShadowFall`), so a spec can say what a glass surface does to the backdrop beside it. `luma`
+ * is the backdrop's (sRGB encoded, 0 to 1, grey); `dx` and `dy` are the point's signed distances past the face's side
+ * and bottom edges, pt, negative inside (a point straight below the middle of a 250 pt menu has dx -125). Returns the
+ * luma there with the glass's shadows drawn, square corners. Under the face (both negative) the glass covers it: `luma`.
+ */
+export const GlassShadowedLuma = (luma: number, span: number, dx: number, dy: number, dark: boolean,
+  kind: GlassShadowKind, clear: number = 0): number => {
+  if (kind === 'None' || (dx < 0 && dy < 0)) return luma;
+  // The signed distance to the outline shifted down by `offset`.
+  const sdAt = (offset: number): number => {
+    const oy = dy - offset;
+    return dx > 0 && oy > 0 ? Math.hypot(dx, oy) : Math.max(dx, oy);
+  };
+  const { V } = GlassSizeRamps(span);
+  // Apple's: black at its fill under v, the colored read (M_shadow of this same even backdrop) over v.
+  const a = GlassShadowFall(sdAt(GLASS_SHADOW_OFFSET_Y), 2 * GlassShadowRadius(span)) * GlassShadowPeak(span, clear);
+  const fill = 0.12 + 0.08 + 0.16 * GlassSizeRamps(span).U;
+  const layer = fill + (1 - fill) * V;
+  const colored = Math.min(1, (dark ? 0.5 * luma : luma) * V / Math.max(layer, 1e-3));
+  let out = luma * (1 - a) + colored * a;
+  if (kind === 'Platter' && V > 0) {
+    const p = GlassPlatterShadowOf(span, dark);
+    out *= 1 - GlassShadowFall(sdAt(p.OffsetY), p.Reach) * p.Opacity * (1 - Math.min(Math.max(clear, 0), 1));
+  }
+  return out;
+};
+
 /** The active lens: a glass whose Lens is above 0 (Glass.Pipeline.glsl, GlassActiveLens). */
 export const GlassIsLens = (lens: number): boolean => lens > 0;
 /** A lens the walk draws as one, lifted items and all: its Lens above 0 while it is still glass. */

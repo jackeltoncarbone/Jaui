@@ -48,6 +48,7 @@ export const DefaultJivStyle: JivStyle = {
   GlassBlur: 'Auto',
   GlassOuterRefraction: 'Auto',
   GlassBleed: 'Auto',
+  GlassShadow: 'Auto',
   GlassReads: 'Content',
   GlassSeesThrough: 'false',
   GlassFrost: 'Inherit',

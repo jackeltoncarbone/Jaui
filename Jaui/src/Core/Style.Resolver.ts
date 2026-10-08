@@ -11,6 +11,7 @@ import { InkLevelOf, type VibrancyDeclaration } from './Vibrancy';
 import type { Color } from './Types';
 import { ResolveTransform } from '../Transform/Transform.Parse';
 import { FLEX_AUTO, type FlexAmounts, type FlexKind } from './Flex';
+import type { GlassShadowKind } from './Glass.Pipeline';
 
 /** The most frost `BackdropFilter: Blur(Auto)` draws, in CSS px. The field resolves to it, so every
  *  reader that sizes for the largest frost is right; the panel's own is `JivFrostCssPx`. */
@@ -272,6 +273,13 @@ const _resolveGlassSwitch = (name: string, raw: string | undefined, ctx: Resolve
   throw new Error(`[Jaui] ${name}: "${v}" -- expected Auto or None.`);
 };
 
+/** `GlassShadow: Auto | Platter | None` (Core/Glass.Pipeline.ts, `GlassShadowKind`). */
+const _resolveGlassShadow = (raw: string | undefined, ctx: ResolveContext): GlassShadowKind => {
+  const v = ResolveTernary(raw ?? 'Auto', ctx).trim();
+  if (v === 'Auto' || v === 'Platter' || v === 'None') return v;
+  throw new Error(`[Jaui] GlassShadow: "${v}" -- expected Auto, Platter or None.`);
+};
+
 /** `GlassReads: Content | Surface` (Core/Glass.Plate.ts). */
 const _resolveGlassReads = (raw: string | undefined, ctx: ResolveContext): 'Content' | 'Surface' => {
   const v = ResolveTernary(raw ?? 'Content', ctx).trim();
@@ -489,6 +497,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     GlassBlur: _resolveGlassBlur(s.GlassBlur, ctx),
     GlassOuterRefraction: _resolveGlassSwitch('GlassOuterRefraction', s.GlassOuterRefraction, ctx),
     GlassBleed: _resolveGlassSwitch('GlassBleed', s.GlassBleed, ctx),
+    GlassShadow: _resolveGlassShadow(s.GlassShadow, ctx),
     GlassReads: _resolveGlassReads(s.GlassReads, ctx),
     GlassSeesThrough: s.GlassSeesThrough === 'true' || (s.GlassSeesThrough as unknown) === true,
     GlassFrost: _resolveGlassFrost(s.GlassFrost, ctx),

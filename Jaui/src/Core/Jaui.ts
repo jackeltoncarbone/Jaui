@@ -18,8 +18,9 @@ import { BumpFontGeneration, MeasureText } from '../Text/Text.Measure';
 import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
-import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
-import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens } from './Glass.Pipeline';
+import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
+import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens,
+  GlassPlatterShadowOf, GlassShadowExtent } from './Glass.Pipeline';
 import { GlassFaceExclusion, PlateSyncRects, type PlateRect } from './Glass.Plate';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
@@ -3949,6 +3950,17 @@ export class Canvas implements DirtyTracker {
         // Glass casts Apple's shadow whatever it authored (Core/Glass.md): black from the flat program, or,
         // from 64 pt, the backdrop past its outline, read from its own pyramid by the glass program.
         const glassShadow = _isGlass(material) ? this._glassShadowPeak(node, eff) : 0;
+        // Under it, a menu's, popover's, sheet's or dialog's platter shadow (`GlassShadow: Platter`, Core/Glass.Pipeline.ts
+        // `GlassPlatterShadowOf`): black, from the flat program, on glass past 64 pt.
+        if (_isGlass(material) && _rs.GlassShadow === 'Platter' && !GlassIsLens(_rs.Lens) && !JivInstanceBuffer.DiagNoShadow
+            && GlassPlatterShadowOf(JivGlassSpanOf(node, eff), _rs.SchemeDark).Opacity * (1 - Math.min(Math.max(_rs.GlassClear, 0), 1)) > 0) {
+          this._panelBuffer.Begin();
+          this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 'Normal', null, 'Platter');
+          r.PanelBeginBatch();
+          r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
+          r.PanelDrawBatch(w, h, null, 0, false, null);
+          this._counts.Panels++;
+        }
         if ((_isGlass(material) ? glassShadow > 0 : _rs.ShadowColor.A > 0.001) && !JivInstanceBuffer.DiagNoShadow) {
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 'Normal', null, 'Only');
@@ -5530,6 +5542,10 @@ export class Canvas implements DirtyTracker {
     if (s.ShadowColor.A > 0.001) {
       m = s.ShadowBlur + Math.max(Math.abs(s.ShadowOffsetX), Math.abs(s.ShadowOffsetY));
     }
+    // Glass casts its own shadow whatever it authored (Drill Sentences lane GL2): two radii and the offset past the outline,
+    // the platter's reach past that. Read as the authored shadow alone, a card's paint rect and a cached layer held the
+    // glass's box and no shadow, so a later card seeded without it wrote the bare snapshot back over it.
+    if (_isGlass(s.Material)) m = Math.max(m, GlassShadowExtent(JivGlassSpan(node), s.GlassShadow));
     m = Math.max(m, s.BorderWidth);
     const kids = node.Children as Jiv[];
     for (let i = 0; i < kids.length; i++) m = Math.max(m, this._subtreeMaxPaintMargin(kids[i]));
@@ -6073,8 +6089,8 @@ export class Canvas implements DirtyTracker {
   };
 
   /** A glass surface's shadow peak at its rendered size (Core/Glass.Pipeline.ts); 0 on clear glass. */
-  private _glassShadowPeak = (node: Jiv, eff: Mat2x3): number =>
-    GlassShadowPeak(JivGlassSpanOf(node, eff), node.RenderStyle.GlassClear, GlassIsLens(node.RenderStyle.Lens));
+  private _glassShadowPeak = (node: Jiv, eff: Mat2x3): number => node.RenderStyle.GlassShadow === 'None' ? 0
+    : GlassShadowPeak(JivGlassSpanOf(node, eff), node.RenderStyle.GlassClear, GlassIsLens(node.RenderStyle.Lens));
 
   /** The glass FILL pyramid's plan: the region it is built over, the sigma it is built at, and how
    *  deep a chain the surface can read.
@@ -7031,7 +7047,8 @@ export class Canvas implements DirtyTracker {
   private _noteGlassFace = (
     node: Jiv, eff: Mat2x3, px: number, py: number, pw: number, ph: number, region: PlateRect,
   ): void => {
-    const shadowPx = GlassShadowRadius(JivGlassSpanOf(node, eff)) * this._dpr;
+    // Its shadows' whole reach (Drill Sentences lane GL2): two radii and the offset, the platter's past that.
+    const shadowPx = GlassShadowExtent(JivGlassSpanOf(node, eff), node.RenderStyle.GlassShadow) * this._dpr;
     const exclusion = GlassFaceExclusion({ x: px, y: py, w: pw, h: ph }, shadowPx, region);
     if (exclusion !== null) this._glassFaces.push(exclusion);
   };

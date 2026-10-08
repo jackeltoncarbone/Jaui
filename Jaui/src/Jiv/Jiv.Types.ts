@@ -2,6 +2,7 @@ import type { Color } from '../Core/Types';
 // Type-only, so the Vibrancy <-> Jiv.Types cycle is erased at compile time.
 import type { VibrancyDeclaration } from '../Core/Vibrancy';
 import type { FlexKind } from '../Core/Flex';
+import type { GlassShadowKind } from '../Core/Glass.Pipeline';
 import type { Transform } from '../Transform/Transform.Types';
 import type { FitMode } from '../Element/Element';
 
@@ -290,6 +291,10 @@ export interface JivStyle {
   /** `GlassBleed: Auto | None`: the edge bleed's reach outward, `inputBleedAmount` and `Height` (LiquidGlass.md 3.4).
    *  None zeroes both and keeps its blur and opacity, as DesignLibrary does when Layers lacks 0x40 (Sheets.md). */
   GlassBleed: string;
+  /** `GlassShadow: Auto | Platter | None`: the drop shadow (LiquidGlass.md 3.5). Auto is glassBackground's own; Platter
+   *  adds UIKit's platter shadow under it, for menus, popovers, sheets and dialogs [I] (Core/Glass.Pipeline.ts,
+   *  `GlassPlatterShadowOf`); None casts none. */
+  GlassShadow: string;
   /** `GlassReads: Content | Surface`: what a glass face's backdrop is (Core/Glass.Plate.ts). Content (the default) is the
    *  content under every glass, so a glass over glass reads as one layer of glass. Surface is what it sits on, the glass
    *  under it included: a sheet's own bar buttons over the sheet, a held toggle's clear knob over its track. */
@@ -489,6 +494,8 @@ export interface JivRenderStyle {
   /** Resolved `GlassOuterRefraction` and `GlassBleed`: true for Auto (Apple's reach), false for None. Snap. */
   GlassOuterRefraction: boolean;
   GlassBleed: boolean;
+  /** Resolved `GlassShadow`. Snaps. */
+  GlassShadow: GlassShadowKind;
   /** Resolved `GlassReads`. Snaps. */
   GlassReads: 'Content' | 'Surface';
   /** Resolved `GlassSeesThrough`. Snaps. */

@@ -3,7 +3,7 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 import { FoldVibrancy, VibrancyGraded } from '../Core/Vibrancy';
 import type { VibrancyValue } from '../Core/Vibrancy';
 import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
-import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps, GlassIsLens } from '../Core/Glass.Pipeline';
+import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps, GlassIsLens, GlassPlatterShadowOf } from '../Core/Glass.Pipeline';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -203,14 +203,16 @@ export class JivInstanceBuffer {
    *  `shadow` splits a glass fill from its drop shadow. 'Only' is the shadow alone: for glass it is
    *  Apple's (Core/Glass.md), black from the flat program, or colored from the glass program on
    *  glass 64 pt and up. 'Excluded' is the panel without it, its quad shrunk to the face and a pixel
-   *  of antialiasing, so the glass program shades only the fragments it can light. */
+   *  of antialiasing, so the glass program shades only the fragments it can light. 'Platter' is a glass's
+   *  platter shadow alone (`GlassShadow: Platter`, Core/Glass.Pipeline.ts `GlassPlatterShadowOf`): black, from
+   *  the flat program, with Apple's fall at the platter's sigma, drawn under the glass's own shadow. */
   Push = (jiv: Jiv, dpr: number, m: Mat2x3 = MAT_IDENTITY,
           clipOffset: number = 0, clipCount: number = 0, xformIndex: number = -1,
           borderMode: 'Normal' | 'Suppress' | 'BorderOnly' | 'VibrancyOnly' | 'RimOnly' = 'Normal',
           /** `'VibrancyOnly'` only: the value to fill with when it is NOT the backdrop zone's (the
            *  foreground zone's, or the cascaded property's). */
           vibrancyOverride: VibrancyValue | null = null,
-          shadow: 'Included' | 'Excluded' | 'Only' = 'Included'): void => {
+          shadow: 'Included' | 'Excluded' | 'Only' | 'Platter' = 'Included'): void => {
     if (this._count >= this._capacity) this._grow();
 
     const style = jiv.RenderStyle;
@@ -228,15 +230,24 @@ export class JivInstanceBuffer {
     const rimOnly = borderMode === 'RimOnly';
     const glass = style.Material === 'LiquidGlass';
     const span = JivGlassSpanOf(jiv, m);
-    const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly;
+    const _ns = JivInstanceBuffer.DiagNoShadow || shadow === 'Excluded' || rimOnly || (glass && style.GlassShadow === 'None');
     // Glass casts Apple's shadow: offset (0, 8) pt, reaching two radii (Glass.Pipeline), its alpha by size.
     const lens = GlassIsLens(style.Lens);
-    const glassShadowPeak = glass ? GlassShadowPeak(span, style.GlassClear, lens) : 0;
+    // The platter's shadow (GlassShadow: Platter): black, its own sigma and offset, straight down (never sideways).
+    const platter = shadow === 'Platter';
+    const platterShadow = platter && glass && !lens ? GlassPlatterShadowOf(span, style.SchemeDark) : null;
+    const glassShadowPeak = !glass ? 0 : platter
+      ? (platterShadow === null ? 0 : platterShadow.Opacity * (1 - Math.min(Math.max(style.GlassClear, 0), 1)))
+      : GlassShadowPeak(span, style.GlassClear, lens);
     // The lens's shadow is a plain one, drawn by the flat program.
     const glassColoredShadow = glass && !lens && shadow === 'Only' && GlassSizeRamps(span).V > 0 && glassShadowPeak > 0;
-    const shadowBlur = _ns ? 0 : glass ? 2 * GlassShadowRadius(span) * avgScale * d : style.ShadowBlur * avgScale * d;
+    const shadowBlur = _ns ? 0 : glass
+      ? (platterShadow !== null ? platterShadow.Reach : 2 * GlassShadowRadius(span)) * avgScale * d
+      : style.ShadowBlur * avgScale * d;
     const shadowOffX = _ns || glass ? 0 : style.ShadowOffsetX * avgScale * d;
-    const shadowOffY = _ns ? 0 : glass ? GLASS_SHADOW_OFFSET_Y * avgScale * d : style.ShadowOffsetY * avgScale * d;
+    const shadowOffY = _ns ? 0 : glass
+      ? (platterShadow !== null ? platterShadow.OffsetY : GLASS_SHADOW_OFFSET_Y) * avgScale * d
+      : style.ShadowOffsetY * avgScale * d;
 
     const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
     const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
@@ -330,7 +341,7 @@ export class JivInstanceBuffer {
     // 2 colored), the lens multiplier, the device px per point, the theme, the variant.
     data[offset + 36] = style.Thickness * avgScale * d;
     data[offset + 37] = span;
-    data[offset + 38] = glass && shadow === 'Only' ? (glassColoredShadow ? 2 : 1) : 0;
+    data[offset + 38] = glass && (shadow === 'Only' || platter) ? (glassColoredShadow ? 2 : 1) : 0;
     data[offset + 39] = style.Refraction;
 
     data[offset + 40] = d * avgScale;
@@ -382,7 +393,7 @@ export class JivInstanceBuffer {
     // strips everything BUT the stroke: transparent background + no shadow, and
     // Thickness=0 so the frag takes the plain stroke composite regardless of
     // the host material.
-    if (shadow === 'Only') {
+    if (shadow === 'Only' || platter) {
       data[offset + 15] = 0;  // Background alpha → no fill
       data[offset + 16] = 0; data[offset + 17] = 0; data[offset + 18] = 0; data[offset + 19] = 0; // BorderColor
       data[offset + 27] = 0;  // borderWidth

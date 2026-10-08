@@ -24,7 +24,8 @@ Status column:
 | thin-glass luma tracking (3.3) | derived | the probe (`u_ShadowState`, 56 pt gate) | differs: Apple's law is now [C] (LiquidGlass.md 3.3): a hysteresis switch between the regular light and dark faces, gated at 64 pt; ours blends a fitted face by the mean. No JSS option yet |
 | edge bleed (3.4) | `GlassBleed: Auto \| None`, built | shader; None zeroes the reach (amount, height) and keeps the blur and opacity, riding lane 46 as 2 x 16384 | matches: DesignLibrary zeroes `EdgeBleed.amount` and `height` when Layers lacks 0x40, which the sheet subvariants 27 to 29 remove (`sub_18AE83CAC`, `sub_18AE88C0C`) [C] |
 | outer lens past the outline (3.1) | `GlassOuterRefraction: Auto \| None`, built | shader outer shift; None rides lane 46 as 1 x 16384 | matches: DesignLibrary zeroes `Refraction.outerHeight` and `outerAmount` when Layers lacks 0x10 (the sheet subvariants, `SolariumDisableOuterRefraction`) [C] |
-| drop shadow (3.5) | `GlassShadow: Auto \| None` | shader, `GlassShadowRadius` 10 + 14 u | differs: our small-glass radius is 10 pt (fitted to one Edit button) where Apple's is 24 |
+| drop shadow (3.5) | `GlassShadow: Auto \| Platter \| None`, built | shader, `GlassShadowRadius` 10 + 14 u; `GlassShadowPeak`; the flat draw (black) or the glass program's colored read (v > 0) | differs: our small-glass radius is 10 pt (fitted to one Edit button) where Apple's is 24. Large glass matches the law, which is faint: 7.4% darker at 4 pt below a 250 pt dark menu over luma 0.3, 5.1% at 12, 2.1% at 24, 0.4% at 40, and nothing in light (M_shadow keeps luma) |
+| the platter's own shadow (LiquidGlass.md 3.5, [I]) | `GlassShadow: Platter`, built; worn by menus, popovers, sheets and the sheet's ask | a second flat draw under Apple's: black, sigma 30 pt, 10 pt down, 0.18 light / 0.35 dark, all over `v` (none at 64 pt and under; half sigma and offset there), Apple's fall at reach 2 sqrt 2 sigma (`GlassPlatterShadowOf`) | [I]: UIKit's platter and sheet drop-shadow views, not read. With it the 250 pt dark menu darkens 26% at 4 pt below, 21% at 12, 13% at 24, 6% at 40, 1% at 64; light 10%, 9%, 6%, 3%, 1% |
 | holding tone, clamp (3.6) | derived | shader, clamp `[0, 1]` | matches (SDR) |
 | dispersion (3.7) | `GlassDispersion: 0` (`aberration_amount`) | `ChromaticAberration`, a per-channel read | differs: ours is not Apple's 6-tap filter; Apple sets 0 on standard glass and on the lens |
 | tint (4) | `GlassTint: None \| <color>` | a glass `Background` is the seed; dark shade fitted | matches in structure, shade fitted |
@@ -185,7 +186,7 @@ GlassRefraction: Auto | Inner(<amount>, <height>) Outer(<amount>, <height>) Opac
 GlassFace: Auto | Ycc(<white>, <black>, <saturation>, <fill>)
 GlassOuterRefraction: Auto | None
 GlassBleed: Auto | None
-GlassShadow: Auto | None
+GlassShadow: Auto | Platter | None
 GlassDispersion: 0 | <n>
 GlassTint: None | <color>
 GlassRim: Auto | None | Rim(<amount>, <height>)
