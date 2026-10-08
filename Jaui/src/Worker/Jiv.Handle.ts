@@ -196,6 +196,13 @@ export class JivHandle {
   get SnapLayout(): boolean { return this._snapLayout; }
   set SnapLayout(v: boolean) { if (this._snapLayout !== v) { this._snapLayout = v; this._markDirty(); } }
 
+  /** Springs the box from `rect` (canvas px) to wherever its next layout puts it (`Element.MorphFrom`). One shot,
+   *  and enqueued at once rather than on the next flush, so it rides the same batch as an apply made beside it. */
+  MorphFrom(rect: { X: number; Y: number; Width: number; Height: number }): void {
+    const from = { X: rect.X, Y: rect.Y, Width: rect.Width, Height: rect.Height };
+    this._bridge.Enqueue({ K: 'apply', Id: this.Id, Opts: { ElementProps: { MorphFrom: from } } });
+  }
+
   /** A text change lands at once instead of cross fading (`Element.SnapText`). */
   get SnapText(): boolean { return this._snapText; }
   set SnapText(v: boolean) { if (this._snapText !== v) { this._snapText = v; this._markDirty(); } }

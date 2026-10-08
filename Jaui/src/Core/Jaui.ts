@@ -7531,6 +7531,11 @@ export class Canvas implements DirtyTracker {
         animator.SnapToTargets();
         this._animators.set(node, animator);
         this._animationManager.Register(animator);
+        // A box born with an origin (`Element.MorphFrom`) springs from it rather than standing where it was born.
+        if (node.MorphFrom) {
+          if (animator.SpringFrom(node.MorphFrom)) this._animationManager.Kick();
+          node.MorphFrom = null;
+        }
 
         // Style animator is Jiv-specific, it springs every animatable
         // JivStyle field toward EffectiveStyle. Only created for Jivs.
@@ -7585,7 +7590,11 @@ export class Canvas implements DirtyTracker {
         // cheap flags: a node that never reads its own box, or whose box did not
         // move, pays nothing.
         if (needsKick && node instanceof Jiv && node.HasScopedPredicates) node.MarkStyleDirty();
-        if (node.SnapLayout) {
+        if (node.MorphFrom) {
+          // `Element.MorphFrom`: this commit springs from the given origin, over a snap and over the spring's own.
+          if (animator.SpringFrom(node.MorphFrom)) this._animationManager.Kick();
+          node.MorphFrom = null;
+        } else if (node.SnapLayout) {
           animator.SnapToTargets();
         } else if (needsKick) {
           this._animationManager.Kick();

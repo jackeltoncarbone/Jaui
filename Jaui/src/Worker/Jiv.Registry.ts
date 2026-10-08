@@ -638,6 +638,10 @@ export class JivRegistry {
       core.MarkLayoutDirty();
     }
     if (ep.SnapLayout !== undefined) core.SnapLayout = ep.SnapLayout;
+    if (ep.MorphFrom !== undefined) {
+      core.MorphFrom = { ...ep.MorphFrom };
+      core.MarkLayoutDirty();
+    }
     if (ep.SnapText !== undefined) core.SnapText = ep.SnapText;
   };
 

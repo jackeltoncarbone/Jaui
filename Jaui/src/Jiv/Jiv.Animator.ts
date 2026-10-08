@@ -71,6 +71,22 @@ export class JivAnimator implements Animatable {
     this._element.TeleportSeq = 0;
   };
 
+  /** Starts the box at `from` and lets each spring run to the target `SetTargets` gave it (`Element.MorphFrom`).
+   *  Returns whether anything moves. */
+  SpringFrom = (from: { X: number; Y: number; Width: number; Height: number }): boolean => {
+    this.Rouse?.();
+    const s = this.Springs;
+    s.X.Value = from.X; s.X.Velocity = 0;
+    s.Y.Value = from.Y; s.Y.Velocity = 0;
+    s.Width.Value = from.Width; s.Width.Velocity = 0;
+    s.Height.Value = from.Height; s.Height.Velocity = 0;
+    this._element.X = from.X;
+    this._element.Y = from.Y;
+    this._element.Width = from.Width;
+    this._element.Height = from.Height;
+    return !(s.X.IsSettled && s.Y.IsSettled && s.Width.IsSettled && s.Height.IsSettled);
+  };
+
   Tick = (dt: number): boolean => {
     const s = this.Springs;
     let active = false;

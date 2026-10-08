@@ -184,6 +184,14 @@ export class Element {
    *  unless a feature opts out. */
   SnapLayout: boolean = false;
 
+  /** A ONE-SHOT ORIGIN for the rect spring, in the same canvas px as `X`/`Y`, or null. The next layout
+   *  commit starts this element's box here and springs it to the rect the solve gives it, then clears it,
+   *  whatever `SnapLayout` says for that commit. It is how a menu grows out of the control that opened it:
+   *  the panel is laid out where it opens, and its box (its glass, its clip) springs there from the control's
+   *  own rect. Children keep their own springs (or their own snap), so a panel's rows can stand at their places
+   *  while the box around them grows. */
+  MorphFrom: { X: number; Y: number; Width: number; Height: number } | null = null;
+
   /** When true, a change of this element's text lands at once: words that left vanish, words that came
    *  stand at full opacity, rather than cross fading in place (`TextAnimator.SnapWords`). For text that is a
    *  reading which ticks, a count or a clock, where the cross fade drew the old value over the new one

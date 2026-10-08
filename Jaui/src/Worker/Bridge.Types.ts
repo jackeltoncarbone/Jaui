@@ -269,6 +269,8 @@ export interface JivApplyOpts {
      *  re-segmentation lands at the final X/Y instantly instead of drifting
      *  between rows from the previous slot. */
     SnapLayout?: boolean;
+    /** A one-shot origin the next layout commit springs the box from, canvas px (`Element.MorphFrom`). Sent once. */
+    MorphFrom?: { X: number; Y: number; Width: number; Height: number };
     /** When true, a text change lands at once instead of cross fading word by word (`Element.SnapText`). */
     SnapText?: boolean;
   };
