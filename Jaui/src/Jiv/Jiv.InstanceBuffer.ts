@@ -3,7 +3,8 @@ import { type Mat2x3, MAT_IDENTITY, matApplyX, matApplyY, matScaleX, matScaleY, 
 import { FoldVibrancy, VibrancyGraded } from '../Core/Vibrancy';
 import type { VibrancyValue } from '../Core/Vibrancy';
 import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
-import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps, GlassIsLens, GlassPlatterShadowOf } from '../Core/Glass.Pipeline';
+import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps, GlassIsLens, GlassPlatterShadowOf,
+  GLASS_ELEVATION_STEPS } from '../Core/Glass.Pipeline';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -346,7 +347,10 @@ export class JivInstanceBuffer {
 
     data[offset + 40] = d * avgScale;
     data[offset + 41] = style.Tint;
-    data[offset + 42] = style.SchemeDark ? 1 : 0;
+    // The dark scheme (0 or 1), with the glass's elevation over earlier glass above it in 31sts (`GlassElevation`, set by
+    // the walk; Jiv.Panel.vert splits them).
+    data[offset + 42] = (style.SchemeDark ? 1 : 0)
+      + 2 * Math.round(Math.min(1, Math.max(0, jiv.GlassElevation || 0)) * GLASS_ELEVATION_STEPS);
     // GlassClear (0..1) with the pressed glow in thousandths above it (Jiv.Panel.frag, GlassLaneClear / GlassLaneGlow).
     data[offset + 43] = style.GlassClear + 4 * Math.round(Math.min(1, Math.max(0, style.GlassGlow)) * 1000);
 

@@ -15,7 +15,7 @@ flat in vec4 v_StyleParams;    // borderEdgeAa, smoothness, opacity, brightness 
                                // borderEdgeAa: half-width of border/silhouette feather (physical px)
 flat in vec4 v_Grading;        // brightness, saturation, contrast, frostLod
 flat in vec4 v_Refraction;     // thickness, glass span (pt), glass shadow mode, refraction
-flat in vec4 v_Lighting;       // device px per pt, bodyTint (signed), dark scheme, clear glass
+flat in vec4 v_Lighting;       // device px per pt, bodyTint (signed), glass elevation (0..1), clear glass
 flat in vec4 v_Specular;       // rim amount, rim height (pt), chromaticAberration, borderFade
 flat in vec4 v_RimEdge;        // glass appearance (1 light), backdrop mean luma, lens magnification, lens ink
 flat in vec4 v_TouchGlow;      // the flex's little glow: centre (fraction of the box), diameter (CSS px), alpha
@@ -816,6 +816,8 @@ void main() {
     float glassClear = GlassLaneClear(v_Lighting.w);
     float glassGlow = GlassLaneGlow(v_Lighting.w);
     float glassLight = v_RimEdge.x;
+    // How far this glass stands over an earlier glass face, 0 to 1 (Jiv.Panel.vert, lane 42): its dark face's step up.
+    float glassElevation = v_Lighting.z;
     float glassShadowTint = 0.0;
     vec3 glassShadowRgb = vec3(0.0);
     if (materialType == 1.0) {
@@ -872,7 +874,8 @@ void main() {
             face = lensed;
             if (GlassSkips(GLASS_SKIP_GRADE)) {} else
             // A seeded glass is a panel at every size: the regular face, never the thin control's fit (Jiv.Panel.vert).
-            face = GlassFace(lensed, v_Tint.a > 0.001 ? max(glassSpan, GLASS_PANEL_FACE_SPAN) : glassSpan, glassClear, glassLight, v_RimEdge.y);
+            face = GlassFace(lensed, v_Tint.a > 0.001 ? max(glassSpan, GLASS_PANEL_FACE_SPAN) : glassSpan, glassClear, glassLight, v_RimEdge.y,
+                             glassElevation);
             // The edge bleed of regular glass from 64 pt: the backdrop 0.35 S outward, blurred at 0.35 S,
             // weighted toward the face's own darks on light glass and its lights on dark glass.
             if (ramps.y > 0.0 && glassClear < 1.0 && !GlassSkips(GLASS_SKIP_BLEED)) {

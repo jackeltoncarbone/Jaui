@@ -74,3 +74,17 @@ export function GlassFaceExclusion(face: PlateRect, shadowPx: number, synced: Pl
   const grown: PlateRect = { x: face.x - shadowPx, y: face.y - shadowPx, w: face.w + 2 * shadowPx, h: face.h + 2 * shadowPx };
   return Intersect(grown, synced);
 }
+
+/**
+ * GLASS PRESENTED OVER GLASS (Drill Sentences lane GL3). The share of a glass face's box, 0 to 1, that stands over the
+ * boxes of glass faces drawn before it this frame (their faces alone, not their shadows or a veil). Because no glass
+ * samples glass, a menu over a sheet would read the sheet's own tone; this share is what lifts it one step
+ * (Core/Glass.Pipeline.ts, `GlassElevationOf`), as Apple's menu over a sheet reads one (Jwift/Apple/LiquidGlass.md 8.1).
+ */
+export function GlassCoveredShare(face: PlateRect, below: readonly PlateRect[]): number {
+  const area = face.w * face.h;
+  if (!(area > 0) || below.length === 0) return 0;
+  let open = 0;
+  for (const p of PlateSyncRects(face, below)) open += p.w * p.h;
+  return Math.max(0, Math.min(1, 1 - open / area));
+}

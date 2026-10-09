@@ -20,8 +20,8 @@ import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens,
-  GlassPlatterShadowOf, GlassShadowExtent } from './Glass.Pipeline';
-import { GlassFaceExclusion, PlateSyncRects, type PlateRect } from './Glass.Plate';
+  GlassPlatterShadowOf, GlassShadowExtent, GlassElevationOf } from './Glass.Pipeline';
+import { GlassCoveredShare, GlassFaceExclusion, PlateSyncRects, type PlateRect } from './Glass.Plate';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
   Vibrancy, VibrancyBlendOf, VibrancyGateLine, VibrancyGraded, VibrancyInkScale, VibrancyIsActive,
@@ -2967,6 +2967,8 @@ export class Canvas implements DirtyTracker {
     let lastBaseFrostLod: number = 0;
     // Glass never samples glass (`Core/Glass.Plate.ts`): the faces drawn so far this frame, which no later sync takes.
     this._glassFaces.length = 0;
+    // And their boxes alone, for the elevation of glass presented over them (`GlassCoveredShare`).
+    this._glassFaceBoxes.length = 0;
     // THE SCROLL EDGE'S BACKDROP, for the glass inside it. A scroll edge strip (`ProgressiveBlurKind:
     // ScrollEdge`) builds a sharp-rooted pyramid of the scene as it was BEFORE the strip dims and blurs it,
     // and a bar floating in the strip samples that pyramid at its own frost instead of building one from
@@ -3738,6 +3740,11 @@ export class Canvas implements DirtyTracker {
         const glassFace = _isGlass(material) && node.RenderStyle.GlassReads === 'Content'
           && below === null && scoped === null && !cardOpen;
         const plate = glassFace ? this._syncPlate(region) : null;
+        // GLASS PRESENTED OVER GLASS (Drill Sentences lane GL3): a face that stands over earlier glass faces wears its
+        // elevated dark face (Core/Glass.Pipeline.ts, GlassElevationOf), one step above them, since it cannot see them.
+        const faceBox: PlateRect = { x: px, y: py, w: pw, h: ph };
+        node.GlassElevation = glassFace ? GlassElevationOf(GlassCoveredShare(faceBox, this._glassFaceBoxes)) : 0;
+        if (glassFace) this._glassFaceBoxes.push(faceBox);
         if (scoped !== null) {
           // The scoped build already IS the final pyramid (capture, resolve, ComputeBlur,
           // GenerateBlurMipmap, cached under READER_SCOPED) — none of the Page decision tree below
@@ -7034,6 +7041,8 @@ export class Canvas implements DirtyTracker {
    */
   /** The glass faces drawn so far this frame, as each one's exclusion (`GlassFaceExclusion`), device px. */
   private _glassFaces: PlateRect[] = [];
+  /** The boxes of the glass faces drawn so far this frame, device px (`GlassCoveredShare`). */
+  private _glassFaceBoxes: PlateRect[] = [];
 
   /** Brings the plate up to date over `region` less every earlier glass face, and returns it (`SyncPlate`). Null off
    *  the WebGL2 renderer, where every backdrop reads the scene as drawn. */

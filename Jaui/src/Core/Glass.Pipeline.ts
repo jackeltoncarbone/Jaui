@@ -95,6 +95,25 @@ export const GlassYcc = (c: GlassRgb, white: number, black: number, saturation: 
  */
 export const GLASS_FACE_APPLE_LIGHT: GlassFaceParams = [1.03, 0.5, 1.0, 0.4];
 export const GLASS_FACE_APPLE_DARK: GlassFaceParams = [0.6, 0.2, 1.0, 0.4];
+
+/**
+ * GLASS PRESENTED OVER GLASS, IN DARK (Drill Sentences lane GL3). Apple's elevation trait changes no face in the paths
+ * read (Jwift/Apple/LiquidGlass.md 8.1 [C]); Apple's menu over a dark sheet reads a step up because its backdrop layer
+ * captures the sheet, and the dark face lifts anything below 0.158 [I]. Jaui's glass never samples glass
+ * (Core/Glass.Plate.ts), so a menu over a sheet read the sheet's own tone, set apart by its rim alone (blind round 28).
+ * The elevated dark face stands in for that step [I]: the dark line moved up by 0.09, Y -> 0.24 Y + 0.21, its slope and
+ * its chroma (x 0.6) kept. That lands +6 to +10 L* over every dark ground, about Apple's own dark elevated steps (black
+ * to (28, 28, 30), +10.3 L*; (28, 28, 30) to (44, 44, 46), +7.7 L*). Light glass keeps its face.
+ */
+export const GLASS_FACE_APPLE_DARK_ELEVATED: GlassFaceParams = [0.75, 0.35, 1.0, 0.4];
+/** How much of a glass face must stand over earlier glass faces before it is elevated, as a share of its own area: none
+ *  below the first, all from the second, smooth between. A sheet over the tab bar is never elevated; a menu wholly over
+ *  a sheet always is; one hanging off the sheet's edge, partly. */
+export const GLASS_ELEVATION_COVER = [0.5, 0.9] as const;
+/** The elevation rides lane 42 above the scheme bit in steps of 1 / GLASS_ELEVATION_STEPS (Jiv.Panel.vert). */
+export const GLASS_ELEVATION_STEPS = 31;
+/** A glass face's elevation, 0 to 1, from the share of its area that stands over earlier glass faces. */
+export const GlassElevationOf = (covered: number): number => _smooth(GLASS_ELEVATION_COVER[0], GLASS_ELEVATION_COVER[1], covered);
 /**
  * The fitted faces (Core/Glass.md), held on glass 64 pt and under, where they were fitted: iOS's 62 pt bars and small
  * controls (dark) and SwiftUI's capsule (light). Apple's glass that size tracks its backdrop's luma, and the dark fit
@@ -115,8 +134,9 @@ const _mixFace = (a: GlassFaceParams, b: GlassFaceParams, t: number): GlassFaceP
   [_mix(a[0], b[0], t), _mix(a[1], b[1], t), _mix(a[2], b[2], t), _mix(a[3], b[3], t)];
 
 /** The light and dark face parameters regular glass `span` pt across wears (`mean` is the probe's luma, read only at
- *  56 pt and under). */
-export const GlassFaceParamsOf = (span: number, mean: number = 0.5): { Light: GlassFaceParams; Dark: GlassFaceParams } => {
+ *  56 pt and under; `elevation` 0 to 1, how far it stands over other glass, moves large dark glass to its elevated
+ *  face and leaves the rest). */
+export const GlassFaceParamsOf = (span: number, mean: number = 0.5, elevation: number = 0): { Light: GlassFaceParams; Dark: GlassFaceParams } => {
   let light = GLASS_FACE_FITTED_LIGHT;
   let dark = GLASS_FACE_FITTED_DARK;
   if (span <= 56) {
@@ -124,12 +144,13 @@ export const GlassFaceParamsOf = (span: number, mean: number = 0.5): { Light: Gl
     dark = GLASS_FACE_THIN_DARK;
   }
   const large = Math.max(0, Math.min(1, (span - GLASS_FACE_LARGE_SPAN[0]) / (GLASS_FACE_LARGE_SPAN[1] - GLASS_FACE_LARGE_SPAN[0])));
-  return { Light: _mixFace(light, GLASS_FACE_APPLE_LIGHT, large), Dark: _mixFace(dark, GLASS_FACE_APPLE_DARK, large) };
+  const appleDark = _mixFace(GLASS_FACE_APPLE_DARK, GLASS_FACE_APPLE_DARK_ELEVATED, Math.max(0, Math.min(1, elevation)));
+  return { Light: _mixFace(light, GLASS_FACE_APPLE_LIGHT, large), Dark: _mixFace(dark, appleDark, large) };
 };
 
 /** Regular glass's face over the lensed read `c`, `light` its appearance 0 (dark) to 1 (light). */
-export const GlassFaceOf = (c: GlassRgb, span: number, light: number, mean: number = 0.5): GlassRgb => {
-  const { Light, Dark } = GlassFaceParamsOf(span, mean);
+export const GlassFaceOf = (c: GlassRgb, span: number, light: number, mean: number = 0.5, elevation: number = 0): GlassRgb => {
+  const { Light, Dark } = GlassFaceParamsOf(span, mean, elevation);
   const lit = GlassYcc(c, Light[0], Light[1], Light[2]);
   const dim = GlassYcc(c, Dark[0], Dark[1], Dark[2]);
   const at = (i: number): number => _mix(dim[i] * (1 - Dark[3]), lit[i] * (1 - Light[3]) + Light[3], light);
@@ -152,8 +173,8 @@ export const GLASS_HOLDING_TONE = 0.97;
  * read is that same backdrop: everywhere on a sheet, whose subvariant has no bleed reach, and deep inside any panel), and
  * the holding tone, clamped, in the order Jiv.Panel.frag runs them. Nothing in it depends on where in the body it is.
  */
-export const GlassBodyOf = (c: GlassRgb, span: number, light: number, mean: number = 0.5): GlassRgb => {
-  const face = GlassFaceOf(c, span, light, mean);
+export const GlassBodyOf = (c: GlassRgb, span: number, light: number, mean: number = 0.5, elevation: number = 0): GlassRgb => {
+  const face = GlassFaceOf(c, span, light, mean, elevation);
   const { V } = GlassSizeRamps(span);
   let out: GlassRgb = face;
   if (V > 0) {
@@ -314,9 +335,11 @@ export const GlassShadowExtent = (span: number, kind: GlassShadowKind): number =
  * is the backdrop's (sRGB encoded, 0 to 1, grey); `dx` and `dy` are the point's signed distances past the face's side
  * and bottom edges, pt, negative inside (a point straight below the middle of a 250 pt menu has dx -125). Returns the
  * luma there with the glass's shadows drawn, square corners. Under the face (both negative) the glass covers it: `luma`.
+ * `read` is the luma the colored shadow reads, the glass's own backdrop: the ground itself, unless the ground is other
+ * glass (a menu over a sheet), which no glass samples (Core/Glass.Plate.ts), so it reads the content under that glass.
  */
 export const GlassShadowedLuma = (luma: number, span: number, dx: number, dy: number, dark: boolean,
-  kind: GlassShadowKind, clear: number = 0): number => {
+  kind: GlassShadowKind, clear: number = 0, read: number = luma): number => {
   if (kind === 'None' || (dx < 0 && dy < 0)) return luma;
   // The signed distance to the outline shifted down by `offset`.
   const sdAt = (offset: number): number => {
@@ -328,7 +351,7 @@ export const GlassShadowedLuma = (luma: number, span: number, dx: number, dy: nu
   const a = GlassShadowFall(sdAt(GLASS_SHADOW_OFFSET_Y), 2 * GlassShadowRadius(span)) * GlassShadowPeak(span, clear);
   const fill = 0.12 + 0.08 + 0.16 * GlassSizeRamps(span).U;
   const layer = fill + (1 - fill) * V;
-  const colored = Math.min(1, (dark ? 0.5 * luma : luma) * V / Math.max(layer, 1e-3));
+  const colored = Math.min(1, (dark ? 0.5 * read : read) * V / Math.max(layer, 1e-3));
   let out = luma * (1 - a) + colored * a;
   if (kind === 'Platter' && V > 0) {
     const p = GlassPlatterShadowOf(span, dark);

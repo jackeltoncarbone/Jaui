@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { GlassFaceExclusion, PLATE_PIECES_MAX, PlateSyncRects, type PlateRect } from '../src/Core/Glass.Plate';
+import { readFileSync } from 'node:fs';
+import { GlassCoveredShare, GlassFaceExclusion, PLATE_PIECES_MAX, PlateSyncRects, type PlateRect } from '../src/Core/Glass.Plate';
+import { GLASS_ELEVATION_STEPS, GlassElevationOf } from '../src/Core/Glass.Pipeline';
+import { Jiv } from '../src/Jiv/Jiv';
+import { JivInstanceBuffer } from '../src/Jiv/Jiv.InstanceBuffer';
 import { ResolveStyle, SEED_CONTEXT } from '../src/Core/Style.Resolver';
 import { DefaultJivStyle } from '../src/Jiv/Jiv.Defaults';
 
@@ -62,5 +66,59 @@ describe('GlassFaceExclusion: the face and its shadow, within what it synced', (
 
   it('a face outside what it synced keeps nothing out', () => {
     expect(GlassFaceExclusion({ x: 0, y: 0, w: 5, h: 5 }, 0, { x: 50, y: 50, w: 10, h: 10 })).toBeNull();
+  });
+});
+
+// Glass presented over glass (Drill Sentences lane GL3): the share of a face over earlier faces, which elevates it.
+describe('GlassCoveredShare: how much of a glass face stands over the glass faces drawn before it', () => {
+  const sheet = { x: 16, y: 300, w: 780, h: 1400 };
+  it('none below it: 0', () => {
+    expect(GlassCoveredShare({ x: 100, y: 400, w: 500, h: 600 }, [])).toBe(0);
+  });
+
+  it('a menu wholly over the sheet: 1; one hanging half off its edge: about a half', () => {
+    expect(GlassCoveredShare({ x: 100, y: 400, w: 500, h: 600 }, [sheet])).toBe(1);
+    expect(GlassCoveredShare({ x: 546, y: 400, w: 500, h: 600 }, [sheet])).toBeCloseTo(0.5, 9);
+  });
+
+  it('a sheet over the tab bar: the bar\'s small share of it', () => {
+    const bar = { x: 42, y: 1580, w: 720, h: 124 };
+    expect(GlassCoveredShare(sheet, [bar])).toBeCloseTo((720 * 120) / (780 * 1400), 9);
+    expect(GlassElevationOf(GlassCoveredShare(sheet, [bar]))).toBe(0);
+  });
+
+  it('overlapping faces below count once', () => {
+    const a = { x: 0, y: 0, w: 100, h: 100 };
+    expect(GlassCoveredShare({ x: 0, y: 0, w: 200, h: 100 }, [a, a, { x: 50, y: 0, w: 100, h: 100 }])).toBeCloseTo(0.75, 9);
+  });
+
+  it('an empty face is over nothing', () => {
+    expect(GlassCoveredShare({ x: 0, y: 0, w: 0, h: 10 }, [sheet])).toBe(0);
+  });
+});
+
+describe('the walk elevates a glass face by its share over earlier faces, and the instance carries it', () => {
+  it('Jaui.ts takes the share against the face boxes alone, before it notes its own', () => {
+    const src = readFileSync(new URL('../src/Core/Jaui.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+    expect(src).toContain('node.GlassElevation = glassFace ? GlassElevationOf(GlassCoveredShare(faceBox, this._glassFaceBoxes)) : 0;\n'
+      + '        if (glassFace) this._glassFaceBoxes.push(faceBox);');
+    expect(src).toContain('this._glassFaceBoxes.length = 0;');
+  });
+
+  it('lane 42 is the scheme bit plus twice the elevation in 31sts', () => {
+    const lane42 = (dark: boolean, elevation: number): number => {
+      const node = new Jiv({ X: 0, Y: 0, Width: 250, Height: 400, Style: { Glass: 'Regular' } });
+      node.RenderStyle.SchemeDark = dark;
+      node.GlassElevation = elevation;
+      const buf = new JivInstanceBuffer();
+      buf.Begin();
+      buf.Push(node, 1);
+      return buf.Data[42];
+    };
+    expect(lane42(false, 0)).toBe(0);
+    expect(lane42(true, 0)).toBe(1);
+    expect(lane42(true, 1)).toBe(1 + 2 * GLASS_ELEVATION_STEPS);
+    expect(lane42(false, 0.5)).toBe(2 * 16);
+    expect(lane42(true, 7)).toBe(1 + 2 * GLASS_ELEVATION_STEPS);
   });
 });

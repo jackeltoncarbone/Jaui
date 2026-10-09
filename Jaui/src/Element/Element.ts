@@ -272,6 +272,9 @@ export class Element {
   EffectiveVibrancyAuthored: boolean = false;
   /** Render-time cascaded `GlassFrost`: 0 Automatic, 1 Reduced, 2 None (Core/Glass.Pipeline.ts). */
   EffectiveGlassFrost: number = 0;
+  /** Render-time: how far this glass face stands over glass faces drawn before it this frame, 0 to 1 (Core/Glass.Pipeline.ts
+   *  `GlassElevationOf`, set by the walk). Large dark glass wears its elevated face by it. */
+  GlassElevation: number = 0;
 
   /** Click handler — fired on pointerup when the release hits the same
    *  Jiv that pointerdown hit (standard click semantics). null = no

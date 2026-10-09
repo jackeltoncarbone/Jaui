@@ -14,7 +14,7 @@ layout(location = 7) in vec4 a_ShadowParams;  // shadowOffX, shadowOffY, shadowB
 layout(location = 8) in vec4 a_StyleParams;   // borderEdgeAa, smoothness, opacity, materialType
 layout(location = 9) in vec4 a_Grading;       // brightness, saturation, contrast, frostLod
 layout(location = 10) in vec4 a_Refraction;   // thickness, glass span (pt), glass shadow mode, refraction
-layout(location = 11) in vec4 a_Lighting;     // device px per pt, bodyTint (signed), dark scheme, clear glass
+layout(location = 11) in vec4 a_Lighting;     // device px per pt, bodyTint (signed), dark scheme + 2 x elevation (31sts), clear glass
 layout(location = 12) in vec4 a_Specular;     // rim amount, rim height (pt), chromaticAberration, borderFade
 layout(location = 13) in vec4 a_RimEdge;      // flex touch centre, flex touch diameter + alpha, lens (0 none, 1 pressed), lens ink (packed rgb + 1)
 layout(location = 14) in vec4 a_Outline;      // dispersion amount + angle, height + inset (packed), clipOffset, clipCount
@@ -77,12 +77,16 @@ void main() {
     v_Grading = a_Grading;
     v_Refraction = a_Refraction;
     v_Lighting = a_Lighting;
+    // Lane 42 is the dark scheme (0 or 1) with the glass's elevation above it in 31sts (Jiv.InstanceBuffer.ts): the
+    // fragment stage reads the elevation alone (Glass.Pipeline.glsl, GlassFace).
+    float schemeDark = mod(a_Lighting.z, 2.0);
+    v_Lighting.z = floor(a_Lighting.z / 2.0) / 31.0;
     v_Specular = a_Specular;
     v_Outline = a_Outline;
     v_TouchGlow = vec4(mod(a_RimEdge.x, 1024.0), floor(a_RimEdge.x / 1024.0), 0.0, 0.0) / 1023.0;
     v_TouchGlow.zw = vec2(mod(a_RimEdge.y, 16384.0) * 0.25, floor(a_RimEdge.y / 16384.0) / 1000.0);
     // Unprobed or larger glass takes the theme's appearance, at a mean that puts thin glass on the table's face.
-    v_RimEdge = a_Lighting.z > 0.5 ? vec4(0.0, 0.45, a_RimEdge.zw) : vec4(1.0, 0.5, a_RimEdge.zw);
+    v_RimEdge = schemeDark > 0.5 ? vec4(0.0, 0.45, a_RimEdge.zw) : vec4(1.0, 0.5, a_RimEdge.zw);
     // Glass with a seed of its own (a panel's tint: a toast, a heading, the selection bar) is a panel at every size: it
     // keeps its theme's appearance, as its tint does, where a thin control tracks the luma under it. Over a bright field
     // a seeded 36 pt heading took the light appearance, and its labels went to light glass's black ink on its dark tint.
@@ -91,7 +95,7 @@ void main() {
         vec2 probe = texelFetch(u_ShadowState, ivec2(int(u_GlassAppearance), 0), 0).rg;
         if (a_Refraction.y <= 56.0 && a_Tint.a <= 0.001) v_RimEdge.xy = vec2(smoothstep(0.45, 0.55, probe.y), probe.y);
         float busy = smoothstep(GLASS_ADAPT_SPREAD.x, GLASS_ADAPT_SPREAD.y, probe.x);
-        float glare = a_Lighting.z > 0.5 ? smoothstep(GLASS_ADAPT_LUMA_DARK.x, GLASS_ADAPT_LUMA_DARK.y, probe.y)
+        float glare = schemeDark > 0.5 ? smoothstep(GLASS_ADAPT_LUMA_DARK.x, GLASS_ADAPT_LUMA_DARK.y, probe.y)
             : 1.0 - smoothstep(GLASS_ADAPT_LUMA_LIGHT.x, GLASS_ADAPT_LUMA_LIGHT.y, probe.y);
         v_Adapt = max(busy * (1.0 - smoothstep(GLASS_ADAPT_SPAN.x, GLASS_ADAPT_SPAN.y, a_Refraction.y)),
             GLASS_ADAPT_LUMA_SHARE * glare * (1.0 - smoothstep(GLASS_ADAPT_GLARE_SPAN.x, GLASS_ADAPT_GLARE_SPAN.y, a_Refraction.y)));
