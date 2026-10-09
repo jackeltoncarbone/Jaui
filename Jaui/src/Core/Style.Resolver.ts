@@ -173,6 +173,15 @@ const _resolveGradeArgs = (raw: string, ctx: ResolveContext): string => {
   });
 };
 
+/** `GlassTint: None | <color>` (Jwift/Apple/LiquidGlass.md 4): on glass, the tint seed the shader reads from the Background
+ *  channel, in place of the Background; `null` (the Background stands) when it is None or the element is not glass, so a
+ *  tint can never become a flat fill. */
+const _resolveGlassSeed = (s: JivStyle, glass: GlassKind, ctx: ResolveContext): string | null => {
+  if (glass === 'None' || s.GlassTint === undefined) return null;
+  const raw = ResolveVars(ResolveTernary(s.GlassTint, ctx), ctx).trim();
+  return raw === '' || raw.toLowerCase() === 'none' ? null : raw;
+};
+
 /** `Tint` + `TintTone` → the signed tint the shader reads: negative toward black, positive toward white. */
 const _resolveTint = (s: JivStyle, ctx: ResolveContext): number => {
   const strength = Math.max(0, Math.min(1, Resolve(ResolveTernary(s.Tint, ctx), ctx, 'W')));
@@ -440,7 +449,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     CornerShape: _parseCornerShape(ResolveTernary(s.CornerShape, ctx)),
     BorderRadiusSmoothness: smoothness,
 
-    Background: ParseBackground(ResolveVars(ResolveTernary(s.Background, ctx), ctx)),
+    Background: ParseBackground(_resolveGlassSeed(s, glass, ctx) ?? ResolveVars(ResolveTernary(s.Background, ctx), ctx)),
 
     VibrancyDeclaration: _resolveVibrancyProperty(ResolveTernary(s.Vibrancy, ctx), ctx),
     ForegroundVibrancy: fg.Vibrancy,

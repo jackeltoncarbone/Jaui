@@ -43,7 +43,28 @@ Every glass surface (`Thickness > 0`, material `LiquidGlass`) runs Apple's pipel
 
 ## Tint
 
-A glass Background is the seed of Apple's tint (LiquidGlass.md 4): `tint = mix(darkShade, seed, L)`. Our shade at L = 0 is the seed's own luma at 0.35 with its chroma at 1.10, `darkShade = ycc(seed, 0.35, 0, 1.10)`, fitted 2026-09-23 to SwiftUI's regular and clear tint of the same inputs (coral, macOS 27). Both variants share the one line; free per-channel lines fit to within 1.3 levels. Apple's iOS 26 orange and blue rows sit nearer 0.6 of the seed, so the shade is macOS 27's.
+`GlassTint: <color>` (or, as before, a glass Background) is the seed of Apple's tint (LiquidGlass.md 4): `tint = mix(darkShade, seed, L)`, L the luma of the finished glass pixel under it. On anything that is not glass `GlassTint` is ignored, so a tint never becomes a flat fill (`Style.Resolver.ts`, `_resolveGlassSeed`).
+
+**The shade at L = 0** is the general law fitted to iOS 26's two decompiled rows, orange and blue (Drill Sentences lane GL6) [I]:
+- The seed's luma × 0.58 and its chroma × 0.63: `darkShade = ycc(seed, 0.58, 0, 0.63)`.
+- It lands within 8 levels of every decompiled channel (5.4 rms).
+- It replaces the macOS 27 fit of 2026-09-23 (luma × 0.35, chroma × 1.10, from SwiftUI's coral). That fit put orange's dark green 38 levels under Apple's iOS row, and turned a gold seed brown on a black page.
+
+**The order** follows Apple's layer tree:
+- The tint lies over the finished glassBackground, holding tone included, so at L = 1 the body is the seed exactly.
+- The rim and the press glows lie over the tint.
+- Jiv.Panel.frag ran the tint before the holding tone until lane GL6.
+
+**A prominent button** (`.glassProminent`, Jwift's `JwiftProminent`) is a regular glass with the house accent as its seed at alpha 1, so its body is the tint law over its own face. `GlassTintedBodyOf` is the CPU mirror.
+
+The house gold, 48 pt, over dark, mid and light backdrops (luma 0.08, 0.32, 0.92), with its white label's contrast:
+
+| theme | seed | dark | mid | light | lowest, any backdrop |
+|---|---|---|---|---|---|
+| dark | (185, 130, 28) | (125, 86, 14), 6.5:1 | (132, 91, 16), 6.0:1 | (150, 104, 20), 4.9:1 | 4.78:1 |
+| light | (153, 108, 23) | (121, 84, 16), 6.8:1 | (129, 90, 17), 6.2:1 | (149, 105, 22), 4.9:1 | 4.74:1 |
+
+"Any backdrop" means greys 0 to 1 and the six primaries and secondaries (`App/src/Design/ProminentGlass.Render.spec.ts`).
 
 ## The highlight (the rim)
 

@@ -300,6 +300,11 @@ export interface JivStyle {
    *  13). `GlassArrowOffset: <length>`: its centre from that edge's centre, clamped clear of the corners. */
   GlassArrow: string;
   GlassArrowOffset: string;
+  /** `GlassTint: None | <color>`: Apple's `.tint(color)` (Jwift/Apple/LiquidGlass.md 4), the seed of the tint layer over
+   *  the finished glass, `mix(darkShade, seed, L)` (Core/Glass.Pipeline.ts, `GlassTintOf`). On glass it is the seed in
+   *  place of `Background` (which, on glass, has always been the seed); on anything that is not glass it is ignored, so a
+   *  tint never becomes a flat fill. It resolves into the Background channel, so `@Transition Background` springs it. */
+  GlassTint?: string;
   /** `GlassReads: Content | Surface`: what a glass face's backdrop is (Core/Glass.Plate.ts). Content (the default) is the
    *  content under every glass, so a glass over glass reads as one layer of glass. Surface is what it sits on, the glass
    *  under it included: a sheet's own bar buttons over the sheet, a held toggle's clear knob over its track. */

@@ -327,8 +327,12 @@ vec4 GlassRim(vec3 under, float d, vec2 n, vec2 key, float amount, float height,
     return vec4(GlassRimMatrix(under, light), GlassRimAlpha(d, n, key, amount, height, clear));
 }
 
-// .tint(color): a line in the glassed pixel's luma, the seed at full luma and at none the seed's own luma at
-// 0.35 with its chroma at 1.10, fitted to SwiftUI's own render (Core/Glass.md).
+// .tint(color) (Jwift/Apple/LiquidGlass.md 4 [C]): the glass filter does not change; over the glassed pixel a
+// backdrop-aware vibrant matrix whose rows are affine in that pixel's luma L, the seed exactly at L = 1 and its dark
+// shade at L = 0: tint = mix(darkShade, seed, L). The dark shade is the general law fitted to iOS 26's two decompiled
+// rows (orange, blue) [I]: the seed's luma x 0.58, its chroma x 0.63 (Drill Sentences lane GL6; Core/Glass.md, Tint).
+// Core/Glass.Pipeline.ts states the same numbers (GLASS_TINT_SHADE, GlassTintOf).
+const vec2 GLASS_TINT_SHADE = vec2(0.58, 0.63);
 // GLASS THAT ADAPTS (Core/Glass.Pipeline.ts states the same numbers): at full adaptation the frost is this much more
 // again, and a seeded tint reaches this alpha at most, so the glass never goes a flat grey.
 const float GLASS_ADAPT_FROST = 1.5;
@@ -340,5 +344,5 @@ float GlassAdaptedTint(float alpha, float adapt) {
 const float GLASS_PANEL_FACE_SPAN = 57.0;
 
 vec3 GlassTint(vec3 face, vec3 seed) {
-    return mix(GlassYcc(seed, 0.35, 0.0, 1.10), seed, dot(face, GLASS_BT709));
+    return mix(GlassYcc(seed, GLASS_TINT_SHADE.x, 0.0, GLASS_TINT_SHADE.y), seed, clamp(dot(face, GLASS_BT709), 0.0, 1.0));
 }

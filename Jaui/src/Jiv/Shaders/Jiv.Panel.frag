@@ -902,11 +902,12 @@ void main() {
             }
             // A vibrancy that could not be drawn under the element (a press fill) rides the grade lanes.
             face = applyGrading(face, brightness, saturation, contrast);
-            // .tint(color): the Background is the seed.
-            // Over a busy or glaring backdrop a seeded glass leans on its tint, to GLASS_ADAPT_TINT_MAX at most.
-            if (v_Tint.a > 0.001) face = mix(face, GlassTint(face, v_Tint.rgb), GlassAdaptedTint(v_Tint.a, v_Adapt));
             // The holding tone: the interior at 97%, the outer one to two points at full.
             face = clamp(face * mix(1.0, 0.97, clamp(-1.0 - d, 0.0, 1.0)), 0.0, 1.0);
+            // .tint(color): the Background (or GlassTint) is the seed. Apple's tint layer sits over the finished
+            // glassBackground, holding tone included, so at L = 1 the body is the seed exactly (LiquidGlass.md 4 [C]).
+            // Over a busy or glaring backdrop a seeded glass leans on its tint, to GLASS_ADAPT_TINT_MAX at most.
+            if (v_Tint.a > 0.001) face = clamp(mix(face, GlassTint(face, v_Tint.rgb), GlassAdaptedTint(v_Tint.a, v_Adapt)), 0.0, 1.0);
             }
             if (!GlassSkips(GLASS_SKIP_RIM)) {
                 // The highlight recolors what the pixel will show, as the rim pass does: where the face covers

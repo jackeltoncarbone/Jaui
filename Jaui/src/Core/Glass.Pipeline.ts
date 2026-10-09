@@ -203,6 +203,46 @@ export const GlassBodyOf = (c: GlassRgb, span: number, light: number, mean: numb
 };
 
 /**
+ * APPLE'S TINT, `.tint(color)` (Jwift/Apple/LiquidGlass.md 4 [C]; Drill Sentences lane GL6). The glass filter does not
+ * change: a `CASDFGradientEffect` layer (alpha 1 everywhere inside the shape) carries a backdrop-aware vibrant matrix
+ * whose rows are affine in the luma L of the glassed pixel under it, so `tint = mix(darkShade, seed, L)`: the seed
+ * exactly at L = 1, its dark shade at L = 0. Apple's two decompiled rows (iOS 26, orange and blue) fix the shade for
+ * those seeds; the general law here is fitted to both [I]: the seed's BT.709 luma x 0.58 and its chroma x 0.63
+ * (`GlassYcc(seed, 0.58, 0, 0.63)`), within 8 levels of every decompiled channel (5.4 rms). It replaces the macOS 27
+ * SwiftUI fit (luma x 0.35, chroma x 1.10), which put orange's dark green 38 levels under Apple's iOS row.
+ * Glass.Pipeline.glsl's `GLASS_TINT_SHADE` and `GlassTint` state the same numbers.
+ */
+export const GLASS_TINT_SHADE = [0.58, 0.63] as const;
+/** The seed's dark shade, the tint at L = 0. */
+export const GlassTintShadeOf = (seed: GlassRgb): GlassRgb => GlassYcc(seed, GLASS_TINT_SHADE[0], 0, GLASS_TINT_SHADE[1]);
+/** The tint over a glassed pixel `face` (its own luma is L), unclamped as the shader's `GlassTint` is. */
+export const GlassTintOf = (face: GlassRgb, seed: GlassRgb): GlassRgb => {
+  const l = Math.max(0, Math.min(1, GlassLuma(face)));
+  const shade = GlassTintShadeOf(seed);
+  return [_mix(shade[0], seed[0], l), _mix(shade[1], seed[1], l), _mix(shade[2], seed[2], l)];
+};
+/** A seeded glass wears the regular face at any span past the thin control's fit (Glass.Pipeline.glsl's
+ *  `GLASS_PANEL_FACE_SPAN`; Jiv.Panel.vert keeps it off the probe, so its appearance is its theme's). */
+export const GLASS_PANEL_FACE_SPAN = 57;
+
+/**
+ * The body of a TINTED regular glass over an even backdrop `c` (a prominent button, Apple's `.glassProminent`), in the
+ * order Jiv.Panel.frag runs it: the face at the panel span (`GLASS_PANEL_FACE_SPAN`), the edge bleed at the glass's own
+ * span, the holding tone, then the tint layer over that finished pixel at `alpha` (the seed's alpha, adapted), clamped.
+ * The rim and the press glow lie over this, as they do over any glass.
+ */
+export const GlassTintedBodyOf = (c: GlassRgb, span: number, light: number, seed: GlassRgb, alpha: number = 1,
+  adapt: number = 0, elevation: number = 0): GlassRgb => {
+  // The bleed's reach `v` is 0 under 64 pt, so taking the body at the panel span changes only the face: the shader's
+  // max(span, GLASS_PANEL_FACE_SPAN) face with the glass's own bleed, exactly.
+  const face = GlassBodyOf(c, Math.max(span, GLASS_PANEL_FACE_SPAN), light, 0.5, elevation, c);
+  const tint = GlassTintOf(face, seed);
+  const a = GlassAdaptedTint(alpha, adapt);
+  const at = (i: number): number => Math.max(0, Math.min(1, _mix(face[i], tint[i], a)));
+  return [at(0), at(1), at(2)];
+};
+
+/**
  * `GlassFrost`, DesignLibrary's `GlassMaterialProvider.Frost` (Jwift/Apple/LiquidGlass.md 3.2): the regular recipe's blur
  * class. 0 Automatic: BlurRadius 1.33 to 4 pt on a quarter-scale backdrop. 1 Reduced: 0.667 pt on a half-scale one.
  * 2 None: no blur, the quarter-scale capture alone. UIKit sets it from the scroll pocket a glass sits in. Clear glass

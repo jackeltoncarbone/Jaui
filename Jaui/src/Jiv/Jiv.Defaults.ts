@@ -51,6 +51,7 @@ export const DefaultJivStyle: JivStyle = {
   GlassShadow: 'Auto',
   GlassArrow: 'None',
   GlassArrowOffset: '0',
+  GlassTint: 'None',
   GlassReads: 'Content',
   GlassSeesThrough: 'false',
   GlassFrost: 'Inherit',
