@@ -346,3 +346,38 @@ const float GLASS_PANEL_FACE_SPAN = 57.0;
 vec3 GlassTint(vec3 face, vec3 seed) {
     return mix(GlassYcc(seed, GLASS_TINT_SHADE.x, 0.0, GLASS_TINT_SHADE.y), seed, clamp(dot(face, GLASS_BT709), 0.0, 1.0));
 }
+
+// THE INK ON A TINTED GLASS (Drill Sentences lane GL6b). A fully tinted glass (Apple's `.glassProminent`) is the seed
+// over light content and its dark shade over dark content, so no single ink reads on it everywhere: its label takes
+// white where the tinted body is dark and black where it is light, decided on the body itself. Black, not a warm
+// near-black: WCAG puts the two inks' crossover at relative luminance sqrt(0.05 x 1.05) - 0.05 = 0.1791, where white
+// and black both read 4.58:1; any ink brighter than relative luminance 0.0018 leaves a band of bodies where neither
+// reaches 4.5:1. Apple's own label on light glass is black (LiquidGlass.md 6). Core/Glass.Pipeline.ts states the same
+// (GlassTintedBodyOf, GLASS_TINT_INK_SWITCH, GlassTintInkOf); the text shader reads it at the glass's probed mean.
+const float GLASS_TINT_INK_SWITCH = 0.1791;
+
+// The body of a fully tinted glass over an even backdrop `c`, inside its rim: the face at the panel span, the edge bleed,
+// the holding tone, then the tint, as Jiv.Panel.frag runs them.
+vec3 GlassTintedBody(vec3 c, float span, float light, vec3 seed) {
+    vec3 face = GlassFace(c, max(span, GLASS_PANEL_FACE_SPAN), 0.0, light, 0.5, 0.0);
+    float v = GlassSizeRamps(span).y;
+    if (v > 0.0) {
+        float lum = dot(face, GLASS_BLEED_LUMA);
+        float weight = mix(1.0 - lum, lum, light);
+        weight = weight * weight;
+        face = mix(face, GlassBleed(c, light), clamp(weight * weight * v * mix(0.8, 0.5, light), 0.0, 1.0));
+    }
+    face = clamp(face * 0.97, 0.0, 1.0);
+    return clamp(GlassTint(face, seed), 0.0, 1.0);
+}
+
+// WCAG relative luminance of an encoded colour.
+float GlassRelativeLuminance(vec3 c) {
+    vec3 lin = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+    return dot(lin, GLASS_BT709);
+}
+
+// 1 for white ink on the tinted body, 0 for black.
+float GlassTintInkWhite(vec3 body) {
+    return GlassRelativeLuminance(body) <= GLASS_TINT_INK_SWITCH ? 1.0 : 0.0;
+}

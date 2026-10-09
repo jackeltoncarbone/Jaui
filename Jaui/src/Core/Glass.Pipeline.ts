@@ -243,6 +243,29 @@ export const GlassTintedBodyOf = (c: GlassRgb, span: number, light: number, seed
 };
 
 /**
+ * THE INK ON A TINTED GLASS (Drill Sentences lane GL6b). A fully tinted glass is the seed over light content and its dark
+ * shade over dark content, so its label takes white where the tinted body is dark and black where it is light, decided
+ * on the body itself (Glass.Pipeline.glsl's `GlassTintedBody` and `GlassTintInkWhite`, which the text shader runs at
+ * the glass's probed mean luma). The switch is WCAG's crossover of the two inks, sqrt(0.05 x 1.05) - 0.05, where both
+ * read 4.58:1, so whichever is chosen reads at least that. Black, not a warm near-black: any ink brighter than relative
+ * luminance 0.0018 leaves a band of bodies on which neither ink reaches 4.5:1. Apple's light-glass label is black
+ * (Jwift/Apple/LiquidGlass.md 6).
+ */
+export const GLASS_TINT_INK_SWITCH = 0.1791;
+/** A glass is fully tinted, and its labels take the tint's ink, from this seed alpha (a part-tinted panel keeps its
+ *  theme's ink). */
+export const GLASS_TINT_INK_ALPHA = 0.999;
+/** WCAG relative luminance of an encoded colour, 0 to 1. */
+export const GlassRelativeLuminance = (c: GlassRgb): number => {
+  const lin = (v: number): number => (v < 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  return GLASS_BT709[0] * lin(c[0]) + GLASS_BT709[1] * lin(c[1]) + GLASS_BT709[2] * lin(c[2]);
+};
+export type GlassTintInkColor = 'White' | 'Black';
+/** The ink a label takes on the tinted body `body`. */
+export const GlassTintInkOf = (body: GlassRgb): GlassTintInkColor =>
+  GlassRelativeLuminance(body) <= GLASS_TINT_INK_SWITCH ? 'White' : 'Black';
+
+/**
  * `GlassFrost`, DesignLibrary's `GlassMaterialProvider.Frost` (Jwift/Apple/LiquidGlass.md 3.2): the regular recipe's blur
  * class. 0 Automatic: BlurRadius 1.33 to 4 pt on a quarter-scale backdrop. 1 Reduced: 0.667 pt on a half-scale one.
  * 2 None: no blur, the quarter-scale capture alone. UIKit sets it from the scroll pocket a glass sits in. Clear glass

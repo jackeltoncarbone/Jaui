@@ -18,9 +18,16 @@ uniform float u_VibrancyCover;
 // Where the glass's appearance matches the theme the authored ink stands; where it turns, the ink turns.
 uniform sampler2D u_ShadowState;
 uniform vec2 u_GlassInk;
+// A LABEL ON A FULLY TINTED GLASS (Apple's `.glassProminent`, Drill Sentences lane GL6b) takes white or black by the
+// tinted body under it (Glass.Pipeline.glsl, GlassTintedBody and GlassTintInkWhite), read at the glass's probed mean:
+// u_GlassTintInk = (the seed, the glass's span in pt), span -1 for every other label. The probe slot and the theme
+// are u_GlassInk's.
+uniform vec4 u_GlassTintInk;
 out vec4 fragColor;
 
 #pragma ClipStack
+
+#include "../../Jiv/Shaders/Glass.Pipeline.glsl"
 
 void main() {
     float clipD = clipStackDistance(v_PixelPos, v_ClipOffset, v_ClipCount);
@@ -32,7 +39,12 @@ void main() {
     vec4 ink = texel * v_Tint * clipAlpha;
     ink.a *= v_Opacity;
     float cover = u_VibrancyCover;
-    if (u_GlassInk.x >= 0.0) {
+    if (u_GlassInk.x >= 0.0 && u_GlassTintInk.w >= 0.0) {
+        float mean = texelFetch(u_ShadowState, ivec2(int(u_GlassInk.x), 0), 0).g;
+        float white = GlassTintInkWhite(GlassTintedBody(vec3(mean), u_GlassTintInk.w, u_GlassInk.y, u_GlassTintInk.rgb));
+        ink = vec4(vec3(white) * clipAlpha, texel.a * v_Opacity * clipAlpha);
+        if (cover >= 0.0) cover = 1.0;
+    } else if (u_GlassInk.x >= 0.0) {
         float light = smoothstep(0.45, 0.55, texelFetch(u_ShadowState, ivec2(int(u_GlassInk.x), 0), 0).g);
         float turn = abs(light - u_GlassInk.y);
         vec4 label = light > 0.5 ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(1.0, 1.0, 1.0, 0.95);

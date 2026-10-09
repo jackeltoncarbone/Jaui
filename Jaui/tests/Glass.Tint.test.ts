@@ -6,8 +6,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
-  GLASS_PANEL_FACE_SPAN, GLASS_TINT_SHADE, GlassBodyOf, GlassLuma, GlassTintedBodyOf, GlassTintOf, GlassTintShadeOf,
-  type GlassRgb,
+  GLASS_PANEL_FACE_SPAN, GLASS_TINT_INK_SWITCH, GLASS_TINT_SHADE, GlassBodyOf, GlassLuma, GlassRelativeLuminance,
+  GlassTintedBodyOf, GlassTintInkOf, GlassTintOf, GlassTintShadeOf, type GlassRgb,
 } from '@jaui/Core/Glass.Pipeline';
 import { ResolveStyle, SEED_CONTEXT } from '@jaui/Core/Style.Resolver';
 import { DefaultJivStyle } from '@jaui/Jiv/Jiv.Defaults';
@@ -15,6 +15,8 @@ import { DefaultJivStyle } from '@jaui/Jiv/Jiv.Defaults';
 const read = (path: string): string => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const PIPELINE = read('../src/Jiv/Shaders/Glass.Pipeline.glsl');
 const PANEL = read('../src/Jiv/Shaders/Jiv.Panel.frag');
+const TEXT = read('../src/Text/Shaders/Text.Quad.frag');
+const JAUI = read('../src/Core/Jaui.ts');
 const level = (x: number): number => Math.round(x * 255);
 const grey = (y: number): GlassRgb => [y, y, y];
 
@@ -106,5 +108,49 @@ describe('`GlassTint: None | <color>`', () => {
   it('on anything that is not glass it is ignored, so a tint never becomes a flat fill', () => {
     const rs = ResolveStyle({ ...DefaultJivStyle, Background: 'rgba(0, 0, 0, 0)', GlassTint: 'rgb(185, 130, 28)' }, SEED_CONTEXT);
     expect(rs.Background.Color.A).toBe(0);
+  });
+});
+
+describe('the ink on a tinted glass (Drill Sentences lane GL6b)', () => {
+  const GOLD: GlassRgb = [200 / 255, 141 / 255, 30 / 255];
+  const contrast = (body: GlassRgb, ink: 'White' | 'Black'): number => {
+    const y = GlassRelativeLuminance(body);
+    return ink === 'White' ? 1.05 / (y + 0.05) : (y + 0.05) / 0.05;
+  };
+
+  it("the switch is WCAG's crossover of white and black, the same number in the shader", () => {
+    expect(GLASS_TINT_INK_SWITCH).toBeCloseTo(Math.sqrt(0.05 * 1.05) - 0.05, 4);
+    expect(PIPELINE).toContain(`const float GLASS_TINT_INK_SWITCH = ${GLASS_TINT_INK_SWITCH};`);
+    expect(PIPELINE).toContain('return GlassRelativeLuminance(body) <= GLASS_TINT_INK_SWITCH ? 1.0 : 0.0;');
+  });
+
+  it("the shader's even-backdrop body is the CPU's: the panel-span face, the bleed, the holding tone, the tint", () => {
+    expect(PIPELINE).toContain('vec3 face = GlassFace(c, max(span, GLASS_PANEL_FACE_SPAN), 0.0, light, 0.5, 0.0);');
+    expect(PIPELINE).toContain('face = mix(face, GlassBleed(c, light), clamp(weight * weight * v * mix(0.8, 0.5, light), 0.0, 1.0));');
+    expect(PIPELINE).toContain('face = clamp(face * 0.97, 0.0, 1.0);');
+    expect(PIPELINE).toContain('return clamp(GlassTint(face, seed), 0.0, 1.0);');
+  });
+
+  it("the text shader takes it at the glass's probed mean, for a fully tinted glass only", () => {
+    expect(TEXT).toContain('#include "../../Jiv/Shaders/Glass.Pipeline.glsl"');
+    expect(TEXT).toContain('float white = GlassTintInkWhite(GlassTintedBody(vec3(mean), u_GlassTintInk.w, u_GlassInk.y, u_GlassTintInk.rgb));');
+    expect(JAUI).toContain('_seed.A >= GLASS_TINT_INK_ALPHA');
+  });
+
+  it('every body over every grey, light and dark, at every size, reads 4.58:1 or better with its ink', () => {
+    for (const light of [0, 1]) {
+      for (const span of [28, 48, 64, 120]) {
+        for (let i = 0; i <= 100; i++) {
+          const body = GlassTintedBodyOf(grey(i / 100), span, light, GOLD);
+          expect(contrast(body, GlassTintInkOf(body))).toBeGreaterThanOrEqual(4.58);
+        }
+      }
+    }
+  });
+
+  it('white on the dark shade, black on the light gold', () => {
+    expect(GlassTintInkOf(GlassTintedBodyOf(grey(0.08), 48, 0, GOLD))).toBe('White');
+    expect(GlassTintInkOf(GlassTintedBodyOf(grey(0.92), 48, 1, GOLD))).toBe('Black');
+    expect(GlassTintInkOf(GOLD)).toBe('Black');
   });
 });

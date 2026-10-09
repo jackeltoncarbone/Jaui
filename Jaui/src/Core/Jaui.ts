@@ -19,7 +19,7 @@ import { TextAnimator } from '../Text/Text.Animator';
 import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
-import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens,
+import { GLASS_TINT_INK_ALPHA, GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens,
   GlassPlatterShadowOf, GlassShadowExtent, GlassElevationOf, GlassLaneShadowMode, GlassArrowReach } from './Glass.Pipeline';
 import { GlassCoveredShare, GlassFaceExclusion, GlassReadsComposite, PlateSyncRects, type PlateRect } from './Glass.Plate';
 import {
@@ -439,7 +439,7 @@ import { PickClaimant } from '../Scroll/Scroll.PanClaim';
 import { PresenceManager } from '../Animation/Presence.Manager';
 import { SelectionManager } from '../Selection/Selection.Manager';
 import { WebGL2Renderer, PANEL_PROGRAM_COUNT } from './WebGL2.Renderer';
-import type { ShadowProbe, BlurCacheSlot } from './WebGL2.Renderer';
+import type { ShadowProbe, BlurCacheSlot, GlassTintInk } from './WebGL2.Renderer';
 import { Framebuffer, FramebufferPool } from './Framebuffer';
 import { GradientCurveOf, type GradientCurve } from './Gradient.Curve';
 import { Janvas } from '../Janvas/Janvas';
@@ -2983,7 +2983,7 @@ export class Canvas implements DirtyTracker {
     // warps that copy and lifts the items from the scene as drawn over it.
     let lensBelow: { Lens: Jiv; Handle: GpuTextureHandle; Items: GpuTextureHandle | null } | null = null;
     // The glass whose labels the text drawn now sits on (`SetGlassInk`): its probe slot and theme, or -1.
-    let glassInk = { Slot: -1, Dark: false };
+    let glassInk: { Slot: number; Dark: boolean; Tint: GlassTintInk | null } = { Slot: -1, Dark: false, Tint: null };
     // The probe slot of the glass whose children are being walked, for its rim pass's appearance; -1 elsewhere.
     let rimSlot = -1;
     // NOTE: no more `backdropDirty` cache flag. The video-backdrop app
@@ -3388,6 +3388,8 @@ export class Canvas implements DirtyTracker {
       let closesEdge = false;
       // A probed glass surface this node draws: its subtree's labels follow its appearance.
       let glassInkHere = -1;
+      // A fully tinted glass this node draws (Apple's `.glassProminent`): its labels take white or black by its body.
+      let glassTintInkHere: GlassTintInk | null = null;
       let rimSlotHere = -1;
 
       // BorderLayer: when this Jiv asks for its border to paint at a non-zero
@@ -4051,6 +4053,14 @@ export class Canvas implements DirtyTracker {
         if (_isGlass(material) && shadowBackdrop !== undefined && node.RenderStyle.Background.Color.A <= 0.001
             && JivGlassSpanOf(node, eff) <= GLASS_TRACKS_LUMA_SPAN) glassInkHere = shadowBackdrop.Slot;
         else this._counts.Panels++;
+        // A FULLY tinted glass (seed alpha 1) is the seed over light content and its dark shade over dark content, so its
+        // labels take white or black by the tinted body at its probed mean (Glass.Pipeline.glsl, GlassTintInkWhite;
+        // Drill Sentences lane GL6b). A part-tinted panel keeps its theme's ink.
+        const _seed = node.RenderStyle.Background.Color;
+        if (_isGlass(material) && shadowBackdrop !== undefined && _seed.A >= GLASS_TINT_INK_ALPHA) {
+          glassInkHere = shadowBackdrop.Slot;
+          glassTintInkHere = { R: _seed.R, G: _seed.G, B: _seed.B, Span: JivGlassSpanOf(node, eff) };
+        }
         if (glassBgPaint && glassBgPaint.Mode === 'Image') this._counts.Image++;
         // Reset the shared panel buffer so this glass instance isn't picked
         // up by the next flushPanels() and drawn AGAIN as a non-glass panel
@@ -4269,14 +4279,14 @@ export class Canvas implements DirtyTracker {
       rimSlot = rimSlotHere;
       if (glassInkHere >= 0) {
         flushText();
-        glassInk = { Slot: glassInkHere, Dark: node.RenderStyle.SchemeDark };
-        r2.SetGlassInk(glassInk.Slot, glassInk.Dark);
+        glassInk = { Slot: glassInkHere, Dark: node.RenderStyle.SchemeDark, Tint: glassTintInkHere };
+        r2.SetGlassInk(glassInk.Slot, glassInk.Dark, glassInk.Tint);
       }
       descendChildren(node, eff, stack, scope, effH, childPersp);
       if (glassInkHere >= 0) {
         flushText();
         glassInk = outerInk;
-        r2.SetGlassInk(outerInk.Slot, outerInk.Dark);
+        r2.SetGlassInk(outerInk.Slot, outerInk.Dark, outerInk.Tint);
       }
       edgeBackdrop = outerEdge;
       rimSlot = outerRimSlot;

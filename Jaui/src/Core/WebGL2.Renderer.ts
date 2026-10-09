@@ -193,6 +193,9 @@ const _unwrap = (handle: GpuTextureHandle): WebGLTexture =>
 const _regionOf = (handle: GpuTextureHandle | null | undefined): BackdropRegion =>
   handle?.Region ?? BACKDROP_REGION_FULL;
 
+/** A fully tinted glass's seed (0 to 1, encoded) and span (pt), for the ink of the labels on it (`SetGlassInk`). */
+export interface GlassTintInk { R: number; G: number; B: number; Span: number }
+
 /** `?blur-cache`: one cached pyramid. `Handle` binds exactly like the build it was copied from --
  *  same region map, same level count, same filter -- and is null once the slot has been released. */
 export interface BlurCacheSlot {
@@ -573,6 +576,10 @@ export class WebGL2Renderer implements Renderer {
   /** The glass the text drawn next sits on (`SetGlassInk`): its probe slot and whether the theme is dark. */
   private _glassInkSlot = -1;
   private _glassInkSchemeLight = 0;
+  /** A fully tinted glass's seed and span (`SetGlassInk`'s `tint`): its labels take white or black by the tinted body
+   *  (Glass.Pipeline.glsl, GlassTintInkWhite). Span -1 for none. */
+  private _glassTintInk: readonly [number, number, number, number] = [0, 0, 0, -1];
+  private _textGlassTintInkLoc: WebGLUniformLocation | null = null;
   /** Vibrancy's cover for the draws under `SetVibrancyBlend`, -1 for every ordinary draw. */
   private _vibrancyCover = -1;
   private _textViewOffsetLoc!: WebGLUniformLocation | null;
@@ -1831,6 +1838,7 @@ export class WebGL2Renderer implements Renderer {
     gl.uniform1i(this._textXformTexLoc, 2);
     gl.uniform1f(this._textVibrancyCoverLoc, this._vibrancyCover);
     gl.uniform2f(this._textGlassInkLoc, this._shadowStateTex ? this._glassInkSlot : -1, this._glassInkSchemeLight);
+    gl.uniform4f(this._textGlassTintInkLoc, this._glassTintInk[0], this._glassTintInk[1], this._glassTintInk[2], this._glassTintInk[3]);
     gl.uniform1i(this._textShadowStateLoc, 3);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this._shadowStateTex ?? this._dummyTex);
@@ -4615,10 +4623,13 @@ export class WebGL2Renderer implements Renderer {
    *
    *  Undone by `RestoreBlend`, which the caller owes before anything else draws. */
   /** The glass the text drawn next sits on: its probe slot, whose appearance its labels follow (Core/Glass.md),
-   *  and whether the theme is dark. -1 for none. The walk flushes the text batch on both sides of a change. */
-  SetGlassInk = (slot: number, schemeDark: boolean): void => {
+   *  and whether the theme is dark. -1 for none. The walk flushes the text batch on both sides of a change.
+   *  `tint`, for a fully tinted glass (Apple's `.glassProminent`): its seed (0 to 1) and span (pt), by which its
+   *  labels take white or black on the tinted body (Glass.Pipeline.glsl, GlassTintInkWhite); null for any other. */
+  SetGlassInk = (slot: number, schemeDark: boolean, tint: GlassTintInk | null = null): void => {
     this._glassInkSlot = slot;
     this._glassInkSchemeLight = schemeDark ? 0 : 1;
+    this._glassTintInk = tint === null ? [0, 0, 0, -1] : [tint.R, tint.G, tint.B, tint.Span];
   };
 
   SetVibrancyBlend = (blend: VibrancyBlend): void => {
@@ -4830,6 +4841,7 @@ export class WebGL2Renderer implements Renderer {
     this._textVibrancyCoverLoc = gl.getUniformLocation(this._textShader.Program, 'u_VibrancyCover');
     this._textShadowStateLoc = gl.getUniformLocation(this._textShader.Program, 'u_ShadowState');
     this._textGlassInkLoc = gl.getUniformLocation(this._textShader.Program, 'u_GlassInk');
+    this._textGlassTintInkLoc = gl.getUniformLocation(this._textShader.Program, 'u_GlassTintInk');
     this._textViewOffsetLoc = gl.getUniformLocation(this._textShader.Program, 'u_ViewOffset');
     this._textAtlasLoc = gl.getUniformLocation(this._textShader.Program, 'u_Atlas');
     this._textClipTexLoc = gl.getUniformLocation(this._textShader.Program, 'u_ClipTex');

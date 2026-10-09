@@ -57,12 +57,20 @@ Every glass surface (`Thickness > 0`, material `LiquidGlass`) runs Apple's pipel
 
 **A prominent button** (`.glassProminent`, Jwift's `JwiftProminent`) is a regular glass with the house accent as its seed at alpha 1, so its body is the tint law over its own face. `GlassTintedBodyOf` is the CPU mirror.
 
-The house gold, 48 pt, over dark, mid and light backdrops (luma 0.08, 0.32, 0.92), with its white label's contrast:
+**The ink on it** (Drill Sentences lane GL6b) is decided by the tinted body, where the tint is:
+- White where the body's WCAG relative luminance is at most 0.1791, black above it (`GlassTintInkOf`; Glass.Pipeline.glsl's `GlassTintedBody` and `GlassTintInkWhite`).
+- 0.1791 is the crossover of the two inks, sqrt(0.05 × 1.05) − 0.05, where both read 4.58:1, so either choice reads at least that.
+- Black, not a warm near-black: any ink brighter than relative luminance 0.0018 leaves a band of bodies on which neither ink reaches 4.5:1. Apple's light-glass label is black (LiquidGlass.md 6).
+- The text shader runs it per label batch at the glass's probed mean luma (`u_GlassTintInk`, the seed and span; `Jaui.ts` sets it for glass whose seed alpha is 1, `GLASS_TINT_INK_ALPHA`). A glass without a probe slot leaves its label the authored ink (`@OnProminent`: white in dark, black in light).
 
-| theme | seed | dark | mid | light | lowest, any backdrop |
-|---|---|---|---|---|---|
-| dark | (185, 130, 28) | (125, 86, 14), 6.5:1 | (132, 91, 16), 6.0:1 | (150, 104, 20), 4.9:1 | 4.78:1 |
-| light | (153, 108, 23) | (121, 84, 16), 6.8:1 | (129, 90, 17), 6.2:1 | (149, 105, 22), 4.9:1 | 4.74:1 |
+The house gold, one seed (200, 141, 30) in both themes, 48 pt, over dark, mid and light backdrops (luma 0.08, 0.32, 0.92), with its label:
+
+| theme | dark | mid | light | lowest, any backdrop |
+|---|---|---|---|---|
+| dark | (135, 94, 15), white 5.8:1 | (143, 99, 17), white 5.3:1 | (162, 113, 21), black 4.9:1 | 4.62:1 |
+| light | (158, 110, 20), black 4.7:1 | (168, 118, 23), black 5.3:1 | (194, 137, 29), black 6.9:1 | 4.62:1 |
+
+Over a white page in light the body is (198, 139, 30), the seed within the holding tone.
 
 "Any backdrop" means greys 0 to 1 and the six primaries and secondaries (`App/src/Design/ProminentGlass.Render.spec.ts`).
 
