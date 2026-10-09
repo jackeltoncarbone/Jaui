@@ -368,7 +368,7 @@ export const GlassShadowFall = (sd: number, reach: number): number => {
  * down, opacity 0.18 light and 0.35 dark, ramped over Apple's thick-glass ramp `v` (64 to 160 pt), so glass 64 pt and
  * under casts none of it (Jwift/Apple/LiquidGlass.md 3.5, the [I] note).
  */
-export type GlassShadowKind = 'Auto' | 'Platter' | 'None';
+export type GlassShadowKind = 'Auto' | 'Platter' | 'Lift' | 'None';
 export const GLASS_PLATTER_SHADOW = { Sigma: 30, OffsetY: 10, OpacityLight: 0.18, OpacityDark: 0.35 } as const;
 
 export interface GlassPlatterShadow {
@@ -383,17 +383,27 @@ export interface GlassPlatterShadow {
 }
 
 /** The platter shadow of glass `span` pt across in its theme: half its sigma and offset at 64 pt growing to the full ones
- *  at 160, its opacity over `v` (0 at 64 pt and under). */
-export const GlassPlatterShadowOf = (span: number, dark: boolean): GlassPlatterShadow => {
+ *  at 160, its opacity over `v` (0 at 64 pt and under).
+ *
+ *  `Lift` (`GlassShadow: Lift`, Drill Sentences lane SH2): a row lifted out of its list to be carried, the platter UIKit
+ *  lifts a dragged item onto (`_UIPlatterView`) [I]. Its sigma and offset follow the same size law, and its opacity is the
+ *  platter's whole at any size: a lifted row is a platter however thin, and the size ramp left a 68 pt row with none, so
+ *  the owner read it as "no shadow". */
+export const GlassPlatterShadowOf = (span: number, dark: boolean, kind: GlassShadowKind = 'Platter'): GlassPlatterShadow => {
   const { V } = GlassSizeRamps(span);
   const sigma = GLASS_PLATTER_SHADOW.Sigma * (0.5 + 0.5 * V);
+  const share = kind === 'Lift' ? 1 : V;
   return {
     Sigma: sigma,
     OffsetY: GLASS_PLATTER_SHADOW.OffsetY * (0.5 + 0.5 * V),
-    Opacity: V * (dark ? GLASS_PLATTER_SHADOW.OpacityDark : GLASS_PLATTER_SHADOW.OpacityLight),
+    Opacity: share * (dark ? GLASS_PLATTER_SHADOW.OpacityDark : GLASS_PLATTER_SHADOW.OpacityLight),
     Reach: 2 * Math.SQRT2 * sigma,
   };
 };
+
+/** Whether `kind` casts the platter's shadow under the glass's own: a menu's, a popover's, a sheet's (`Platter`), or a
+ *  carried row's (`Lift`). */
+export const GlassCastsPlatter = (kind: GlassShadowKind | string): boolean => kind === 'Platter' || kind === 'Lift';
 
 /** How far past the outline glass `span` pt across can put shadow, pt: two radii plus the offset for Apple's, and the
  *  platter's reach plus its offset when it casts one. What a draw rect, a card's paint rect and a cached layer must hold.
@@ -402,8 +412,8 @@ export const GlassShadowExtent = (span: number, kind: GlassShadowKind, arrow: Gl
   const tip = GlassArrowReach(arrow);
   if (kind === 'None') return tip;
   const own = 2 * GlassShadowRadius(span) + GLASS_SHADOW_OFFSET_Y;
-  if (kind !== 'Platter' || GlassSizeRamps(span).V <= 0) return own + tip;
-  const p = GlassPlatterShadowOf(span, true);
+  if (!GlassCastsPlatter(kind) || (kind === 'Platter' && GlassSizeRamps(span).V <= 0)) return own + tip;
+  const p = GlassPlatterShadowOf(span, true, kind);
   return Math.max(own, p.Reach + p.OffsetY) + tip;
 };
 
@@ -431,8 +441,8 @@ export const GlassShadowedLuma = (luma: number, span: number, dx: number, dy: nu
   const layer = fill + (1 - fill) * V;
   const colored = Math.min(1, (dark ? 0.5 * read : read) * V / Math.max(layer, 1e-3));
   let out = luma * (1 - a) + colored * a;
-  if (kind === 'Platter' && V > 0) {
-    const p = GlassPlatterShadowOf(span, dark);
+  if (GlassCastsPlatter(kind) && (kind === 'Lift' || V > 0)) {
+    const p = GlassPlatterShadowOf(span, dark, kind);
     out *= 1 - GlassShadowFall(sdAt(p.OffsetY), p.Reach) * p.Opacity * (1 - Math.min(Math.max(clear, 0), 1));
   }
   return out;

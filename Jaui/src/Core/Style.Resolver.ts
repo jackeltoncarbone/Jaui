@@ -282,11 +282,11 @@ const _resolveGlassSwitch = (name: string, raw: string | undefined, ctx: Resolve
   throw new Error(`[Jaui] ${name}: "${v}" -- expected Auto or None.`);
 };
 
-/** `GlassShadow: Auto | Platter | None` (Core/Glass.Pipeline.ts, `GlassShadowKind`). */
+/** `GlassShadow: Auto | Platter | Lift | None` (Core/Glass.Pipeline.ts, `GlassShadowKind`). */
 const _resolveGlassShadow = (raw: string | undefined, ctx: ResolveContext): GlassShadowKind => {
   const v = ResolveTernary(raw ?? 'Auto', ctx).trim();
-  if (v === 'Auto' || v === 'Platter' || v === 'None') return v;
-  throw new Error(`[Jaui] GlassShadow: "${v}" -- expected Auto, Platter or None.`);
+  if (v === 'Auto' || v === 'Platter' || v === 'Lift' || v === 'None') return v;
+  throw new Error(`[Jaui] GlassShadow: "${v}" -- expected Auto, Platter, Lift or None.`);
 };
 
 /** `GlassArrow: None | Top | Bottom | Leading | Trailing` (Core/Glass.Pipeline.ts, `GlassArrowSide`). */

@@ -20,7 +20,7 @@ import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { GLASS_TINT_INK_ALPHA, GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens,
-  GlassPlatterShadowOf, GlassShadowExtent, GlassElevationOf, GlassLaneShadowMode, GlassArrowReach } from './Glass.Pipeline';
+  GlassPlatterShadowOf, GlassCastsPlatter, GlassShadowExtent, GlassElevationOf, GlassLaneShadowMode, GlassArrowReach } from './Glass.Pipeline';
 import { GlassCoveredShare, GlassFaceExclusion, GlassReadsComposite, PlateSyncRects, type PlateRect } from './Glass.Plate';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
@@ -3981,8 +3981,8 @@ export class Canvas implements DirtyTracker {
         const glassShadow = _isGlass(material) ? this._glassShadowPeak(node, eff) : 0;
         // Under it, a menu's, popover's, sheet's or dialog's platter shadow (`GlassShadow: Platter`, Core/Glass.Pipeline.ts
         // `GlassPlatterShadowOf`): black, from the flat program, on glass past 64 pt.
-        if (_isGlass(material) && _rs.GlassShadow === 'Platter' && !GlassIsLens(_rs.Lens) && !JivInstanceBuffer.DiagNoShadow
-            && GlassPlatterShadowOf(JivGlassSpanOf(node, eff), _rs.SchemeDark).Opacity * (1 - Math.min(Math.max(_rs.GlassClear, 0), 1)) > 0) {
+        if (_isGlass(material) && GlassCastsPlatter(_rs.GlassShadow) && !GlassIsLens(_rs.Lens) && !JivInstanceBuffer.DiagNoShadow
+            && GlassPlatterShadowOf(JivGlassSpanOf(node, eff), _rs.SchemeDark, _rs.GlassShadow).Opacity * (1 - Math.min(Math.max(_rs.GlassClear, 0), 1)) > 0) {
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 'Normal', null, 'Platter');
           r.PanelBeginBatch();

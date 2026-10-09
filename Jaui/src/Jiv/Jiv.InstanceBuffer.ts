@@ -236,7 +236,7 @@ export class JivInstanceBuffer {
     const lens = GlassIsLens(style.Lens);
     // The platter's shadow (GlassShadow: Platter): black, its own sigma and offset, straight down (never sideways).
     const platter = shadow === 'Platter';
-    const platterShadow = platter && glass && !lens ? GlassPlatterShadowOf(span, style.SchemeDark) : null;
+    const platterShadow = platter && glass && !lens ? GlassPlatterShadowOf(span, style.SchemeDark, style.GlassShadow) : null;
     const glassShadowPeak = !glass ? 0 : platter
       ? (platterShadow === null ? 0 : platterShadow.Opacity * (1 - Math.min(Math.max(style.GlassClear, 0), 1)))
       : GlassShadowPeak(span, style.GlassClear, lens);

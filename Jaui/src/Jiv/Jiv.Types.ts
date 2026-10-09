@@ -291,9 +291,9 @@ export interface JivStyle {
   /** `GlassBleed: Auto | None`: the edge bleed's reach outward, `inputBleedAmount` and `Height` (LiquidGlass.md 3.4).
    *  None zeroes both and keeps its blur and opacity, as DesignLibrary does when Layers lacks 0x40 (Sheets.md). */
   GlassBleed: string;
-  /** `GlassShadow: Auto | Platter | None`: the drop shadow (LiquidGlass.md 3.5). Auto is glassBackground's own; Platter
-   *  adds UIKit's platter shadow under it, for menus, popovers, sheets and dialogs [I] (Core/Glass.Pipeline.ts,
-   *  `GlassPlatterShadowOf`); None casts none. */
+  /** `GlassShadow: Auto | Platter | Lift | None`: the drop shadow (LiquidGlass.md 3.5). Auto is glassBackground's own;
+   *  Platter adds UIKit's platter shadow under it, for menus, popovers, sheets and dialogs [I] (Core/Glass.Pipeline.ts,
+   *  `GlassPlatterShadowOf`); Lift is that platter shadow at any size, for a row carried out of its list; None casts none. */
   GlassShadow: string;
   /** `GlassArrow: None | Top | Bottom | Leading | Trailing`: a popover's arrow on that edge of its glass, one outline with
    *  the body that the lens, rim, bleed and shadows follow (Core/Glass.Pipeline.ts, `GlassArrowUnion`; Jwift/Apple/Sizing.md
