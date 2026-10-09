@@ -371,53 +371,6 @@ vec3 glassSample(vec2 pixel, float lod) {
                       GlassPyramidLevel(exp2(lod), u_BackdropLevel.x, u_BackdropLevel.y)).rgb;
 }
 
-// THE BODY READS SMOOTH (Drill Sentences lane SH2; the owner, live: the field's sideline stood through the 432 x 792 pt list
-// panel as a hard edged lighter band). The panel's blur is Apple's law, 4 pt (LiquidGlass.md 3.2): measured live at 1x,
-// 4.5 px, the law's 4.46. Its shape was not: one trilinear tap magnifies a level's texels bilinearly, so a thin line
-// came through as a flat topped band with steep 4 px shoulders, where Apple's large glass leaves soft shapes. A cubic
-// B-spline over the same level (four bilinear taps, the progressive blur's own read, ProgressiveBlur.Shader.ts) is
-// smooth, its texel grid gone, and GlassPyramidLevelSmooth picks the level that keeps the law's sigma. Under its floor
-// (a near sharp read) the one tap stays.
-vec4 glassCubicWeights(float v) {
-    vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v;
-    vec4 s = n * n * n;
-    float x = s.x;
-    float y = s.y - 4.0 * s.x;
-    float z = s.z - 4.0 * s.y + 6.0 * s.x;
-    return vec4(x, y, z, 6.0 - x - y - z) * (1.0 / 6.0);
-}
-vec3 glassBicubic(vec2 at, float level) {
-    // A level's size by GL's own rule (each halves, floored, never under a texel), so no read past the chain's end.
-    vec2 size = vec2(max(textureSize(u_Backdrop, 0) >> int(level), ivec2(1)));
-    vec2 coord = at * size - 0.5;
-    vec2 fxy = fract(coord);
-    coord -= fxy;
-    vec4 xc = glassCubicWeights(fxy.x);
-    vec4 yc = glassCubicWeights(fxy.y);
-    vec4 c = coord.xxyy + vec2(-0.5, 1.5).xyxy;
-    vec4 s = vec4(xc.xz + xc.yw, yc.xz + yc.yw);
-    vec4 o = (c + vec4(xc.yw, yc.yw) / s) / size.xxyy;
-    vec3 s0 = textureLod(u_Backdrop, o.xz, level).rgb;
-    vec3 s1 = textureLod(u_Backdrop, o.yz, level).rgb;
-    vec3 s2 = textureLod(u_Backdrop, o.xw, level).rgb;
-    vec3 s3 = textureLod(u_Backdrop, o.yw, level).rgb;
-    float sx = s.x / (s.x + s.y);
-    float sy = s.z / (s.z + s.w);
-    return mix(mix(s3, s2, sx), mix(s1, s0, sx), sy);
-}
-vec3 glassSampleSmooth(vec2 pixel, float lod) {
-    if (GlassSkips(GLASS_SKIP_BACKDROP)) return GLASS_SKIP_FLAT;
-    float level = GlassPyramidLevelSmooth(exp2(lod), u_BackdropLevel.x, u_BackdropLevel.y);
-    if (level < 0.0) return glassSample(pixel, lod);
-    vec2 uv = pixel / u_Resolution;
-    uv.y = 1.0 - uv.y;
-    vec2 at = uv * u_BackdropXf.xy + u_BackdropXf.zw;
-    float whole = floor(level);
-    vec3 near = glassBicubic(at, whole);
-    float f = level - whole;
-    return f < 0.004 ? near : mix(near, glassBicubic(at, whole + 1.0), f);
-}
-
 // The BackdropView's read: the scene under the lifted items (u_Scene) as a CABackdropLayer captures it, at
 // GLASS_LENS_BACKDROP_CAPTURE of the device pixel with no blur (its gaussianBlur is 0 lifted [C]), read bilinearly.
 // Each capture texel is the mean of its device pixels, four bilinear fetches over a 4 x 4 block; the texel grid
@@ -919,7 +872,7 @@ void main() {
             if (GlassSkips(GLASS_SKIP_CA)) caSpreadPx = 0.0;
             vec3 lensed;
             if (caSpreadPx < 0.5) {
-                lensed = glassSampleSmooth(v_PixelPos + innerOffset, innerLod);
+                lensed = glassSample(v_PixelPos + innerOffset, innerLod);
             } else {
                 lensed = vec3(glassSample(v_PixelPos + innerOffset * (1.0 + 0.2 * chromaticAberration), innerLod).r,
                               glassSample(v_PixelPos + innerOffset * (1.0 + 0.1 * chromaticAberration), innerLod).g,
@@ -940,7 +893,7 @@ void main() {
             // weighted toward the face's own darks on light glass and its lights on dark glass.
             if (ramps.y > 0.0 && glassClear < 1.0 && !GlassSkips(GLASS_SKIP_BLEED)) {
                 float bleedShift = glassBleedOff ? 0.0 : GlassShift(d, 0.35 * glassSpan, 0.35 * glassSpan);
-                vec3 bleed = GlassBleed(glassSampleSmooth(v_PixelPos + nScreen * bleedShift * glassDpr,
+                vec3 bleed = GlassBleed(glassSample(v_PixelPos + nScreen * bleedShift * glassDpr,
                                                     GlassNativeLod(0.35 * glassSpan, glassDpr, glassClear, glassFrost)), glassLight);
                 float lum = dot(face, GLASS_BLEED_LUMA);
                 float weight = mix(1.0 - lum, lum, glassLight);
