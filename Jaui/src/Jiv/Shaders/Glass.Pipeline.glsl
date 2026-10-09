@@ -205,7 +205,7 @@ void GlassArrowNearest(vec2 q, vec2 a, vec2 b, inout float best, inout vec2 best
     vec2 point = a + span * t;
     vec2 off = q - point;
     float d2 = dot(off, off);
-    if (d2 < best) { best = d2; bestPoint = point; bestOut = normalize(vec2(-span.y, span.x)); }
+    if (d2 < best) { best = d2; bestPoint = point; bestOut = vec2(-span.y, span.x) * inversesqrt(max(dot(span, span), 1e-12)); }
     if (q.x >= a.x && q.x <= b.x && b.x > a.x) graph = mix(a.y, b.y, (q.x - a.x) / (b.x - a.x));
 }
 // The arrow's own field at (u, w) points, u along the edge from its centre and w outward: the distance to its outline,
@@ -237,11 +237,11 @@ float GlassArrowField(vec2 uw, out vec2 outward, out bool inside) {
     return d;
 }
 // The body and its arrow as one outline: the union's signed distance (device px, negative inside) at `p`, taken from the
-// body's centre, given the body's own `bodyDist`, and its outward normal written over `normal` where the arrow decides
+// body's centre, given the body's own `bodyDist`, and its outward unit vector written over `outward` where the arrow decides
 // it. `pt` is device px per point. Under the arrow's footprint, inside the body, the body's own edge is no edge: the
 // nearest is the arrow's outline or one of the body's other three sides, so no rim or lens runs along the seam. The
 // offset is clamped so the footprint stays clear of the edge's corner radius.
-float GlassArrowUnion(vec2 p, vec2 halfSize, vec4 radii, float arrow, float pt, float bodyDist, inout vec2 normal) {
+float GlassArrowUnion(vec2 p, vec2 halfSize, vec4 radii, float arrow, float pt, float bodyDist, inout vec2 outward) {
     float side = mod(arrow, 8.0);
     bool across = side > 2.5;
     float along = across ? halfSize.y : halfSize.x;
@@ -256,18 +256,18 @@ float GlassArrowUnion(vec2 p, vec2 halfSize, vec4 radii, float arrow, float pt, 
     bool inside;
     float dArrow = GlassArrowField(uw / pt, n, inside) * pt;
     vec2 nShape = across ? vec2(sgn * n.y, n.x) : vec2(n.x, sgn * n.y);
-    if (inside) { normal = nShape; return -dArrow; }
+    if (inside) { outward = nShape; return -dArrow; }
     if (bodyDist >= 0.0) {
-        if (dArrow < bodyDist) { normal = nShape; return dArrow; }
+        if (dArrow < bodyDist) { outward = nShape; return dArrow; }
         return bodyDist;
     }
     if (abs(uw.x) < GLASS_ARROW_HALF_FOOTPRINT * pt) {
         float toSides = along - abs(uw.x + offset);
         float toFar = 2.0 * perp + uw.y;
         float other = min(toSides, toFar);
-        if (dArrow < other) { normal = nShape; return -dArrow; }
+        if (dArrow < other) { outward = nShape; return -dArrow; }
         vec2 o = toSides < toFar ? vec2(uw.x + offset < 0.0 ? -1.0 : 1.0, 0.0) : vec2(0.0, -1.0);
-        normal = across ? vec2(sgn * o.y, o.x) : vec2(o.x, sgn * o.y);
+        outward = across ? vec2(sgn * o.y, o.x) : vec2(o.x, sgn * o.y);
         return -other;
     }
     return bodyDist;
