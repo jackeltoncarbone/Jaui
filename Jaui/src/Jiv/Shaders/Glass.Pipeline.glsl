@@ -64,6 +64,18 @@ float GlassPyramidLevel(float sigma, float texel, float sigma0) {
     return whole + (q - p) / (3.0 * p);
 }
 
+// The level a cubic B-spline read delivers `sigma` at (glassSampleSmooth, Jiv.Panel.frag; the progressive blur's own
+// four-tap read). A B-spline holds a third of its texel squared where the bilinear tent holds a sixth, so level L reads
+// as variance sigma0^2 - (5/12) texel^2 + (7/12) texel^2 4^L. Below its floor, sigma0^2 + texel^2 / 6, it cannot
+// deliver `sigma` and answers -1: the caller reads the one bilinear tap there (Core/Glass.Pipeline.ts states the same).
+float GlassPyramidLevelSmooth(float sigma, float texel, float sigma0) {
+    float q = (sigma * sigma - sigma0 * sigma0 + 0.41666667 * texel * texel) / (0.58333333 * texel * texel);
+    if (q < 1.0) return -1.0;
+    float whole = floor(0.5 * log2(q));
+    float p = exp2(2.0 * whole);
+    return whole + (q - p) / (3.0 * p);
+}
+
 // QuartzCore's set_ycc_composite without its fill: BT.709 luma remapped to (white - black) Y + black, chroma
 // scaled by `saturation`.
 vec3 GlassYcc(vec3 c, float white, float black, float saturation) {

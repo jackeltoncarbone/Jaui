@@ -323,6 +323,19 @@ export const GlassPyramidLevel = (sigma: number, texel: number, sigma0: number):
   return whole + (q - p) / (3 * p);
 };
 
+/** The level a cubic B-spline read (Jiv.Panel.frag's `glassSampleSmooth`, the glass body's and edge bleed's read) delivers a
+ *  Gaussian of `sigma` device px at: a B-spline holds a third of its texel squared where `GlassPyramidLevel`'s bilinear
+ *  tent holds a sixth, so level L reads as variance sigma0^2 - (5/12) texel^2 + (7/12) texel^2 4^L; -1 under its floor
+ *  (sigma0^2 + texel^2 / 6), where the read is the one bilinear tap. Glass.Pipeline.glsl states the same (Drill
+ *  Sentences lane SH2). */
+export const GlassPyramidLevelSmooth = (sigma: number, texel: number, sigma0: number): number => {
+  const q = (sigma * sigma - sigma0 * sigma0 + (5 / 12) * texel * texel) / ((7 / 12) * texel * texel);
+  if (q < 1) return -1;
+  const whole = Math.floor(0.5 * Math.log2(q));
+  const p = Math.pow(4, whole);
+  return whole + (q - p) / (3 * p);
+};
+
 /** The body's LOD at blur scale `k` (0.5 at the edge ramp's floor, 1 in the body), on our pyramid. */
 export const GlassBodyLod = (span: number, k: number, dpr: number, variant: GlassVariant, authored: number = 0,
   frost: number = GLASS_FROST_AUTOMATIC): number =>
