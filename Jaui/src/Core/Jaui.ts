@@ -433,7 +433,7 @@ export interface GlassSkipCensus {
 import { DirtyFlag, type Color } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
-import { ScrollManager } from '../Scroll/Scroll.Manager';
+import { ScrollManager, ScrollDelta } from '../Scroll/Scroll.Manager';
 import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PickClaimant } from '../Scroll/Scroll.PanClaim';
 import { PresenceManager } from '../Animation/Presence.Manager';
@@ -8344,7 +8344,9 @@ export class Canvas implements DirtyTracker {
       const cssX = e.clientX - rect.left;
       const cssY = e.clientY - rect.top;
 
-      let dx = e.deltaX, dy = e.deltaY;
+      // A delta the physics can take (`ScrollDelta`): NaN moves nothing and an infinite one runs to the edge.
+      let dx = ScrollDelta(e.deltaX), dy = ScrollDelta(e.deltaY);
+      if (dx === 0 && dy === 0) return;
       if (e.deltaMode === 1) { dx *= 16; dy *= 16; }
 
       // Per-axis scroll chaining: a horizontal row (no vertical extent) lets a

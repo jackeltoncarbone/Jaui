@@ -126,15 +126,18 @@ export class ScrollManager implements Animatable {
    *  release spring in Tick() picks it up exactly like a touch release. */
   ApplyDelta = (jiv: Jiv, dx: number, dy: number): void => {
     const s = this._ensureState(jiv);
+    _repairState(s);
+    dx = ScrollDelta(dx);
+    dy = ScrollDelta(dy);
     const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
     const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
     if (jiv.OverscrollInput === 'All') {
       const r = _resistanceMultiplier(jiv.OverscrollResistance);
       s.targetX = maxX > 0
-        ? _integrateRubber(s.targetX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight)
+        ? _integrateRubber(s.targetX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight, jiv.Width)
         : Math.max(0, Math.min(maxX, s.targetX + dx));
       s.targetY = maxY > 0
-        ? _integrateRubber(s.targetY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom)
+        ? _integrateRubber(s.targetY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom, jiv.Height)
         : Math.max(0, Math.min(maxY, s.targetY + dy));
       // No pending ease once overscrolling — land the same frame, like DragMove/
       // ApplyDeltaInstant, so the release spring (not the wheel-ease decay) is
@@ -165,15 +168,18 @@ export class ScrollManager implements Animatable {
    *  so touch is unaffected either way. */
   ApplyDeltaInstant = (jiv: Jiv, dx: number, dy: number, allowOverscroll: boolean = false): void => {
     const s = this._ensureState(jiv);
+    _repairState(s);
+    dx = ScrollDelta(dx);
+    dy = ScrollDelta(dy);
     const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
     const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
     if (allowOverscroll) {
       const r = _resistanceMultiplier(jiv.OverscrollResistance);
       s.posX = maxX > 0
-        ? _integrateRubber(s.posX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight)
+        ? _integrateRubber(s.posX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight, jiv.Width)
         : Math.max(0, Math.min(maxX, s.posX + dx));
       s.posY = maxY > 0
-        ? _integrateRubber(s.posY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom)
+        ? _integrateRubber(s.posY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom, jiv.Height)
         : Math.max(0, Math.min(maxY, s.posY + dy));
     } else {
       s.posX = Math.max(0, Math.min(maxX, s.posX + dx));
@@ -297,6 +303,9 @@ export class ScrollManager implements Animatable {
   DragMove = (jiv: Jiv, dx: number, dy: number, tMs: number): void => {
     const s = this._ensureState(jiv);
     if (!s.dragging) return;
+    _repairState(s);
+    dx = ScrollDelta(dx);
+    dy = ScrollDelta(dy);
 
     const maxX = Math.max(0, jiv.ContentWidth - jiv.Width);
     const maxY = Math.max(0, jiv.ContentHeight - jiv.Height);
@@ -315,10 +324,10 @@ export class ScrollManager implements Animatable {
     // (OverscrollInput only gates wheel/trackpad — see ApplyDelta/Instant).
     const r = _resistanceMultiplier(jiv.OverscrollResistance);
     s.posX = maxX > 0
-      ? _integrateRubber(s.posX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight)
+      ? _integrateRubber(s.posX, dx, 0, maxX, r, jiv.OverscrollLeft, jiv.OverscrollRight, jiv.Width)
       : Math.max(0, Math.min(maxX, s.posX + dx));
     s.posY = maxY > 0
-      ? _integrateRubber(s.posY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom)
+      ? _integrateRubber(s.posY, dy, 0, maxY, r, jiv.OverscrollTop, jiv.OverscrollBottom, jiv.Height)
       : Math.max(0, Math.min(maxY, s.posY + dy));
     // Momentum is still charged only from IN-BOUNDS travel: overscroll
     // stretch is the spring's business, not the fling's.
@@ -552,6 +561,7 @@ export class ScrollManager implements Animatable {
     this._stepWalk(this._root, (jiv) => {
       const s = this._ensureState(jiv);
       if (s.dragging) return;
+      _repairState(s);
 
       // TEMP demo auto-scroll overrides all physics while enabled.
       if (this.AutoScrollSpeed > 0) {
@@ -888,10 +898,31 @@ const _resistanceMultiplier = (raw: string): number => {
  *  position (`Bounce`) or holds it at the line while still publishing it (`Pin`). */
 const _integrateRubber = (
   pos: number, delta: number, minBound: number, maxBound: number,
-  resistance: number, lowMode: OverscrollMode, highMode: OverscrollMode,
+  resistance: number, lowMode: OverscrollMode, highMode: OverscrollMode, reach: number,
 ): number => {
   const STEP = 4;
-  let remaining = delta;
+  // THE PULL PAST AN EDGE IS BOUNDED (a fast trackpad fling, or a synthetic wheel of -10000 over the drill editor's
+  // phrase list). The curve's stretch grows as the square root of the pull, without limit, and the loop below walks
+  // the whole delta four pixels at a time: a pull of ten thousand pixels stretched the list thousands of pixels off its
+  // edge, and an infinite one never left this loop. Whatever travel lies inside the bounds is kept, and past the edge
+  // the pull counts for at most one viewport (`reach`, the scroller's own size on this axis): a flick lands at the
+  // edge with the same stretch a long finger pull would show, never more.
+  const pull = Math.max(1, Number.isFinite(reach) ? reach : 1);
+  const lo = Math.min(0, minBound - pos) - pull;
+  const hi = Math.max(0, maxBound - pos) + pull;
+  let remaining = Math.max(lo, Math.min(hi, ScrollDelta(delta)));
+  // A long list's in-bounds travel is taken in one move rather than a few thousand four-pixel ones: inside the bounds
+  // the resistance is exactly 1, so whole steps that start inside land where the loop would have put them. Only a
+  // travel this long takes the shortcut; every ordinary delta runs the loop exactly as before.
+  if (pos >= minBound && pos <= maxBound && remaining !== 0) {
+    const room = remaining > 0 ? maxBound - pos : pos - minBound;
+    const steps = Math.floor(Math.min(Math.abs(remaining), room) / STEP);
+    if (steps > 1024) {
+      const move = Math.sign(remaining) * steps * STEP;
+      pos += move;
+      remaining -= move;
+    }
+  }
   while (remaining !== 0) {
     const step = Math.abs(remaining) <= STEP ? remaining : Math.sign(remaining) * STEP;
     pos += step * _rubberResistance(pos, minBound, maxBound, resistance);
@@ -930,4 +961,26 @@ export const WheelMayOverscroll = (jiv: Jiv, axis: 'x' | 'y', delta: number, pre
     ? (delta < 0 ? jiv.OverscrollTop : jiv.OverscrollBottom)
     : (delta < 0 ? jiv.OverscrollLeft : jiv.OverscrollRight);
   return (mode ?? 'Bounce') !== 'None';
+};
+
+/** A scroll delta the physics can take: NaN (a broken event, or arithmetic on a box with no size) moves nothing, and
+ *  either infinity moves as far as anything can, which every path then clamps to the edge it points at. Finite deltas
+ *  pass through untouched. */
+export const ScrollDelta = (d: number): number => {
+  if (Number.isNaN(d)) return 0;
+  if (d === Infinity) return Number.MAX_SAFE_INTEGER;
+  if (d === -Infinity) return -Number.MAX_SAFE_INTEGER;
+  return d;
+};
+
+/** A scroll state that something upstream poisoned (a NaN content size, a non-finite programmatic target) is put back
+ *  at its target, or at 0, before the physics reads it: a NaN offset never reaches `ScrollY`, the scroll vars, or the
+ *  render walk's translate. Costs four `isFinite` reads per scroller per tick. */
+const _repairState = (s: ScrollState): void => {
+  if (!Number.isFinite(s.targetX)) s.targetX = Number.isFinite(s.posX) ? s.posX : 0;
+  if (!Number.isFinite(s.targetY)) s.targetY = Number.isFinite(s.posY) ? s.posY : 0;
+  if (!Number.isFinite(s.posX)) s.posX = s.targetX;
+  if (!Number.isFinite(s.posY)) s.posY = s.targetY;
+  if (!Number.isFinite(s.velX)) s.velX = 0;
+  if (!Number.isFinite(s.velY)) s.velY = 0;
 };
