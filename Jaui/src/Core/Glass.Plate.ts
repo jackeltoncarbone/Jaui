@@ -1,11 +1,12 @@
 /**
- * GLASS NEVER SAMPLES GLASS (Drill Sentences lane WW1, follow up three). Pure, so the rule is spec'd (`Glass.Plate.test.ts`).
+ * GLASS NEVER SAMPLES GLASS BESIDE OR UNDER IT, ONLY GLASS IT IS PRESENTED OVER (Drill Sentences lanes WW1, follow up
+ * three, and GL5). Pure, so the rule is spec'd (`Glass.Plate.test.ts`).
  *
  * Jack: "we keep stacking them and they keep getting more grey and like darker and more opaque". Measured live on a
  * phone: the field rgb(71, 86, 54), the sheet over it rgb(35, 41, 30), a menu over the sheet rgb(27, 30, 26). Every glass
  * surface built its backdrop from the scene as painted so far, so a menu over the sheet blurred and tinted the sheet's
- * already blurred, already tinted face, and each layer darkened and greyed the one below. In iOS 26 glass cannot sample
- * glass: a menu over a sheet reads as one layer of glass over the content, the same as the sheet itself.
+ * already blurred, already tinted face, and each layer darkened and greyed the one below. A sheet, a bar, a toast read
+ * the content under them, not each other; glass presented over glass is the one case that reads it (below).
  *
  * So the walk keeps a PLATE: the scene as it stands with no glass face in it. Before a glass surface draws, the plate is
  * brought up to date from the scene over the surface's sample region, everywhere except where an earlier glass face
@@ -21,9 +22,21 @@
  * A veil (`GlassSeesThrough`, a sheet's dimming view) is kept out of the plate the same way a glass face is: the plate
  * takes what lies under it before it draws, so an alert's glass over the dim is the same glass as every popover's.
  *
- * THE ONE LIMIT. Content drawn ON a glass face after it (a sheet's own sentences) is under that face's exclusion, so a
- * menu over the sheet does not see the sentences beneath it, only the field. At the panel glass's frost and tint those
- * words read as a faint smear at most, and dropping them is what makes the menu over the sheet the menu over the field.
+ * GLASS PRESENTED OVER GLASS READS IT (Drill Sentences lane GL5, `GlassReadsComposite`). The plate held one limit: content
+ * drawn ON a glass face after it (a sheet's own sentences) is under that face's exclusion, so a menu over the sheet saw
+ * the field beneath both and none of the sheet, and read as an opaque card (blind round 30: "only the elevated face and a
+ * hairline rim mark it"). On iOS 26 a menu over a sheet carries the sheet's rows through it as a soft blur, lensed at its
+ * edges; that is what reads as glass (Jwift/Apple/LiquidGlass.md 8.1: a menu's CABackdropLayer captures the sheet). So a
+ * glass face that stands over earlier glass faces (its elevation above 0, `GlassCoveredShare`) builds its backdrop from
+ * the scene as drawn: the lower glass's final pixels and everything drawn on them. Layer order drew all of that first.
+ *
+ * Why that cannot compound, as the old every-glass-reads-the-scene did: the upper face is applied ONCE, to final pixels.
+ * Nothing re-runs the lower glass's recipe; the lower glass never reads the upper; and the upper wears the presented face
+ * (Core/Glass.Pipeline.ts, `GLASS_FACE_APPLE_DARK_ELEVATED`), whose line lifts the lower glass's tone rather than pulling
+ * it toward the dark face's fixed point and holds its chroma rather than taking 0.6 of it again. So each level stands a
+ * step lighter than the one under it and no greyer, never the field (71, 86, 54), sheet (35, 41, 30), menu (27, 30, 26)
+ * slide. Controls inside glass stay vibrant fills, never glass, so nothing inside a level adds a face of its own.
+ * Every other glass face still reads the plate: a sheet over the tab bar, a bar beside a sheet, a menu over the field.
  */
 
 /** A rect in device px, y down. */
@@ -77,9 +90,9 @@ export function GlassFaceExclusion(face: PlateRect, shadowPx: number, synced: Pl
 
 /**
  * GLASS PRESENTED OVER GLASS (Drill Sentences lane GL3). The share of a glass face's box, 0 to 1, that stands over the
- * boxes of glass faces drawn before it this frame (their faces alone, not their shadows or a veil). Because no glass
- * samples glass, a menu over a sheet would read the sheet's own tone; this share is what lifts it one step
- * (Core/Glass.Pipeline.ts, `GlassElevationOf`), as Apple's menu over a sheet reads one (Jwift/Apple/LiquidGlass.md 8.1).
+ * boxes of glass faces drawn before it this frame (their faces alone, not their shadows or a veil). It is what lifts a
+ * menu over a sheet one step (Core/Glass.Pipeline.ts, `GlassElevationOf`), as Apple's menu over a sheet reads one
+ * (Jwift/Apple/LiquidGlass.md 8.1), and what makes it read the sheet (`GlassReadsComposite`).
  */
 export function GlassCoveredShare(face: PlateRect, below: readonly PlateRect[]): number {
   const area = face.w * face.h;
@@ -88,3 +101,7 @@ export function GlassCoveredShare(face: PlateRect, below: readonly PlateRect[]):
   for (const p of PlateSyncRects(face, below)) open += p.w * p.h;
   return Math.max(0, Math.min(1, 1 - open / area));
 }
+
+/** Whether a glass face of elevation `elevation` (`GlassElevationOf`) reads the scene as drawn, the glass under it
+ *  included, rather than the plate: exactly when it is presented over glass, so the step and the read go together. */
+export const GlassReadsComposite = (elevation: number): boolean => elevation > 0;

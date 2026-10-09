@@ -47,9 +47,13 @@ const _smooth = (e0: number, e1: number, x: number): number => {
   return t * t * (3 - 2 * t);
 };
 
-/** The adaptation amount for a glass `span` pt across over a backdrop of stored spread `spread` and mean luma `mean`. */
-export const GlassAdaptOf = (spread: number, mean: number, span: number, dark: boolean): number => {
-  const busy = _smooth(GLASS_ADAPT_SPREAD[0], GLASS_ADAPT_SPREAD[1], spread);
+/** The adaptation amount for a glass `span` pt across over a backdrop of stored spread `spread` and mean luma `mean`.
+ *  Glass presented over glass (`elevation` above 0, Core/Glass.Plate.ts `GlassReadsComposite`) takes no busy share: what
+ *  is busy under it is the glass under it, whose own rows already read, and Apple's menu keeps its 4 pt law over a busy
+ *  list (Jwift/Apple/LiquidGlass.md 3.2, Menus: sigma 3.6 pt over the Messages list), so a sheet's rows show through it as
+ *  a soft blur rather than vanishing at twice that (Drill Sentences lane GL5). */
+export const GlassAdaptOf = (spread: number, mean: number, span: number, dark: boolean, elevation: number = 0): number => {
+  const busy = elevation > 0 ? 0 : _smooth(GLASS_ADAPT_SPREAD[0], GLASS_ADAPT_SPREAD[1], spread);
   const glare = dark ? _smooth(GLASS_ADAPT_LUMA_DARK[0], GLASS_ADAPT_LUMA_DARK[1], mean)
     : 1 - _smooth(GLASS_ADAPT_LUMA_LIGHT[0], GLASS_ADAPT_LUMA_LIGHT[1], mean);
   return Math.max(busy * (1 - _smooth(GLASS_ADAPT_SPAN[0], GLASS_ADAPT_SPAN[1], span)),
@@ -97,15 +101,21 @@ export const GLASS_FACE_APPLE_LIGHT: GlassFaceParams = [1.03, 0.5, 1.0, 0.4];
 export const GLASS_FACE_APPLE_DARK: GlassFaceParams = [0.6, 0.2, 1.0, 0.4];
 
 /**
- * GLASS PRESENTED OVER GLASS, IN DARK (Drill Sentences lane GL3). Apple's elevation trait changes no face in the paths
- * read (Jwift/Apple/LiquidGlass.md 8.1 [C]); Apple's menu over a dark sheet reads a step up because its backdrop layer
- * captures the sheet, and the dark face lifts anything below 0.158 [I]. Jaui's glass never samples glass
- * (Core/Glass.Plate.ts), so a menu over a sheet read the sheet's own tone, set apart by its rim alone (blind round 28).
- * The elevated dark face stands in for that step [I]: the dark line moved up by 0.09, Y -> 0.24 Y + 0.21, its slope and
- * its chroma (x 0.6) kept. That lands +6 to +10 L* over every dark ground, about Apple's own dark elevated steps (black
- * to (28, 28, 30), +10.3 L*; (28, 28, 30) to (44, 44, 46), +7.7 L*). Light glass keeps its face.
+ * GLASS PRESENTED OVER GLASS, IN DARK (Drill Sentences lanes GL3 and GL5). Apple's elevation trait changes no face in the
+ * paths read (Jwift/Apple/LiquidGlass.md 8.1 [C]); Apple's menu over a dark sheet reads a step up because its backdrop
+ * layer captures the sheet, and the dark face lifts anything below 0.158 [I]. Ours captures the sheet too
+ * (Core/Glass.Plate.ts, `GlassReadsComposite`): the face below is applied once to the sheet's final pixels, its rows
+ * included. Apple's dark face alone would pull a sheet over our field (0.18, which reads the field through its dim) DOWN
+ * toward 0.158, -6 L*, the darker, greyer stack Jack rejected. So the presented face keeps Apple's slope (0.24: what
+ * shows through, the sheet's rows, reads at Apple's contrast) and lifts the line to Y -> 0.24 Y + 0.222, its fixed
+ * point 0.29, past every sheet the app draws over the field; and it holds the chroma of what it is presented over
+ * (saturation 1.6667, 1 / 0.6, so x 1 where Apple's face takes 0.6 again). That lands a menu over the editor's bare sheet +4.5 L*
+ * above it, about Apple's own measured menu over a sheet, 28 to 37 levels (+4.8 L*), and over a sheet gone near black at
+ * the large detent about Apple's absolute 37 to 45 levels (+15 L* there, the sheet being darker than Apple's 28). GL3's
+ * face (Y -> 0.24 Y + 0.21 over the field, which the menu read in place of the sheet) drew the opaque card of blind round
+ * 30 over that dark sheet, +25 L*. Light glass keeps its face: its line lifts everything under it already.
  */
-export const GLASS_FACE_APPLE_DARK_ELEVATED: GlassFaceParams = [0.75, 0.35, 1.0, 0.4];
+export const GLASS_FACE_APPLE_DARK_ELEVATED: GlassFaceParams = [0.77, 0.37, 1.6667, 0.4];
 /** How much of a glass face must stand over earlier glass faces before it is elevated, as a share of its own area: none
  *  below the first, all from the second, smooth between. A sheet over the tab bar is never elevated; a menu wholly over
  *  a sheet always is; one hanging off the sheet's edge, partly. */
@@ -172,13 +182,16 @@ export const GLASS_HOLDING_TONE = 0.97;
  * The body of regular glass over an even backdrop `c`, inside its bezel and its rim band: the face, the edge bleed (whose
  * read is that same backdrop: everywhere on a sheet, whose subvariant has no bleed reach, and deep inside any panel), and
  * the holding tone, clamped, in the order Jiv.Panel.frag runs them. Nothing in it depends on where in the body it is.
+ * Over an uneven backdrop `c` is the body's own blurred read at the pixel, and `bleedRead` the bleed's far wider one (its
+ * blur is 0.35 of the span, so over a menu's rows it reads their mean).
  */
-export const GlassBodyOf = (c: GlassRgb, span: number, light: number, mean: number = 0.5, elevation: number = 0): GlassRgb => {
+export const GlassBodyOf = (c: GlassRgb, span: number, light: number, mean: number = 0.5, elevation: number = 0,
+  bleedRead: GlassRgb = c): GlassRgb => {
   const face = GlassFaceOf(c, span, light, mean, elevation);
   const { V } = GlassSizeRamps(span);
   let out: GlassRgb = face;
   if (V > 0) {
-    const bleed = GlassBleedOf(c, light);
+    const bleed = GlassBleedOf(bleedRead, light);
     const lum = GlassLuma(face, GLASS_BLEED_LUMA);
     let weight = _mix(1 - lum, lum, light);
     weight = weight * weight;

@@ -94,7 +94,9 @@ void main() {
     if (u_GlassAppearance >= 0.0) {
         vec2 probe = texelFetch(u_ShadowState, ivec2(int(u_GlassAppearance), 0), 0).rg;
         if (a_Refraction.y <= 56.0 && a_Tint.a <= 0.001) v_RimEdge.xy = vec2(smoothstep(0.45, 0.55, probe.y), probe.y);
-        float busy = smoothstep(GLASS_ADAPT_SPREAD.x, GLASS_ADAPT_SPREAD.y, probe.x);
+        // Glass presented over glass (an elevation above 0) takes no busy share: the busy backdrop is the glass under it,
+        // whose rows show through at the 4 pt law, as Apple's menu over a list does (Drill Sentences lane GL5).
+        float busy = v_Lighting.z > 0.0 ? 0.0 : smoothstep(GLASS_ADAPT_SPREAD.x, GLASS_ADAPT_SPREAD.y, probe.x);
         float glare = schemeDark > 0.5 ? smoothstep(GLASS_ADAPT_LUMA_DARK.x, GLASS_ADAPT_LUMA_DARK.y, probe.y)
             : 1.0 - smoothstep(GLASS_ADAPT_LUMA_LIGHT.x, GLASS_ADAPT_LUMA_LIGHT.y, probe.y);
         v_Adapt = max(busy * (1.0 - smoothstep(GLASS_ADAPT_SPAN.x, GLASS_ADAPT_SPAN.y, a_Refraction.y)),

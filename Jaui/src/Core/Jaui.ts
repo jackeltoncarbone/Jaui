@@ -21,7 +21,7 @@ import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens,
   GlassPlatterShadowOf, GlassShadowExtent, GlassElevationOf, GlassLaneShadowMode, GlassArrowReach } from './Glass.Pipeline';
-import { GlassCoveredShare, GlassFaceExclusion, PlateSyncRects, type PlateRect } from './Glass.Plate';
+import { GlassCoveredShare, GlassFaceExclusion, GlassReadsComposite, PlateSyncRects, type PlateRect } from './Glass.Plate';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
   Vibrancy, VibrancyBlendOf, VibrancyGateLine, VibrancyGraded, VibrancyInkScale, VibrancyIsActive,
@@ -3741,10 +3741,15 @@ export class Canvas implements DirtyTracker {
           && below === null && scoped === null && !cardOpen;
         const plate = glassFace ? this._syncPlate(region) : null;
         // GLASS PRESENTED OVER GLASS (Drill Sentences lane GL3): a face that stands over earlier glass faces wears its
-        // elevated dark face (Core/Glass.Pipeline.ts, GlassElevationOf), one step above them, since it cannot see them.
+        // elevated dark face (Core/Glass.Pipeline.ts, GlassElevationOf), one step above them.
         const faceBox: PlateRect = { x: px, y: py, w: pw, h: ph };
         node.GlassElevation = glassFace ? GlassElevationOf(GlassCoveredShare(faceBox, this._glassFaceBoxes)) : 0;
         if (glassFace) this._glassFaceBoxes.push(faceBox);
+        // AND READS THEM (Drill Sentences lane GL5, `GlassReadsComposite`): its backdrop is the scene as drawn, the lower
+        // glass's final pixels with everything on it (a sheet's own rows), not the plate. Layer order drew those first,
+        // and the face reads them once: its pyramid is built from the scene before its own shadow or face draws. The
+        // plate is still synced above so it keeps what lies under this face for any later glass that reads the content.
+        const backdropPlate = GlassReadsComposite(node.GlassElevation) ? null : plate;
         if (scoped !== null) {
           // The scoped build already IS the final pyramid (capture, resolve, ComputeBlur,
           // GenerateBlurMipmap, cached under READER_SCOPED) — none of the Page decision tree below
@@ -3806,8 +3811,8 @@ export class Canvas implements DirtyTracker {
           // A snapshot binds its copy target, so whatever backdrop this surface takes below, the walk must
           // rebind the scene before it draws; a branch that builds nothing would otherwise paint off screen.
           const snapTaken = below === null && instFrostLod < SCENE_TAP_FROST_LOD;
-          // A glass face's sharp tap is the plate, as its pyramid is.
-          sceneSnap = below !== null ? below : snapTaken ? plate ?? r.SnapshotScreen(region) : null;
+          // A glass face's sharp tap is the plate, as its pyramid is (the scene, when it is presented over glass).
+          sceneSnap = below !== null ? below : snapTaken ? backdropPlate ?? r.SnapshotScreen(region) : null;
           this._opMs.Snap += performance.now() - _tSnap;
           let leftScene = snapTaken;
           // See the rim site: a snapshot is a scene READ and stays in the walk, so under
@@ -3869,7 +3874,7 @@ export class Canvas implements DirtyTracker {
             const separable = this._maySeparable(plan);
             lastBackdrop = this._bcBuild(node, READER_FILL, region, plan.Radius, plan.MaxLod, presample, separable, w, h, () => {
               const _tBlur = performance.now();
-              const built = r.ComputeBlur(below ?? plate ?? r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
+              const built = r.ComputeBlur(below ?? backdropPlate ?? r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);
               const _tMip = performance.now();
               this._opMs.Blur += _tMip - _tBlur;
               r.GenerateBlurMipmap(plan.MaxLod);
@@ -3880,7 +3885,9 @@ export class Canvas implements DirtyTracker {
               // builds nothing and takes no point.
               fillBuilt = true;
               return built;
-            });
+            // A face presented over glass builds from the scene, where the same face beside it builds from the plate:
+            // two sources, so two readers (`GlassReadsComposite`).
+            }, plate !== null && backdropPlate === null ? 'composite|' : undefined);
             if (this._bcOn) probePyramid = this._bcFillKey;
             leftScene = true;
           }
@@ -3893,7 +3900,7 @@ export class Canvas implements DirtyTracker {
         // bound and there is no feedback loop to dodge.
         let shadowBackdrop: ShadowBackdrop | undefined;
         const _rs = node.RenderStyle;
-        const _shadowScene = sceneSnap ?? plate ?? r.SceneTexture;
+        const _shadowScene = sceneSnap ?? backdropPlate ?? r.SceneTexture;
         // This face is drawn next: no later glass takes its box, or its shadow's reach, from the scene.
         if (plate !== null) this._noteGlassFace(node, eff, px, py, pw, ph, region);
         const preShadow = this._phasedWalk ? this._phasedShadow.get(node) : undefined;
@@ -5348,8 +5355,9 @@ export class Canvas implements DirtyTracker {
     owner: Jiv, kind: number, region: { x: number; y: number; w: number; h: number },
     radius: number, maxLod: number, presample: boolean, gaussian: boolean, w: number, h: number,
     build: () => GpuTextureHandle,
-    // `keyExtra`/`prefix`: READER_SCOPED only. `keyExtra` folds the scope root's identity into the
-    // key (two different roots at the same region/radius are not the same reader); `prefix`
+    // `keyExtra`/`prefix`: READER_SCOPED, and `keyExtra` alone for a glass face presented over glass, whose
+    // fill reads the scene rather than the plate (`GlassReadsComposite`). `keyExtra` folds the scope root's identity
+    // (or that source) into the key (two different roots at the same region/radius are not the same reader); `prefix`
     // replaces the whole-canvas running signature with the root-scoped one (`activeRootSigs`), so a
     // change outside the root's subtree cannot miss this reader. Omitted, both are every other
     // reader's byte-for-byte prior behavior.

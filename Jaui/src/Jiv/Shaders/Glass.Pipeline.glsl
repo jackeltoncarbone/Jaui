@@ -85,11 +85,13 @@ vec3 GlassYcc(vec3 c, float white, float black, float saturation) {
 const vec2 GLASS_FACE_LARGE_SPAN = vec2(64.0, 96.0);
 const vec4 GLASS_FACE_APPLE_LIGHT = vec4(1.03, 0.5, 1.0, 0.4);
 const vec4 GLASS_FACE_APPLE_DARK = vec4(0.6, 0.2, 1.0, 0.4);
-// GLASS PRESENTED OVER GLASS (Drill Sentences lane GL3): a large dark face that stands over an earlier glass face
-// (`elevation`, 0 to 1, Core/Jaui.ts from Core/Glass.Pipeline.ts `GlassElevationOf`) wears the elevated dark face,
-// Y -> 0.24 Y + 0.21, one clear step (+6 to +10 L*) above the glass under it [I] (Core/Glass.Pipeline.ts,
-// GLASS_FACE_APPLE_DARK_ELEVATED; Jwift/Apple/LiquidGlass.md 8.1). Light glass keeps its face.
-const vec4 GLASS_FACE_APPLE_DARK_ELEVATED = vec4(0.75, 0.35, 1.0, 0.4);
+// GLASS PRESENTED OVER GLASS (Drill Sentences lanes GL3 and GL5): a large dark face that stands over an earlier glass
+// face (`elevation`, 0 to 1, Core/Jaui.ts from Core/Glass.Pipeline.ts `GlassElevationOf`) reads that glass's final
+// pixels (Core/Glass.Plate.ts, `GlassReadsComposite`) and wears the presented dark face once over them: Apple's slope,
+// Y -> 0.24 Y + 0.222, fixed point 0.29, chroma held (x 1), so it stands a step above the glass under it and never
+// darker or greyer [I] (Core/Glass.Pipeline.ts, GLASS_FACE_APPLE_DARK_ELEVATED; Jwift/Apple/LiquidGlass.md 8.1).
+// Light glass keeps its face.
+const vec4 GLASS_FACE_APPLE_DARK_ELEVATED = vec4(0.77, 0.37, 1.6667, 0.4);
 vec3 GlassFace(vec3 c, float span, float clear, float light, float mean, float elevation) {
     vec3 clearFace = GlassYcc(c, 1.1054, 0.1295, 0.885);
     if (clear >= 1.0) return clearFace;
