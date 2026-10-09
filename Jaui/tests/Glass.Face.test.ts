@@ -110,11 +110,12 @@ describe('glass presented over glass: the elevated dark face (Drill Sentences la
     Slope: (f[0] - f[1]) * (1 - f[3]), Offset: f[1] * (1 - f[3]), Chroma: f[2] * (1 - f[3]),
   });
 
-  it('is the dark line moved up by 0.09: Y -> 0.24 Y + 0.21, its slope and chroma (x 0.6) kept', () => {
+  it('is Apple\'s slope lifted: Y -> 0.24 Y + 0.222, fixed point 0.29, the chroma under it held (x 1) (lane GL5)', () => {
     const k = asLine(GLASS_FACE_APPLE_DARK_ELEVATED);
     expect(k.Slope).toBeCloseTo(0.24, 9);
-    expect(k.Offset).toBeCloseTo(0.21, 9);
-    expect(k.Chroma).toBeCloseTo(0.6, 9);
+    expect(k.Offset).toBeCloseTo(0.222, 9);
+    expect(k.Offset / (1 - k.Slope)).toBeCloseTo(0.292, 3);
+    expect(k.Chroma).toBeCloseTo(1, 4);
   });
 
   it('elevation 0 is the base face exactly, at every size; light glass never changes', () => {
@@ -137,12 +138,18 @@ describe('glass presented over glass: the elevated dark face (Drill Sentences la
     }
   });
 
-  it('the body over any dark ground, at a menu\'s size and a sheet\'s, stands +6 to +10 L* above the base body', () => {
+  it('read over the glass under it (lane GL5), a menu stands a step above any dark sheet the app draws, never below', () => {
+    // The sheet: the base body over a dark ground, under its own face (Jwift Sheet.Geometry: black, 0 to 0.85 by height).
+    // The menu reads that sheet's final pixels, once, and wears the presented face over them.
     for (const s of [160, 250, 400]) {
-      for (let y = 0.0; y <= 0.70001; y += 0.05) {
-        const step = lstar(GlassBodyOf(grey(y), s, 0, 0.5, 1)) - lstar(GlassBodyOf(grey(y), s, 0, 0.5, 0));
-        expect(step, `S ${s}, ground ${y.toFixed(2)}`).toBeGreaterThanOrEqual(6);
-        expect(step, `S ${s}, ground ${y.toFixed(2)}`).toBeLessThanOrEqual(10);
+      for (let y = 0.0; y <= 0.35001; y += 0.05) {
+        for (const faceAlpha of [0, 0.3, 0.6, 0.85]) {
+          const sheet = GlassBodyOf(grey(y), 386, 0).map((x) => x * (1 - faceAlpha)) as unknown as GlassRgb;
+          const step = lstar(GlassBodyOf(sheet, s, 0, 0.5, 1)) - lstar(sheet);
+          const at = `S ${s}, ground ${y.toFixed(2)}, sheet face ${faceAlpha}`;
+          expect(step, at).toBeGreaterThanOrEqual(3.5);
+          expect(step, at).toBeLessThanOrEqual(15.5);
+        }
       }
     }
   });

@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { GlassCoveredShare, GlassFaceExclusion, PLATE_PIECES_MAX, PlateSyncRects, type PlateRect } from '../src/Core/Glass.Plate';
-import { GLASS_ELEVATION_STEPS, GlassElevationOf } from '../src/Core/Glass.Pipeline';
+import {
+  GlassCoveredShare, GlassFaceExclusion, GlassReadsComposite, PLATE_PIECES_MAX, PlateSyncRects, type PlateRect,
+} from '../src/Core/Glass.Plate';
+import { GLASS_ELEVATION_STEPS, GlassAdaptOf, GlassElevationOf } from '../src/Core/Glass.Pipeline';
 import { Jiv } from '../src/Jiv/Jiv';
 import { JivInstanceBuffer } from '../src/Jiv/Jiv.InstanceBuffer';
 import { ResolveStyle, SEED_CONTEXT } from '../src/Core/Style.Resolver';
@@ -120,5 +122,62 @@ describe('the walk elevates a glass face by its share over earlier faces, and th
     expect(lane42(true, 1)).toBe(1 + 2 * GLASS_ELEVATION_STEPS);
     expect(lane42(false, 0.5)).toBe(2 * 16);
     expect(lane42(true, 7)).toBe(1 + 2 * GLASS_ELEVATION_STEPS);
+  });
+});
+
+describe('glass presented over glass reads the glass under it (Drill Sentences lane GL5)', () => {
+  const JAUI = readFileSync(new URL('../src/Core/Jaui.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const sheet: PlateRect = { x: 16, y: 300, w: 772, h: 1400 };
+
+  it('exactly the faces that are elevated read the composite: a menu over a sheet, never a sheet over the tab bar', () => {
+    expect(GlassReadsComposite(0)).toBe(false);
+    expect(GlassReadsComposite(1e-6)).toBe(true);
+    expect(GlassReadsComposite(1)).toBe(true);
+    const menu = GlassElevationOf(GlassCoveredShare({ x: 100, y: 400, w: 500, h: 880 }, [sheet]));
+    expect(GlassReadsComposite(menu)).toBe(true);
+    const overBar = GlassElevationOf(GlassCoveredShare(sheet, [{ x: 42, y: 1580, w: 720, h: 124 }]));
+    expect(GlassReadsComposite(overBar)).toBe(false);
+    // A menu over the bare field, and one hanging half off the sheet, read the plate as before.
+    expect(GlassReadsComposite(GlassElevationOf(GlassCoveredShare({ x: 100, y: 400, w: 500, h: 880 }, [])))).toBe(false);
+    expect(GlassReadsComposite(GlassElevationOf(GlassCoveredShare({ x: 538, y: 400, w: 500, h: 880 }, [sheet])))).toBe(false);
+  });
+
+  it('the walk builds such a face\'s pyramid, sharp tap and shadow read from the scene, and still syncs the plate', () => {
+    expect(JAUI).toContain('const backdropPlate = GlassReadsComposite(node.GlassElevation) ? null : plate;');
+    // The elevation is taken before the source is chosen.
+    expect(JAUI.indexOf('node.GlassElevation = glassFace ?')).toBeLessThan(JAUI.indexOf('const backdropPlate ='));
+    expect(JAUI).toContain('const built = r.ComputeBlur(below ?? backdropPlate ?? r.SceneTexture, w, h, plan.Radius, undefined, region, presample, separable);');
+    expect(JAUI).toContain('sceneSnap = below !== null ? below : snapTaken ? backdropPlate ?? r.SnapshotScreen(region) : null;');
+    expect(JAUI).toContain('const _shadowScene = sceneSnap ?? backdropPlate ?? r.SceneTexture;');
+    // Every source goes through that choice; the plate is synced and the face noted as before, whichever it reads.
+    expect(JAUI).not.toMatch(/below \?\? plate \?\?|snapTaken \? plate \?\?|sceneSnap \?\? plate \?\?/);
+    expect(JAUI).toContain('const plate = glassFace ? this._syncPlate(region) : null;');
+    expect(JAUI).toContain('if (plate !== null) this._noteGlassFace(node, eff, px, py, pw, ph, region);');
+    // The blur cache keys the two sources apart.
+    expect(JAUI).toContain("}, plate !== null && backdropPlate === null ? 'composite|' : undefined);");
+  });
+
+  it('reads it once: the pyramid is built before the face\'s own shadows and face draw', () => {
+    const build = JAUI.indexOf('const built = r.ComputeBlur(below ?? backdropPlate');
+    expect(build).toBeGreaterThan(0);
+    expect(JAUI.indexOf("'Normal', null, 'Platter');")).toBeGreaterThan(build);
+    expect(JAUI.indexOf("ownBorderMode, null, 'Excluded');")).toBeGreaterThan(build);
+  });
+
+  it('layer order draws the lower glass and its content first: layers ascend, and Top is deferred to the root\'s end', () => {
+    expect(JAUI).toContain('return [...children].sort((a, b) => a.RenderStyle.Layer - b.RenderStyle.Layer);');
+    expect(JAUI).toContain('if (child.RenderStyle.Layer >= LAYER_TOP) {\n          (scope.Top ?? scope).Deferred.push(');
+  });
+
+  it('takes no busy frost over the glass under it, so its rows show at the 4 pt law', () => {
+    // Text rows under a menu read as a busy backdrop (a stored spread well past 0.09).
+    expect(GlassAdaptOf(0.3, 0.2, 250, true)).toBeGreaterThan(0.8);
+    expect(GlassAdaptOf(0.3, 0.2, 250, true, 1)).toBe(0);
+    expect(GlassAdaptOf(0.3, 0.2, 250, true, 0.4)).toBe(0);
+    // The glare share is the same either way.
+    expect(GlassAdaptOf(0, 0.9, 120, true, 1)).toBe(GlassAdaptOf(0, 0.9, 120, true));
+    const vert = readFileSync(new URL('../src/Jiv/Shaders/Jiv.Panel.vert', import.meta.url), 'utf8');
+    expect(vert).toContain('float busy = v_Lighting.z > 0.0 ? 0.0 : smoothstep(GLASS_ADAPT_SPREAD.x, GLASS_ADAPT_SPREAD.y, probe.x);');
+    expect(vert.indexOf('v_Lighting.z = floor(a_Lighting.z / 2.0) / 31.0;')).toBeLessThan(vert.indexOf('float busy ='));
   });
 });
