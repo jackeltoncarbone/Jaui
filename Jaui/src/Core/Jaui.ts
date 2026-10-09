@@ -20,7 +20,7 @@ import { ResolveTextStyle, type ResolvedTextStyle } from '../Text/Text.Types';
 import { ResolveLengthTuple4 } from '../Core/Length.Tuple';
 import { JivInstanceBuffer, JivPanelShapeOf, JivFrostCssPx, JivGlassSpan, JivGlassSpanOf, JIV_FLOATS_PER_INSTANCE } from '../Jiv/Jiv.InstanceBuffer';
 import { GLASS_TRACKS_LUMA_SPAN, GlassBlurNeedsOf, GlassShadowPeak, GlassShadowRadius, GlassIsLens, GlassIsActiveLens,
-  GlassPlatterShadowOf, GlassShadowExtent, GlassElevationOf } from './Glass.Pipeline';
+  GlassPlatterShadowOf, GlassShadowExtent, GlassElevationOf, GlassLaneShadowMode, GlassArrowReach } from './Glass.Pipeline';
 import { GlassCoveredShare, GlassFaceExclusion, PlateSyncRects, type PlateRect } from './Glass.Plate';
 import {
   BackdropVibrancy, CascadedVibrancy, CascadeVibrancy, FoldVibrancy, ForegroundVibrancy, TextVibrancy,
@@ -3971,7 +3971,7 @@ export class Canvas implements DirtyTracker {
         if ((_isGlass(material) ? glassShadow > 0 : _rs.ShadowColor.A > 0.001) && !JivInstanceBuffer.DiagNoShadow) {
           this._panelBuffer.Begin();
           this._panelBuffer.Push(node, this._dpr, eff, clipMeta.Offset, clipMeta.Count, xformIndex, 'Normal', null, 'Only');
-          const colored = this._panelBuffer.Data[38] > 1.5;
+          const colored = GlassLaneShadowMode(this._panelBuffer.Data[38]) > 1.5;
           r.PanelBeginBatch();
           r.PanelAddInstance(this._panelBuffer.Data, 0, JIV_FLOATS_PER_INSTANCE);
           if (colored) r.PanelDrawBatch(w, h, lastBackdrop, lastBaseFrostLod, true, sceneSnap, undefined, shadowBackdrop);
@@ -5552,7 +5552,7 @@ export class Canvas implements DirtyTracker {
     // Glass casts its own shadow whatever it authored (Drill Sentences lane GL2): two radii and the offset past the outline,
     // the platter's reach past that. Read as the authored shadow alone, a card's paint rect and a cached layer held the
     // glass's box and no shadow, so a later card seeded without it wrote the bare snapshot back over it.
-    if (_isGlass(s.Material)) m = Math.max(m, GlassShadowExtent(JivGlassSpan(node), s.GlassShadow));
+    if (_isGlass(s.Material)) m = Math.max(m, GlassShadowExtent(JivGlassSpan(node), s.GlassShadow, s.GlassArrow));
     m = Math.max(m, s.BorderWidth);
     const kids = node.Children as Jiv[];
     for (let i = 0; i < kids.length; i++) m = Math.max(m, this._subtreeMaxPaintMargin(kids[i]));
@@ -6142,11 +6142,13 @@ export class Canvas implements DirtyTracker {
     // shadow) and deeper than its base (the body at full radius): Core/Glass.Pipeline.ts says how far.
     const glass = _isGlass(rs.Material)
       ? GlassBlurNeedsOf(JivGlassSpanOf(node, eff), d, rs.GlassVariant, GlassIsLens(rs.Lens), rs.GlassBlur, node.EffectiveGlassFrost) : null;
-    const margin = Math.max(frostCssPx * d + 8 * d, glass !== null ? glass.ReachPt * avgScale * d : 0);
+    // A popover's arrow (`GlassArrow`) is face too, its height past the box, and reads as far past itself.
+    const margin = Math.max(frostCssPx * d + 8 * d, glass !== null ? glass.ReachPt * avgScale * d : 0)
+      + (glass !== null ? GlassArrowReach(rs.GlassArrow) * avgScale * d : 0);
     // The draw quad's own reach, from `Jiv.InstanceBuffer`'s expressions rather than from a
     // second reading of them: the surface draws with its shadow excluded, so its quad is the face,
     // the border and a pixel of antialiasing. The shadow is its own draw and never samples.
-    const tapReach = (rs.BorderWidth + rs.BorderBlur) * avgScale * d + 1;
+    const tapReach = (rs.BorderWidth + rs.BorderBlur) * avgScale * d + 1 + (glass !== null ? GlassArrowReach(rs.GlassArrow) * avgScale * d : 0);
     const ab = this._nodeAabb(node, eff, effH);
     const px = ab.minX * d, py = ab.minY * d;
     const pw = (ab.maxX - ab.minX) * d, ph = (ab.maxY - ab.minY) * d;
@@ -7057,7 +7059,7 @@ export class Canvas implements DirtyTracker {
     node: Jiv, eff: Mat2x3, px: number, py: number, pw: number, ph: number, region: PlateRect,
   ): void => {
     // Its shadows' whole reach (Drill Sentences lane GL2): two radii and the offset, the platter's past that.
-    const shadowPx = GlassShadowExtent(JivGlassSpanOf(node, eff), node.RenderStyle.GlassShadow) * this._dpr;
+    const shadowPx = GlassShadowExtent(JivGlassSpanOf(node, eff), node.RenderStyle.GlassShadow, node.RenderStyle.GlassArrow) * this._dpr;
     const exclusion = GlassFaceExclusion({ x: px, y: py, w: pw, h: ph }, shadowPx, region);
     if (exclusion !== null) this._glassFaces.push(exclusion);
   };

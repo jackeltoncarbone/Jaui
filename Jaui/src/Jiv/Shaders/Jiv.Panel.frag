@@ -636,6 +636,9 @@ void main() {
     float dist;
     vec2 normal;
     CornerEval(p, halfSize, v_Radii, smoothness, dist, normal);
+    // The popover arrow's outline is the glass's own (Glass.Pipeline.glsl, GlassArrowUnion), so its band follows it.
+    float glassArrow = GlassLaneArrow(v_Refraction.z);
+    if (glassArrow > 0.0) dist = GlassArrowUnion(p, halfSize, v_Radii, glassArrow, dpr, dist, normal);
     float d = dist / dpr;
     if (-d > height + 1.0) discard;
     float unusedShadow;
@@ -746,12 +749,19 @@ void main() {
                                 p - shadowOffset, panelHalfSize, v_Radii, effectiveSmooth, shadowDist);
     if (clipD > 1.0) discard;
     float clipAlpha = 1.0 - smoothstep(-0.5, 0.5, clipD);
+    // Lane 38: the glass shadow draw's mode, and the popover arrow its outline unions with the body's (Glass.Pipeline.glsl,
+    // GlassArrowUnion), so both shadows fall from the whole outline and the face fills it.
+    float glassShadowMode = GlassLaneShadowMode(v_Refraction.z);
+    float glassArrow = GlassLaneArrow(v_Refraction.z);
+    vec2 arrowShadowNormal = vec2(0.0);
+    if (wantShadow && glassArrow > 0.0)
+        shadowDist = GlassArrowUnion(p - shadowOffset, panelHalfSize, v_Radii, glassArrow, max(v_Lighting.x, 1e-3), shadowDist, arrowShadowNormal);
     // The shadow is finished HERE, so what the rest of the body carries is one float, not the distance
     // and its gate.
     float shadowAlpha = 0.0;
     if (wantShadow) {
         // A glass surface's shadow (mode 1 and 2) is Apple's erf fall over two radii; any other is a smoothstep.
-        shadowAlpha = (v_Refraction.z > 0.5 ? GlassShadowFall(shadowDist, shadowBlur)
+        shadowAlpha = (glassShadowMode > 0.5 ? GlassShadowFall(shadowDist, shadowBlur)
                                             : smoothstep(shadowBlur, -shadowBlur, shadowDist)) * v_ShadowColor.a;
     }
 
@@ -766,6 +776,9 @@ void main() {
 #else
     vec2 normal;
     CornerEval(p, panelHalfSize, v_Radii, effectiveSmooth, dist, normal);
+    // The arrow's face (a glass face draws with the glass program; a borderless flat draw of an arrowed glass is only
+    // ever its shadow, whose face is empty and whose distance took the arrow above).
+    if (glassArrow > 0.0) dist = GlassArrowUnion(p, panelHalfSize, v_Radii, glassArrow, max(v_Lighting.x, 1e-3), dist, normal);
 #endif
     float edgeDist = max(-dist, 0.0);                 // positive inside
 
@@ -825,7 +838,7 @@ void main() {
         vec2 nScreen = v_Is3D > 0.5 ? normal
             : vec2(v_Rot.x * normal.x - v_Rot.y * normal.y, v_Rot.y * normal.x + v_Rot.x * normal.y);
         vec2 ramps = GlassSizeRamps(glassSpan);
-        if (v_Refraction.z > 1.5) {
+        if (glassShadowMode > 1.5) {
             // The colored shadow of large glass: the backdrop past the outline, blurred at 40 pt, saturated
             // (light) or dimmed (dark), carried by v. Its alpha is the shared fall above.
             float reach = GlassShift(d, min(0.625 * glassSpan, 75.0), 0.4 * glassSpan);

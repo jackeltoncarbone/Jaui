@@ -11,7 +11,7 @@ import { InkLevelOf, type VibrancyDeclaration } from './Vibrancy';
 import type { Color } from './Types';
 import { ResolveTransform } from '../Transform/Transform.Parse';
 import { FLEX_AUTO, type FlexAmounts, type FlexKind } from './Flex';
-import type { GlassShadowKind } from './Glass.Pipeline';
+import type { GlassArrowSide, GlassShadowKind } from './Glass.Pipeline';
 
 /** The most frost `BackdropFilter: Blur(Auto)` draws, in CSS px. The field resolves to it, so every
  *  reader that sizes for the largest frost is right; the panel's own is `JivFrostCssPx`. */
@@ -280,6 +280,13 @@ const _resolveGlassShadow = (raw: string | undefined, ctx: ResolveContext): Glas
   throw new Error(`[Jaui] GlassShadow: "${v}" -- expected Auto, Platter or None.`);
 };
 
+/** `GlassArrow: None | Top | Bottom | Leading | Trailing` (Core/Glass.Pipeline.ts, `GlassArrowSide`). */
+const _resolveGlassArrow = (raw: string | undefined, ctx: ResolveContext): GlassArrowSide => {
+  const v = ResolveTernary(raw ?? 'None', ctx).trim();
+  if (v === 'None' || v === 'Top' || v === 'Bottom' || v === 'Leading' || v === 'Trailing') return v;
+  throw new Error(`[Jaui] GlassArrow: "${v}" -- expected None, Top, Bottom, Leading or Trailing.`);
+};
+
 /** `GlassReads: Content | Surface` (Core/Glass.Plate.ts). */
 const _resolveGlassReads = (raw: string | undefined, ctx: ResolveContext): 'Content' | 'Surface' => {
   const v = ResolveTernary(raw ?? 'Content', ctx).trim();
@@ -498,6 +505,8 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     GlassOuterRefraction: _resolveGlassSwitch('GlassOuterRefraction', s.GlassOuterRefraction, ctx),
     GlassBleed: _resolveGlassSwitch('GlassBleed', s.GlassBleed, ctx),
     GlassShadow: _resolveGlassShadow(s.GlassShadow, ctx),
+    GlassArrow: _resolveGlassArrow(s.GlassArrow, ctx),
+    GlassArrowOffset: Resolve(ResolveTernary(s.GlassArrowOffset ?? '0', ctx), ctx, 'W'),
     GlassReads: _resolveGlassReads(s.GlassReads, ctx),
     GlassSeesThrough: s.GlassSeesThrough === 'true' || (s.GlassSeesThrough as unknown) === true,
     GlassFrost: _resolveGlassFrost(s.GlassFrost, ctx),

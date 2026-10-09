@@ -2,7 +2,7 @@ import type { Color } from '../Core/Types';
 // Type-only, so the Vibrancy <-> Jiv.Types cycle is erased at compile time.
 import type { VibrancyDeclaration } from '../Core/Vibrancy';
 import type { FlexKind } from '../Core/Flex';
-import type { GlassShadowKind } from '../Core/Glass.Pipeline';
+import type { GlassArrowSide, GlassShadowKind } from '../Core/Glass.Pipeline';
 import type { Transform } from '../Transform/Transform.Types';
 import type { FitMode } from '../Element/Element';
 
@@ -295,6 +295,11 @@ export interface JivStyle {
    *  adds UIKit's platter shadow under it, for menus, popovers, sheets and dialogs [I] (Core/Glass.Pipeline.ts,
    *  `GlassPlatterShadowOf`); None casts none. */
   GlassShadow: string;
+  /** `GlassArrow: None | Top | Bottom | Leading | Trailing`: a popover's arrow on that edge of its glass, one outline with
+   *  the body that the lens, rim, bleed and shadows follow (Core/Glass.Pipeline.ts, `GlassArrowUnion`; Jwift/Apple/Sizing.md
+   *  13). `GlassArrowOffset: <length>`: its centre from that edge's centre, clamped clear of the corners. */
+  GlassArrow: string;
+  GlassArrowOffset: string;
   /** `GlassReads: Content | Surface`: what a glass face's backdrop is (Core/Glass.Plate.ts). Content (the default) is the
    *  content under every glass, so a glass over glass reads as one layer of glass. Surface is what it sits on, the glass
    *  under it included: a sheet's own bar buttons over the sheet, a held toggle's clear knob over its track. */
@@ -496,6 +501,9 @@ export interface JivRenderStyle {
   GlassBleed: boolean;
   /** Resolved `GlassShadow`. Snaps. */
   GlassShadow: GlassShadowKind;
+  /** Resolved `GlassArrow` and `GlassArrowOffset` (pt). Snap. */
+  GlassArrow: GlassArrowSide;
+  GlassArrowOffset: number;
   /** Resolved `GlassReads`. Snaps. */
   GlassReads: 'Content' | 'Surface';
   /** Resolved `GlassSeesThrough`. Snaps. */

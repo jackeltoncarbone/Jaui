@@ -26,6 +26,7 @@ Status column:
 | outer lens past the outline (3.1) | `GlassOuterRefraction: Auto \| None`, built | shader outer shift; None rides lane 46 as 1 x 16384 | matches: DesignLibrary zeroes `Refraction.outerHeight` and `outerAmount` when Layers lacks 0x10 (the sheet subvariants, `SolariumDisableOuterRefraction`) [C] |
 | drop shadow (3.5) | `GlassShadow: Auto \| Platter \| None`, built | shader, `GlassShadowRadius` 10 + 14 u; `GlassShadowPeak`; the flat draw (black) or the glass program's colored read (v > 0) | differs: our small-glass radius is 10 pt (fitted to one Edit button) where Apple's is 24. Large glass matches the law, which is faint: 7.4% darker at 4 pt below a 250 pt dark menu over luma 0.3, 5.1% at 12, 2.1% at 24, 0.4% at 40, and nothing in light (M_shadow keeps luma) |
 | the platter's own shadow (LiquidGlass.md 3.5, [I]) | `GlassShadow: Platter`, built; worn by menus, popovers, sheets and the sheet's ask | a second flat draw under Apple's: black, sigma 30 pt, 10 pt down, 0.18 light / 0.35 dark, all over `v` (none at 64 pt and under; half sigma and offset there), Apple's fall at reach 2 sqrt 2 sigma (`GlassPlatterShadowOf`) | [I]: UIKit's platter and sheet drop-shadow views, not read. With it the 250 pt dark menu darkens 26% at 4 pt below, 21% at 12, 13% at 24, 6% at 40, 1% at 64; light 10%, 9%, 6%, 3%, 0.6% |
+| the popover arrow (Jwift/Apple/Sizing.md 13, [C]) | `GlassArrow: None \| Top \| Bottom \| Leading \| Trailing`, `GlassArrowOffset: <length>` (from the edge's centre, UIKit's `arrowOffset`), built | the glass SDF is the body's continuous corner unioned with Apple's arrow (`GlassArrowUnion`, Glass.Pipeline.glsl and .ts): 13 pt tall on a 26 pt base, the tip one cubic on the peak, concave fillets meeting the edge over 37 pt. The face, lens, rim, bleed, Apple's shadow and the platter's all read that one distance; under the arrow's footprint the body's own edge is no edge, so no rim runs along the seam. It rides lane 38 above the shadow draw's mode (`GlassArrowLane`); the quad, the pyramid's region and the paint extents grow by its height (`GlassArrowReach`, `GlassShadowExtent`). Jwift's `<popover>` wears it at regular width, beside or below its anchor (Drill Sentences lane GL4) | matches the outline; ours never pins into a corner: the offset is clamped so the 37 pt stay clear of the corner radius |
 | holding tone, clamp (3.6) | derived | shader, clamp `[0, 1]` | matches (SDR) |
 | dispersion (3.7) | `GlassDispersion: 0` (`aberration_amount`) | `ChromaticAberration`, a per-channel read | differs: ours is not Apple's 6-tap filter; Apple sets 0 on standard glass and on the lens |
 | tint (4) | `GlassTint: None \| <color>` | a glass `Background` is the seed; dark shade fitted | matches in structure, shade fitted |
@@ -188,6 +189,8 @@ GlassFace: Auto | Ycc(<white>, <black>, <saturation>, <fill>)
 GlassOuterRefraction: Auto | None
 GlassBleed: Auto | None
 GlassShadow: Auto | Platter | None
+GlassArrow: None | Top | Bottom | Leading | Trailing
+GlassArrowOffset: 0 | <length>
 GlassDispersion: 0 | <n>
 GlassTint: None | <color>
 GlassRim: Auto | None | Rim(<amount>, <height>)

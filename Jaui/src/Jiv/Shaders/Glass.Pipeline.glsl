@@ -183,6 +183,96 @@ float GlassShadowFall(float sd, float reach) {
     return 0.5 + x * (-0.560547 + x2 * (0.168213 + x2 * (-0.034454 + 0.002954 * x2)));
 }
 
+// THE POPOVER ARROW (Drill Sentences lane GL4; Jwift/Apple/Sizing.md 13 [C]; Core/Glass.Pipeline.ts states the same,
+// GlassArrowField and GlassArrowUnion). A popover's glass is one outline, the body and an arrow 13 pt tall on a 26 pt
+// base, its tip rounded by one cubic on the peak, its flanks leaving the edge through concave fillets over 37 pt. The
+// union's distance feeds everything the body's does: the fill, the lens, the rim, the bleed and both shadows.
+// Lane 38 carries the shadow draw's mode (0..2) and above it, in 4s, the arrow: its side (1 top, 2 bottom, 3 left,
+// 4 right, 0 none) and, in 8s above that, its offset from the edge's centre in quarter device px biased by 32768.
+float GlassLaneShadowMode(float lane) { return mod(lane, 4.0); }
+float GlassLaneArrow(float lane) { return floor(lane / 4.0); }
+const float GLASS_ARROW_HALF_FOOTPRINT = 18.5;
+
+vec2 GlassArrowCubic(vec2 a, vec2 b, vec2 c, vec2 d, float t) {
+    float u = 1.0 - t;
+    return u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d;
+}
+// Keep the nearer of the best so far and the segment from `a` to `b` (left to right in u), and read the outline's height
+// over q.x where the segment spans it.
+void GlassArrowNearest(vec2 q, vec2 a, vec2 b, inout float best, inout vec2 bestPoint, inout vec2 bestOut, inout float graph) {
+    vec2 span = b - a;
+    float t = clamp(dot(q - a, span) / max(dot(span, span), 1e-12), 0.0, 1.0);
+    vec2 point = a + span * t;
+    vec2 off = q - point;
+    float d2 = dot(off, off);
+    if (d2 < best) { best = d2; bestPoint = point; bestOut = normalize(vec2(-span.y, span.x)); }
+    if (q.x >= a.x && q.x <= b.x && b.x > a.x) graph = mix(a.y, b.y, (q.x - a.x) / (b.x - a.x));
+}
+// The arrow's own field at (u, w) points, u along the edge from its centre and w outward: the distance to its outline,
+// the outward normal there and whether the point lies inside it. The right half is walked, folded: the tip cubic's
+// second half, the straight flank, the fillet.
+float GlassArrowField(vec2 uw, out vec2 outward, out bool inside) {
+    vec2 q = vec2(abs(uw.x), uw.y);
+    float best = 1e20;
+    vec2 bestPoint = q;
+    vec2 bestOut = vec2(0.0, 1.0);
+    float graph = -1.0;
+    vec2 prev = vec2(0.0, 12.75);
+    for (int i = 1; i <= 4; i++) {
+        vec2 next = GlassArrowCubic(vec2(-2.0, 12.0), vec2(0.0, 13.0), vec2(0.0, 13.0), vec2(2.0, 12.0), 0.5 + 0.125 * float(i));
+        GlassArrowNearest(q, prev, next, best, bestPoint, bestOut, graph);
+        prev = next;
+    }
+    GlassArrowNearest(q, prev, vec2(7.5, 6.0), best, bestPoint, bestOut, graph);
+    prev = vec2(7.5, 6.0);
+    for (int i = 1; i <= 8; i++) {
+        vec2 next = GlassArrowCubic(vec2(7.5, 6.0), vec2(13.0, 0.0), vec2(13.0, 0.0), vec2(18.5, 0.0), float(i) / 8.0);
+        GlassArrowNearest(q, prev, next, best, bestPoint, bestOut, graph);
+        prev = next;
+    }
+    inside = q.y > 0.0 && q.y < graph;
+    float d = sqrt(best);
+    vec2 n = d > 1e-4 ? (inside ? bestPoint - q : q - bestPoint) / d : bestOut;
+    outward = vec2(uw.x < 0.0 ? -n.x : n.x, n.y);
+    return d;
+}
+// The body and its arrow as one outline: the union's signed distance (device px, negative inside) at `p`, taken from the
+// body's centre, given the body's own `bodyDist`, and its outward normal written over `normal` where the arrow decides
+// it. `pt` is device px per point. Under the arrow's footprint, inside the body, the body's own edge is no edge: the
+// nearest is the arrow's outline or one of the body's other three sides, so no rim or lens runs along the seam. The
+// offset is clamped so the footprint stays clear of the edge's corner radius.
+float GlassArrowUnion(vec2 p, vec2 halfSize, vec4 radii, float arrow, float pt, float bodyDist, inout vec2 normal) {
+    float side = mod(arrow, 8.0);
+    bool across = side > 2.5;
+    float along = across ? halfSize.y : halfSize.x;
+    float perp = across ? halfSize.x : halfSize.y;
+    vec4 r = clamp(radii, vec4(0.0), vec4(min(halfSize.x, halfSize.y)));
+    float corner = side < 1.5 ? max(r.x, r.y) : side < 2.5 ? max(r.z, r.w) : side < 3.5 ? max(r.x, r.w) : max(r.y, r.z);
+    float room = max(0.0, along - corner - GLASS_ARROW_HALF_FOOTPRINT * pt);
+    float offset = clamp((floor(arrow / 8.0) - 32768.0) * 0.25, -room, room);
+    float sgn = (side < 1.5 || (side > 2.5 && side < 3.5)) ? -1.0 : 1.0;
+    vec2 uw = across ? vec2(p.y - offset, sgn * p.x - perp) : vec2(p.x - offset, sgn * p.y - perp);
+    vec2 n;
+    bool inside;
+    float dArrow = GlassArrowField(uw / pt, n, inside) * pt;
+    vec2 nShape = across ? vec2(sgn * n.y, n.x) : vec2(n.x, sgn * n.y);
+    if (inside) { normal = nShape; return -dArrow; }
+    if (bodyDist >= 0.0) {
+        if (dArrow < bodyDist) { normal = nShape; return dArrow; }
+        return bodyDist;
+    }
+    if (abs(uw.x) < GLASS_ARROW_HALF_FOOTPRINT * pt) {
+        float toSides = along - abs(uw.x + offset);
+        float toFar = 2.0 * perp + uw.y;
+        float other = min(toSides, toFar);
+        if (dArrow < other) { normal = nShape; return -dArrow; }
+        vec2 o = toSides < toFar ? vec2(uw.x + offset < 0.0 ? -1.0 : 1.0, 0.0) : vec2(0.0, -1.0);
+        normal = across ? vec2(sgn * o.y, o.x) : vec2(o.x, sgn * o.y);
+        return -other;
+    }
+    return bodyDist;
+}
+
 // The highlight band of one light: 1 pt deep with an inner shoulder (fade 1 - 0.7 depth), lit where the
 // outline faces the light within the spread.
 float GlassRimBand(float s, float fw, float height, vec2 n, vec2 light, float cosSpread) {

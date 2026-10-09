@@ -320,13 +320,15 @@ export const GlassPlatterShadowOf = (span: number, dark: boolean): GlassPlatterS
 };
 
 /** How far past the outline glass `span` pt across can put shadow, pt: two radii plus the offset for Apple's, and the
- *  platter's reach plus its offset when it casts one. What a draw rect, a card's paint rect and a cached layer must hold. */
-export const GlassShadowExtent = (span: number, kind: GlassShadowKind): number => {
-  if (kind === 'None') return 0;
+ *  platter's reach plus its offset when it casts one. What a draw rect, a card's paint rect and a cached layer must hold.
+ *  A glass with an arrow (`GlassArrow`) paints the arrow's height further, its face and its shadows alike. */
+export const GlassShadowExtent = (span: number, kind: GlassShadowKind, arrow: GlassArrowSide | string = 'None'): number => {
+  const tip = GlassArrowReach(arrow);
+  if (kind === 'None') return tip;
   const own = 2 * GlassShadowRadius(span) + GLASS_SHADOW_OFFSET_Y;
-  if (kind !== 'Platter' || GlassSizeRamps(span).V <= 0) return own;
+  if (kind !== 'Platter' || GlassSizeRamps(span).V <= 0) return own + tip;
   const p = GlassPlatterShadowOf(span, true);
-  return Math.max(own, p.Reach + p.OffsetY);
+  return Math.max(own, p.Reach + p.OffsetY) + tip;
 };
 
 /**
@@ -358,6 +360,130 @@ export const GlassShadowedLuma = (luma: number, span: number, dx: number, dy: nu
     out *= 1 - GlassShadowFall(sdAt(p.OffsetY), p.Reach) * p.Opacity * (1 - Math.min(Math.max(clear, 0), 1));
   }
   return out;
+};
+
+/**
+ * THE POPOVER ARROW (Drill Sentences lane GL4; Jwift/Apple/Sizing.md 13, [C] from `_UIPopoverShapePathProviderIOS` and
+ * the iOS 26.1 dyld cache). A popover's glass is ONE outline: the rounded body and an arrow on one of its edges, and the
+ * glass, its rim, lens, edge bleed and both shadows follow it. `GlassArrow: None | Top | Bottom | Leading | Trailing`
+ * names the edge, `GlassArrowOffset` the arrow's centre from that edge's centre (UIKit's `arrowOffset`), in points.
+ *
+ * Apple's arrow is 13 pt tall on a 26 pt base. Its flanks stop 2 pt either side of the peak and 1 pt back, joined by one
+ * cubic whose control points are both the peak; each flank leaves the edge through a concave fillet that starts 5.5 pt
+ * past the base corner (half the flank's run) and reaches the flank's midpoint by a cubic with both control points on
+ * the base corner. So the arrow meets the edge over 37 pt, tangent to it. Ours never pins into a corner as UIKit's can:
+ * the offset is clamped so those 37 pt stay clear of the edge's corner radius.
+ *
+ * In (u, w) points, u along the edge from the arrow's centre and w outward from the edge, the right half of the outline
+ * (the left mirrors it): the tip cubic's second half from (0, 12.75) to (2, 12), a line to (7.5, 6), the fillet to
+ * (18.5, 0). Glass.Pipeline.glsl's `GlassArrowField` walks the same polyline.
+ */
+export type GlassArrowSide = 'None' | 'Top' | 'Bottom' | 'Leading' | 'Trailing';
+export const GLASS_ARROW = { Height: 13, Base: 26, HalfFootprint: 18.5 } as const;
+/** The lane code of each side (lane 38, `GlassArrowLane`); Leading is the left edge and Trailing the right. */
+const GLASS_ARROW_SIDE_CODE: Record<GlassArrowSide, number> = { None: 0, Top: 1, Bottom: 2, Leading: 3, Trailing: 4 };
+/** The shadow draw's mode rides lane 38's low two bits; the arrow above it in 4s: its side, and in 8s above that its
+ *  offset in quarter device px biased by 32768 (every value exact in a float's 24 bits). */
+export const GLASS_ARROW_OFFSET_BIAS = 32768;
+export const GlassArrowLane = (mode: number, side: GlassArrowSide, offsetPx: number): number => {
+  const code = GLASS_ARROW_SIDE_CODE[side];
+  if (code === 0) return mode;
+  const q = Math.max(0, Math.min(65535, Math.round(offsetPx * 4) + GLASS_ARROW_OFFSET_BIAS));
+  return mode + 4 * (code + 8 * q);
+};
+/** Lane 38's shadow mode alone (Jiv.Panel.frag, `GlassLaneShadowMode`). */
+export const GlassLaneShadowMode = (lane: number): number => lane % 4;
+/** How far past the box an arrow on `side` reaches, pt: its height, or 0. */
+export const GlassArrowReach = (side: GlassArrowSide | string): number => side === 'None' || !side ? 0 : GLASS_ARROW.Height;
+
+const _cubic = (a: number, b: number, c: number, d: number, t: number): number => {
+  const u = 1 - t;
+  return u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * c + t * t * t * d;
+};
+/** The right half of the arrow's outline as the shader walks it, in (u, w) points: the tip cubic over t 0.5 to 1 in four
+ *  steps, the straight flank, the fillet in eight steps. */
+export const GLASS_ARROW_POLYLINE: readonly (readonly [number, number])[] = (() => {
+  const pts: [number, number][] = [[0, 12.75]];
+  for (let i = 1; i <= 4; i++) {
+    const t = 0.5 + 0.125 * i;
+    pts.push([_cubic(-2, 0, 0, 2, t), _cubic(12, 13, 13, 12, t)]);
+  }
+  pts.push([7.5, 6]);
+  for (let i = 1; i <= 8; i++) {
+    const t = i / 8;
+    pts.push([_cubic(7.5, 13, 13, 18.5, t), _cubic(6, 0, 0, 0, t)]);
+  }
+  return pts;
+})();
+
+/** The arrow's own field at (u, w) points: the distance to its outline, the outward normal there, and whether the point
+ *  is inside the arrow (between the edge and the outline). Glass.Pipeline.glsl's `GlassArrowField`. */
+export const GlassArrowField = (u: number, w: number): { Distance: number; Normal: [number, number]; Inside: boolean } => {
+  const qx = Math.abs(u);
+  let best = Infinity, bx = qx, by = w, nx = 0, ny = 1, graph = -1;
+  for (let i = 1; i < GLASS_ARROW_POLYLINE.length; i++) {
+    const [ax, ay] = GLASS_ARROW_POLYLINE[i - 1];
+    const [cx, cy] = GLASS_ARROW_POLYLINE[i];
+    const sx = cx - ax, sy = cy - ay;
+    const t = Math.max(0, Math.min(1, ((qx - ax) * sx + (w - ay) * sy) / Math.max(sx * sx + sy * sy, 1e-12)));
+    const px = ax + sx * t, py = ay + sy * t;
+    const d2 = (qx - px) ** 2 + (w - py) ** 2;
+    if (d2 < best) {
+      best = d2; bx = px; by = py;
+      const l = Math.hypot(sx, sy) || 1;
+      nx = -sy / l; ny = sx / l;
+    }
+    if (qx >= ax && qx <= cx && cx > ax) graph = ay + (cy - ay) * (qx - ax) / (cx - ax);
+  }
+  const inside = w > 0 && w < graph;
+  const d = Math.sqrt(best);
+  if (d > 1e-4) {
+    nx = (inside ? bx - qx : qx - bx) / d;
+    ny = (inside ? by - w : w - by) / d;
+  }
+  return { Distance: d, Normal: [u < 0 ? -nx : nx, ny], Inside: inside };
+};
+
+/**
+ * THE BODY AND ITS ARROW AS ONE OUTLINE: the signed distance (negative inside) and outward normal of their union at `p`,
+ * taken from the body's centre, given the body's own `bodyDist` and `bodyNormal` there. Lengths in one unit (device px in
+ * the shader); `pt` is that unit per point. Glass.Pipeline.glsl's `GlassArrowUnion` states the same.
+ *
+ * Outside both, the union's distance is the nearer of the two. Inside the arrow it is the distance to the arrow's outline.
+ * Inside the body, under the arrow's 37 pt footprint, the body's own edge is no longer an edge: the nearest is the arrow's
+ * outline or one of the body's other three sides, so no rim, lens or holding tone runs along the seam.
+ */
+export const GlassArrowUnion = (p: readonly [number, number], halfW: number, halfH: number,
+  radii: readonly [number, number, number, number], side: GlassArrowSide, offset: number, pt: number,
+  bodyDist: number, bodyNormal: readonly [number, number]): { Distance: number; Normal: [number, number] } => {
+  const code = GLASS_ARROW_SIDE_CODE[side];
+  if (code === 0) return { Distance: bodyDist, Normal: [bodyNormal[0], bodyNormal[1]] };
+  const across = code > 2;
+  const along = across ? halfH : halfW;
+  const perp = across ? halfW : halfH;
+  const cap = Math.min(halfW, halfH);
+  const r = radii.map((x) => Math.max(0, Math.min(cap, x)));
+  const corner = code === 1 ? Math.max(r[0], r[1]) : code === 2 ? Math.max(r[2], r[3]) : code === 3 ? Math.max(r[0], r[3]) : Math.max(r[1], r[2]);
+  const room = Math.max(0, along - corner - GLASS_ARROW.HalfFootprint * pt);
+  const off = Math.max(-room, Math.min(room, offset));
+  const sgn = code === 1 || code === 3 ? -1 : 1;
+  const u = (across ? p[1] : p[0]) - off;
+  const w = sgn * (across ? p[0] : p[1]) - perp;
+  const f = GlassArrowField(u / pt, w / pt);
+  const dArrow = f.Distance * pt;
+  const toShape = (nu: number, nw: number): [number, number] => across ? [sgn * nw, nu] : [nu, sgn * nw];
+  if (f.Inside) return { Distance: -dArrow, Normal: toShape(f.Normal[0], f.Normal[1]) };
+  if (bodyDist >= 0) {
+    return dArrow < bodyDist ? { Distance: dArrow, Normal: toShape(f.Normal[0], f.Normal[1]) } : { Distance: bodyDist, Normal: [bodyNormal[0], bodyNormal[1]] };
+  }
+  if (Math.abs(u) < GLASS_ARROW.HalfFootprint * pt) {
+    const toSides = along - Math.abs(u + off);
+    const toFar = 2 * perp + w;
+    const other = Math.min(toSides, toFar);
+    if (dArrow < other) return { Distance: -dArrow, Normal: toShape(f.Normal[0], f.Normal[1]) };
+    return { Distance: -other, Normal: toSides < toFar ? toShape(u + off < 0 ? -1 : 1, 0) : toShape(0, -1) };
+  }
+  return { Distance: bodyDist, Normal: [bodyNormal[0], bodyNormal[1]] };
 };
 
 /** The active lens: a glass whose Lens is above 0 (Glass.Pipeline.glsl, GlassActiveLens). */

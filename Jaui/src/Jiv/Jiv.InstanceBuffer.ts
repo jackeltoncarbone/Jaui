@@ -4,7 +4,7 @@ import { FoldVibrancy, VibrancyGraded } from '../Core/Vibrancy';
 import type { VibrancyValue } from '../Core/Vibrancy';
 import { AUTO_FROST_MAX } from '../Core/Style.Resolver';
 import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadowPeak, GlassSizeRamps, GlassIsLens, GlassPlatterShadowOf,
-  GLASS_ELEVATION_STEPS } from '../Core/Glass.Pipeline';
+  GLASS_ELEVATION_STEPS, GlassArrowLane, GlassArrowReach } from '../Core/Glass.Pipeline';
 
 // 3D (perspective) panels reuse this same instance layout via a SENTINEL, no
 // extra attributes — exactly how `(cos,sin)=(1,0)` already means "no rotation".
@@ -31,7 +31,7 @@ import { GLASS_SHADOW_OFFSET_Y, GlassShadowRadius, GlassBlurNeedsOf, GlassShadow
 //          .w was materialType (now a compile-time shader-variant const);
 //          repurposed to the foreground Brightness multiplier.
 //   loc  9: a_Grading      (brightness, saturation, contrast, frostLod)
-//   loc 10: a_Refraction   (thickness, refraction band, free, refraction amount)
+//   loc 10: a_Refraction   (thickness, glass span, glass shadow mode + 4 x the popover arrow (GlassArrowLane), refraction amount)
 //   loc 11: a_Lighting     (lightAngle rad, bodyTint, lightIntensity, fresnelStrength)
 //          The light rides as its ANGLE (the frag takes cos/sin) so the freed lane carries the
 //          signed glass body Tint: negative toward black, positive toward white.
@@ -253,8 +253,12 @@ export class JivInstanceBuffer {
     const shadowMarginX = shadowBlur + Math.abs(shadowOffX);
     const shadowMarginY = shadowBlur + Math.abs(shadowOffY);
     const borderMargin = rimOnly ? 1 : borderWidth + borderEdgeAa + (shadow === 'Excluded' ? 1 : 0);
-    const marginX = Math.max(shadowMarginX, borderMargin);
-    const marginY = Math.max(shadowMarginY, borderMargin);
+    // A popover's arrow (GlassArrow) stands its height past the box on its edge, its face and its shadows alike.
+    const arrow = glass && !lens ? style.GlassArrow : 'None';
+    const arrowPx = GlassArrowReach(arrow) * avgScale * d;
+    const arrowAcross = arrow === 'Leading' || arrow === 'Trailing';
+    const marginX = Math.max(shadowMarginX, borderMargin) + (arrowAcross ? arrowPx : 0);
+    const marginY = Math.max(shadowMarginY, borderMargin) + (arrowAcross ? 0 : arrowPx);
 
     const halfW = shape.HalfWidth;
     const halfH = shape.HalfHeight;
@@ -342,7 +346,10 @@ export class JivInstanceBuffer {
     // 2 colored), the lens multiplier, the device px per point, the theme, the variant.
     data[offset + 36] = style.Thickness * avgScale * d;
     data[offset + 37] = span;
-    data[offset + 38] = glass && (shadow === 'Only' || platter) ? (glassColoredShadow ? 2 : 1) : 0;
+    // The shadow draw's mode (1 black, 2 colored), and above it the arrow: its side and its offset from the edge's centre in
+    // device px (Core/Glass.Pipeline.ts, GlassArrowLane; Jiv.Panel.frag decodes both).
+    data[offset + 38] = GlassArrowLane(glass && (shadow === 'Only' || platter) ? (glassColoredShadow ? 2 : 1) : 0,
+      arrow, style.GlassArrowOffset * avgScale * d);
     data[offset + 39] = style.Refraction;
 
     data[offset + 40] = d * avgScale;
