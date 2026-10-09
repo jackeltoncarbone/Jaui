@@ -434,6 +434,7 @@ import { DirtyFlag, type Color } from './Types';
 import { Element as JauiElement, type DirtyTracker } from '../Element/Element';
 import { Jiv } from '../Jiv/Jiv';
 import { ScrollManager, ScrollDelta } from '../Scroll/Scroll.Manager';
+import type { JauiFrameStats } from '../Worker/Bridge.Types';
 import type { ScrollToOptions } from '../Scroll/Scroll.Types';
 import { PickClaimant } from '../Scroll/Scroll.PanClaim';
 import { PresenceManager } from '../Animation/Presence.Manager';
@@ -2182,10 +2183,21 @@ export class Canvas implements DirtyTracker {
     for (const child of node.Children) this._resetJanvasesForRestore(child);
   };
 
+  /** RENDER ON DEMAND, measured (`FrameStats`): frames drawn, and loop callbacks taken, since boot. */
+  private _framesRendered = 0;
+  private _ticksTaken = 0;
+
+  /** The frame ledger (`JauiFrameStats`): how many frames this engine has drawn, how many loop callbacks it has taken,
+   *  and whether the loop sleeps now. At rest after the page settles, `Rendered` stops moving and `Parked` reads true:
+   *  nothing is dirty and no spring, transition or presence is in flight, so the loop is asleep until something wakes it
+   *  (input, a message from main, a resize, a `RequestFrame`). The worker answers `frame-stats` with it without waking. */
+  FrameStats = (): JauiFrameStats => ({ Rendered: this._framesRendered, Ticks: this._ticksTaken, Parked: this._parked });
+
   private _tickErrorCount = 0;
   private _tick = (time: number): void => {
     this._frameId = 0;
     if (!this._running || this._contextLost) return;
+    this._ticksTaken++;
     // `park` can only become true by _tickInner RETURNING it. A throw leaves it false and the loop
     // re-arms below, which is the same robustness the old unconditional re-arm bought: one bad
     // frame must not take the engine down, and it must not be able to park it either.
@@ -2822,6 +2834,7 @@ export class Canvas implements DirtyTracker {
   };
 
   private _render = (dt: number): void => {
+    this._framesRendered++;
     const r = this._renderer;
     this._adaptiveShadowsDrawn = false;
     this._bcFillClean = null;
@@ -10525,7 +10538,7 @@ export {
   type JanvasRendererFactory,
 } from '../Worker/Worker.RendererRegistry';
 export type { JanvasFactoryContext } from '../Janvas/Janvas.Renderer';
-export type { JivApplyOpts, JivOp, M2W, W2M, PointerPayload, WheelPayload } from '../Worker/Bridge.Types';
+export type { JivApplyOpts, JivOp, M2W, W2M, PointerPayload, WheelPayload, JauiFrameStats } from '../Worker/Bridge.Types';
 export type { ProbeNode, ProbeRect, ProbeSnapshot, ProbeText } from '../Probe/Probe.Types';
 
 // DOM embeds — the only way real DOM (an iframe, a <video>, a map) lives on a

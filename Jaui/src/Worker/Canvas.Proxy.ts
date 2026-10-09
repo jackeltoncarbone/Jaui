@@ -33,6 +33,7 @@
 import type { MainBridge } from './Bridge.Main';
 import { JivHandle } from './Jiv.Handle';
 import { RootId } from './Bridge.Main';
+import type { JauiFrameStats } from './Bridge.Types';
 
 class CanvasImagesProxy {
   private _bridge: MainBridge;
@@ -114,6 +115,9 @@ export class CanvasProxy {
 
   /** Debug/screenshot: capture the next rendered frame as a PNG blob. */
   Capture = (): Promise<Blob | null> => this._bridge.Capture();
+  /** How many frames the engine has drawn, and whether its loop sleeps now (`JauiFrameStats`). A screenshot harness
+   *  reads it twice over a window at rest: the same `Rendered` both times is an idle screen costing no GPU. */
+  FrameStats = (): Promise<JauiFrameStats | null> => this._bridge.FrameStats();
 
   /** Local mirror of `window.devicePixelRatio` — matches what
    *  WorkerPlatform.GetDevicePixelRatio() returns inside the worker. */

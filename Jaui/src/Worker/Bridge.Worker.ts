@@ -42,6 +42,7 @@ import {
   type M2W_Ping,
   type M2W_JanvasInput,
   type M2W_ProbeLayout,
+  type M2W_FrameStats,
   type W2M,
   type PointerPayload,
   type WheelPayload,
@@ -148,6 +149,12 @@ export class WorkerBridge {
     // nothing the gate skips the render and the loop parks straight back, so speculating here buys
     // the belt for one gate evaluation rather than for a full render walk. On an unparked loop --
     // which is every message that arrives during an interaction -- it is a single boolean test.
+    // A read of the frame ledger is answered BEFORE the wake: it changes nothing, and waking on it would make the
+    // very measurement of an idle loop cost that loop a tick.
+    if (isMessage<M2W_FrameStats>(m, 'frame-stats')) {
+      this._post({ T: 'frame-stats-result', Nonce: m.Nonce, Stats: this._canvas?.FrameStats() ?? null });
+      return;
+    }
     this._canvas?.Wake();
     // Platform messages first — they're cheap and many of the bridge's
     // payloads (DPR, focus, fonts, key, coarse) are pure Platform deltas.

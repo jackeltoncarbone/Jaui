@@ -29,6 +29,7 @@ import type {
   PointerPayload,
   WheelPayload,
   KeyPayload,
+  JauiFrameStats,
 } from './Bridge.Types';
 import { ContextWatchdog } from './Context.Watchdog';
 import type { ProbeSnapshot } from '../Probe/Probe.Types';
@@ -274,6 +275,19 @@ export class MainBridge {
     this.PostMessage({ T: 'probe-layout', Nonce: nonce });
   });
 
+  private _statsNonce = 0;
+  private _pendingStats = new Map<number, (stats: JauiFrameStats | null) => void>();
+  /** The engine's frame ledger (`JauiFrameStats`): how many frames it has drawn, and whether its loop sleeps now.
+   *  Asking does not wake the loop. Null with no worker. */
+  FrameStats = (): Promise<JauiFrameStats | null> => {
+    if (!this.Worker) return Promise.resolve(null);
+    return new Promise(resolve => {
+      const nonce = ++this._statsNonce;
+      this._pendingStats.set(nonce, resolve);
+      this.PostMessage({ T: 'frame-stats', Nonce: nonce });
+    });
+  };
+
   PostMessage = (msg: M2W, transfer?: Transferable[]): void => {
     // Workerless (server) bridge: DROP, don't backlog. The backlog exists to replay into a
     // worker that is still booting; with no worker ever arriving it would instead accumulate
@@ -368,6 +382,7 @@ export class MainBridge {
       case 'capture':       return this._onCapture(m);
       case 'capture-result': this._pendingCapture?.(m.Blob); this._pendingCapture = null; return;
       case 'probe-layout-result': this._pendingProbes.get(m.Nonce)?.(m.Snapshot); this._pendingProbes.delete(m.Nonce); return;
+      case 'frame-stats-result': this._pendingStats.get(m.Nonce)?.(m.Stats); this._pendingStats.delete(m.Nonce); return;
       case 'hit':           return this._onHit(m);
       case 'rect':          return this._onRect(m);
       case 'hud':           return; // HUD relocation lands in P1g; no-op for now.

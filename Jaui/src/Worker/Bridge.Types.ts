@@ -412,6 +412,13 @@ export interface M2W_Ping {
   T: 'ping';
 }
 
+/** Main → worker: how many frames the engine has drawn (`FrameStats`). Answered without waking the loop, so asking
+ *  never perturbs the number being asked about. */
+export interface M2W_FrameStats {
+  T: 'frame-stats';
+  Nonce: number;
+}
+
 /** Dev-only: dump the laid-out tree. Main sends it only from dev builds. */
 export interface M2W_ProbeLayout {
   T: 'probe-layout';
@@ -421,6 +428,7 @@ export interface M2W_ProbeLayout {
 export type M2W =
   | M2W_Init
   | M2W_ProbeLayout
+  | M2W_FrameStats
   | M2W_Ping
   | M2W_PointerEvent
   | M2W_WheelEvent
@@ -594,7 +602,24 @@ export type W2M =
   | W2M_ContextLost
   | W2M_ContextRestored
   | W2M_CaptureResult
-  | W2M_ProbeLayoutResult;
+  | W2M_ProbeLayoutResult
+  | W2M_FrameStatsResult;
+
+/** The engine's frame ledger, answering `frame-stats` (`Canvas.FrameStats`). */
+export interface W2M_FrameStatsResult {
+  T: 'frame-stats-result';
+  Nonce: number;
+  Stats: JauiFrameStats | null;
+}
+
+/** RENDER ON DEMAND, measured. `Rendered` counts every frame the engine drew (the tick's render and a resize's inline
+ *  one alike); `Ticks` every loop callback, drawn or not; `Parked` whether the loop is asleep right now. At rest after
+ *  the page settles, two reads a second apart show the same `Rendered` and `Parked: true`: an idle screen costs no GPU. */
+export interface JauiFrameStats {
+  Rendered: number;
+  Ticks: number;
+  Parked: boolean;
+}
 
 /** Dev-only: the layout dump answering `probe-layout`. */
 export interface W2M_ProbeLayoutResult {
