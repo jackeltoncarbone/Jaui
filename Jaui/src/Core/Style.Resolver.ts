@@ -544,6 +544,7 @@ export const ResolveStyle = (s: JivStyle, ctx: ResolveContext): JivRenderStyle =
     BorderBlur: Resolve(s.BorderBlur, ctx, 'W'),
     BorderFade: Resolve(s.BorderFade, ctx, 'W'),
     BorderOffset: Resolve(s.BorderOffset, ctx, 'W'),
+    ClipInsetTop: Resolve(s.ClipInsetTop, ctx, 'H'),
     ContainBorder: s.ContainBorder,
     BorderLayer: Resolve(s.BorderLayer, ctx, 'W'),
 

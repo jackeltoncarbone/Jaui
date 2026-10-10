@@ -145,6 +145,7 @@ const BINDINGS: Array<[string, RenderGetter, RenderSetter]> = [
   ['BorderBlur',             s => s.BorderBlur,                   (s, v) => { s.BorderBlur = v; }],
   ['BorderFade',             s => s.BorderFade,                   (s, v) => { s.BorderFade = v; }],
   ['BorderOffset',           s => s.BorderOffset,                 (s, v) => { s.BorderOffset = v; }],
+  ['ClipInsetTop',           s => s.ClipInsetTop,                 (s, v) => { s.ClipInsetTop = v; }],
 
   // Shadow
   ['ShadowColor',            s => s.ShadowColor.R,                (s, v) => { s.ShadowColor.R = v; }],

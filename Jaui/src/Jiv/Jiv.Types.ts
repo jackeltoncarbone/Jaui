@@ -364,6 +364,11 @@ export interface JivStyle {
    *  by BorderBlur alone. */
   BorderFade: string;
   BorderOffset: string;
+  /** How far in from this node's top edge it clips its children, a length (only where it clips them, `ClipsChildren`).
+   *  A child that stands at that edge and escapes the clip (`ParentOverflow: Visible`) then has the content passing under
+   *  it cut that far inside its own outline, never on it: a scroller's pinned heading over its rows (Drill Sentences lane
+   *  R36). Default 0, the box itself. */
+  ClipInsetTop: string;
   ContainBorder: boolean;
   /** Where the border stroke paints in this Jiv's own paint stack, RELATIVE
    *  to its children's `Layer` space. A NUMBER in the same units children
@@ -542,6 +547,8 @@ export interface JivRenderStyle {
   BorderBlur: number;
   BorderFade: number;
   BorderOffset: number;
+  /** Resolved `ClipInsetTop`, px. */
+  ClipInsetTop: number;
   ContainBorder: boolean;
   /** Resolved border paint position in the child-`Layer` space. Default 0:
    *  border draws with the panel, below all zero-Layer children. A value

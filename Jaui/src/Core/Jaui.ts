@@ -5866,11 +5866,14 @@ export class Canvas implements DirtyTracker {
   /** Build the rounded-rect ClipShape for `node` — its box plus its
    *  per-corner BorderRadius. Used both when a node clips its descendants
    *  (Overflow: Hidden|Scroll) and when a child opts in (ParentOverflow:
-   *  Hidden). All values stay in CSS px; the buffer multiplies by dpr. */
+   *  Hidden). All values stay in CSS px; the buffer multiplies by dpr.
+   *  Its top edge stands `ClipInsetTop` in from the box's (Drill Sentences lane R36). */
   private _boxClip = (
     node: Jiv, m: Mat2x3,
   ): ClipShape => {
     const radii = node.RenderStyle.BorderRadius;
+    const insetTop = Math.min(Math.max(0, node.RenderStyle.ClipInsetTop || 0), node.Height);
+    const boxH = node.Height - insetTop;
     // Axis scales + rotation basis from the cascaded matrix. At rotation 0,
     // cx=|a|, cy=|d|, cos=1, sin=0 — identical to the legacy scalar path.
     const cx = matScaleX(m);
@@ -5880,7 +5883,7 @@ export class Canvas implements DirtyTracker {
     // "inside" region is empty — the clip rejects everything including the
     // center, so the node's image/content draws are fully clipped away.
     const w = cx * node.Width;
-    const h = cy * node.Height;
+    const h = cy * boxH;
     const avgScale = (cx + cy) * 0.5;
     const maxR = Math.min(w, h) / 2;
     // The clip draws the panel's corner verbatim: the same continuous corner, its radius clamped to half
@@ -5895,7 +5898,7 @@ export class Canvas implements DirtyTracker {
     // and let the clip SDF rebuild corners from center ± half-extents in the
     // un-rotated frame. Cos/Sin let the per-pixel clip SDF un-rotate the sample.
     const cxLocal = node.X + node.Width * 0.5;
-    const cyLocal = node.Y + node.Height * 0.5;
+    const cyLocal = node.Y + insetTop + boxH * 0.5;
     return {
       // X/Y are the top-left of the UNROTATED box at this scale (center − half).
       // The clip SDF re-derives them after un-rotating about CenterX/Y.

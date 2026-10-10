@@ -70,6 +70,7 @@ export const DefaultJivStyle: JivStyle = {
   BorderBlur: '0.5',
   BorderFade: '0',
   BorderOffset: '0',
+  ClipInsetTop: '0',
   ContainBorder: false,
   BorderLayer: '0',
   ShadowColor: 'rgba(0, 0, 0, 0)',
